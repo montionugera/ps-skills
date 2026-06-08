@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  engine:
+    name: ps-release-workflow engine (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install engine (dev extras)
+        working-directory: engine/ps-release-workflow
+        run: pip install -e ".[dev]"
+      - name: Run tests
+        working-directory: engine/ps-release-workflow
+        run: pytest -q
+
+  ps-commu-lifecycle:
+    name: ps-commu-explain lifecycle (bash, macOS)
+    runs-on: macos-latest          # scripts use BSD stat/lsof; run on macOS
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lifecycle test suite
+        run: bash skills/ps-commu-explain/tests/lifecycle_test.sh
+
+  ps-commu-react-template:
+    name: ps-commu-explain React template builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build the React tier template
+        working-directory: skills/ps-commu-explain/assets/template-react
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npm run build

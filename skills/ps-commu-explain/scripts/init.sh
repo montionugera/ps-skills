@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# init.sh — create a ps-commu workspace (sweeps stale ones first).
+# Usage: init.sh <slug> [--tier html|react]
+#   slug    kebab-case topic id, e.g. jwt-refresh-rotation
+#   --tier  html (default) or react
+# Sweep rule (spec D5): delete workspaces >3 days old AND with no live
+# marker-verified server. Port pick here is advisory; serve.sh binding is
+# authoritative (spec D3).
+set -euo pipefail
+source "$(dirname "$0")/common.sh"
+
+usage() { grep '^#' "$0" | cut -c3-; exit "${1:-0}"; }
+slug="" tier="html"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tier) [[ $# -ge 2 ]] || { echo "--tier requires a value" >&2; exit 1; }
+            tier="$2"; shift ;;
+    -h|--help) usage ;;
+    *) slug="$1" ;;
+  esac
+  shift
+done
+[[ "$slug" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || { echo "bad slug: '$slug' (use kebab-case)" >&2; exit 1; }
+[[ "$tier" == "html" || "$tier" == "react" ]] || { echo "bad tier: '$tier'" >&2; exit 1; }
+
+mkdir -p "$PS_COMMU_ROOT"
+chmod 700 "$PS_COMMU_ROOT"   # spec D2: fact sheets may contain private code
+
+# --- sweep ---
+now="$(date +%s)"
+for ws in "$PS_COMMU_ROOT"/*/; do
+  [[ -d "$ws" ]] || continue
+  s="$(basename "$ws")"
+  pid="$(meta_get "$s" pid)"
+  if [[ -n "$pid" ]] && pid_has_marker "$pid" "$s"; then
+    continue                                   # live server — never sweep
+  fi
+  mtime="$(stat -f %m "$ws" 2>/dev/null || stat -c %Y "$ws" 2>/dev/null || echo "$now")"
+  if (( now - mtime > 259200 )); then          # 3 days
+    target="$(validate_workspace_path "$ws")" || continue
+    rm -rf "$target" && echo "swept: $s"
+  fi
+done
+
+# --- workspace ---
+ws="$PS_COMMU_ROOT/$slug"
+mkdir -p "$ws"
+
+# --- advisory free port ---
+port=7700
+while (( port <= 7799 )); do
+  lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 || break
+  port=$((port+1))
+done
+(( port <= 7799 )) || { echo "no free port in 7700-7799 — run clean.sh" >&2; exit 1; }
+
+python3 - "$ws/meta.json" "$slug" "$tier" "$port" <<'PY'
+import json, os, sys, tempfile
+path, slug, tier, port = sys.argv[1:5]
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w") as f:
+    json.dump({"slug": slug, "tier": tier, "port": int(port), "pid": "", "started_at": ""}, f, indent=1)
+os.replace(tmp, path)
+PY
+echo "workspace: $ws (tier=$tier, candidate port=$port)"

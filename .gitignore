@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+
+# Node (skill templates ship source only; builds are generated)
+node_modules/
+dist/
+
+# Skill runtime artifacts
+**/server.log
+
+# OS
+.DS_Store
