@@ -60,6 +60,53 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
         )
         return re.sub(r"\s+", " ", "\n".join(path.read_text() for path in paths)).lower()
 
+    def _find_contract_contradictions(self, content: str) -> set[str]:
+        normalized = re.sub(r"\s+", " ", content).lower()
+        patterns = {
+            "external write without approval": (
+                r"\b(?:may|can|should|must) (?:create|push)[^.]{0,80}"
+                r"\bwithout (?:explicit )?approval\b"
+                r"|\bdo not require (?:explicit )?approval before "
+                r"(?:creating|pushing|creating or pushing)\b"
+                r"|\b(?:you )?need not require (?:explicit )?approval "
+                r"(?:before|to) (?:create|creating|push|pushing)\b"
+                r"|\b(?:explicit )?approval (?:is|shall be) not required\b"
+            ),
+            "artifact author self-acceptance": (
+                r"\b(?:artifact )?authors? "
+                r"(?:may|can|should|must|are allowed to) "
+                r"(?:accept|approve|audit)[^.]{0,60}"
+                r"\b(?:their|the) (?:own )?(?:artifacts?|work|scope)\b"
+            ),
+            "builder self-audit": (
+                r"\bbuilders? (?:may|can|should|must|are allowed to) "
+                r"(?:accept|approve|audit)[^.]{0,60}"
+                r"\b(?:their|the) (?:own )?"
+                r"(?:artifacts?|work|application|scope)\b"
+            ),
+            "catalog updated before gates": (
+                r"(?<!not )(?<!never )\b"
+                r"(?:(?:may|can|should|must) )?update the catalog[^.]{0,60}"
+                r"\bbefore (?:all|the) (?:other |required )?gates? pass\b"
+            ),
+            "unsupported claims published": (
+                r"\bunsupported claims? "
+                r"(?:may|can|should|must|are allowed to) "
+                r"(?:enter|appear in|be published in) (?:the )?application\b"
+            ),
+            "blocking audit findings accepted": (
+                r"\bunresolved "
+                r"(?:critical|high|critical or high|critical and high) findings? "
+                r"(?:may|can|should|must|are allowed to|are allowed )"
+                r"(?:pass|be accepted|permit|allow|advance|through)\b"
+            ),
+        }
+        return {
+            scenario
+            for scenario, pattern in patterns.items()
+            if re.search(pattern, normalized)
+        }
+
     def test_skill_declares_gated_traceable_workflow(self) -> None:
         content = SKILL.read_text()
         frontmatter, body = self._parse_frontmatter(content)
@@ -264,51 +311,39 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
         for forbidden in ("TBD", "PLACEHOLDER", "python -m http.server"):
             self.assertNotIn(forbidden, all_text)
 
-    def test_contract_rejects_external_write_and_catalog_bypasses(self) -> None:
-        content = self._semantic_contract()
-        prohibited = {
-            "external write without approval": (
-                r"\b(?:may|can|should|must) (?:create|push)[^.]{0,80}"
-                r"\bwithout (?:explicit )?approval\b"
-            ),
-            "approval declared unnecessary": (
-                r"\b(?:explicit )?approval (?:is|shall be) not required\b"
-            ),
-            "catalog updated before gates": (
-                r"\b(?:may|can|should|must) update the catalog[^.]{0,60}"
-                r"\bbefore (?:all|the) (?:other |required )?gates? pass\b"
-            ),
-        }
-        for scenario, pattern in prohibited.items():
-            with self.subTest(scenario=scenario):
-                self.assertNotRegex(content, pattern)
+    def test_actual_contract_has_no_semantic_contradictions(self) -> None:
+        self.assertEqual(
+            self._find_contract_contradictions(self._semantic_contract()), set()
+        )
 
-    def test_contract_rejects_self_audit_and_quality_bypasses(self) -> None:
-        content = self._semantic_contract()
-        prohibited = {
+    def test_contradiction_scanner_detects_unsafe_mutations(self) -> None:
+        fixtures = {
+            "external write without approval": (
+                "Do not require explicit approval before creating or pushing.",
+                "You need not require approval to push.",
+            ),
             "artifact author self-acceptance": (
-                r"\b(?:artifact )?authors? (?:may|can|should|must) "
-                r"(?:accept|approve|audit) (?:their|its|the) (?:own )?"
-                r"(?:artifacts?|work|scope)\b"
+                "Artifact authors may audit and accept their own work.",
             ),
             "builder self-audit": (
-                r"\bbuilders? (?:may|can|should|must) "
-                r"(?:accept|approve|audit) (?:their|its|the) (?:own )?"
-                r"(?:artifacts?|work|application|scope)\b"
+                "Builders are allowed to approve their own application.",
+            ),
+            "catalog updated before gates": (
+                "Update the catalog before all required gates pass.",
             ),
             "unsupported claims published": (
-                r"\bunsupported claims? (?:may|can|should|must) "
-                r"(?:enter|appear in|be published in) (?:the )?application\b"
+                "Unsupported claims are allowed to enter the application.",
             ),
             "blocking audit findings accepted": (
-                r"\bunresolved (?:critical|high|critical or high|critical and high) "
-                r"findings? (?:may|can|should|must) "
-                r"(?:pass|be accepted|permit|allow|advance)\b"
+                "Unresolved critical or high findings are allowed through the audit gate.",
             ),
         }
-        for scenario, pattern in prohibited.items():
-            with self.subTest(scenario=scenario):
-                self.assertNotRegex(content, pattern)
+        for expected, mutations in fixtures.items():
+            for mutation in mutations:
+                with self.subTest(expected=expected, mutation=mutation):
+                    self.assertIn(
+                        expected, self._find_contract_contradictions(mutation)
+                    )
 
     def test_installer_links_skill_for_claude_and_codex(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
