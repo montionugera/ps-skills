@@ -1,0 +1,4 @@
+interface:
+  display_name: "Interactive Learning Builder"
+  short_description: "Build researched interactive learning experiences"
+  default_prompt: "Use $ps-interactive-learning-builder to research, design, build, audit, and verify an interactive learning project."

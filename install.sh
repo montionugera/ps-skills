@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# install.sh — install the ps-* skills (and the release-workflow engine) into ~/.claude.
+# install.sh — install ps-* skills for Claude and Codex.
 #
 # Usage:
 #   ./install.sh                 # symlink skills (edits in the repo take effect live)
 #   ./install.sh --copy          # copy instead of symlink (snapshot, no live link)
-#   CLAUDE_HOME=/path ./install.sh   # install into a non-default Claude home
+#   CLAUDE_HOME=/path AGENTS_HOME=/path ./install.sh
 #
 # What it does:
 #   skills/ps-*            -> $CLAUDE_HOME/skills/ps-*
+#   skills/ps-*            -> $AGENTS_HOME/skills/ps-*
 #   engine/ps-release-workflow -> $CLAUDE_HOME/ps-release-workflow
 #     (the 9 ps-release-workflow-* skills call scripts in that engine dir; without
 #      it they install but fail at runtime.)
@@ -15,11 +16,12 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
+AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 MODE="symlink"
 [[ "${1:-}" == "--copy" ]] && MODE="copy"
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { grep '^#' "$0" | cut -c3-; exit 0; }
 
-mkdir -p "$CLAUDE_HOME/skills"
+mkdir -p "$CLAUDE_HOME/skills" "$AGENTS_HOME/skills"
 
 link() {  # src dest
   local src="$1" dest="$2"
@@ -33,9 +35,10 @@ link() {  # src dest
 
 for d in "$REPO"/skills/*/; do
   link "${d%/}" "$CLAUDE_HOME/skills/$(basename "$d")"
+  link "${d%/}" "$AGENTS_HOME/skills/$(basename "$d")"
 done
 link "$REPO/engine/ps-release-workflow" "$CLAUDE_HOME/ps-release-workflow"
 
 echo
-echo "Installed into $CLAUDE_HOME. Restart your Claude Code session to pick up new skills."
+echo "Installed into $CLAUDE_HOME and $AGENTS_HOME. Restart Claude Code and Codex to pick up new skills."
 echo "ps-commu-explain is self-contained; ps-release-workflow-* use $CLAUDE_HOME/ps-release-workflow."
