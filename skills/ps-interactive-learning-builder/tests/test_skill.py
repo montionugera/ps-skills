@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -48,6 +49,16 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             text=True,
             check=False,
         )
+
+    def _semantic_contract(self) -> str:
+        paths = (
+            SKILL,
+            REFERENCES / "artifact-contract.md",
+            REFERENCES / "learning-design.md",
+            REFERENCES / "audit-contract.md",
+            REFERENCES / "verification-contract.md",
+        )
+        return re.sub(r"\s+", " ", "\n".join(path.read_text() for path in paths)).lower()
 
     def test_skill_declares_gated_traceable_workflow(self) -> None:
         content = SKILL.read_text()
@@ -252,6 +263,52 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
         )
         for forbidden in ("TBD", "PLACEHOLDER", "python -m http.server"):
             self.assertNotIn(forbidden, all_text)
+
+    def test_contract_rejects_external_write_and_catalog_bypasses(self) -> None:
+        content = self._semantic_contract()
+        prohibited = {
+            "external write without approval": (
+                r"\b(?:may|can|should|must) (?:create|push)[^.]{0,80}"
+                r"\bwithout (?:explicit )?approval\b"
+            ),
+            "approval declared unnecessary": (
+                r"\b(?:explicit )?approval (?:is|shall be) not required\b"
+            ),
+            "catalog updated before gates": (
+                r"\b(?:may|can|should|must) update the catalog[^.]{0,60}"
+                r"\bbefore (?:all|the) (?:other |required )?gates? pass\b"
+            ),
+        }
+        for scenario, pattern in prohibited.items():
+            with self.subTest(scenario=scenario):
+                self.assertNotRegex(content, pattern)
+
+    def test_contract_rejects_self_audit_and_quality_bypasses(self) -> None:
+        content = self._semantic_contract()
+        prohibited = {
+            "artifact author self-acceptance": (
+                r"\b(?:artifact )?authors? (?:may|can|should|must) "
+                r"(?:accept|approve|audit) (?:their|its|the) (?:own )?"
+                r"(?:artifacts?|work|scope)\b"
+            ),
+            "builder self-audit": (
+                r"\bbuilders? (?:may|can|should|must) "
+                r"(?:accept|approve|audit) (?:their|its|the) (?:own )?"
+                r"(?:artifacts?|work|application|scope)\b"
+            ),
+            "unsupported claims published": (
+                r"\bunsupported claims? (?:may|can|should|must) "
+                r"(?:enter|appear in|be published in) (?:the )?application\b"
+            ),
+            "blocking audit findings accepted": (
+                r"\bunresolved (?:critical|high|critical or high|critical and high) "
+                r"findings? (?:may|can|should|must) "
+                r"(?:pass|be accepted|permit|allow|advance)\b"
+            ),
+        }
+        for scenario, pattern in prohibited.items():
+            with self.subTest(scenario=scenario):
+                self.assertNotRegex(content, pattern)
 
     def test_installer_links_skill_for_claude_and_codex(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
