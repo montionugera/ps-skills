@@ -9,6 +9,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | Skill | What it does |
 |-------|--------------|
 | **ps-commu-explain** | Turns "explain X" into a fact-checked, visually rich web explanation (diagrams, animation, interactivity) served from `/tmp` and handed back as a verified localhost URL. Self-contained: lifecycle scripts + HTML and React+TS templates. |
+| **ps-interactive-learning-builder** | Orchestrates research, learning design, interactive builds, independent audits, and durable verification for traceable courses and explorable references. |
 | **ps-release-workflow-init** | Opt a repo into the ship-the-release workflow (`.release.json`, backlogs, routing convention). |
 | **ps-release-workflow-idea** | Capture a new idea (`I-NNN`) in the idea backlog. |
 | **ps-release-workflow-refine** | Promote a solid, approved idea into the refined backlog (`F-NNN`). |
@@ -29,6 +30,7 @@ engine is installed alongside them.
 ps-skills/
 ├── skills/                     # the ps-* skills (copied into ~/.claude/skills)
 │   ├── ps-commu-explain/
+│   ├── ps-interactive-learning-builder/
 │   └── ps-release-workflow-*/
 ├── engine/
 │   └── ps-release-workflow/    # Python engine for the release-workflow skills
@@ -61,6 +63,8 @@ Install into a non-default Claude home with `CLAUDE_HOME=/path ./install.sh`.
 - **ps-commu-explain** — say *"explain X"* / *"show me how X works"*, or invoke `/ps-commu-explain <topic>`.
   Modes: `/ps-commu-explain list`, `/ps-commu-explain clean`. Built explanations live under
   `/tmp/ps-commu/<slug>/` and self-destruct after 24h.
+- **ps-interactive-learning-builder** — invoke `/ps-interactive-learning-builder <topic>` to create a
+  source-backed course, explorable reference, or hybrid learning project with gated audit and verification.
 - **ps-release-workflow** — start with `ps-release-workflow-init` in a repo, then
   idea → refine → claim → ship → promote. Each skill's `SKILL.md` documents its preconditions.
 
@@ -75,13 +79,17 @@ pytest -q
 # ps-commu-explain lifecycle suite (bash; macOS — uses BSD stat/lsof)
 bash skills/ps-commu-explain/tests/lifecycle_test.sh
 
+# ps-interactive-learning-builder contract, installer, and repository integration suite
+python3 -m unittest discover -s skills/ps-interactive-learning-builder/tests -v
+
 # ps-commu-explain React template builds
 cd skills/ps-commu-explain/assets/template-react
 npm ci && npx tsc --noEmit && npm run build
 ```
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all three on every push and PR:
-the engine tests on Linux, the lifecycle suite on macOS, and the React template build on Linux.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all four on every push and PR:
+the engine and interactive-learning-builder tests on Linux, the lifecycle suite on macOS, and the
+React template build on Linux.
 
 ## License
 

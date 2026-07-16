@@ -29,6 +29,17 @@ jobs:
       - name: Lifecycle test suite
         run: bash skills/ps-commu-explain/tests/lifecycle_test.sh
 
+  ps-interactive-learning-builder:
+    name: ps-interactive-learning-builder (unittest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run tests
+        run: python3 -m unittest discover -s skills/ps-interactive-learning-builder/tests -v
+
   ps-commu-react-template:
     name: ps-commu-explain React template builds
     runs-on: ubuntu-latest

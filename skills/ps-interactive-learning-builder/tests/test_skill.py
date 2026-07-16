@@ -311,6 +311,27 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
         for forbidden in ("TBD", "PLACEHOLDER", "python -m http.server"):
             self.assertNotIn(forbidden, all_text)
 
+    def test_repository_catalog_and_ci_include_skill(self) -> None:
+        readme = (REPO / "README.md").read_text()
+        workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+        command = (
+            "python3 -m unittest discover "
+            "-s skills/ps-interactive-learning-builder/tests -v"
+        )
+
+        for expected in (
+            "| **ps-interactive-learning-builder** |",
+            "invoke `/ps-interactive-learning-builder <topic>`",
+            command,
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, readme)
+
+        job = workflow.split("  ps-interactive-learning-builder:\n", 1)[1]
+        job = re.split(r"\n(?=  \S)", job, maxsplit=1)[0]
+        self.assertIn("runs-on: ubuntu-latest", job)
+        self.assertIn(command, job)
+
     def test_actual_contract_has_no_semantic_contradictions(self) -> None:
         self.assertEqual(
             self._find_contract_contradictions(self._semantic_contract()), set()
