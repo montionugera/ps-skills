@@ -14,6 +14,18 @@ REFERENCES = SKILL_DIR / "references"
 
 
 class InteractiveLearningBuilderSkillTest(unittest.TestCase):
+    def _parse_frontmatter(self, content: str) -> tuple[dict[str, str], str]:
+        lines = content.splitlines()
+        self.assertGreaterEqual(len(lines), 3)
+        self.assertEqual(lines[0], "---")
+        closing = lines.index("---", 1)
+        fields = {}
+        for line in lines[1:closing]:
+            key, separator, value = line.partition(":")
+            self.assertEqual(separator, ":", line)
+            fields[key.strip()] = value.strip()
+        return fields, "\n".join(lines[closing + 1 :])
+
     def _read_reference(self, filename: str) -> str:
         path = REFERENCES / filename
         self.assertTrue(path.is_file(), filename)
@@ -22,9 +34,14 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
 
     def test_skill_declares_gated_traceable_workflow(self) -> None:
         content = SKILL.read_text()
-        self.assertTrue(
-            content.startswith("---\nname: ps-interactive-learning-builder\n")
-        )
+        frontmatter, body = self._parse_frontmatter(content)
+        self.assertEqual(frontmatter["name"], "ps-interactive-learning-builder")
+        self.assertEqual(set(frontmatter), {"name", "description"})
+        description = frontmatter["description"].lower()
+        for trigger in ("research", "plan", "synthesi", "build", "audit", "verif"):
+            with self.subTest(trigger=trigger):
+                self.assertIn(trigger, description)
+
         for expected in (
             "/Users/pnusso/Workspace/Main/learning-materials",
             "gitlab.agodadev.io/pnusso/learning-materials",
@@ -41,6 +58,20 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             "hybrid",
         ):
             self.assertIn(expected, content)
+
+        ordered_gates = (
+            "Frame learner",
+            "Create or resume",
+            "Research authoritative",
+            "Synthesize the knowledge map",
+            "Produce curriculum",
+            "Delegate the temporary app",
+            "Export the durable app",
+            "Assign an isolated auditor",
+            "Run final verification",
+        )
+        positions = [body.index(gate) for gate in ordered_gates]
+        self.assertEqual(positions, sorted(positions))
 
     def test_artifact_contract_defines_paths_states_and_claim_ids(self) -> None:
         content = self._read_reference("artifact-contract.md")
@@ -68,8 +99,15 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             "structured course",
             "explorable reference",
             "hybrid",
+            "measurable objectives",
+            "map to relevant claims",
+            "interaction, exercise, or assessment",
+            "assessment alignment",
+            "authoritative dated sources",
             "valuation and retrieval dates",
+            "currencies and units",
             "explicit assumptions and formulas",
+            "base, upside, and downside scenarios",
             "sensitivity analysis",
             "educational-not-personal-financial-advice",
         ):
@@ -88,6 +126,10 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             "high",
             "medium",
             "low",
+            "Critical and high findings block the `audited` state",
+            "Medium and low findings require an explicit disposition",
+            "rerun every affected build, test, browser, manifest, and audit check",
+            "independent re-audit",
             "cannot be the sole auditor",
         ):
             self.assertIn(expected, content)
@@ -101,6 +143,22 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             "integration tests",
             "end-to-end tests",
             "80%",
+            "every published claim has evidence",
+            "access date",
+            "confidence",
+            "freshness check",
+            "unsupported claims do not enter the application",
+            "keyboard navigation",
+            "semantic structure",
+            "contrast",
+            "focus visibility",
+            "reduced-motion behavior",
+            "responsive sections are inspected in Chrome",
+            "zero console errors",
+            "source → claim → objective → module → interaction → assessment → verification evidence",
+            "durable-preview SHA-256 equivalence",
+            "durable build checks",
+            "no unresolved critical or high findings",
             "catalog update is the final operation",
             "preserve completed artifacts and raw evidence",
             "08-audit-report.md",
