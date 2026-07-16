@@ -48,7 +48,7 @@ The workflow has four gated phases:
 1. **Frame:** define the learner model, goals, scope, output destination, format, and acceptance criteria.
 2. **Research:** create a research strategy, gather authoritative evidence, assign stable claim identifiers, record confidence and freshness, and expose gaps or contradictions.
 3. **Design learning:** synthesize a knowledge map, measurable objectives, modules, interactions, exercises, assessments, build specification, and acceptance matrix.
-4. **Build and verify:** delegate the visual application lifecycle to `ps-commu-explain`, run content and software checks, export the result to the durable topic directory, compare the durable copy with the verified build, and update the catalog.
+4. **Build, audit, and verify:** delegate the visual application lifecycle to `ps-commu-explain`, run content and software checks, export the result to the durable topic directory, independently audit the result, compare the durable copy with the verified build, and update the catalog.
 
 The traceability chain is:
 
@@ -109,11 +109,12 @@ Each topic project contains:
 ├── app/
 │   └── durable website source
 └── verification/
-    ├── 08-verification-report.md
+    ├── 08-audit-report.md
+    ├── 09-verification-report.md
     └── manifest.sha256
 ```
 
-`03-factsheet.md` assigns stable claim IDs and records source, access date, confidence, and freshness. `05-curriculum.md` maps claims to objectives and modules. `06-build-spec.md` maps modules to visual explanations, interactions, exercises, and assessments. `07-acceptance-matrix.md` defines evidence for every objective and critical user flow.
+`03-factsheet.md` assigns stable claim IDs and records source, access date, confidence, and freshness. `05-curriculum.md` maps claims to objectives and modules. `06-build-spec.md` maps modules to visual explanations, interactions, exercises, and assessments. `07-acceptance-matrix.md` defines evidence for every objective and critical user flow. `08-audit-report.md` records independent findings and their disposition. `09-verification-report.md` records the final gate evidence.
 
 ## Source strategy
 
@@ -158,8 +159,20 @@ After the temporary application passes verification:
 The central catalog recognizes these ordered states:
 
 ```text
-planned → researched → designed → built → verified
+planned → researched → designed → built → audited → verified
 ```
+
+## Independent audit gate
+
+After the durable build is frozen, assign an independent reviewer or isolated subagent that did not author the application to audit the raw artifacts. Give the auditor the topic project, source records, acceptance matrix, application, and test evidence without leaking the builder's conclusions. Audit these dimensions:
+
+- **Source and factual integrity:** authority, coverage, freshness, claim accuracy, uncertainty, and citation fidelity.
+- **Learning effectiveness:** learner fit, prerequisite ordering, measurable objectives, cognitive load, exercise quality, feedback, and assessment alignment.
+- **Technical and security quality:** build reproducibility, input validation, dependency risk, secrets, unsafe content rendering, privacy, performance, and maintainability.
+- **Accessibility and user experience:** keyboard access, semantics, contrast, reduced motion, responsive layout, navigation, readability, and interaction clarity.
+- **Traceability and reproducibility:** complete source-to-evidence mapping, deterministic instructions, durable-preview equivalence, and sufficient verification evidence.
+
+Classify findings as critical, high, medium, or low. Critical and high findings block the `audited` state. Medium and low findings require an explicit disposition in `08-audit-report.md`. After any remediation, rerun every affected build, test, browser, manifest, and audit check. The author of a fix cannot be the sole auditor of that fix.
 
 A topic becomes `verified` only when all applicable checks pass:
 
@@ -171,6 +184,7 @@ A topic becomes `verified` only when all applicable checks pass:
 - **Browser:** responsive sections are inspected in Chrome and the production preview has zero console errors.
 - **Traceability:** the complete source-to-verification chain is represented in the artifacts.
 - **Durability:** the exported topic application matches the verified temporary build through the manifest comparison and passes its own build checks.
+- **Audit:** the independent audit has no unresolved critical or high findings, and every medium or low finding has a recorded disposition.
 - **Catalog:** the central catalog update is the final operation after every other gate passes.
 
 ## Failure handling
@@ -178,7 +192,7 @@ A topic becomes `verified` only when all applicable checks pass:
 On a failed gate:
 
 - preserve completed artifacts and raw evidence;
-- record the gate, failing checks, commands, and actionable remediation in `08-verification-report.md`;
+- record audit findings in `08-audit-report.md` and failed verification gates, commands, and actionable remediation in `09-verification-report.md`;
 - retain the topic's last valid catalog state;
 - do not describe the topic as complete or verified;
 - never convert unavailable evidence or failed checks into confident educational content.
@@ -197,6 +211,7 @@ skills/ps-interactive-learning-builder/
 ├── references/
 │   ├── artifact-contract.md
 │   ├── learning-design.md
+│   ├── audit-contract.md
 │   └── verification-contract.md
 └── tests/
     └── test_skill.py
@@ -216,6 +231,7 @@ Use standard-library `unittest` tests to verify:
 - adaptive structured-course, explorable-reference, and hybrid modes;
 - financial source, date, assumption, sensitivity, and advice-boundary controls;
 - failure-state preservation and catalog update ordering;
+- independent audit dimensions, severity handling, reviewer isolation, and re-audit requirements;
 - required reference and agent metadata files;
 - absence of placeholders, stale paths, and duplicated server or application templates;
 - automatic discovery by the existing installer for both Claude and Codex.
