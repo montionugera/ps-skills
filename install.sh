@@ -4,7 +4,11 @@
 # Usage:
 #   ./install.sh                 # symlink skills (edits in the repo take effect live)
 #   ./install.sh --copy          # copy instead of symlink (snapshot, no live link)
+#   ./install.sh --force         # replace foreign symlinks or existing destinations
+#   ./install.sh --copy --force  # refresh existing copied destinations
 #   CLAUDE_HOME=/path AGENTS_HOME=/path ./install.sh
+#
+# Existing files, directories, and foreign symlinks are preserved unless --force is set.
 #
 # What it does:
 #   skills/ps-*            -> $CLAUDE_HOME/skills/ps-*
@@ -18,17 +22,52 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 MODE="symlink"
-[[ "${1:-}" == "--copy" ]] && MODE="copy"
-[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { grep '^#' "$0" | cut -c3-; exit 0; }
+FORCE="false"
+
+usage() {
+  sed -n '2,/^set -euo pipefail$/s/^# \{0,1\}//p' "$0"
+}
+
+while (($#)); do
+  case "$1" in
+    --copy) MODE="copy" ;;
+    --force) FORCE="true" ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
 
 mkdir -p "$CLAUDE_HOME/skills" "$AGENTS_HOME/skills"
 
+replace_destination() {  # dest
+  local dest="$1"
+  case "$dest" in
+    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$CLAUDE_HOME/ps-release-workflow") ;;
+    *) echo "refuse unsafe destination: $dest" >&2; return 1 ;;
+  esac
+  rm -rf -- "$dest"
+}
+
 link() {  # src dest
   local src="$1" dest="$2"
-  if [[ -e "$dest" && ! -L "$dest" ]]; then
-    echo "skip (exists, not a symlink): $dest" >&2; return
+  if [[ -L "$dest" ]]; then
+    if [[ "$dest" -ef "$src" ]]; then
+      rm -f -- "$dest"
+    elif [[ "$FORCE" == "true" ]]; then
+      replace_destination "$dest"
+    else
+      echo "preserve (foreign symlink): $dest" >&2
+      return
+    fi
+  elif [[ -e "$dest" ]]; then
+    if [[ "$FORCE" == "true" ]]; then
+      replace_destination "$dest"
+    else
+      echo "preserve (existing path): $dest" >&2
+      return
+    fi
   fi
-  rm -f "$dest"
   if [[ "$MODE" == "symlink" ]]; then ln -s "$src" "$dest"; else cp -R "$src" "$dest"; fi
   echo "$MODE: $dest"
 }

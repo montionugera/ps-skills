@@ -32,6 +32,23 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
         self.assertGreater(path.stat().st_size, 300, filename)
         return path.read_text()
 
+    def _run_installer(
+        self, root: Path, *arguments: str
+    ) -> subprocess.CompletedProcess[str]:
+        env = {
+            **os.environ,
+            "CLAUDE_HOME": str(root / ".claude"),
+            "AGENTS_HOME": str(root / ".agents"),
+        }
+        return subprocess.run(
+            ["bash", str(REPO / "install.sh"), *arguments],
+            cwd=REPO,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def test_skill_declares_gated_traceable_workflow(self) -> None:
         content = SKILL.read_text()
         frontmatter, body = self._parse_frontmatter(content)
@@ -56,6 +73,8 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             "structured course",
             "explorable reference",
             "hybrid",
+            "Resolve the library root and remote before creation",
+            "No artifact or audit dimension may be accepted solely by its author",
         ):
             self.assertIn(expected, content)
 
@@ -90,6 +109,19 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             "verification/manifest.sha256",
             "planned → researched → designed → built → audited → verified",
             "stable claim IDs",
+        ):
+            self.assertIn(expected, content)
+
+    def test_artifact_contract_defines_portable_resolution_order(self) -> None:
+        content = self._read_reference("artifact-contract.md")
+        for expected in (
+            "explicit invocation input",
+            "existing catalog or repository configuration",
+            "environment variables",
+            "defaults",
+            "before creating or writing",
+            "confirm the resolved root and remote with the user",
+            "portable override",
         ):
             self.assertIn(expected, content)
 
@@ -134,6 +166,22 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
         ):
             self.assertIn(expected, content)
 
+    def test_audit_contract_defines_artifact_and_conflict_independence(self) -> None:
+        content = self._read_reference("audit-contract.md")
+        for expected in (
+            "research strategy and source records",
+            "claims and knowledge map",
+            "curriculum, build specification, and acceptance matrix",
+            "application source and assets",
+            "test and browser evidence",
+            "traceability and manifest evidence",
+            "independence conflict",
+            "record the conflict",
+            "assign a different auditor",
+            "No artifact or audit dimension may be accepted solely by its author",
+        ):
+            self.assertIn(expected, content)
+
     def test_verification_contract_defines_tests_ordering_and_failure_evidence(
         self,
     ) -> None:
@@ -167,6 +215,29 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
         ):
             self.assertIn(expected, content)
 
+    def test_verification_contract_defines_deterministic_manifest(self) -> None:
+        content = self._read_reference("verification-contract.md")
+        for expected in (
+            "application source",
+            "required assets",
+            "configuration files",
+            "lockfiles",
+            "tests",
+            "generated build directories",
+            "cache directories",
+            "dependency directories",
+            "logs",
+            "operating-system metadata",
+            "preview runtime state",
+            "POSIX relative paths",
+            "sorted lexicographically by path",
+            "<sha256>  <path>",
+            "identical normalized file sets",
+            "identical hashes",
+            "report every missing, extra, or hash-mismatched path",
+        ):
+            self.assertIn(expected, content)
+
     def test_package_has_metadata_and_no_duplicated_runtime(self) -> None:
         metadata = (SKILL_DIR / "agents" / "openai.yaml").read_text()
         self.assertIn('display_name: "Interactive Learning Builder"', metadata)
@@ -185,19 +256,7 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
     def test_installer_links_skill_for_claude_and_codex(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            env = {
-                **os.environ,
-                "CLAUDE_HOME": str(root / ".claude"),
-                "AGENTS_HOME": str(root / ".agents"),
-            }
-            result = subprocess.run(
-                ["bash", str(REPO / "install.sh")],
-                cwd=REPO,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            result = self._run_installer(root)
             self.assertEqual(result.returncode, 0, result.stderr)
             for destination in (
                 root / ".claude" / "skills" / "ps-interactive-learning-builder",
@@ -205,6 +264,88 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             ):
                 self.assertTrue(destination.is_symlink())
                 self.assertEqual(destination.resolve(), SKILL_DIR)
+
+    def test_installer_preserves_foreign_symlink_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            foreign = root / "foreign"
+            foreign.mkdir()
+            destination = (
+                root
+                / ".agents"
+                / "skills"
+                / "ps-interactive-learning-builder"
+            )
+            destination.parent.mkdir(parents=True)
+            destination.symlink_to(foreign)
+
+            result = self._run_installer(root)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(destination.is_symlink())
+            self.assertTrue(destination.samefile(foreign))
+            self.assertIn("preserve (foreign symlink)", result.stderr)
+
+    def test_installer_force_replaces_foreign_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            foreign = root / "foreign"
+            foreign.mkdir()
+            destination = (
+                root
+                / ".agents"
+                / "skills"
+                / "ps-interactive-learning-builder"
+            )
+            destination.parent.mkdir(parents=True)
+            destination.symlink_to(foreign)
+
+            result = self._run_installer(root, "--force")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(destination.is_symlink())
+            self.assertEqual(destination.resolve(), SKILL_DIR)
+
+    def test_installer_copy_mode_and_idempotency(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self._run_installer(root, "--copy")
+            second = self._run_installer(root, "--copy")
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+
+            for home in (".claude", ".agents"):
+                destination = (
+                    root / home / "skills" / "ps-interactive-learning-builder"
+                )
+                self.assertTrue(destination.is_dir())
+                self.assertFalse(destination.is_symlink())
+                self.assertEqual(
+                    (destination / "SKILL.md").read_text(), SKILL.read_text()
+                )
+
+    def test_installer_symlink_mode_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self._run_installer(root)
+            second = self._run_installer(root)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            destination = (
+                root
+                / ".agents"
+                / "skills"
+                / "ps-interactive-learning-builder"
+            )
+            self.assertTrue(destination.is_symlink())
+            self.assertEqual(destination.resolve(), SKILL_DIR)
+
+    def test_installer_help_documents_force(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self._run_installer(Path(temporary), "--help")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--force", result.stdout)
+            self.assertIn("foreign symlinks", result.stdout)
 
 
 if __name__ == "__main__":

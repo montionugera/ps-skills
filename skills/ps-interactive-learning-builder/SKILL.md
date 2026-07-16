@@ -9,6 +9,8 @@ Orchestrate one traceable learning project without duplicating the application r
 
 Read every linked contract before executing its related gate. Stop at a failed gate; never publish downstream artifacts from incomplete evidence.
 
+Resolve the library root and remote before creation by applying the precedence in the artifact contract. Keep overrides portable, and confirm the resolved destinations with the user before a creation or write.
+
 ## Ordered gates
 
 1. **Frame learner and scope.** Frame learner prerequisites, topic boundaries, measurable outcomes, source families, assessment depth, freshness, destination, acceptance criteria, and the output mode: structured course, explorable reference, or hybrid. Read [learning-design.md](references/learning-design.md).
@@ -18,5 +20,5 @@ Read every linked contract before executing its related gate. Stop at a failed g
 5. **Produce curriculum and acceptance artifacts.** Produce the curriculum, build specification, and acceptance matrix. Map each objective through content, a purposeful interaction or exercise, assessment, and required evidence.
 6. **Delegate the temporary app.** Delegate the temporary application, frontend build, preview lifecycle, and Chrome inspection to `ps-commu-explain`. Preserve one application writer and one server/browser owner for each verification cycle; do not create another server or application template.
 7. **Export the durable app.** Freeze the verified temporary build, export its source and required assets into the topic `app/`, run durable checks, and compare relevant SHA-256 manifests while excluding generated caches and environment-specific runtime files.
-8. **Assign an isolated auditor.** Assign an isolated auditor who did not author the application. Provide raw artifacts without builder conclusions, apply [audit-contract.md](references/audit-contract.md), remediate blocking findings, and obtain independent re-audit where required.
+8. **Assign an isolated auditor.** Assign isolated auditors across the research, claims, learning design, application, tests, and traceability evidence. Record independence conflicts and reassign affected scope. Enforce this rule: No artifact or audit dimension may be accepted solely by its author. Provide raw artifacts without builder conclusions, apply [audit-contract.md](references/audit-contract.md), remediate blocking findings, and obtain independent re-audit where required.
 9. **Run final verification.** Run [verification-contract.md](references/verification-contract.md), update the catalog only after every other gate passes, and hand off the durable path, exact verified preview URL, catalog state, verification evidence, and cleanup command.
