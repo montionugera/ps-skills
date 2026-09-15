@@ -1,3 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
+
+# SDD scratch workspace (ledger, briefs, review packages) — never committed
+.superpowers/

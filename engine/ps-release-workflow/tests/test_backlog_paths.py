@@ -12,10 +12,15 @@ from lib.backlog_paths import (
 
 
 def _make_release_worktree(repo: Path) -> Path:
-    """Fabricate the long-lived _release worktree with backlog dirs."""
+    """Fabricate the long-lived _release worktree with backlog dirs.
+
+    The _release worktree's .release.json is the in-progress source of truth
+    (fix #2), so write it here with in_progress=True.
+    """
     wt = repo / ".claude" / "worktrees" / "_release"
     (wt / ".claude" / "idea_backlog").mkdir(parents=True)
     (wt / ".claude" / "refined_backlog").mkdir(parents=True)
+    (wt / ".release.json").write_text(json.dumps({"version": "1.1", "in_progress": True}))
     return wt
 
 

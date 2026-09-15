@@ -70,3 +70,20 @@ def test_commits_the_opt_in(tmp_repo: Path):
     import subprocess
     log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_repo, capture_output=True, text=True)
     assert "ps-release-workflow" in log.stdout.lower()
+
+
+def test_help_does_not_initialize(tmp_repo, tmp_path):
+    """`init_repo.py --help` must print usage and leave the repo un-opted-in."""
+    import subprocess, sys
+    from pathlib import Path
+    script = Path(__file__).resolve().parent.parent / "scripts" / "init_repo.py"
+    home = tmp_path / "_home2"
+    home.mkdir()
+
+    proc = subprocess.run([sys.executable, str(script), "--help"], cwd=tmp_repo,
+                          env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                          capture_output=True, text=True)
+
+    assert proc.returncode == 0
+    assert "usage:" in proc.stdout.lower()
+    assert not (tmp_repo / ".release.json").exists(), "--help opted the repo in"

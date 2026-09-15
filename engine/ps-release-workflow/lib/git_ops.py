@@ -44,6 +44,20 @@ def add_worktree_new_branch(cwd: Path, path: Path, new_branch: str, start_point:
     _run(cwd, "worktree", "add", "-b", new_branch, str(path), start_point)
 
 
+def fetch_and_ff_main(cwd: Path, remote: str = "origin", branch: str = "main") -> None:
+    """Fetch and fast-forward local <branch> to <remote>/<branch>.
+
+    PR-based promote advances ONLY the remote (the squash-merge happens on the
+    host); local main is never pulled. Cutting a new release branch from a stale
+    local main then silently misses the just-promoted release. Calling this
+    before branching guarantees the base carries the latest promoted work, and
+    raises (non-ff) instead of silently using a diverged local main.
+    """
+    _run(cwd, "fetch", remote, branch)
+    _run(cwd, "checkout", branch)
+    _run(cwd, "merge", "--ff-only", f"{remote}/{branch}")
+
+
 def remove_worktree(cwd: Path, path: Path, force: bool = False) -> None:
     args = ["worktree", "remove"]
     if force:

@@ -18,53 +18,57 @@ init            # once per repo — opt in
        ├─ claim            # claim F-NNN → isolated worktree (owner marker)
        │    └─ implement       # build inside the worktree
        │         └─ ship           # Gate 1 → merge feature into release/<v>
-       └─ promote          # Gate 2 → squash-merge release/<v> → main, deploy, auto-clean
+       └─ promote          # Gate 2 → push release/<v> + open PR → main
+            └─ cleanup         # REQUIRED after the PR merges: --cleanup-only <v>
 ```
 
-Slash skills mirror these steps: `/ps-release-workflow:init`, `:new-release`, `:idea`,
-`:refine`, `:claim`, `:ship`, `:promote`, plus `:cleanup-legacy` and the auto-fired `:guard`.
+`psrw` mirrors these steps as verbs: `psrw init`, `new-release`, `idea`, `refine`, `claim`,
+`ship`, `promote`, `unclaim`, `status`, `hotfix`. The guard fires automatically on Claude's
+own edit tools; see [`docs/lifecycle.md#guard-guarantees`](docs/lifecycle.md#guard-guarantees).
 
 ## Scripts
 
 | Script | What it does |
 | --- | --- |
-| `init_repo.py` | Opt the repo in: create `.release.json`, backlog dirs, gitignore the state dir, install the routing convention. Once per repo. |
-| `init_work_new_release.py` | Open `release/<v>`, mark `.release.json` in-progress, create the long-lived `_release` worktree. |
-| `new_idea.py` | Mint `I-NNN`, create the idea folder with spec/plan/research skeletons, commit on `release/<v>`. |
-| `promote_idea_to_refined.py` | Promote `I-NNN` → `F-NNN`, move into the refined backlog, update catalogs. |
-| `init_work_refined_backlog.py` | Atomically claim `F-NNN` (or `--next`), create a per-feature worktree with an owner marker. |
-| `ship_current_work_to_release.py` | Run Gate 1 (`precheck.sh`), merge the feature branch into `release/<v>`, mark catalog shipped. |
-| `promote_release.py` | Run Gate 2 (`integration.sh`), squash-merge `release/<v>` → `main`, deploy, auto-clean worktrees/branches. |
-| `cleanup_legacy_worktrees.py` | Interactive GC of marker-less ("legacy") worktrees, showing merged-to-main status. |
-| `guard_check.py` | PreToolUse hook: blocks edits on `main` of an opted-in repo, or in a worktree owned by another session. |
+| `init_repo.py` (`psrw init`) | Opt the repo in: create `.release.json`, backlog dirs, gitignore the state dir, install the routing convention. Once per repo. |
+| `init_work_new_release.py` (`psrw new-release`) | Open `release/<v>`, mark `.release.json` in-progress, create the long-lived `_release` worktree. |
+| `new_idea.py` (`psrw idea`) | Mint `I-NNN`, create the idea folder with spec/research skeletons, commit on `release/<v>`. |
+| `promote_idea_to_refined.py` (`psrw refine`) | Promote `I-NNN` → `F-NNN`, carry the idea's content forward into the refined backlog, update catalogs. |
+| `init_work_refined_backlog.py` (`psrw claim`) | Atomically claim `F-NNN` (or `--next`), create a per-feature worktree with an owner marker. |
+| `ship_current_work_to_release.py` (`psrw ship`) | Run Gate 1 (`precheck.sh`), merge the feature branch into `release/<v>`, mark catalog shipped. |
+| `promote_release.py` (`psrw promote`) | Run Gate 2 (`integration.sh`), push `release/<v>`, open a PR to `main` (default) or squash-merge locally (`--direct`). After the PR merges, `--cleanup-only <v>` archives + prunes. See *Promote lifecycle* below. |
+| `unclaim.py` (`psrw unclaim`) | Abandon a claim, keeping the feature branch. |
+| `status.py` (`psrw status`) | One-screen report of what is in flight. |
+| `hotfix.py` (`psrw hotfix`) | Create a sibling hotfix worktree. |
+| `cleanup_legacy_worktrees.py` | Interactive GC of marker-less ("legacy") worktrees, showing merged-to-main status. **Deferred** — garbage collection has no `psrw` verb yet (later spec); invoke directly with `python3 scripts/cleanup_legacy_worktrees.py`. |
+| `guard_check.py` | PreToolUse hook: blocks edits on `main` of an opted-in repo, or in a worktree owned by another session. See *Guard guarantees* in `docs/lifecycle.md`. |
+
+## Promote lifecycle
+
+See [`docs/lifecycle.md#promote-sequence`](docs/lifecycle.md#promote-sequence) for the full
+sequence — Gate 2, the PR-based flow, `--babysit`, and the required post-merge
+`--cleanup-only <version>` step.
 
 ## State-file layout
 
-```
-.release.json                         # version + in_progress flag (committed)
-.claude/
-  idea_backlog/
-    _catalog.json                     # I-NNN registry (committed on release/<v>)
-    I-NNN-<slug>/spec.md plan.md research.md
-  refined_backlog/
-    _catalog.json                     # F-NNN registry (committed on release/<v>)
-    F-NNN-<slug>/spec.md plan.md ...
-    _archive/                         # promoted/closed features
-  state/
-    claims.json                       # gitignored — F-NNN → owner session map
-  worktrees/                          # gitignored — per-feature + _release worktrees
-    _release/                         # long-lived worktree on release/<v>
-    F-NNN-<slug>/                     # claimed feature worktree (has owner marker)
-```
+See [`docs/lifecycle.md#state-layout`](docs/lifecycle.md#state-layout) for the full
+directory layout: `.release.json`, `idea_backlog/`, `refined_backlog/`, and the gitignored
+`state/` and `worktrees/` dirs.
 
 Backlog metadata (`idea_backlog/`, `refined_backlog/`, catalogs) is committed onto the
 `release/<v>` branch through the long-lived `_release` worktree rather than the main
-checkout (decision **D11**). This keeps backlog churn off `main` and lets the guard keep
-`main` read-only during a release, while still recording every idea/refine/claim/ship as a
-real commit on the release branch.
+checkout (decision **D11**) — see
+[`docs/lifecycle.md#d11-backlog-routing`](docs/lifecycle.md#d11-backlog-routing).
 
-The per-session owner is resolved from `$CLAUDE_SESSION_ID`. The toolkit's own scripts set
-`PS_RELEASE_WORKFLOW_SCRIPTED=1` so their writes bypass the guard.
+See [`docs/lifecycle.md#guard-guarantees`](docs/lifecycle.md#guard-guarantees) for what the
+guard actually checks. In short: it intercepts Claude Code's own `Edit`/`Write`/`MultiEdit`/
+`NotebookEdit` tool calls only — a script's own file writes never go through it, with or
+without any environment override — and its ownership check guards against cross-machine
+claims and hand-edited markers, not against two local Claude sessions (claims are created
+with a machine-cached fallback id, so local sessions normally resolve to the same owner).
+The one place the toolkit sets `PS_RELEASE_WORKFLOW_SCRIPTED=1` as an explicit override is
+`promote_release.py`'s `--direct` mode, defensively, before its post-squash-merge cleanup
+step runs against the main checkout.
 
 ## Tests
 

@@ -24,9 +24,11 @@ RUNNABLE_SCRIPTS = [
     "init_work_new_release.py",
     "init_work_refined_backlog.py",
     "ship_current_work_to_release.py",
+    "unclaim.py",
     "promote_release.py",
     "cleanup_legacy_worktrees.py",
     "guard_check.py",
+    "hotfix.py",
 ]
 
 

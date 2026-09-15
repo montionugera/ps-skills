@@ -17,9 +17,11 @@ from lib.backlog_paths import (
     NoReleaseInProgressError,
     get_backlog_catalog_path,
     get_release_worktree,
+    read_release_state,
 )
-from lib.catalog import mark_shipped
+from lib.catalog import CatalogEntryNotFoundError, mark_shipped
 from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
+from lib.hooks import HookPathError, resolve_hook
 from lib.repo import is_ps_release_workflow_repo
 from lib.state import file_lock
 
@@ -27,6 +29,31 @@ from lib.state import file_lock
 class DirtyTreeError(Exception): pass
 class GateFailedError(Exception): pass
 class NotInFeatureWorktreeError(Exception): pass
+
+
+def _run_precheck(tree: Path) -> int | None:
+    """Run the Gate 1 script with cwd=tree; return its exit code.
+
+    Gate 1 must resolve its script from the tree whose code it is verifying
+    (audit A5) — the feature worktree pre-merge, the _release worktree
+    post-merge — never the main checkout, whose script/code may differ. Mirrors
+    promote's Gate 2, which resolves its script from the _release worktree. The
+    path comes from that tree's .release.json hooks block, defaulting to
+    scripts/precheck.sh. Returns None (with a loud stderr warning, not a hard
+    error) when the tree has no such script — repos without one must keep
+    working. Raises GateFailedError when the hooks value itself is unusable: an
+    unrunnable gate must refuse, never silently skip. Callers that have already
+    committed a merge MUST roll it back around that raise (see ship_current_work).
+    """
+    try:
+        precheck = resolve_hook(tree, "precheck")
+    except HookPathError as e:
+        print(f"❌ Gate 1 REFUSED — {e}", file=sys.stderr)
+        raise GateFailedError(str(e))
+    if not precheck.exists():
+        print(f"⚠️ Gate 1 SKIPPED — {precheck} not found in {tree}", file=sys.stderr)
+        return None
+    return subprocess.run([str(precheck)], cwd=tree).returncode
 
 
 def _find_marker(worktree: Path) -> dict:
@@ -59,22 +86,23 @@ def ship_current_work(worktree: Path) -> dict:
     if not is_ps_release_workflow_repo(repo):
         raise RuntimeError(f"{repo} not opted into ps-release-workflow")
 
-    rj = json.loads((repo / ".release.json").read_text())
-    if not rj.get("in_progress"):
+    # In-progress + version come from the _release worktree's .release.json
+    # (fix #2 source of truth), not main — main carries only last-promoted state.
+    state = read_release_state(repo)
+    if state is None:
         raise NoReleaseInProgressError("No release in progress")
-    release_version = rj["version"]
+    release_version = state["version"]
     release_branch = f"release/{release_version}"
 
     # The _release worktree (release/<v>) — also enforces the in-progress guard.
     rel_wt = get_release_worktree(repo)
 
-    # Run Gate 1.
-    precheck = repo / "scripts" / "precheck.sh"
-    if precheck.exists():
-        cp = subprocess.run([str(precheck)], cwd=worktree)
-        if cp.returncode != 0:
-            raise GateFailedError(f"Gate 1 (scripts/precheck.sh) failed in {worktree}")
-    # If precheck missing, allow (some repos may not have it yet).
+    # Run Gate 1 from the FEATURE worktree — it verifies the code being shipped
+    # (audit A5: resolving from `repo` ran the main checkout's precheck against
+    # the main checkout's code). Missing precheck warns loudly but allows.
+    rc = _run_precheck(worktree)
+    if rc is not None and rc != 0:
+        raise GateFailedError(f"Gate 1 (scripts/precheck.sh) failed in {worktree}")
 
     # Merge feat/<feature_id> into release/<v> in the _release worktree.
     # Serialize the whole merge → re-verify → rollback → mark critical section on
@@ -89,33 +117,123 @@ def ship_current_work(worktree: Path) -> dict:
             git_run(rel_wt, "merge", "--abort", check=False)
             raise GateFailedError(f"merge of {feat_branch} into {release_branch} failed: {e}")
 
-        # Re-verify Gate 1 in release worktree.
-        if precheck.exists():
-            cp = subprocess.run([str(precheck)], cwd=rel_wt)
-            if cp.returncode != 0:
-                # Roll back the merge: hard reset to release HEAD~1
-                git_run(rel_wt, "reset", "--hard", "HEAD~1")
-                raise GateFailedError(f"Gate 1 failed on combined release after merge — rolled back")
+        # Re-verify Gate 1 on the MERGED result — precheck resolved from the
+        # _release worktree itself, so it checks the combined release code.
+        try:
+            rc = _run_precheck(rel_wt)
+        except GateFailedError:
+            # A bad hooks.precheck path must not leave the merge standing: the
+            # raise would otherwise skip the rollback below and escape the lock
+            # with the feature merged on release/<v> while ship reports failure.
+            git_run(rel_wt, "reset", "--hard", "HEAD~1")
+            raise
+        if rc is not None and rc != 0:
+            # Roll back the merge: hard reset to release HEAD~1
+            git_run(rel_wt, "reset", "--hard", "HEAD~1")
+            raise GateFailedError(f"Gate 1 failed on combined release after merge — rolled back")
 
         # Mark catalog status=shipped IN PLACE in the _release worktree (D11/SR-1).
         # The populated catalog lives only here; main's is []. No copy step.
+        # Raises CatalogEntryNotFoundError if the marker's feature id drifted out
+        # of the catalog (audit A6) — surfaced as a clean CLI error in main().
+        # Returns False when already shipped on this version (re-ship): no
+        # rewrite. Commit also when the worktree is dirty (M-2): a previous run
+        # that crashed between mark_shipped and commit_all left the change
+        # uncommitted — "no change now" must not strand it forever.
         refined_cat = get_backlog_catalog_path(repo, "refined")
-        mark_shipped(refined_cat, feature_id, release_version)
-        commit_all(rel_wt, f"chore(catalog): {feature_id} status=shipped on {release_version}")
+        if mark_shipped(refined_cat, feature_id, release_version) or is_dirty(rel_wt):
+            commit_all(rel_wt, f"chore(catalog): {feature_id} status=shipped on {release_version}")
 
-    return {"ok": True, "feature": feature_id, "release": release_version}
+    return {"ok": True, "feature": feature_id, "release": release_version, "rel_wt": str(rel_wt)}
 
 
 def main() -> int:
+    import argparse
+    p = argparse.ArgumentParser(
+        prog="psrw ship",
+        description="Run Gate 1 (precheck.sh), then merge this feature worktree "
+                    "into release/<v>.",
+    )
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--deploy", action="store_true",
+                   help="force the post-merge local deploy")
+    g.add_argument("--no-deploy", action="store_true",
+                   help="skip the post-merge local deploy (use when other sessions "
+                        "are shipping to the same release right now — batch the "
+                        "deploy once after the burst instead of racing rebuilds)")
+    args = p.parse_args()
+
     cwd = Path.cwd()
     try:
         result = ship_current_work(cwd)
-    except (DirtyTreeError, GateFailedError, NotInFeatureWorktreeError, NoReleaseInProgressError, RuntimeError) as e:
+    except (DirtyTreeError, GateFailedError, NotInFeatureWorktreeError,
+            NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,
+            RuntimeError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result))
     print(f"\n✅ Shipped {result['feature']} to release/{result['release']}")
-    print(f"   Continue with next feature, or promote: /ps-release-workflow:promote")
+
+    rel_wt = Path(result["rel_wt"])
+    # Resolve through the hooks block exactly as promote does — a hardcoded
+    # rel_wt/"scripts"/"deploy-local.sh" made a repo with a custom
+    # hooks.deploy_local get a deploy from promote and a silent no-op from ship
+    # (the .exists() gate just failed), while ship/SKILL.md already advertised
+    # "the repo's own local deploy script (default scripts/deploy-local.sh)".
+    try:
+        deploy_script = resolve_hook(rel_wt, "deploy_local")
+    except HookPathError as e:
+        # We are PAST the merge: ship_current_work() has already merged and
+        # marked the catalog. Refuse the deploy LOUDLY (an unrunnable configured
+        # hook must never be silently skipped) but do NOT imply the ship failed —
+        # and keep the exit code 0, matching the existing precedent below where a
+        # deploy script that runs and FAILS also leaves ship successful.
+        print(
+            f"\n❌ Post-merge local deploy REFUSED — {e}\n"
+            f"   The merge into release/{result['release']} SUCCEEDED and the catalog "
+            f"is marked shipped; only the deploy was skipped.\n"
+            f"   Fix hooks.deploy_local in .release.json on release/{result['release']}, "
+            f"then deploy by hand: cd {rel_wt} && ./scripts/deploy-local.sh",
+            file=sys.stderr,
+        )
+        print(f"\n   Continue with next feature, or promote: psrw promote")
+        return 0
+    if deploy_script.exists():
+        # Deploy-local is a DEFAULT step of ship (treat merge-to-release like an
+        # MR merge that triggers a staging deploy). Precedence UNCHANGED:
+        #   --no-deploy      -> skip (concurrent-session burst; batch the deploy)
+        #   --deploy         -> force deploy
+        #   interactive tty  -> prompt (Enter = yes)
+        #   non-interactive  -> deploy by default
+        # deploy-local.sh itself refuses any non-local kubectl context, so this
+        # can never touch prod even when it runs unattended.
+        if args.no_deploy:                      # was: "--no-deploy" in sys.argv
+            deploy_now = False
+        elif args.deploy:                       # was: "--deploy" in sys.argv
+            deploy_now = True
+        elif sys.stdin.isatty():
+            deploy_now = False
+            try:
+                choice = input("\nDeploy the release locally now? [Y/n]: ").strip().lower()
+                if choice in ('', 'y', 'yes'):
+                    deploy_now = True
+            except KeyboardInterrupt:
+                pass
+        else:
+            deploy_now = True
+
+        if deploy_now:
+            print("\n🚀 Running local deployment...")
+            rc = subprocess.run([str(deploy_script)], cwd=rel_wt).returncode
+            if rc != 0:
+                print(f"\n⚠️  {deploy_script.name} exited {rc} — verify pods (it can be "
+                      f"a false negative on a stale image/migrate). Re-run: "
+                      f"cd {rel_wt} && {deploy_script}")
+        else:
+            print(f"\n⏭️  Local deploy skipped. Run it manually when ready: "
+                  f"cd {rel_wt} && {deploy_script}")
+
+    print(f"\n   Continue with next feature, or promote: psrw promote")
     return 0
 
 
