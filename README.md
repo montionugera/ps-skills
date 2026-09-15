@@ -19,8 +19,13 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **ps-release-workflow-promote** | Squash-merge a full release to main and deploy (Gate 2). |
 | **ps-release-workflow-guard** | The PreToolUse guard that blocks edits on `main` / foreign worktrees. |
 | **ps-release-workflow-cleanup-legacy** | Housekeeping for marker-less legacy worktrees. |
+| **ps-release-workflow-full-promote** | Whole release turnover in one shot: promote, babysit CI, merge, watch deploy, clean up, open the next release. |
+| **ps-release-workflow-hotfix** | Cut the sibling worktree for an urgent fix straight to `main`, bypassing the release branch. |
+| **ps-release-workflow-status** | Read-only one-screen report of the release, features, claims, and what to do next. |
+| **ps-release-workflow-unclaim** | Abandon a claimed feature: remove its worktree and clear the claim (keeps the branch). |
+| **handoff** | Compact the session into an action-first handoff doc and spawn a fresh agent tab in Herdr; ships an optional Stop hook (`hooks/auto-handoff-stop.py`) that triggers it when context grows large. |
 
-The nine `ps-release-workflow-*` skills are thin wrappers over a shared Python engine
+The thirteen `ps-release-workflow-*` skills are thin wrappers over a shared Python engine
 ([`engine/ps-release-workflow`](engine/ps-release-workflow)) — they call its scripts at runtime, so the
 engine is installed alongside them.
 
@@ -71,7 +76,7 @@ Install into a non-default Claude home with `CLAUDE_HOME=/path ./install.sh`.
 ## Development
 
 ```bash
-# Python engine (111 tests)
+# Python engine (350+ tests)
 cd engine/ps-release-workflow
 pip install -e ".[dev]"
 pytest -q
