@@ -14,7 +14,16 @@ Usage: httpserve.py PORT DOCROOT [READYFILE]
 import functools
 import http.server
 import os
+import socketserver
 import sys
+
+
+class LocalServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind calls socket.getfqdn(host) before listen();
+        # reverse DNS can stall >10s (GitHub macOS runners), so skip it.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
@@ -29,7 +38,7 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
 def main() -> None:
     port, root = int(sys.argv[1]), sys.argv[2]
     handler = functools.partial(NoCacheHandler, directory=root)
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server = LocalServer(("127.0.0.1", port), handler)
     if len(sys.argv) > 3:
         tmp = sys.argv[3] + ".tmp"
         with open(tmp, "w") as f:
