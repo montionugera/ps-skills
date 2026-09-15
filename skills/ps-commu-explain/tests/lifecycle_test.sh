@@ -93,7 +93,7 @@ check sweep_spares_live test_sweep_spares_live
 # --- serve.sh / stop.sh ---
 test_serve_html() {
   "$S/init.sh" t-serve >/dev/null
-  echo '<h1>hello t-serve</h1>' > /tmp/ps-commu/t-serve/index.html
+  echo '<h1>hello t-serve</h1>' > /tmp/ps-commu/t-serve/app/index.html
   "$S/serve.sh" t-serve >/dev/null
   local port; port="$(meta_get t-serve port)"
   curl -sf "http://127.0.0.1:$port/" | grep -q 'hello t-serve'
@@ -110,14 +110,14 @@ test_bind_localhost_only() { # D9: listening on 127.0.0.1, not *
 test_port_retry() {          # D3: occupied candidate port → next one taken
   "$S/init.sh" t-retry >/dev/null
   meta_set t-retry port "$(meta_get t-serve port)"   # force collision
-  echo ok > /tmp/ps-commu/t-retry/index.html
+  echo ok > /tmp/ps-commu/t-retry/app/index.html
   "$S/serve.sh" t-retry >/dev/null
   [[ "$(meta_get t-retry port)" != "$(meta_get t-serve port)" ]] &&
   curl -sf "http://127.0.0.1:$(meta_get t-retry port)/" >/dev/null
 }
 test_watchdog_fires() {      # D6 with marker check
   "$S/init.sh" t-watch >/dev/null
-  echo ok > /tmp/ps-commu/t-watch/index.html
+  echo ok > /tmp/ps-commu/t-watch/app/index.html
   "$S/serve.sh" t-watch --keep-alive 3s >/dev/null
   local pid; pid="$(meta_get t-watch pid)"
   kill -0 "$pid" 2>/dev/null || return 1   # alive now
@@ -156,7 +156,7 @@ check stop_refuses_foreign_pid test_stop_refuses_foreign_pid
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.
 test_list_shows_running_and_stopped() {
   "$S/init.sh" t-list >/dev/null
-  echo ok > /tmp/ps-commu/t-list/index.html
+  echo ok > /tmp/ps-commu/t-list/app/index.html
   "$S/serve.sh" t-list >/dev/null
   local out; out="$("$S/list.sh")"
   echo "$out" | grep -E 't-list .*running .*http://localhost:' >/dev/null &&
@@ -178,7 +178,7 @@ test_clean_removes_dangling_link() {
 }
 test_clean_wipes_and_kills() {
   "$S/init.sh" t-clean >/dev/null
-  echo ok > /tmp/ps-commu/t-clean/index.html
+  echo ok > /tmp/ps-commu/t-clean/app/index.html
   "$S/serve.sh" t-clean >/dev/null
   local pid; pid="$(meta_get t-clean pid)"
   "$S/clean.sh" >/dev/null
