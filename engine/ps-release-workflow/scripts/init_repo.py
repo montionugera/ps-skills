@@ -86,6 +86,12 @@ def init_repo(repo: Path) -> None:
 
 
 def main() -> int:
+    import argparse
+    p = argparse.ArgumentParser(
+        prog="psrw init",
+        description="Opt this repo into ps-release-workflow. Run once per repo.",
+    )
+    p.parse_args()
     repo = Path.cwd()
     try:
         init_repo(repo)

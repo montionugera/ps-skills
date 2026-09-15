@@ -20,6 +20,9 @@ def _isolate_home(tmp_path: Path, monkeypatch) -> Path:
     home = tmp_path / "_home"
     home.mkdir(exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    # The harness exports CLAUDE_CODE_SESSION_ID. self_ids() reads it, so clear it by
+    # default or every exact-equality assertion on self_ids() picks up the real session.
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     return home
 
 
@@ -35,6 +38,13 @@ def tmp_repo(tmp_path: Path) -> Path:
     (repo / "README.md").write_text("test\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+    # A bare `origin` remote: new_release/ship/promote fetch + push against it
+    # (fetch_and_ff_main, release-branch push, finalize push). Without it every
+    # remote op raises GitError. Kept local (bare repo) so tests stay offline.
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=repo, check=True, capture_output=True)
     return repo
 
 
@@ -56,6 +66,7 @@ def tmp_repo_with_release(tmp_repo: Path) -> Path:
     (tmp_repo / ".claude" / "state" / "claims.json").write_text("{}")
     subprocess.run(["git", "add", "."], cwd=tmp_repo, check=True)
     subprocess.run(["git", "commit", "-m", "opt in"], cwd=tmp_repo, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=tmp_repo, check=True, capture_output=True)
     return tmp_repo
 
 
@@ -65,3 +76,13 @@ def fixed_owner(monkeypatch) -> str:
     owner = "test-owner-abc123"
     monkeypatch.setenv("CLAUDE_SESSION_ID", owner)
     return owner
+
+
+@pytest.fixture
+def tmp_repo_in_release(tmp_repo_with_release: Path) -> Path:
+    """An opted-in temp repo with release/1.1 open and its _release worktree present."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from scripts.init_work_new_release import new_release
+    new_release(tmp_repo_with_release)
+    return tmp_repo_with_release

@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# ps-skills-sync — keep this clone and the ~/.claude symlinks in sync with GitHub.
+#
+# Usage:
+#   ps-skills-sync              # pull (fast-forward only) + link any new skills + status
+#   ps-skills-sync --hook       # same, throttled to once per 6h, one quiet line; for SessionStart
+#   ps-skills-sync --push [msg] # publish local edits: secret scan -> branch -> PR -> CI -> squash-merge
+#   ps-skills-sync --push --no-merge [msg]   # stop after opening the PR
+#   ps-skills-sync --scan       # only run the secret scan on unpublished changes
+#
+# Safety: never auto-pushes (the repo is public), never pulls over uncommitted
+# edits or a non-main branch — it reports instead.
+set -uo pipefail
+
+SELF="$0"; while [[ -L "$SELF" ]]; do SELF="$(readlink "$SELF")"; done
+REPO="$(cd "$(dirname "$SELF")/.." && pwd)"
+STATE="$REPO/.sync"; mkdir -p "$STATE"
+THROTTLE_SECONDS=$((6 * 3600))
+
+MODE="sync"; MERGE=true; MSG=""
+while (($#)); do
+  case "$1" in
+    --hook) MODE="hook" ;;
+    --push) MODE="push" ;;
+    --no-merge) MERGE=false ;;
+    --scan) MODE="scan" ;;
+    -h|--help) sed -n '2,/^set -uo/s/^# \{0,1\}//p' "$SELF"; exit 0 ;;
+    *) MSG="$1" ;;
+  esac
+  shift
+done
+
+g() { git -C "$REPO" "$@"; }
+branch() { g branch --show-current; }
+dirty_count() { g status --porcelain | wc -l | tr -d ' '; }
+
+status_line() {
+  local b ahead behind dirty
+  b=$(branch); dirty=$(dirty_count)
+  read -r ahead behind < <(g rev-list --left-right --count "HEAD...origin/main" 2>/dev/null || echo "0 0")
+  local parts=()
+  [[ "$b" != "main" ]] && parts+=("on branch $b")
+  ((dirty > 0)) && parts+=("$dirty uncommitted edit(s)")
+  ((ahead > 0)) && parts+=("$ahead unpushed commit(s)")
+  ((behind > 0)) && parts+=("$behind update(s) not pulled")
+  if ((${#parts[@]} == 0)); then echo "ps-skills: up to date"; else
+    local joined; joined=$(printf '%s, ' "${parts[@]}"); echo "ps-skills: ${joined%, } — run: ps-skills-sync --push"; fi
+}
+
+do_sync() {
+  g fetch --quiet origin 2>/dev/null || { echo "ps-skills: offline, skipped pull"; return 0; }
+  local before; before=$(g rev-parse HEAD)
+  if [[ "$(branch)" == "main" && "$(dirty_count)" == "0" ]]; then
+    g merge --ff-only --quiet origin/main 2>/dev/null || echo "ps-skills: main has diverged from origin — resolve by hand"
+  fi
+  if [[ "$(g rev-parse HEAD)" != "$before" ]]; then
+    echo "ps-skills: pulled $(g rev-list --count "$before..HEAD") commit(s)"
+    "$REPO/install.sh" 2>/dev/null | grep -E '^(symlink|copy):' | sed 's/^/ps-skills: new link /'
+  fi
+  date +%s > "$STATE/last-sync"
+  status_line
+}
+
+SECRET_RE='ghp_[A-Za-z0-9]{20}|github_pat_|sk-[A-Za-z0-9_-]{20}|xox[bpas]-|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|(password|passwd|api[_-]?key|secret|token)["'"'"' ]*[:=]["'"'"' ]*[A-Za-z0-9/+_-]{12,}|/Users/[a-z]+/'
+
+secret_scan() {  # added lines in unpublished changes (committed, uncommitted, untracked)
+  local hits
+  hits=$(
+    g diff origin/main -- . ':!bin/ps-skills-sync' \
+      | awk '/^\+\+\+ b\//{f=substr($0,7); next} /^\+/{print f": "substr($0,2)}' \
+      | grep -E "$SECRET_RE"
+    (cd "$REPO" && g ls-files --others --exclude-standard -z -- . ':!bin/ps-skills-sync' | xargs -0 grep -HnE "$SECRET_RE" 2>/dev/null)
+  )
+  if [[ -n "$hits" ]]; then
+    echo "❌ secret scan hit — nothing pushed (public repo). Fix or gitignore these:" >&2
+    echo "$hits" | cut -c1-160 | head -10 >&2
+    return 1
+  fi
+}
+
+do_push() {
+  g fetch --quiet origin || { echo "❌ cannot reach origin" >&2; exit 1; }
+  if [[ "$(dirty_count)" == "0" && "$(g rev-list --count origin/main..HEAD)" == "0" ]]; then
+    echo "ps-skills: nothing to push"; exit 0
+  fi
+  secret_scan || exit 1
+  local b; b=$(branch)
+  if [[ "$b" == "main" ]]; then
+    b="sync/$(hostname -s | tr 'A-Z' 'a-z')-$(date +%Y%m%d-%H%M%S)"
+    g switch --quiet -c "$b" || exit 1
+  fi
+  if [[ "$(dirty_count)" != "0" ]]; then
+    g add -A && g commit --quiet -m "${MSG:-sync: local skill edits}" || exit 1
+  fi
+  g push --quiet -u origin "$b" || exit 1
+  local url; url=$(gh pr view "$b" --repo montionugera/ps-skills --json url -q .url 2>/dev/null) \
+    || url=$(cd "$REPO" && gh pr create --base main --head "$b" --fill) || exit 1
+  echo "ps-skills: PR $url"
+  $MERGE || exit 0
+  for _ in $(seq 1 30); do  # checks take a few seconds to register on a new PR
+    (cd "$REPO" && gh pr checks "$b" >/dev/null 2>&1) && break
+    [[ "$(cd "$REPO" && gh pr checks "$b" 2>&1)" == *"no checks"* ]] || break
+    sleep 2
+  done
+  (cd "$REPO" && gh pr checks "$b" --watch --fail-fast >/dev/null) || { echo "❌ CI failed — PR left open: $url" >&2; exit 1; }
+  (cd "$REPO" && gh pr merge "$b" --squash --delete-branch >/dev/null) || { echo "❌ merge failed: $url" >&2; exit 1; }
+  g switch --quiet main && g pull --quiet --ff-only origin main && g branch -D "$b" >/dev/null 2>&1
+  echo "✅ ps-skills: merged and back on main"
+}
+
+case "$MODE" in
+  sync) do_sync ;;
+  hook)
+    last=$(cat "$STATE/last-sync" 2>/dev/null || echo 0)
+    if (( $(date +%s) - last >= THROTTLE_SECONDS )); then out=$(do_sync); else out=$(status_line); fi
+    [[ "$out" == *"up to date"* ]] || echo "$out"
+    exit 0 ;;
+  push) do_push ;;
+  scan) g fetch --quiet origin 2>/dev/null; secret_scan && echo "ps-skills: secret scan clean" ;;
+esac

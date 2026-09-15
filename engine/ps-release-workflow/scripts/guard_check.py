@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-from lib.owner import resolve_owner_id
+from lib.owner import self_ids
 from lib.repo import find_repo_root, is_ps_release_workflow_repo, RepoNotFoundError
 
 
@@ -26,14 +26,15 @@ class ExitCode(enum.IntEnum):
 
 
 # Tool names that mutate the working tree.
-MUTATING_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+MUTATING_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "write_file", "replace"}  # + Gemini CLI tool names
 
 
 def _find_target_path(tool_call: dict) -> Path | None:
     tn = tool_call.get("tool_name", "")
     ti = tool_call.get("tool_input", {}) or {}
     if tn in MUTATING_TOOLS:
-        fp = ti.get("file_path")
+        # NotebookEdit sends `notebook_path`, everything else `file_path`.
+        fp = ti.get("file_path") or ti.get("notebook_path")
         if fp:
             return Path(fp)
     return None
@@ -101,7 +102,7 @@ def check_tool_call(tool_call: dict) -> ExitCode:
     if kind == "dir":
         # Edit in the MAIN working tree of an opted-in repo — block.
         print(f"BLOCKED: {target} is on main of a ps-release-workflow repo. "
-              "Claim a feature first: /ps-release-workflow:claim --next", file=sys.stderr)
+              "Claim a feature first: psrw claim --next", file=sys.stderr)
         return ExitCode.BLOCK
 
     # Linked worktree.
@@ -114,18 +115,70 @@ def check_tool_call(tool_call: dict) -> ExitCode:
         print(f"WARN: {wt_root} is an unmanaged/legacy worktree (no marker). Allowing.", file=sys.stderr)
         return ExitCode.ALLOW
 
-    owner = resolve_owner_id()
-    if marker.get("owner") != owner:
-        print(f"BLOCKED: {wt_root} is claimed by {marker.get('owner')!r}, not you ({owner!r}). "
-              "Run /ps-release-workflow:claim --next", file=sys.stderr)
+    # A session may be known by several ids: the hook payload's session_id,
+    # $CLAUDE_SESSION_ID, and the machine-cached fallback id (historically the
+    # id all claims were created with). Owner matching ANY of them → allow.
+    # generate=False: the guard is a READ path — with no identity anywhere it
+    # judges anonymously (empty set → mismatch → block) rather than persisting
+    # a fresh id as a side effect.
+    ids = self_ids(payload_session_id=tool_call.get("session_id"), generate=False)
+    if marker.get("owner") not in ids:
+        print(f"BLOCKED: {wt_root} is claimed by {marker.get('owner')!r}, "
+              f"not you ({sorted(ids)!r}). "
+              "If this is your feature from a previous session: "
+              "psrw claim --resume F-NNN "
+              "(F id from the worktree's working-feature.json). "
+              "Otherwise pick different work: psrw claim --next",
+              file=sys.stderr)
         return ExitCode.BLOCK
 
     return ExitCode.ALLOW
 
 
+def _under_workflow_repo(target: Path) -> bool:
+    """Crash-fallback check: walk up from `target` (or its nearest existing
+    ancestor) looking for a .release.json. Deliberately dumb — no git logic —
+    so it cannot itself fail for the reasons the main path might have."""
+    try:
+        cur = target if target.exists() else target.parent
+        cur = cur.resolve()
+        while True:
+            if (cur / ".release.json").is_file():
+                return True
+            if cur.parent == cur:
+                return False
+            cur = cur.parent
+    except OSError:
+        return False
+
+
 def main() -> int:
-    payload = json.loads(sys.stdin.read())
-    return int(check_tool_call(payload))
+    """Fail-open wrapper: an unexpected exception must never exit 1, which
+    Claude Code treats as a NON-blocking error (i.e. the edit would proceed).
+
+    Policy:
+    - unparseable stdin JSON → allow (exit 0) with a stderr warning;
+    - crash after the target path is known → block (exit 2) if the target sits
+      under a workflow repo (.release.json ancestor), else allow with warning;
+    - crash before the target path is known → allow with warning.
+    """
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"guard: unparseable stdin JSON ({e}); allowing", file=sys.stderr)
+        return int(ExitCode.ALLOW)
+
+    target: Path | None = None
+    try:
+        target = _find_target_path(payload)
+        return int(check_tool_call(payload))
+    except Exception as e:  # noqa: BLE001 — deliberate catch-all, see docstring
+        if target is not None and _under_workflow_repo(target):
+            print(f"guard crashed, blocking edit in workflow repo: {e!r}", file=sys.stderr)
+            return int(ExitCode.BLOCK)
+        print(f"guard: crashed ({e!r}); target not in a workflow repo, allowing", file=sys.stderr)
+        return int(ExitCode.ALLOW)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1127 @@
+/* ============================================================================
+   explainer.css — COMPONENT LIBRARY  (Cream Infographic)
+   ----------------------------------------------------------------------------
+   On-theme component classes, scoped under .cherry-markdown.theme__explainer.
+   EVERY color / size / font value references a var(--token) from theme.css.
+   The only raw values permitted here are @media breakpoint px, 0, structural
+   1px hairlines, and geometry (transforms / % / fr) — never a color or type
+   size literal.
+
+   CATEGORY SYSTEM — a component tinted to a category color sets three vars on
+   itself: --cat (solid), --cat-weak (dim), --cat-tint (soft wash). Utility
+   classes .cat-coral / .cat-amber / .cat-teal / .cat-blue / .cat-violet /
+   .cat-magenta assign those from the palette. Components then read var(--cat*)
+   so one class recolors icon chip, accent bar, rail, number, etc. together.
+   ============================================================================ */
+
+/* ---- category color assignment ------------------------------------------- */
+.cat-coral   { --cat: var(--coral);   --cat-weak: var(--coral-weak);   --cat-tint: var(--coral-tint);   }
+.cat-amber   { --cat: var(--amber);   --cat-weak: var(--amber-weak);   --cat-tint: var(--amber-tint);   }
+.cat-teal    { --cat: var(--teal);    --cat-weak: var(--teal-weak);    --cat-tint: var(--teal-tint);    }
+.cat-blue    { --cat: var(--blue);    --cat-weak: var(--blue-weak);    --cat-tint: var(--blue-tint);    }
+.cat-violet  { --cat: var(--violet);  --cat-weak: var(--violet-weak);  --cat-tint: var(--violet-tint);  }
+.cat-magenta { --cat: var(--magenta); --cat-weak: var(--magenta-weak); --cat-tint: var(--magenta-tint); }
+/* sensible default so components used bare still have a category color */
+.cherry-markdown.theme__explainer { --cat: var(--coral); --cat-weak: var(--coral-weak); --cat-tint: var(--coral-tint); }
+
+/* smooth click-to-jump for the sticky nav — the JS handler scrolls by absolute
+   offset (reliable everywhere), and THIS animates it. Auto-off under reduced
+   motion, so no JS motion guard is needed. */
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
+
+/* ---- page canvas ---------------------------------------------------------- */
+body {
+  margin: 0;
+  background:
+    radial-gradient(1000px 560px at 88% -8%, var(--bloom-1), transparent 60%),
+    radial-gradient(820px 480px at -4% 2%, var(--bloom-2), transparent 58%),
+    radial-gradient(900px 520px at 40% 108%, var(--bloom-3), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  letter-spacing: var(--track-body);
+  font-feature-settings: "cv11" 1, "ss01" 1, "cv02" 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* faint paper grain — warm tooth on the cream, very subtle */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.4;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+}
+
+/* Cherry ships a light theme on .cherry / .cherry-previewer. Neutralise those
+   surfaces so OUR cream canvas shows through. `transparent` is a keyword, not a
+   raw color, so this respects the token lock. */
+.cherry.theme__light,
+.cherry-previewer.cherry-markdown.theme__explainer,
+.cherry-markdown.theme__explainer {
+  background: transparent !important;
+  box-shadow: none;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+.cherry.theme__light { border: 0; }
+
+.cherry-markdown.theme__explainer {
+  position: relative;
+  z-index: 2;
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: var(--space-7) var(--space-6) var(--space-8);
+  color: var(--text);
+  font-family: var(--font-body);
+  counter-reset: section;
+}
+
+/* ---- Lucide icon defaults ------------------------------------------------- */
+.cherry-markdown.theme__explainer svg.lucide,
+.cherry-markdown.theme__explainer [data-lucide] {
+  width: var(--icon);
+  height: var(--icon);
+  stroke-width: 2px;
+  vertical-align: middle;
+  flex: none;
+}
+
+/* Cherry's `br` hook turns the newlines INSIDE our HTML component blocks into
+   literal <br>. In block-flow that's harmless, but as a direct child of a grid
+   or flex layout each stray <br> becomes a phantom track/item — which collapses
+   the columns (e.g. a step body squished to one char per line). Neutralise <br>
+   that lands as a direct child of any layout component. This is a pure display
+   fix; it does not touch the render flow or the callout hook. */
+.section-head > br,
+.hero > br,
+.steps > br,
+.step > br,
+.step-body > br,
+.card-grid > br,
+.card > br,
+.stat-grid > br,
+.stat-tile > br,
+.stat-tile .stat-head > br,
+.metric-grid > br,
+.compare > br,
+.compare-panel > br,
+.compare-panel .cmp-head > br,
+.compare-panel .cmp-body > br,
+.legend > br,
+.row > br,
+.meter > br,
+.callout > br,
+.co-body > br,
+.icon-chip > br,
+.nav-brand > br { display: none; }
+
+/* icon chip — colored rounded square that carries a Lucide icon, tinted to
+   the nearest category (--cat). Used across headers, cards, callouts, steps. */
+.icon-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chip);
+  height: var(--chip);
+  border-radius: var(--radius-sm);
+  background: var(--cat-tint);
+  color: var(--cat);
+  border: 1px solid color-mix(in srgb, var(--cat) 22%, transparent);
+  flex: none;
+}
+.icon-chip.lg { width: var(--chip-lg); height: var(--chip-lg); border-radius: var(--radius); }
+.icon-chip.sm { width: var(--chip-sm); height: var(--chip-sm); border-radius: var(--radius-sm); }
+.icon-chip svg { width: 1.3em; height: 1.3em; stroke-width: 2.1px; }
+.icon-chip.round { border-radius: var(--radius-pill); }
+
+/* ---- typography ----------------------------------------------------------- */
+.cherry-markdown.theme__explainer h1,
+.cherry-markdown.theme__explainer h2,
+.cherry-markdown.theme__explainer h3 {
+  font-family: var(--font-display);
+  color: var(--text);
+  line-height: var(--lh-tight);
+}
+.cherry-markdown.theme__explainer h1 {
+  font-size: var(--fs-h1);
+  font-weight: var(--w-bold);
+  letter-spacing: var(--track-h);
+  margin: var(--space-8) 0 var(--space-4);
+}
+.cherry-markdown.theme__explainer h2 {
+  font-size: var(--fs-h2);
+  font-weight: var(--w-bold);
+  letter-spacing: var(--track-h);
+  margin: var(--space-7) 0 var(--space-4);
+  scroll-margin-top: var(--space-6);
+}
+.cherry-markdown.theme__explainer h3 {
+  font-size: var(--fs-h3);
+  font-weight: var(--w-semibold);
+  letter-spacing: var(--track-h);
+  line-height: var(--lh-snug);
+  margin: var(--space-6) 0 var(--space-3);
+  color: var(--text);
+}
+
+/* Cherry injects an empty <a class="anchor"> and paints a "§" on it — suppress
+   that so it doesn't collide with our styling; keep the anchor for links. */
+.cherry-markdown.theme__explainer h1 .anchor,
+.cherry-markdown.theme__explainer h2 .anchor,
+.cherry-markdown.theme__explainer h3 .anchor { display: none; }
+
+.cherry-markdown.theme__explainer p { margin: 0 0 var(--space-4); color: var(--text-2); }
+.cherry-markdown.theme__explainer h1 + p,
+.cherry-markdown.theme__explainer h2 + p,
+.cherry-markdown.theme__explainer h3 + p { color: var(--text); }
+
+.cherry-markdown.theme__explainer a {
+  color: var(--blue);
+  text-decoration-color: color-mix(in srgb, var(--blue) 40%, transparent);
+  text-underline-offset: 3px;
+  transition: color var(--dur-1) var(--ease-standard),
+              text-decoration-color var(--dur-1) var(--ease-standard);
+}
+.cherry-markdown.theme__explainer a:hover {
+  color: var(--blue-weak);
+  text-decoration-color: var(--blue);
+}
+.cherry-markdown.theme__explainer strong { color: var(--text); font-weight: var(--w-semibold); }
+.cherry-markdown.theme__explainer em { color: var(--text); }
+.cherry-markdown.theme__explainer mark {
+  background: var(--tint-mark);
+  color: var(--amber-weak);
+  padding: var(--pad-mark);
+  border-radius: var(--radius-sm);
+  font-weight: var(--w-medium);
+}
+.cherry-markdown.theme__explainer hr { border: 0; border-top: 1px solid var(--border); margin: var(--space-7) 0; }
+
+.cherry-markdown.theme__explainer ul,
+.cherry-markdown.theme__explainer ol { padding-left: var(--space-6); margin: 0 0 var(--space-4); color: var(--text-2); }
+.cherry-markdown.theme__explainer li { margin: var(--space-2) 0; }
+.cherry-markdown.theme__explainer li::marker { color: var(--cat); }
+
+/* ============================================================================
+   STICKY NAVIGATION — left sidebar (wide) → sticky top strip (narrow)
+   Built + driven by cherry-setup.js (buildNav + scrollspy).
+   ============================================================================ */
+.explainer-nav {
+  position: fixed;
+  z-index: 40;
+  top: 0;
+  left: 0;
+  width: var(--nav-w);
+  height: 100vh;
+  padding: var(--space-6) var(--space-4) var(--space-5) var(--space-5);
+  box-sizing: border-box;
+  overflow-y: auto;
+  background:
+    linear-gradient(180deg, var(--surface-overlay), transparent 40%),
+    var(--bg);
+  border-right: 1px solid var(--border);
+}
+.explainer-nav .nav-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+.explainer-nav .nav-brand .icon-chip { --cat: var(--coral); --cat-tint: var(--coral-tint); }
+.explainer-nav .nav-brand .nav-title {
+  font-family: var(--font-display);
+  font-weight: var(--w-bold);
+  font-size: var(--fs-body);
+  letter-spacing: var(--track-h);
+  color: var(--text);
+  line-height: 1.1;
+}
+.explainer-nav .nav-brand .nav-sub {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.explainer-nav .nav-kicker {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin: 0 0 var(--space-3) var(--space-2);
+}
+.explainer-nav ul { list-style: none; margin: 0; padding: 0; }
+.explainer-nav li { margin: 0; }
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: 2px;
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  font-weight: var(--w-medium);
+  letter-spacing: var(--track-body);
+  text-decoration: none;
+  position: relative;
+  transition: background var(--dur-1) var(--ease-standard),
+              color var(--dur-1) var(--ease-standard);
+}
+.nav-link .nav-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chip-sm);
+  height: var(--chip-sm);
+  border-radius: var(--radius-sm);
+  background: var(--cat-tint);
+  color: var(--cat);
+  flex: none;
+  transition: transform var(--dur-1) var(--ease-emphasized);
+}
+.nav-link .nav-ico svg { width: 1em; height: 1em; stroke-width: 2.2px; }
+.nav-link:hover { background: var(--surface-overlay); color: var(--text); }
+.nav-link:hover .nav-ico { transform: scale(1.08); }
+.nav-link.is-active {
+  background: var(--cat-tint);
+  color: var(--text);
+  font-weight: var(--w-semibold);
+}
+.nav-link.is-active::before {
+  content: "";
+  position: absolute;
+  left: -1px; top: 20%; bottom: 20%;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--cat);
+}
+.nav-link.is-bookend { color: var(--text); }
+.nav-link.is-bookend .nav-label { font-weight: var(--w-semibold); }
+
+/* content offset so it doesn't sit under the fixed sidebar */
+@media (min-width: 1060px) {
+  body.has-nav .cherry-markdown.theme__explainer { margin-left: var(--nav-w); }
+}
+/* narrow: nav becomes a sticky horizontal strip at the top */
+@media (max-width: 1059px) {
+  .explainer-nav {
+    position: sticky;
+    width: auto;
+    height: auto;
+    max-height: none;
+    padding: var(--space-3) var(--space-4);
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: saturate(1.1) blur(8px);
+  }
+  .explainer-nav .nav-brand { margin-bottom: var(--space-3); }
+  .explainer-nav .nav-kicker { display: none; }
+  .explainer-nav ul {
+    display: flex;
+    gap: var(--space-2);
+    overflow-x: auto;
+    padding-bottom: var(--space-1);
+    scrollbar-width: thin;
+  }
+  .nav-link {
+    margin-bottom: 0;
+    white-space: nowrap;
+    padding: var(--space-2) var(--space-3);
+  }
+  .nav-link .nav-label { display: inline; }
+  .nav-link.is-active::before { display: none; }
+}
+
+/* ============================================================================
+   HERO — big display title + lede + KPI stat row (the infographic centerpiece)
+   ============================================================================ */
+.hero {
+  margin: 0 0 var(--space-7);
+  padding: var(--space-6) var(--space-6) var(--space-6);
+  position: relative;
+  background:
+    radial-gradient(120% 140% at 100% 0%, var(--coral-tint), transparent 55%),
+    radial-gradient(110% 120% at 0% 100%, var(--amber-tint), transparent 55%),
+    var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+.hero .eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: var(--w-medium);
+  letter-spacing: var(--track-eyebrow);
+  text-transform: uppercase;
+  color: var(--coral-weak);
+  background: var(--n-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2);
+  margin: 0 0 var(--space-4);
+  box-shadow: var(--shadow-1);
+}
+.hero .eyebrow svg { width: 1em; height: 1em; color: var(--coral); }
+.hero .title {
+  font-family: var(--font-display);
+  font-size: var(--fs-display);
+  font-weight: var(--w-black);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--track-display);
+  color: var(--text);
+  margin: 0 0 var(--space-5);
+  max-width: 18ch;
+  text-wrap: balance;
+}
+.hero .title .hl { color: var(--coral); }
+.hero .lede {
+  font-size: calc(var(--fs-body) * 1.18);
+  font-weight: var(--w-regular);
+  color: var(--text-2);
+  max-width: 60ch;
+  line-height: var(--lh-body);
+  margin: 0 0 var(--space-6);
+  text-wrap: pretty;
+}
+/* meta grid (legacy hero meta — kept for components.md hero demo) */
+.hero .meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-6);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border);
+}
+.hero .meta > div {
+  border-left: 3px solid var(--cat, var(--coral));
+  padding-left: var(--space-4);
+}
+.hero .meta > div:nth-child(1) { border-left-color: var(--coral); }
+.hero .meta > div:nth-child(2) { border-left-color: var(--amber); }
+.hero .meta > div:nth-child(3) { border-left-color: var(--teal); }
+.hero .meta > div:nth-child(4) { border-left-color: var(--blue); }
+.hero .meta .k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+  display: block;
+  margin-bottom: var(--space-1);
+}
+.hero .meta .v { color: var(--text); font-weight: var(--w-semibold); letter-spacing: var(--track-body); }
+
+/* ============================================================================
+   SECTION HEADER — colored icon chip + kicker + title (icon-carrying header)
+   ============================================================================ */
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin: var(--space-8) 0 var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border);
+}
+.section-head .icon-chip { box-shadow: var(--shadow-1); }
+.section-head .sh-text { min-width: 0; }
+.section-head .sh-kicker {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  font-weight: var(--w-medium);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--cat);
+  margin-bottom: var(--space-1);
+}
+.section-head .sh-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-h2);
+  font-weight: var(--w-bold);
+  letter-spacing: var(--track-h);
+  line-height: var(--lh-tight);
+  color: var(--text);
+}
+.section-head.bookend {
+  border-top: 0;
+  background: var(--cat-tint);
+  border: 1px solid color-mix(in srgb, var(--cat) 22%, transparent);
+  border-radius: var(--radius);
+  padding: var(--space-4) var(--space-5);
+  box-shadow: var(--shadow-1);
+}
+
+/* ---- SEMANTIC HUE LOCK ----------------------------------------------------
+   Each category color owns a meaning AND a section:
+     coral=lead/overview/danger · amber=warning/action · teal=success/system ·
+     blue=info/data · violet=idea/authoring · magenta=metric/summary.
+   Component recoloring flows through --cat/.cat-* — never hardcode a hue. ---- */
+
+/* ============================================================================
+   CALLOUTS — warm colored panels, icon in a colored rounded chip; 7 kinds
+   ============================================================================ */
+.callout {
+  position: relative;
+  display: flex;
+  gap: var(--space-4);
+  margin: var(--space-5) 0;
+  padding: var(--space-4) var(--space-5);
+  background: var(--cat-tint);
+  border: 1px solid color-mix(in srgb, var(--cat) 26%, transparent);
+  border-left: 4px solid var(--cat);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  transition: transform var(--dur-2) var(--ease-emphasized),
+              box-shadow var(--dur-2) var(--ease-standard);
+}
+.callout > .co-body { min-width: 0; }
+.callout > .co-body > :first-child { margin-top: 0; }
+.callout > .co-body > :last-child { margin-bottom: 0; }
+.callout p { color: var(--text-2); }
+.callout p strong, .callout strong { color: var(--text); }
+/* icon chip — a Lucide icon injected by cherry-setup.js per kind, tinted --cat */
+.callout::before { content: none; }   /* replace old glyph pseudo with real chip */
+.callout > .co-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chip);
+  height: var(--chip);
+  border-radius: var(--radius-sm);
+  background: var(--n-4);
+  color: var(--cat);
+  border: 1px solid color-mix(in srgb, var(--cat) 24%, transparent);
+  flex: none;
+  box-shadow: var(--shadow-1);
+}
+.callout > .co-ico svg { width: 1.25em; height: 1.25em; stroke-width: 2.1px; }
+.callout:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-2);
+}
+
+/* kind → category color + default icon name (icon rendered by JS via data-ico) */
+.callout.info    { --cat: var(--blue);    --cat-weak: var(--blue-weak);    --cat-tint: var(--blue-tint);    }
+.callout.warn    { --cat: var(--amber);   --cat-weak: var(--amber-weak);   --cat-tint: var(--amber-tint);   }
+.callout.success { --cat: var(--teal);    --cat-weak: var(--teal-weak);    --cat-tint: var(--teal-tint);    }
+.callout.danger  { --cat: var(--coral);   --cat-weak: var(--coral-weak);   --cat-tint: var(--coral-tint);   }
+.callout.idea    { --cat: var(--violet);  --cat-weak: var(--violet-weak);  --cat-tint: var(--violet-tint);  }
+.callout.metric  { --cat: var(--magenta); --cat-weak: var(--magenta-weak); --cat-tint: var(--magenta-tint); }
+.callout.action  { --cat: var(--amber);   --cat-weak: var(--amber-weak);   --cat-tint: var(--amber-tint);   }
+
+/* ============================================================================
+   KPI / STAT TILES — the infographic centerpiece
+   ============================================================================ */
+.metric-grid,
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-4);
+  margin: var(--space-5) 0;
+}
+.metric-tile,
+.stat-tile {
+  position: relative;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-5);
+  overflow: hidden;
+  box-shadow: var(--shadow-1);
+  transition: transform var(--dur-2) var(--ease-emphasized),
+              box-shadow var(--dur-2) var(--ease-standard);
+}
+/* colored top accent bar */
+.metric-tile::before,
+.stat-tile::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 4px;
+  background: var(--cat, var(--coral));
+}
+.metric-tile:hover,
+.stat-tile:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-2);
+}
+.stat-tile .stat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-4);
+}
+.stat-tile .icon-chip { --cat-tint: var(--cat-tint); box-shadow: var(--shadow-1); }
+.stat-tile .stat-delta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  font-weight: var(--w-medium);
+  letter-spacing: var(--track-label);
+  color: var(--cat);
+  background: var(--cat-tint);
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+}
+.stat-tile .stat-delta svg { width: 0.9em; height: 0.9em; }
+.metric-value,
+.stat-value {
+  font-family: var(--font-display);
+  font-size: var(--fs-stat);
+  font-weight: var(--w-black);
+  color: var(--text);
+  line-height: 0.95;
+  letter-spacing: var(--track-display);
+  font-variant-numeric: tabular-nums;
+}
+.stat-value .unit { font-size: 0.5em; color: var(--cat); font-weight: var(--w-bold); margin-left: 0.15em; }
+.metric-label,
+.stat-label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-top: var(--space-3);
+}
+.stat-sub { color: var(--text-2); font-size: var(--fs-sm); margin-top: var(--space-2); }
+/* legacy .alarm flag → amber category */
+.metric-tile.alarm { --cat: var(--amber); }
+.metric-tile.alarm .metric-value { color: var(--amber-weak); }
+
+/* ============================================================================
+   FEATURE CARDS — icon chip + title + text, colored top accent, hover lift
+   ============================================================================ */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-4);
+  margin: var(--space-5) 0;
+}
+.card {
+  position: relative;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-5);
+  overflow: hidden;
+  box-shadow: var(--shadow-1);
+  transition: transform var(--dur-2) var(--ease-emphasized),
+              box-shadow var(--dur-2) var(--ease-standard);
+}
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 4px;
+  background: var(--cat, var(--coral));
+}
+.card:hover { transform: translateY(-4px); box-shadow: var(--shadow-2); }
+.card .icon-chip { margin-bottom: var(--space-4); box-shadow: var(--shadow-1); }
+.card .card-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-h3);
+  font-weight: var(--w-semibold);
+  letter-spacing: var(--track-h);
+  color: var(--text);
+  margin: 0 0 var(--space-2);
+  line-height: var(--lh-snug);
+}
+.card p { color: var(--text-2); margin: 0; }
+.card .card-title + p { color: var(--text-2); }
+
+/* ============================================================================
+   STEPS / TIMELINE — numbered colored circles + connectors + icon + title
+   ============================================================================ */
+.steps { margin: var(--space-5) 0; display: flex; flex-direction: column; gap: 0; }
+.step {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--chip-lg) 1fr;
+  gap: var(--space-4);
+  padding-bottom: var(--space-5);
+}
+.step:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--chip-lg) / 2 - 1px);
+  top: var(--chip-lg);
+  bottom: 0;
+  width: 2px;
+  background: var(--border-strong);
+}
+.step .step-num {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chip-lg);
+  height: var(--chip-lg);
+  border-radius: var(--radius-pill);
+  background: var(--cat, var(--coral));
+  color: var(--n-4);
+  font-family: var(--font-display);
+  font-weight: var(--w-bold);
+  font-size: var(--fs-h3);
+  box-shadow: var(--shadow-2);
+  border: 3px solid var(--surface-raised);
+}
+.step .step-body {
+  padding-top: var(--space-1);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4) var(--space-5);
+  box-shadow: var(--shadow-1);
+  transition: transform var(--dur-2) var(--ease-emphasized),
+              box-shadow var(--dur-2) var(--ease-standard);
+}
+.step:hover .step-body { transform: translateX(3px); box-shadow: var(--shadow-2); }
+.step .step-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--fs-h3);
+  font-weight: var(--w-semibold);
+  letter-spacing: var(--track-h);
+  color: var(--text);
+  margin: 0 0 var(--space-1);
+  line-height: var(--lh-snug);
+}
+.step .step-title svg { width: 1em; height: 1em; color: var(--cat); }
+.step .step-body p { margin: 0; color: var(--text-2); }
+
+/* ============================================================================
+   COMPARISON / TWO-UP PANELS — colored headers (before/after, this-vs-that)
+   ============================================================================ */
+.compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+  margin: var(--space-5) 0;
+}
+.compare-panel {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow-1);
+}
+.compare-panel .cmp-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--cat-tint);
+  border-bottom: 1px solid color-mix(in srgb, var(--cat) 24%, transparent);
+  font-family: var(--font-display);
+  font-weight: var(--w-semibold);
+  letter-spacing: var(--track-h);
+  color: var(--text);
+}
+.compare-panel .cmp-head .icon-chip { --cat-tint: var(--n-4); box-shadow: var(--shadow-1); }
+.compare-panel .cmp-body { padding: var(--space-4) var(--space-5); }
+.compare-panel .cmp-body > :first-child { margin-top: 0; }
+.compare-panel .cmp-body > :last-child { margin-bottom: 0; }
+.compare-panel .cmp-body ul { padding-left: var(--space-5); }
+.compare-panel .cmp-body li { color: var(--text-2); }
+@media (max-width: 720px) { .compare { grid-template-columns: 1fr; } }
+
+/* ============================================================================
+   BADGES / PILLS with status dots · METERS / PROGRESS · LEGEND
+   ============================================================================ */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  font-weight: var(--w-medium);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--cat);
+  background: var(--cat-tint);
+  border: 1px solid color-mix(in srgb, var(--cat) 24%, transparent);
+  border-radius: var(--radius-pill);
+  padding: 0.25em 0.7em 0.25em 0.55em;
+}
+.badge .dot {
+  width: 0.5em; height: 0.5em; border-radius: var(--radius-pill);
+  background: var(--cat); flex: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cat) 20%, transparent);
+}
+
+.meter { margin: var(--space-3) 0; }
+.meter .meter-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  margin-bottom: var(--space-2);
+}
+.meter .meter-label .meter-val {
+  color: var(--cat);
+  font-weight: var(--w-medium);
+  font-variant-numeric: tabular-nums;
+}
+.meter .meter-track {
+  height: 0.6rem;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+.meter .meter-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--cat) 72%, var(--n-4)), var(--cat));
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  margin: var(--space-4) 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+}
+.legend .legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.legend .legend-swatch {
+  width: 0.9rem; height: 0.9rem; border-radius: var(--radius-sm);
+  background: var(--cat); flex: none;
+  border: 1px solid color-mix(in srgb, var(--cat) 40%, transparent);
+}
+
+/* ---- schematic (mono box-drawing) — light code well ----------------------- */
+.schematic {
+  font-family: var(--font-mono);
+  font-size: var(--fs-mono-sm);
+  line-height: 1.55;
+  white-space: pre;
+  overflow-x: auto;
+  background: var(--surface-well);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--teal);
+  border-radius: var(--radius);
+  padding: var(--space-5) var(--space-6);
+  margin: var(--space-5) 0;
+  color: var(--text-2);
+  box-shadow: var(--shadow-1);
+}
+
+/* ---- responsive rows ------------------------------------------------------ */
+.row { display: grid; gap: var(--space-4); margin: var(--space-5) 0; }
+.row.two   { grid-template-columns: repeat(2, 1fr); }
+.row.three { grid-template-columns: repeat(3, 1fr); }
+.row > * { margin: 0; min-width: 0; }
+@media (max-width: 960px) {
+  .row.three { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 720px) {
+  .row.two, .row.three { grid-template-columns: 1fr; }
+}
+
+/* ---- topic chips ---------------------------------------------------------- */
+.topic-chip {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  letter-spacing: var(--track-body);
+  color: var(--text-2);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-3);
+  margin: 0 var(--space-2) var(--space-2) 0;
+  box-shadow: var(--shadow-1);
+  transition: color var(--dur-1) var(--ease-standard),
+              border-color var(--dur-1) var(--ease-standard),
+              transform var(--dur-1) var(--ease-emphasized);
+}
+.topic-chip::before { content: "#"; color: var(--coral); margin-right: 0.15em; }
+.topic-chip:hover {
+  color: var(--text);
+  border-color: var(--coral);
+  transform: translateY(-2px);
+}
+
+/* chip-row — flow chips horizontally (wrapping). Keep chips on ONE line inside
+   <div class="chip-row"> so Cherry's br hook can't split them. */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-6);
+}
+.chip-row .topic-chip { margin: 0; }
+
+/* ---- pull quote ----------------------------------------------------------- */
+.cherry-markdown.theme__explainer blockquote,
+.pull-quote {
+  margin: var(--space-6) 0;
+  padding: var(--space-4) var(--space-5) var(--space-4) var(--space-6);
+  border-left: 4px solid var(--violet);
+  background: var(--violet-tint);
+  border-radius: var(--radius);
+  font-family: var(--font-display);
+  font-size: var(--fs-h3);
+  font-weight: var(--w-medium);
+  font-style: normal;
+  letter-spacing: var(--track-h);
+  color: var(--text);
+  line-height: var(--lh-snug);
+}
+.cherry-markdown.theme__explainer blockquote p { color: var(--text); }
+.cherry-markdown.theme__explainer blockquote p:last-child { margin-bottom: 0; }
+
+/* ---- tables --------------------------------------------------------------- */
+.cherry-markdown.theme__explainer table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: var(--space-5) 0;
+  font-size: var(--fs-table);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow-1);
+}
+.cherry-markdown.theme__explainer thead th {
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  font-weight: var(--w-semibold);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-2);
+  background: var(--surface-overlay);
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-3) var(--space-4);
+}
+.cherry-markdown.theme__explainer tbody td {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: top;
+  color: var(--text-2);
+}
+.cherry-markdown.theme__explainer tbody tr:last-child td { border-bottom: 0; }
+.cherry-markdown.theme__explainer tbody tr { transition: background var(--dur-1) var(--ease-standard); }
+.cherry-markdown.theme__explainer tbody tr:hover td { background: var(--surface-overlay); }
+
+/* ---- code — light well with warm syntax ----------------------------------- */
+.cherry-markdown.theme__explainer :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-code);
+  background: var(--surface-well);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--pad-code);
+  color: var(--coral-weak);
+}
+.cherry-markdown.theme__explainer pre {
+  background: var(--surface-well) !important;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-5);
+  overflow-x: auto;
+  margin: var(--space-5) 0;
+  box-shadow: var(--shadow-1);
+}
+.cherry-markdown.theme__explainer pre code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-mono-sm);
+  color: var(--text);
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+/* ---- mermaid frame — one look for every diagram (light) ------------------- */
+.mermaid-frame {
+  position: relative;
+  margin: var(--space-6) 0;
+  padding: var(--space-6);
+  background:
+    radial-gradient(120% 90% at 50% -10%, var(--amber-tint), transparent 60%),
+    var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+  overflow-x: auto;
+  text-align: center;
+}
+.mermaid-frame svg { max-width: 100%; height: auto; }
+@media (prefers-reduced-motion: no-preference) {
+  .mermaid-frame { transition: opacity var(--dur-3) var(--ease-emphasized); }
+  .mermaid-frame.is-pending { opacity: 0; }
+}
+.cherry-markdown.theme__explainer pre.mermaid-error {
+  border-left: 4px solid var(--danger);
+}
+
+/* ---- built-in nav: [toc] + detail/panel ----------------------------------- */
+.cherry-markdown.theme__explainer .toc {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4) var(--space-5);
+  margin: var(--space-6) 0;
+  box-shadow: var(--shadow-1);
+}
+.cherry-markdown.theme__explainer .toc .toc-title,
+.cherry-markdown.theme__explainer .toc-title {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  font-weight: var(--w-medium);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.cherry-markdown.theme__explainer .toc a {
+  color: var(--text-2);
+  transition: color var(--dur-1) var(--ease-standard);
+}
+.cherry-markdown.theme__explainer .toc a:hover { color: var(--coral); }
+
+.cherry-markdown.theme__explainer details {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-5);
+  margin: var(--space-4) 0;
+  box-shadow: var(--shadow-1);
+}
+.cherry-markdown.theme__explainer summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  letter-spacing: var(--track-body);
+  color: var(--text-2);
+  transition: color var(--dur-1) var(--ease-standard);
+}
+.cherry-markdown.theme__explainer summary:hover { color: var(--coral); }
+
+/* ---- gallery helper (used by components.md cheat-sheet) ------------------- */
+.gallery-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin: var(--space-5) 0;
+  box-shadow: var(--shadow-1);
+  background: var(--surface);
+}
+.gallery-item .gallery-label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+  background: var(--surface-overlay);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.gallery-item .gallery-body { padding: var(--space-5); }
+
+/* ---- focus states (keyboard) ---------------------------------------------- */
+.cherry-markdown.theme__explainer a:focus-visible,
+.cherry-markdown.theme__explainer summary:focus-visible,
+.nav-link:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ---- staggered entrance (one orchestrated moment; fade + small rise) ------ */
+@media (prefers-reduced-motion: no-preference) {
+  .cherry-markdown.theme__explainer.is-ready > * {
+    animation: rise var(--dur-3) var(--ease-emphasized) both;
+  }
+  .cherry-markdown.theme__explainer.is-ready > *:nth-child(1) { animation-delay: 0.02s; }
+  .cherry-markdown.theme__explainer.is-ready > *:nth-child(2) { animation-delay: 0.06s; }
+  .cherry-markdown.theme__explainer.is-ready > *:nth-child(3) { animation-delay: 0.10s; }
+  .cherry-markdown.theme__explainer.is-ready > *:nth-child(4) { animation-delay: 0.14s; }
+  .cherry-markdown.theme__explainer.is-ready > *:nth-child(5) { animation-delay: 0.18s; }
+  .cherry-markdown.theme__explainer.is-ready > *:nth-child(6) { animation-delay: 0.22s; }
+  .cherry-markdown.theme__explainer.is-ready > *:nth-child(n+7) { animation-delay: 0.26s; }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(14px); }
+    to   { opacity: 1; transform: none; }
+  }
+  .explainer-nav { animation: rise var(--dur-3) var(--ease-emphasized) both; animation-delay: 0.02s; }
+}
+
+/* ---- error panel (missing/failed ?doc) ------------------------------------ */
+.explainer-error {
+  position: relative;
+  z-index: 2;
+  max-width: 680px;
+  margin: var(--space-8) auto;
+  padding: var(--space-7);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--danger);
+  border-radius: var(--radius);
+  font-family: var(--font-body);
+  color: var(--text-2);
+  box-shadow: var(--shadow-2);
+}
+.explainer-error .eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  letter-spacing: var(--track-eyebrow);
+  text-transform: uppercase;
+  color: var(--danger);
+  margin: 0 0 var(--space-4);
+}
+.explainer-error h1 {
+  font-family: var(--font-display);
+  font-size: var(--fs-h2);
+  font-weight: var(--w-bold);
+  letter-spacing: var(--track-h);
+  color: var(--text);
+  margin: 0 0 var(--space-4);
+}
+.explainer-error code {
+  font-family: var(--font-mono);
+  color: var(--magenta-weak);
+  background: var(--magenta-tint);
+  border-radius: var(--radius-sm);
+  padding: var(--pad-code);
+}
+.explainer-error ul { padding-left: var(--space-6); }
+.explainer-error a { color: var(--blue); }

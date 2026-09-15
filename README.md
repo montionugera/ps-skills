@@ -19,8 +19,13 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **ps-release-workflow-promote** | Squash-merge a full release to main and deploy (Gate 2). |
 | **ps-release-workflow-guard** | The PreToolUse guard that blocks edits on `main` / foreign worktrees. |
 | **ps-release-workflow-cleanup-legacy** | Housekeeping for marker-less legacy worktrees. |
+| **ps-release-workflow-full-promote** | Whole release turnover in one shot: promote, babysit CI, merge, watch deploy, clean up, open the next release. |
+| **ps-release-workflow-hotfix** | Cut the sibling worktree for an urgent fix straight to `main`, bypassing the release branch. |
+| **ps-release-workflow-status** | Read-only one-screen report of the release, features, claims, and what to do next. |
+| **ps-release-workflow-unclaim** | Abandon a claimed feature: remove its worktree and clear the claim (keeps the branch). |
+| **handoff** | Compact the session into an action-first handoff doc and spawn a fresh agent tab in Herdr; ships an optional Stop hook (`hooks/auto-handoff-stop.py`) that triggers it when context grows large. |
 
-The nine `ps-release-workflow-*` skills are thin wrappers over a shared Python engine
+The thirteen `ps-release-workflow-*` skills are thin wrappers over a shared Python engine
 ([`engine/ps-release-workflow`](engine/ps-release-workflow)) — they call its scripts at runtime, so the
 engine is installed alongside them.
 
@@ -58,6 +63,27 @@ Then restart your Claude Code session so the new skills are discovered.
 
 Install into a non-default Claude home with `CLAUDE_HOME=/path ./install.sh`.
 
+## Keeping in sync
+
+After `./install.sh`, everything in `~/.claude` is a symlink into this clone, so there is one copy.
+
+```bash
+ps-skills-sync            # pull (fast-forward only) + link newly added skills + status
+ps-skills-sync --push     # publish local edits: secret scan -> branch -> PR -> CI -> squash-merge
+ps-skills-sync --scan     # just the secret scan
+```
+
+Automatic pull on session start (throttled to once per 6h, silent when up to date) — add to
+`~/.claude/settings.json` under `hooks.SessionStart`:
+
+```json
+{ "matcher": "", "hooks": [{ "type": "command", "command": "~/.local/bin/ps-skills-sync --hook", "timeout": 20 }] }
+```
+
+It never pushes on its own (this repo is public) and never pulls over uncommitted edits — it prints a
+one-line reminder instead. The `handoff` skill's Stop hook (`skills/handoff/hooks/auto-handoff-stop.py`,
+linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKILL.md`.
+
 ## Using the skills
 
 - **ps-commu-explain** — say *"explain X"* / *"show me how X works"*, or invoke `/ps-commu-explain <topic>`.
@@ -71,7 +97,7 @@ Install into a non-default Claude home with `CLAUDE_HOME=/path ./install.sh`.
 ## Development
 
 ```bash
-# Python engine (111 tests)
+# Python engine (350+ tests)
 cd engine/ps-release-workflow
 pip install -e ".[dev]"
 pytest -q

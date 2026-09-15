@@ -24,11 +24,29 @@ def test_creates_release_worktree(tmp_repo_with_release: Path):
 
 def test_updates_release_json(tmp_repo_with_release: Path):
     new_release(tmp_repo_with_release, version="1.1")
-    rj = json.loads((tmp_repo_with_release / ".release.json").read_text())
+    # Fix #2: the start-state lives on the RELEASE BRANCH (the _release worktree),
+    # NOT main. main is left untouched (only the promote squash writes it).
+    rel_rj = tmp_repo_with_release / ".claude" / "worktrees" / "_release" / ".release.json"
+    rj = json.loads(rel_rj.read_text())
     assert rj["version"] == "1.1"
     assert rj["in_progress"] is True
     assert rj["started_at"] is not None
     assert rj["started_by"] is not None
+    # main's .release.json is unchanged (still the pre-release / last-promoted state)
+    main_rj = json.loads((tmp_repo_with_release / ".release.json").read_text())
+    assert main_rj["in_progress"] is False
+
+
+def test_new_release_does_not_commit_to_main(tmp_repo_with_release: Path):
+    """Fix #2 invariant: new_release leaves main's HEAD untouched (no 'start'
+    commit on main) — the release branch is the sole carrier of in-progress state,
+    so local main never diverges from origin."""
+    before = subprocess.run(["git", "rev-parse", "main"], cwd=tmp_repo_with_release,
+                            capture_output=True, text=True).stdout.strip()
+    new_release(tmp_repo_with_release, version="1.1")
+    after = subprocess.run(["git", "rev-parse", "main"], cwd=tmp_repo_with_release,
+                           capture_output=True, text=True).stdout.strip()
+    assert before == after
 
 
 def test_auto_bumps_minor_if_no_version(tmp_repo_with_release: Path):
@@ -45,9 +63,15 @@ def test_refuses_if_release_in_progress(tmp_repo_with_release: Path):
 
 def test_refuses_non_increasing_version(tmp_repo_with_release: Path):
     new_release(tmp_repo_with_release, version="1.5")
-    # promote it so in_progress becomes false; for test purposes manually clear:
+    # Simulate promote: drop the _release worktree (no release in progress) and
+    # advance main's recorded version to 1.5 (the last-promoted state). The next
+    # version must exceed main's recorded version.
+    wt = tmp_repo_with_release / ".claude" / "worktrees" / "_release"
+    subprocess.run(["git", "worktree", "remove", "--force", str(wt)],
+                   cwd=tmp_repo_with_release, check=True, capture_output=True)
     p = tmp_repo_with_release / ".release.json"
     rj = json.loads(p.read_text())
+    rj["version"] = "1.5"
     rj["in_progress"] = False
     p.write_text(json.dumps(rj))
     with pytest.raises(BadVersionError):

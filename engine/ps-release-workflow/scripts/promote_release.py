@@ -11,11 +11,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lib.catalog import list_entries, mark_promoted_to_main
+from lib.backlog_paths import read_release_state
+from lib.catalog import CatalogEntryNotFoundError, list_entries, mark_promoted_to_main
 from lib.git_ops import (
     GitError, _run as git_run, commit_all,
     delete_branch_local, delete_branch_remote, push, remove_worktree,
 )
+from lib.hooks import resolve_hook
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
 from lib.state import mutate_state
 
@@ -28,6 +30,146 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _has_origin(repo: Path) -> bool:
+    """True if an `origin` remote is configured (False in local-only repos/tests)."""
+    return git_run(repo, "remote", "get-url", "origin", check=False).returncode == 0
+
+
+def _finalized_uncleaned_version(repo: Path) -> str | None:
+    """Version of a finalized-but-not-cleaned release, or None.
+
+    Evidence of an uncleaned release (cleanup would have removed both):
+    - the _release worktree still exists → its .release.json names the version;
+    - a release/<v> branch still exists → prefer last_promoted_version's branch,
+      else the first surviving release branch.
+    """
+    rel_rj = repo / ".claude" / "worktrees" / "_release" / ".release.json"
+    if rel_rj.exists():
+        try:
+            v = json.loads(rel_rj.read_text()).get("version")
+            if v:
+                return str(v)
+        except (OSError, json.JSONDecodeError):
+            pass
+    branches = git_run(repo, "branch", "--list", "release/*", check=False).stdout
+    names = [ln.strip().lstrip("*+ ").strip() for ln in branches.splitlines() if ln.strip()]
+    if not names:
+        return None
+    try:
+        last = json.loads((repo / ".release.json").read_text()).get("last_promoted_version")
+    except (OSError, json.JSONDecodeError):
+        last = None
+    if last and f"release/{last}" in names:
+        return str(last)
+    return names[0].split("/", 1)[1]
+
+
+def _finalize_release_state(worktree: Path, version: str) -> bool:
+    """Flip .release.json to finalized ON the release branch (in the _release
+    worktree) and commit it there.
+
+    This is fix #2: by finalizing on the release branch BEFORE the PR is opened,
+    the squash-merge that lands on main already carries the finalized state
+    (in_progress=False, last_promoted=<version>). The PR thus becomes the SOLE
+    writer of main's .release.json — there is no separate finalize-on-main commit
+    to diverge from the squash (the exact breakage fix #1 guards against).
+
+    Returns True if a finalize commit was made, False if there was nothing to do
+    (no _release worktree, or already finalized).
+    """
+    rj_path = worktree / ".release.json"
+    if not rj_path.exists():
+        return False
+    rj = json.loads(rj_path.read_text())
+    if not rj.get("in_progress"):
+        return False
+    rj["in_progress"] = False
+    rj["last_promoted_at"] = _now()
+    rj["last_promoted_version"] = version
+    rj_path.write_text(json.dumps(rj, indent=2) + "\n")
+    commit_all(worktree, f"chore(release): finalize {version} in .release.json")
+    return True
+
+
+# ── gh interactions ────────────────────────────────────────────────────────────
+# Each one is a tiny function taking an injectable `runner` (defaulting to
+# subprocess.run) so tests can stub gh without a network or a GitHub remote.
+
+def _create_or_adopt_pr(repo: Path, release_branch: str, version: str,
+                        pr_body: str, runner) -> tuple[str, str | None]:
+    """Open the release PR; if one already exists for the branch, adopt it.
+
+    Returns (pr_url, note). Raises Gate2FailedError when the PR can neither be
+    created nor found — WITHOUT having touched any release state, so promote
+    can simply be re-run (fix A3).
+    """
+    cp = runner(
+        ["gh", "pr", "create", "--base", "main", "--head", release_branch,
+         "--title", f"release {version}", "--body", pr_body],
+        cwd=repo, capture_output=True, text=True,
+    )
+    out = (cp.stdout or "").strip()
+    err = (cp.stderr or "").strip()
+    if cp.returncode == 0:
+        return out, None
+    # A PR may already exist for this branch — surface its URL instead of failing.
+    view = runner(
+        ["gh", "pr", "view", release_branch, "--json", "url", "-q", ".url"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    existing = (view.stdout or "").strip() if view.returncode == 0 else ""
+    if existing:
+        return existing, "PR already existed"
+    raise Gate2FailedError(f"gh pr create failed: {err or out}")
+
+
+def _watch_pr_checks(repo: Path, ref: str, runner) -> int:
+    """`gh pr checks <ref> --watch` — streams to the terminal; returns exit code."""
+    return runner(["gh", "pr", "checks", ref, "--watch"], cwd=repo).returncode
+
+
+def _merge_pr_squash(repo: Path, ref: str, runner) -> subprocess.CompletedProcess:
+    return runner(["gh", "pr", "merge", "--squash", ref],
+                  cwd=repo, capture_output=True, text=True)
+
+
+def _ensure_release_pr_merged_or_absent(repo: Path, release_branch: str,
+                                        version: str, runner) -> None:
+    """B3: cleanup deletes the remote release branch, and GitHub auto-closes any
+    open PR whose head branch disappears — i.e. cleanup on an unmerged release
+    PR silently destroys the release. Proceed only when the PR is MERGED or no
+    PR exists; refuse (fail safe) on anything else, including gh being
+    unavailable or failing for an unrelated reason.
+    """
+    force_hint = (f"if you are SURE, override with: "
+                  f"promote_release.py --cleanup-only {version} --force-cleanup")
+    try:
+        cp = runner(["gh", "pr", "view", release_branch, "--json", "state", "-q", ".state"],
+                    cwd=repo, capture_output=True, text=True)
+    except (FileNotFoundError, OSError) as e:
+        raise RuntimeError(
+            f"cannot verify the PR state for {release_branch} (gh unavailable: {e}); "
+            f"refusing to clean up — an open release PR would be destroyed. {force_hint}"
+        )
+    if cp.returncode != 0:
+        err = ((cp.stderr or "") + " " + (cp.stdout or "")).strip()
+        if "no pull requests found" in err.lower():
+            return  # no PR for the branch — nothing to destroy
+        raise RuntimeError(
+            f"cannot verify the PR state for {release_branch} (gh failed: {err}); "
+            f"refusing to clean up — an open release PR would be destroyed. {force_hint}"
+        )
+    state = (cp.stdout or "").strip().upper()
+    if state == "MERGED":
+        return
+    raise RuntimeError(
+        f"the PR for {release_branch} is {state or 'in an UNKNOWN state'} — cleanup would "
+        f"delete the remote release branch and auto-close the PR, destroying the unmerged "
+        f"release. Merge (or close) the PR first, then re-run: "
+        f"promote_release.py --cleanup-only {version}. Otherwise {force_hint}"
+    )
+
+
 def promote_release(
     repo: Path,
     *,
@@ -35,33 +177,154 @@ def promote_release(
     run_deploy: bool = True,
     push: bool = True,
     keep: bool = False,
+    use_pr: bool = True,
+    allow_missing_gate2: bool = False,
+    babysit: bool = False,
+    gh_runner=subprocess.run,
 ) -> dict:
     repo = Path(repo).resolve()
     if not is_ps_release_workflow_repo(repo):
         raise RuntimeError(f"{repo} not opted into ps-release-workflow")
-    rj_path = repo / ".release.json"
-    rj = json.loads(rj_path.read_text())
-    if not rj.get("in_progress"):
+    # In-progress + version come from the _release worktree's .release.json
+    # (fix #2 source of truth), not main — main carries only last-promoted state.
+    state = read_release_state(repo)
+    if state is None:
+        # M1: distinguish "nothing to promote" from "promoted but not cleaned".
+        # A finalized-but-uncleaned release (leftover _release worktree or a
+        # surviving release/<v> branch) needs --cleanup-only, not a re-promote.
+        leftover = _finalized_uncleaned_version(repo)
+        if leftover:
+            raise NoReleaseInProgressError(
+                f"release {leftover} already finalized — if its PR is merged run: "
+                f"promote_release.py --cleanup-only {leftover}"
+            )
         raise NoReleaseInProgressError("No release in progress")
-    version = rj["version"]
+    version = state["version"]
     release_branch = f"release/{version}"
     rel_wt = repo / ".claude" / "worktrees" / "_release"
 
     if run_deploy:
-        deploy = repo / "scripts" / "deploy-local.sh"
+        # Deploy the RELEASE tree, not the main checkout: deploy-local is
+        # worktree-aware, and the shared local DB may already be migrated
+        # AHEAD of main by the release's own migrations (ship deploys
+        # release/<v>). Deploying main pre-merge then fails alembic with
+        # "Can't locate revision" for any migration-bearing release.
+        deploy_root = rel_wt if rel_wt.exists() else repo
+        deploy = resolve_hook(deploy_root, "deploy_local")
         if deploy.exists():
-            cp = subprocess.run([str(deploy)], cwd=repo)
+            cp = subprocess.run([str(deploy)], cwd=deploy_root)
             if cp.returncode != 0:
-                raise Gate2FailedError("deploy-local.sh failed")
+                raise Gate2FailedError(f"local deploy script ({deploy}) failed")
 
+    gate2_ran = False
     if run_gate2:
-        integ = repo / "scripts" / "integration.sh"
+        # Gate 2 must run from the _release worktree so the integration script
+        # resolves the repo's source paths against the release branch's tree,
+        # not the main checkout's.
+        gate2_root = rel_wt if rel_wt.exists() else repo
+        integ = resolve_hook(gate2_root, "integration")
         if integ.exists():
-            cp = subprocess.run([str(integ)], cwd=repo)
+            cp = subprocess.run([str(integ)], cwd=gate2_root)
             if cp.returncode != 0:
-                raise Gate2FailedError(f"Gate 2 (scripts/integration.sh) failed for release/{version}")
+                raise Gate2FailedError(f"Gate 2 ({integ}) failed for release/{version}")
+            gate2_ran = True
+        else:
+            # A1: never skip a requested gate silently. Missing script means the
+            # release would go to main with zero integration verification.
+            print(
+                f"⚠️  Gate 2 SKIPPED — {integ} not found on release/{version}; "
+                f"the release is going to main UNVERIFIED",
+                file=sys.stderr,
+            )
+            if not allow_missing_gate2:
+                raise Gate2FailedError(
+                    f"Gate 2 requested but {integ} is missing on release/{version}. "
+                    f"Add it to the release branch, or pass "
+                    f"--allow-missing-gate2 to promote UNVERIFIED (or --no-gate2 to skip the gate)."
+                )
 
-    # Squash-merge release/<v> into main (in main checkout).
+    # ── PR mode (default) ──────────────────────────────────────────────
+    # Push release/<v> and open a PR to main; a human reviews + squash-merges
+    # it (the merge triggers the prod deploy). We do NOT merge or clean up here
+    # — the branches must survive until the PR lands. After the PR merges, run
+    # `promote_release.py --cleanup-only <version>` to archive + prune.
+    if use_pr:
+        try:
+            git_run(repo, "push", "-u", "origin", release_branch)
+        except GitError as e:
+            raise Gate2FailedError(f"failed to push {release_branch} to origin: {e}")
+        gate2_line = (
+            f"- Gate 2 (`integration.sh`{' + local prod-style deploy' if run_deploy else ''}) passed at promote."
+            if gate2_ran else
+            "- ⚠️ Gate 2 did NOT run at promote (skipped or `integration.sh` missing) — UNVERIFIED."
+        )
+        pr_body = (
+            f"Promote `{release_branch}` → `main`.\n\n"
+            f"- Gate 1 (`precheck.sh`) passed at ship.\n"
+            f"{gate2_line}\n\n"
+            f"Squash-merging this PR triggers the prod (Vultr) deploy.\n"
+            f"After it merges, run: `promote_release.py --cleanup-only {version}` "
+            f"(archives the F-NNN folders, prunes worktrees/branches, finalizes `.release.json`)."
+        )
+        pr_url, note = _create_or_adopt_pr(repo, release_branch, version, pr_body, gh_runner)
+
+        # Fix A3 ordering: finalize the release state ONLY once the PR exists.
+        # (Previously finalize ran before `gh pr create`; a gh failure then left
+        # in_progress=False and every retry hit NoReleaseInProgressError.)
+        # Fix #2 still holds: the finalize commit lands on the release branch and
+        # is pushed, so the squash-merge carries in_progress=False to main and
+        # the PR stays the sole writer of main's .release.json.
+        def _finalize_and_push() -> None:
+            if _finalize_release_state(rel_wt, version):
+                try:
+                    git_run(repo, "push", "origin", release_branch)
+                except GitError as e:
+                    raise Gate2FailedError(
+                        f"PR created ({pr_url}) but pushing the finalize commit to "
+                        f"{release_branch} failed: {e}\n"
+                        f"Push it manually (git push origin {release_branch}) before merging the PR."
+                    )
+
+        result = {"ok": True, "version": version, "mode": "pr", "pr_url": pr_url,
+                  "gate2_ran": gate2_ran}
+        if note:
+            result["note"] = note
+
+        if not babysit:
+            _finalize_and_push()
+            return result
+
+        # ── --babysit (B4): the user's "babysit + merge" convention ────────
+        # M1 ordering: create PR → watch checks → finalize+push → merge →
+        # cleanup. Finalizing only AFTER green checks means red checks leave
+        # in_progress=True and promote is simply re-runnable — no post-finalize
+        # failure can brick the re-run. (The finalize push adds a commit after
+        # the checks passed; acceptable — the merge follows immediately.)
+        ref = pr_url or release_branch
+        if _watch_pr_checks(repo, ref, gh_runner) != 0:
+            raise Gate2FailedError(
+                f"PR checks FAILED for {ref} — NOT merging.\n"
+                f"The release is still in progress: fix the failures and re-run "
+                f"promote (or merge the PR yourself with gh pr merge --squash {ref}, "
+                f"then run: promote_release.py --cleanup-only {version})"
+            )
+        _finalize_and_push()
+        merged = _merge_pr_squash(repo, ref, gh_runner)
+        if merged.returncode != 0:
+            raise Gate2FailedError(
+                f"gh pr merge --squash failed for {ref}: "
+                f"{(merged.stderr or merged.stdout or '').strip()}\n"
+                f"Merge manually, then run: promote_release.py --cleanup-only {version}"
+            )
+        # verify_pr=False: the PR was squash-merged two lines up — the
+        # merged state is known by construction.
+        cleanup(repo, version=version, gh_runner=gh_runner, verify_pr=False)
+        result["merged"] = True
+        result["cleaned_up"] = True
+        return result
+
+    # ── Direct mode (--direct) ─────────────────────────────────────────
+    # Legacy path: squash-merge release/<v> into main locally + push + cleanup.
     try:
         git_run(repo, "merge", "--squash", release_branch)
         git_run(repo, "commit", "-m", f"release {version}")
@@ -76,15 +339,24 @@ def promote_release(
         push_fn(repo, "main")
 
     if not keep:
-        cleanup(repo, version=version)
+        # verify_pr=False: --direct never opened a PR for this release.
+        cleanup(repo, version=version, verify_pr=False)
 
-    return {"ok": True, "version": version}
+    return {"ok": True, "version": version, "mode": "direct"}
 
 
-def cleanup(repo: Path, version: str) -> dict:
+def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
+            verify_pr: bool = True, force: bool = False) -> dict:
     """Idempotent cleanup after promote.
 
     Each step tolerates already-done state so re-running is safe.
+
+    PR SAFETY (B3): before deleting ANYTHING, verify the release PR (if any)
+    is MERGED — deleting the remote release branch auto-closes an open PR,
+    destroying an unmerged release. `verify_pr=False` is for promote's own
+    internal calls where the check is meaningless by construction (--direct
+    never opened a PR; --babysit just merged it). `force=True`
+    (--force-cleanup) is the explicit human override.
 
     ORDERING NOTE: a worktree that has a branch checked out must be removed
     BEFORE deleting that branch — git refuses to delete a branch that is
@@ -92,6 +364,39 @@ def cleanup(repo: Path, version: str) -> dict:
     remove the worktree first, then delete the (now-detached) branch.
     """
     repo = Path(repo).resolve()
+
+    if verify_pr and not force and _has_origin(repo):
+        _ensure_release_pr_merged_or_absent(repo, f"release/{version}", version, gh_runner)
+
+    # ── Adopt origin/main BEFORE accumulating any cleanup changes ──────────
+    # PR-based promote advances origin/main via the GitHub squash-merge, so the
+    # local checkout is behind/diverged. Every cleanup edit below (archival moves,
+    # catalog, claims, the finalize .release.json) is committed together in the
+    # finalize commit at the end. If we don't base that commit on origin/main now,
+    # it lands on a diverged local main and the finalize push becomes a
+    # non-fast-forward — which previously failed SILENTLY, leaving origin's
+    # .release.json stale and local main diverged. No-op when there is no origin
+    # (local-only repos / tests) or in --direct mode (main was just pushed).
+    if _has_origin(repo):
+        git_run(repo, "fetch", "origin", "main")
+        # Only adopt origin/main when it carries commits the local checkout lacks
+        # — i.e. the PR squash-merge advanced origin under a diverged/behind local
+        # main. If local main is ahead/equal (e.g. --direct mode merged the squash
+        # locally and hasn't pushed), it IS the source of truth; resetting would
+        # discard the just-merged release.
+        origin_ahead = git_run(repo, "rev-list", "HEAD..origin/main", check=False).stdout.strip()
+        if origin_ahead:
+            # reset --hard discards disposable local release-bookkeeping commits, but
+            # would also nuke uncommitted tracked edits — refuse rather than lose them.
+            if git_run(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+                raise RuntimeError(
+                    "main checkout has uncommitted tracked changes; refusing to reset "
+                    "to origin/main during cleanup. Commit or stash them, then re-run: "
+                    f"promote_release.py --cleanup-only {version}"
+                )
+            git_run(repo, "checkout", "main")
+            git_run(repo, "reset", "--hard", "origin/main")
+
     refined_cat = repo / ".claude" / "refined_backlog" / "_catalog.json"
     claims_file = repo / ".claude" / "state" / "claims.json"
     archive_root = repo / ".claude" / "refined_backlog" / "_archive" / version
@@ -105,9 +410,16 @@ def cleanup(repo: Path, version: str) -> dict:
             continue
 
         feature_id = entry["id"]
-        # 1. Mark promoted.
+        # 1. Mark promoted. This is a bulk sweep: one drifted entry (removed
+        # concurrently between the list_entries snapshot and here) must not kill
+        # the whole cleanup — warn, then keep cleaning this feature + the rest
+        # (audit A6). Already-promoted entries are a no-op inside mark itself.
         if entry["status"] != "promoted":
-            mark_promoted_to_main(refined_cat, feature_id)
+            try:
+                mark_promoted_to_main(refined_cat, feature_id)
+            except CatalogEntryNotFoundError as e:
+                print(f"⚠️ cleanup: {e} — promote-stamp skipped, continuing sweep",
+                      file=sys.stderr)
 
         # 2. Archive folder.
         candidates = list((repo / ".claude" / "refined_backlog").glob(f"{feature_id}-*"))
@@ -164,7 +476,18 @@ def cleanup(repo: Path, version: str) -> dict:
     except GitError:
         pass
 
-    # Update .release.json + commit + push.
+    # Finalize .release.json (only when still in progress) THEN commit + push
+    # everything cleanup produced. We based on origin/main above, so this is a
+    # clean fast-forward. Do NOT swallow a failed push — a silent failure here is
+    # exactly what left origin's .release.json stale and local main diverged;
+    # surface it with a concrete remediation instead.
+    #
+    # The commit+push MUST NOT be gated on in_progress. In PR-mode promote,
+    # _finalize_release_state already flipped in_progress=False on the release
+    # branch and the squash carried it to main — so by cleanup time in_progress
+    # is already False, yet the archival moves + catalog promote-stamps + cleared
+    # claims still need committing. Nesting the commit inside `if in_progress`
+    # (old bug) stranded all of that uncommitted in the main checkout.
     rj_path = repo / ".release.json"
     rj = json.loads(rj_path.read_text())
     if rj.get("in_progress"):
@@ -172,37 +495,83 @@ def cleanup(repo: Path, version: str) -> dict:
         rj["last_promoted_at"] = _now()
         rj["last_promoted_version"] = version
         rj_path.write_text(json.dumps(rj, indent=2) + "\n")
-        commit_all(repo, f"chore(release): finalize {version}")
-        # If origin exists, push.
-        try:
-            git_run(repo, "push", "origin", "main")
-        except GitError:
-            pass
+
+    # Commit any pending cleanup changes (archival, catalog, claims, and the
+    # finalize above) regardless of the in_progress flag. No-op when clean.
+    if git_run(repo, "status", "--porcelain").stdout.strip():
+        commit_all(repo, f"chore(release): finalize {version} cleanup on main")
+        if _has_origin(repo):
+            try:
+                git_run(repo, "push", "origin", "main")
+            except GitError as e:
+                raise Gate2FailedError(
+                    f"finalize push to origin/main failed: {e}\n"
+                    f"origin/main moved under us. Reconcile with:\n"
+                    f"  git fetch origin && git reset --hard origin/main\n"
+                    f"then re-run: promote_release.py --cleanup-only {version}"
+                )
 
     return {"ok": True, "version": version}
 
 
-def main() -> int:
+def _build_parser():
     import argparse
-    p = argparse.ArgumentParser()
-    p.add_argument("--gate2", action="store_true", dest="gate2")
-    p.add_argument("--deploy", action="store_true")
+    p = argparse.ArgumentParser(
+        prog="psrw promote",
+        description="Gate 2, then open a PR from release/<v> to main.",
+    )
+    p.add_argument("--gate2", action=argparse.BooleanOptionalAction, dest="gate2", default=True,
+                   help="run Gate 2 (scripts/integration.sh) before promoting "
+                        "(default: on; --no-gate2 to skip)")
+    p.add_argument("--allow-missing-gate2", action="store_true", dest="allow_missing_gate2",
+                   help="proceed even when scripts/integration.sh is missing on the "
+                        "release branch (the release goes to main UNVERIFIED)")
+    p.add_argument("--deploy", action="store_true",
+                   help="run the repo-specific local deploy (scripts/deploy-local.sh) first "
+                        "(default: off)")
     p.add_argument("--push", action="store_true", default=True)
     p.add_argument("--no-push", action="store_false", dest="push")
     p.add_argument("--keep", action="store_true", help="skip auto-cleanup")
     p.add_argument("--cleanup-only", help="run cleanup for a previously-promoted version", default=None)
-    args = p.parse_args()
+    p.add_argument("--force-cleanup", action="store_true", dest="force_cleanup",
+                   help="with --cleanup-only: skip the release-PR safety check and clean "
+                        "up even if the PR is not merged / gh is unavailable (DANGEROUS: "
+                        "deleting the remote release branch auto-closes an open PR)")
+    p.add_argument("--direct", action="store_false", dest="use_pr",
+                   help="legacy: squash-merge release→main locally + push, no PR (default opens a PR)")
+    p.add_argument("--babysit", action="store_true",
+                   help="after opening the PR: watch checks (gh pr checks --watch), "
+                        "squash-merge on green, and run cleanup automatically — the "
+                        "'babysit + merge' convention")
+    return p
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
     repo = find_repo_root(Path.cwd())
     try:
         if args.cleanup_only:
-            result = cleanup(repo, args.cleanup_only)
+            result = cleanup(repo, args.cleanup_only, force=args.force_cleanup)
         else:
-            result = promote_release(repo, run_gate2=args.gate2, run_deploy=args.deploy, push=args.push, keep=args.keep)
-    except (NoReleaseInProgressError, Gate2FailedError, RuntimeError) as e:
+            result = promote_release(repo, run_gate2=args.gate2, run_deploy=args.deploy,
+                                     push=args.push, keep=args.keep, use_pr=args.use_pr,
+                                     allow_missing_gate2=args.allow_missing_gate2,
+                                     babysit=args.babysit)
+    except (NoReleaseInProgressError, Gate2FailedError,
+            CatalogEntryNotFoundError, RuntimeError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result))
-    print(f"\n✅ Promoted v{result['version']} to main.")
+    if result.get("mode") == "pr":
+        gated = " (Gate 2 passed)" if result.get("gate2_ran") else " (local Gate 2 skipped — PR CI gates it)"
+        if result.get("merged"):
+            print(f"\n✅ Babysat release/{result['version']} → main{gated}: checks green, "
+                  f"squash-merged, cleaned up.\n   {result.get('pr_url','(see GitHub)')}")
+        else:
+            print(f"\n✅ PR opened for release/{result['version']} → main{gated}:\n   {result.get('pr_url','(see GitHub)')}")
+            print(f"   Review + squash-merge it to deploy to prod. After merge: --cleanup-only {result['version']}")
+    else:
+        print(f"\n✅ Promoted v{result['version']} to main.")
     return 0
 
 

@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""psrw — single entry point for ps-release-workflow verbs.
+
+Dispatches by SUBPROCESS, not by importing each script's main(). Two reasons
+still hold today, plus two historical ones from when this was first written:
+  * argparse raises SystemExit, which would collide with our own exit 2;
+  * 'gc' is in sys.builtin_module_names, so an unqualified import of a future
+    scripts/gc.py returns Python's garbage collector module.
+  * (historical) four scripts used to read sys.argv directly, so in-process
+    argv rewriting would have been mandatory and easy to get wrong — all ten
+    now parse with argparse, so this no longer applies;
+  * (historical) no parser used to set prog=, so in-process every verb would
+    have printed identical usage — all ten now pass prog="psrw <verb>", so each
+    verb's --help prints its own usage line either way.
+Every verb already spawns dozens of git subprocesses, so one more is noise.
+"""
+import subprocess
+import sys
+from collections import namedtuple
+from pathlib import Path
+
+TOOLKIT = Path(__file__).resolve().parent.parent
+SCRIPTS = TOOLKIT / "scripts"
+
+Verb = namedtuple("Verb", "script summary argparse_safe")
+
+# argparse_safe=False means the script treats an unrecognised token as DATA.
+# --help must never be forwarded to those: `psrw init --help` would opt the repo
+# in, `psrw idea --help` would commit an idea titled "--help".
+VERBS = {
+    "init":        Verb("init_repo.py", "Opt this repo into ps-release-workflow (once per repo)", True),
+    "new-release": Verb("init_work_new_release.py", "Open release/<v> and its _release worktree", True),
+    "idea":        Verb("new_idea.py", "Capture an idea as I-NNN", True),
+    "refine":      Verb("promote_idea_to_refined.py", "Promote I-NNN into a refined feature F-NNN", True),
+    "claim":       Verb("init_work_refined_backlog.py", "Claim F-NNN into an isolated worktree", True),
+    "ship":        Verb("ship_current_work_to_release.py", "Gate 1, then merge the feature into release/<v>", True),
+    "promote":     Verb("promote_release.py", "Gate 2, then open a PR from release/<v> to main", True),
+    "unclaim":     Verb("unclaim.py", "Abandon a claim, keeping the feature branch", True),
+    "status":      Verb("status.py", "One-screen report of what is in flight", True),
+    "hotfix":      Verb("hotfix.py", "Create a sibling hotfix worktree", True),
+}
+
+# Scripts with no verb, on purpose.
+NON_VERBS = {
+    "__init__.py",                    # empty package marker
+    "guard_check.py",                 # PreToolUse hook, absolute path in settings.json
+    "cleanup_legacy_worktrees.py",    # garbage collection — deferred to spec 1b
+}
+
+HELP_FLAGS = {"-h", "--help"}
+
+
+def print_usage(stream=sys.stdout) -> None:
+    print("usage: psrw <verb> [args...]\n", file=stream)
+    print("verbs:", file=stream)
+    width = max(len(v) for v in VERBS)
+    for verb in VERBS:
+        print(f"  {verb.ljust(width)}  {VERBS[verb].summary}", file=stream)
+    print("\n  psrw <verb> --help    flags for that verb", file=stream)
+
+
+def print_verb_help(verb: str) -> None:
+    entry = VERBS[verb]
+    print(f"psrw {verb} — {entry.summary}")
+    print(f"\nscript: scripts/{entry.script}")
+    if not entry.argparse_safe:
+        print(
+            f"\nThis verb's script does not parse flags yet, so psrw will not forward\n"
+            f"--help to it (doing so would be destructive). Read the skill for flags:\n"
+            f"  ~/.claude/skills/ps-release-workflow-{verb}/SKILL.md"
+        )
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        print("ERROR: no verb given\n", file=sys.stderr)
+        print_usage(sys.stderr)
+        return 2
+
+    verb, rest = argv[0], argv[1:]
+
+    if verb in HELP_FLAGS:
+        print_usage()
+        return 0
+
+    if verb not in VERBS:
+        print(f"ERROR: unknown verb {verb!r}\n", file=sys.stderr)
+        print_usage(sys.stderr)
+        return 2
+
+    entry = VERBS[verb]
+
+    # The dispatcher OWNS --help. Forward it only to argparse-safe scripts.
+    if any(a in HELP_FLAGS for a in rest):
+        if not entry.argparse_safe:
+            print_verb_help(verb)
+            return 0
+
+    script = SCRIPTS / entry.script
+    if not script.is_file():
+        print(f"ERROR: verb {verb!r} maps to missing script {script}", file=sys.stderr)
+        return 2
+
+    return subprocess.run([sys.executable, str(script), *rest]).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

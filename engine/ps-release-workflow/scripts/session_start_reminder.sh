@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# SessionStart hook: print a reminder of the current ps-release-workflow state
-# if cwd is inside an opted-in repo. Silent otherwise.
+# SessionStart hook: print a brief ps-release-workflow status if cwd is inside
+# an opted-in repo. Silent otherwise. Spawns python3 at most ONCE (status.py
+# --brief does all the work); must always exit 0 and never break a session.
 
-set -e
-
-# Walk up to find .release.json.
+# Cheap bash fast-exit: walk up to find .release.json — no python spawn when absent.
 dir="$PWD"
 while [ "$dir" != "/" ]; do
   if [ -f "$dir/.release.json" ]; then
@@ -18,30 +17,9 @@ if [ -z "${REPO_ROOT:-}" ]; then
   exit 0  # not in a workflow repo
 fi
 
-REL_JSON="$REPO_ROOT/.release.json"
-CLAIMS="$REPO_ROOT/.claude/state/claims.json"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-VERSION=$(python3 -c "import json,sys; print(json.load(open('$REL_JSON'))['version'])" 2>/dev/null || echo "?")
-IN_PROGRESS=$(python3 -c "import json,sys; print(json.load(open('$REL_JSON')).get('in_progress', False))" 2>/dev/null || echo "False")
-
-echo "🚨 ps-release-workflow active in this repo ($REPO_ROOT)"
-if [ "$IN_PROGRESS" = "True" ]; then
-  echo "   Active release: $VERSION (in progress)"
-  if [ -f "$CLAIMS" ]; then
-    SESSION="${CLAUDE_SESSION_ID:-}"
-    OWNED_FEATURE=$(python3 -c "
-import json, os
-claims = json.load(open('$CLAIMS'))
-me = os.environ.get('CLAUDE_SESSION_ID','')
-mine = [f for f, c in claims.items() if c.get('owner') == me]
-print(','.join(mine) if mine else 'none')
-" 2>/dev/null)
-    if [ -n "$OWNED_FEATURE" ] && [ "$OWNED_FEATURE" != "none" ]; then
-      echo "   Your active claim(s): $OWNED_FEATURE"
-    else
-      echo "   No claim — run /ps-release-workflow:claim --next"
-    fi
-  fi
-else
-  echo "   No release in progress — run /ps-release-workflow:new-release to start"
-fi
+# Single python spawn. status.py itself always exits 0 and degrades gracefully;
+# the guards here cover a missing/broken python3 as well.
+python3 "$SCRIPT_DIR/status.py" --repo "$REPO_ROOT" --brief 2>/dev/null || true
+exit 0

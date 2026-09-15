@@ -14,3 +14,12 @@ dist/
 
 # OS
 .DS_Store
+
+# Machine-local engine files: they name private repos/paths, so they stay out of
+# this public repo. They still live in the working tree, so the symlinked
+# ~/.claude/ps-release-workflow keeps them.
+engine/ps-release-workflow/verify.sh
+engine/ps-release-workflow/docs/superpowers/
+
+# ps-skills-sync state
+.sync/
