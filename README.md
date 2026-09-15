@@ -63,6 +63,27 @@ Then restart your Claude Code session so the new skills are discovered.
 
 Install into a non-default Claude home with `CLAUDE_HOME=/path ./install.sh`.
 
+## Keeping in sync
+
+After `./install.sh`, everything in `~/.claude` is a symlink into this clone, so there is one copy.
+
+```bash
+ps-skills-sync            # pull (fast-forward only) + link newly added skills + status
+ps-skills-sync --push     # publish local edits: secret scan -> branch -> PR -> CI -> squash-merge
+ps-skills-sync --scan     # just the secret scan
+```
+
+Automatic pull on session start (throttled to once per 6h, silent when up to date) — add to
+`~/.claude/settings.json` under `hooks.SessionStart`:
+
+```json
+{ "matcher": "", "hooks": [{ "type": "command", "command": "~/.local/bin/ps-skills-sync --hook", "timeout": 20 }] }
+```
+
+It never pushes on its own (this repo is public) and never pulls over uncommitted edits — it prints a
+one-line reminder instead. The `handoff` skill's Stop hook (`skills/handoff/hooks/auto-handoff-stop.py`,
+linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKILL.md`.
+
 ## Using the skills
 
 - **ps-commu-explain** — say *"explain X"* / *"show me how X works"*, or invoke `/ps-commu-explain <topic>`.
