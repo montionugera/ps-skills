@@ -7,7 +7,11 @@ S="$SKILL_DIR/scripts"
 PASS=0; FAIL=0
 ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
-check(){ local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
+CHECK_LOG="$(mktemp)"
+check(){               # on FAIL, show the test's output so CI logs say why
+  local name="$1"; shift
+  if "$@" >"$CHECK_LOG" 2>&1; then ok "$name"; else bad "$name"; tail -n 25 "$CHECK_LOG" | sed 's/^/    /'; fi
+}
 
 # --- common.sh ---
 source "$S/common.sh"
@@ -18,7 +22,7 @@ cleanup_tests() {
     local s p; s="$(basename "$d")"; p="$(meta_get "$s" pid 2>/dev/null)"
     [[ -n "$p" ]] && pid_has_marker "$p" "$s" && kill "$p" 2>/dev/null
   done
-  rm -rf /tmp/ps-commu/t-* 2>/dev/null
+  rm -rf /tmp/ps-commu/t-* "$CHECK_LOG" 2>/dev/null
 }
 trap cleanup_tests EXIT
 
