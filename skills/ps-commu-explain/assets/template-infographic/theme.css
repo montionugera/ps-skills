@@ -1,0 +1,211 @@
+/* ============================================================================
+   theme.css — THE DESIGN LOCK
+   ----------------------------------------------------------------------------
+   Design tokens ONLY. This is the ONE place raw color / size / font values are
+   allowed. explainer.css and cherry-setup.js MUST reference these variables —
+   never hardcode a value.
+
+   DESIGN DIRECTION — "Cream Infographic", warm editorial / data-journalism.
+   A light, colorful, information-dense look: cream paper, near-white cards,
+   soft warm shadows, generous rounded corners, and a harmonious six-color
+   category palette that color-codes sections, stat tiles, cards, icons and
+   diagram nodes. Reads like a designed infographic, not a plain document.
+
+     • Canvas: warm cream paper (#FBF7EF) with a cleaner near-white card surface.
+     • Depth: layered low-opacity WARM shadows + warm hairline borders.
+     • Text: warm near-black (#211C15) primary, warm brown-gray secondary/tertiary
+       (all AA-checked on cream and on card surfaces).
+     • Category palette (each owns a meaning + a section): coral, amber, teal,
+       blue, violet, magenta — vivid but tasteful, tuned to pop on cream.
+     • Type: Bricolage Grotesque (characterful display) + Inter (body/UI) +
+       JetBrains Mono (labels + tabular numbers).
+     • Motion: staggered entrance (fade+rise), hover lift, colored accents.
+
+   The Mermaid themeVariables that pair with this file live in cherry-setup.js
+   (raw hex there because Mermaid reads a JS object, not CSS custom properties —
+   each key is annotated with the token it mirrors).
+   ============================================================================ */
+
+:root {
+  /* --- Warm neutral / paper ramp (cream canvas → near-white cards) ----------
+     Numbered ramp: 0 = deepest warm shade, ascending = lighter / cleaner. */
+  --n-0:  #e2d7bf;  /* deep cream — insets, code wells        */
+  --n-1:  #e9dfca;  /* cream shade — raised label strips       */
+  --n-2:  #efe6d3;  /* PAPER — app canvas (toned down, less glare) */
+  --n-3:  #f7f1e6;  /* card surface — warm off-white           */
+  --n-4:  #fcf8f0;  /* cleanest surface — tiles, popovers (no pure-white glare) */
+  --n-5:  #fefcf6;  /* highlight surface                       */
+
+  /* --- Surface & elevation roles (semantic aliases of the ramp) ------------- */
+  --bg:             var(--n-2);   /* cream paper canvas          */
+  --surface:        var(--n-3);   /* card / panel surface        */
+  --surface-raised: var(--n-4);   /* tiles, elevated cards       */
+  --surface-overlay:var(--n-1);   /* hover / inset strips        */
+  --surface-well:   var(--n-0);   /* code wells, deep insets     */
+  /* legacy aliases kept so existing component rules resolve cleanly */
+  --surface-2:     var(--n-4);
+  --surface-3:     var(--n-1);
+  --border:        #e6dcc7;   /* hairline (visible warm)        */
+  --border-soft:   #efe7d7;   /* hairline (whisper warm)        */
+  --border-strong: #d9ccb2;   /* border-strong                  */
+
+  /* --- Text roles (warm near-black ladder; AA on cream + cards) ------------- */
+  --text:   #211c15;  /* primary   — warm near-black   (contrast ~14:1 on paper) */
+  --text-2: #5c5344;  /* secondary — warm brown-gray   (contrast ~6.5:1)         */
+  --text-3: #8a7d68;  /* tertiary  — muted warm gray   (contrast ~3.6:1, labels) */
+  /* legacy ink aliases → new roles (so no component rule needs rewriting) */
+  --ink:        var(--text);
+  --ink-bright: #000000;
+  --ink-dim:    var(--text-2);
+
+  /* --- CATEGORY / ACCENT PALETTE -------------------------------------------
+     Six harmonious editorial hues that pop on cream and read as one family.
+     Each: a solid (fills/icons/text-on-tint), a -weak (dim rails), and a
+     -tint (soft translucent wash for panel/tile backgrounds). Every hue owns
+     one meaning AND becomes a section category color. */
+  --coral:        #e0533d;  --coral-weak:   #b53e2c;  --coral-tint:   #fbeae5;
+  --amber:        #e08a1e;  --amber-weak:   #b06a10;  --amber-tint:   #fbf0dd;
+  --teal:         #109a86;  --teal-weak:    #0c7365;  --teal-tint:    #daf1ec;
+  --blue:         #2f6bd6;  --blue-weak:    #204f9e;  --blue-tint:    #e2ebfb;
+  --violet:       #7a53d1;  --violet-weak:  #5a3aa3;  --violet-tint:  #ece5fa;
+  --magenta:      #c43a8f;  --magenta-weak: #97286c;  --magenta-tint: #fbe3f1;
+
+  /* --- Brand / accent roles (map onto the category palette) ----------------- */
+  --primary:        var(--coral);       /* the lead category            */
+  --primary-strong: var(--coral);       /* solid for text-on-cream       */
+  --primary-weak:   var(--coral-weak);  /* dim rail / underline          */
+  --secondary:      var(--violet);
+  --secondary-weak: var(--violet-weak);
+  --accent:         var(--coral);
+  --accent-dim:     var(--coral-weak);
+
+  /* --- Semantic hues (each aliases a category color; owns one meaning) ------ */
+  --info:    var(--blue);    --info-weak:    var(--blue-weak);    --info-tint:    var(--blue-tint);
+  --success: var(--teal);    --success-weak: var(--teal-weak);    --success-tint: var(--teal-tint);
+  --warning: var(--amber);   --warning-weak: var(--amber-weak);   --warning-tint: var(--amber-tint);
+  --danger:  var(--coral);   --danger-weak:  var(--coral-weak);   --danger-tint:  var(--coral-tint);
+  --idea:    var(--violet);  --idea-weak:    var(--violet-weak);  --idea-tint:    var(--violet-tint);
+  --metric:  var(--magenta); --metric-weak:  var(--magenta-weak); --metric-tint:  var(--magenta-tint);
+  --action:  var(--amber);   --action-weak:  var(--amber-weak);   --action-tint:  var(--amber-tint);
+
+  /* --- Legacy hue aliases (older component rules reference these names) ------ */
+  --purple:  var(--violet);  --purple-dim: var(--violet-weak);
+  --red:     var(--coral);   --red-dim:    var(--coral-weak);
+  --amber-dim: var(--amber-weak);
+  --blue-dim:  var(--blue-weak);
+  --teal-dim:  var(--teal-weak);
+
+  /* --- Atmospheric tints (kept as tokens so no rgba is hardcoded downstream) -
+     Warm washes for the page atmosphere + mark highlight. */
+  --tint-primary:      var(--coral-tint);
+  --tint-primary-soft: var(--coral-tint);
+  --tint-primary-glow: rgba(224, 83, 61, 0.10);
+  --tint-secondary:    var(--violet-tint);
+  --tint-success:      var(--teal-tint);
+  --tint-warning:      var(--amber-tint);
+  --tint-danger:       var(--coral-tint);
+  --tint-mark:         rgba(224, 138, 30, 0.22);   /* amber highlighter */
+  /* page-atmosphere blooms (very soft warm color on cream) */
+  --bloom-1: rgba(224, 138, 30, 0.10);   /* amber, top-right    */
+  --bloom-2: rgba(47, 107, 214, 0.07);   /* blue, top-left      */
+  --bloom-3: rgba(196, 58, 143, 0.06);   /* magenta, bottom     */
+  /* legacy tint aliases */
+  --tint-accent:      var(--tint-primary);
+  --tint-accent-soft: var(--tint-primary-soft);
+  --tint-accent-glow: var(--tint-primary-glow);
+  --tint-blue:        var(--blue-tint);
+  --tint-amber:       var(--amber-tint);
+  --tint-red:         var(--coral-tint);
+
+  /* --- Typefaces ------------------------------------------------------------
+     Bricolage Grotesque (characterful display, loaded in shell.html) for
+     headings; Inter for body/UI; JetBrains Mono for labels + tabular numbers. */
+  --font-display: "Bricolage Grotesque", "Inter", -apple-system, BlinkMacSystemFont,
+                  "Segoe UI", Roboto, sans-serif;
+  --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", "SFMono-Regular",
+                  Menlo, monospace;
+
+  /* --- Weight ladder -------------------------------------------------------- */
+  --w-regular:  400;
+  --w-medium:   500;
+  --w-semibold: 600;
+  --w-bold:     700;
+  --w-black:    800;
+
+  /* --- Type ramp (fluid; confident infographic headings) -------------------- */
+  --fs-display: clamp(3.0rem, 2.0rem + 4.6vw, 5.0rem);   /* hero              */
+  --fs-h1:      clamp(2.2rem, 1.6rem + 2.6vw, 3.3rem);
+  --fs-h2:      clamp(1.7rem, 1.3rem + 1.6vw, 2.35rem);
+  --fs-h3:      clamp(1.25rem, 1.05rem + 0.7vw, 1.55rem);
+  --fs-body:    1.03rem;
+  --fs-sm:      0.82rem;
+  --fs-caption: 0.73rem;
+  /* legacy alias */
+  --fs-hero:    var(--fs-display);
+  /* intermediate reading sizes for dense blocks */
+  --fs-mono-sm: 0.85rem;  /* schematic + pre code   */
+  --fs-table:   0.94rem;  /* table body             */
+  --fs-code:    0.86em;   /* inline code (tracks text) */
+  --fs-stat:    clamp(2.6rem, 2.0rem + 2.2vw, 3.6rem);  /* KPI numbers */
+
+  /* --- Tracking (letter-spacing) -------------------------------------------- */
+  --track-display: -0.028em;
+  --track-h:       -0.018em;
+  --track-body:    -0.004em;
+  --track-eyebrow:  0.18em;   /* uppercase overline */
+  --track-label:    0.06em;   /* mono micro-labels  */
+
+  /* --- Line-height ---------------------------------------------------------- */
+  --lh-tight:  1.05;   /* display / headings */
+  --lh-snug:   1.28;   /* h3 / quotes        */
+  --lh-body:   1.64;   /* prose (generous)   */
+
+  /* --- Spacing scale (8pt rhythm) ------------------------------------------- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4.5rem;
+
+  /* --- Shape & measure ------------------------------------------------------ */
+  --radius:      18px;
+  --radius-sm:   12px;
+  --radius-lg:   24px;
+  --radius-pill: 999px;
+  --maxw:        1120px;
+  --nav-w:       244px;   /* sticky sidebar width (wide screens) */
+
+  --pad-code: 0.12em 0.42em;
+  --pad-mark: 0.06em 0.34em;
+
+  /* --- Chip geometry (icon chips that carry Lucide icons) ------------------- */
+  --chip:    2.5rem;   /* standard icon chip size          */
+  --chip-sm: 1.7rem;   /* small chip (nav, inline)         */
+  --chip-lg: 3.1rem;   /* large chip (section header, KPI) */
+  --icon:    1.15rem;  /* default Lucide icon stroke box    */
+
+  /* --- Elevation shadows (soft, layered, WARM — depth on cream) ------------- */
+  --shadow-1: 0 1px 2px rgba(93, 66, 20, 0.06),
+              0 1px 3px rgba(93, 66, 20, 0.05);
+  --shadow-2: 0 2px 6px rgba(93, 66, 20, 0.06),
+              0 10px 22px -8px rgba(93, 66, 20, 0.14);
+  --shadow-3: 0 4px 10px rgba(93, 66, 20, 0.07),
+              0 26px 50px -18px rgba(93, 66, 20, 0.22);
+
+  /* --- Motion --------------------------------------------------------------- */
+  --ease-standard:   cubic-bezier(0.2, 0.0, 0, 1.0);
+  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);       /* springy decel */
+  --ease-accelerate: cubic-bezier(0.3, 0.0, 0.8, 0.15);
+  /* legacy alias */
+  --ease: var(--ease-standard);
+
+  --dur-1: 0.16s;   /* micro hover           */
+  --dur-2: 0.28s;   /* transitions           */
+  --dur-3: 0.55s;   /* entrance / emphasis   */
+  /* legacy alias */
+  --dur:   var(--dur-2);
+}

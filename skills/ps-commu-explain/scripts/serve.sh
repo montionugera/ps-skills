@@ -25,7 +25,7 @@ done
 ws="$PS_COMMU_ROOT/$slug"
 [[ -d "$ws" ]] || { echo "no workspace: $ws (run init.sh first)" >&2; exit 1; }
 tier="$(meta_get "$slug" tier)"
-[[ "$tier" == "html" || "$tier" == "react" ]] || { echo "bad tier='$tier' in meta.json for $slug (re-run init.sh)" >&2; exit 1; }
+[[ "$tier" == "infographic" || "$tier" == "html" || "$tier" == "react" ]] || { echo "bad tier='$tier' in meta.json for $slug (re-run init.sh)" >&2; exit 1; }
 
 # Replace any previous server for this slug (marker-verified).
 old_pid="$(meta_get "$slug" pid)"
@@ -35,6 +35,9 @@ fi
 
 if [[ "$tier" == "react" && "$dev" == 0 ]]; then
   [[ -d "$ws/app/dist" ]] || { echo "react tier: run 'npm run build' first (no app/dist)" >&2; exit 1; }
+fi
+if [[ "$tier" == "html" || "$tier" == "infographic" ]]; then
+  [[ -d "$ws/app" ]] || { echo "$tier tier: no app/ dir (re-run init.sh, then edit app/)" >&2; exit 1; }
 fi
 
 keep_secs="$(parse_duration "$keep")" || exit 1
@@ -50,7 +53,10 @@ start_one() {  # port → 0 once HTTP responds; 1 if process died (port taken)
     node "$ws/app/node_modules/vite/bin/vite.js" "$ws/app" \
       --host 127.0.0.1 --port "$port" --strictPort >>"$ws/server.log" 2>&1 &
   else
-    local docroot="$ws"
+    # Doc root is the app/ dir: "/" serves app/index.html (clean URL), and the
+    # planning docs (01-factsheet.md etc., possibly private — spec D2) stay OUT
+    # of the served tree. React serves its built bundle.
+    local docroot="$ws/app"
     [[ "$tier" == "react" ]] && docroot="$ws/app/dist"
     # httpserve.py = SimpleHTTPRequestHandler + Cache-Control: no-store, so the
     # browser never shows a stale fix-loop page. $docroot in argv keeps the

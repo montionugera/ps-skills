@@ -9,52 +9,47 @@ description: |
 
 # ps-release-workflow:ship
 
-Ship the current feature into the in-progress release.
+Merge the claimed feature into `release/<v>`, then deploy the release locally.
 
-## Usage
+## Precondition
 
-```bash
-# Run from inside the claimed feature worktree:
-python3 ~/.claude/ps-release-workflow/scripts/ship_current_work_to_release.py
-```
+Clean tree, run from inside the claimed feature worktree.
 
-## What it does
+## Run
 
-1. Verifies you are inside a claimed feature worktree with a valid owner marker.
-2. Runs **Gate 1** (`precheck.sh`) — the per-feature pre-merge check.
-3. Merges the feature branch into `release/<v>`.
-4. Marks the feature shipped in the refined catalog via the `_release` worktree (D11).
+    psrw ship
 
-## Hand-off
+## Flags that change behavior
 
-Prints: `Shipped to release/<v>. Claim the next feature, or /ps-release-workflow:promote when the release is full.`
+- `--no-deploy` — skip the post-merge local deploy. **Use it when other sessions are
+  shipping to the same `release/<v>` right now**: batch one deploy after the burst
+  instead of racing rebuilds. Also when you are mid-sweep and will deploy at the end.
+- `--deploy` — force the deploy. An interactive run prompts `[Y/n]`; without a TTY the
+  default is to deploy.
+- You never need `--no-deploy` for a non-local kubectl context: the deploy script
+  self-refuses those.
 
-## After ship — deploy the release locally (MR-merge convention)
+## The local deploy
 
-`ship` is **git-only**: it merges to `release/<v>` but does **not** deploy anything.
-To keep the local env reflecting the integrated release — the same way merging an MR
-triggers a staging deploy — deploy `release/<v>` after shipping:
+Runs the repo's own local deploy script against `release/<v>`, so the local env
+reflects the integrated release: `scripts/deploy-local.sh`, or whatever
+`hooks.deploy_local` in `.release.json` points at (an unusable value refuses the
+deploy loudly and leaves the merge standing). That script is
+responsible for refusing any non-local kubectl context, so ship can never touch prod.
+Prod stays untouched until `psrw promote`, whose `--deploy` runs against the `_release`
+worktree — the release tree, not `main` — because the local DB may already be migrated
+ahead of `main` by the release's own migrations. To deploy by hand after `--no-deploy`,
+run the script from a tree that is on `release/<v>` (the `_release` worktree is).
 
-```bash
-# from a tree on release/<v> — the _release worktree is on it, and deploy-local
-# is worktree-aware (it builds from the current working tree):
-cd .claude/worktrees/_release && ./scripts/deploy-local.sh
-```
+## Then
 
-This rebuilds the local `quant-{api,fe}:local` images from `release/<v>` and rolls the
-deployments, so you can exercise the just-merged feature locally. `deploy-local.sh`
-refuses any non-local kubectl context (`orbstack|kind-|minikube|docker-desktop`), so it
-can't touch prod. **Prod stays untouched until `promote`** (which runs deploy-local
-against `main` as part of Gate 2).
-
-**Why this is a recommendation, not auto-run by the ship script:** multiple sessions
-often ship to the same `release/<v>` concurrently. Auto-deploying after *every* ship
-would mean constant local rebuilds and redeploy races between sessions. Deploy when you
-want to *test* — typically once after a batch of ships, or right before exercising a
-screen — not mechanically after each merge.
+Claim the next feature, or `psrw promote` when the release is full.
 
 ## Refuses if
 
-- Not run from inside a feature worktree.
-- The worktree has a dirty (uncommitted) tree.
-- **Gate 1** (`precheck.sh`) fails.
+Not inside a feature worktree · dirty tree · Gate 1 (`precheck.sh`) fails. Gate 1 runs
+twice — pre-merge on the feature worktree, then again post-merge on `_release`, where a
+failure rolls the merge back.
+
+Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#gates`
+Flags: `psrw ship --help`

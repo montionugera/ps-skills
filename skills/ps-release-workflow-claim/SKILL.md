@@ -3,43 +3,52 @@ name: ps-release-workflow-claim
 description: |
   Use BEFORE implementing a refined feature (F-NNN) in a ps-release-workflow
   repo. Atomically claims the feature for your session and creates an isolated
-  per-feature worktree with a working-feature.json owner marker. After this
-  skill: hint to implement via /superpowers:subagent-driven-development.
+  per-feature worktree with a working-feature.json owner marker. Also use with
+  --resume to re-own an already-claimed feature (fresh session resuming
+  in-flight work, or after the guard blocks with "claim --resume F-NNN").
+  After this skill: hint to implement via /subagent-driven-development.
 ---
 
 # ps-release-workflow:claim
 
 Claim a refined feature and get an isolated worktree to build it in.
 
-## Precondition — spec + plan ready (deliberate gate)
+## Precondition — deliberate gate
 
 Claim only a feature that already has an **approved spec** (under
-`docs/superpowers/specs/`) and a **written plan** (`/superpowers:writing-plans`).
-Claiming cuts a real worktree + branch; doing it before the design is settled
-wastes that setup and risks throwaway code. **Never auto-chain
-idea -> refine -> claim** — each is a separate, deliberate, human-approved step.
+`docs/superpowers/specs/`) and a **written plan**. **Never auto-chain
+idea -> refine -> claim** — each is a separate, human-approved step.
 
-## Usage
+## Run
 
-```bash
-python3 ~/.claude/ps-release-workflow/scripts/init_work_refined_backlog.py F-NNN
-# or pick the next unclaimed feature automatically:
-python3 ~/.claude/ps-release-workflow/scripts/init_work_refined_backlog.py --next
-```
+    psrw claim F-NNN
+    psrw claim --next            # pick the next unclaimed feature automatically
+    psrw claim --resume F-NNN    # re-own / recreate an ALREADY-claimed feature
 
-## What it does
+A plain claim re-attaches to an existing `feat/F-NNN` branch if there is one — prior
+commits stay intact — because `psrw unclaim` **always keeps the branch**.
 
-1. Atomically records the claim in `.claude/state/claims.json` (owner = your `$CLAUDE_SESSION_ID`).
-2. Creates a per-feature worktree under `.claude/worktrees/F-NNN-<slug>/` off `release/<v>`.
-3. Writes the `working-feature.json` owner marker into the worktree's gitdir (the guard reads this).
-4. Marks the feature claimed in the refined catalog via the `_release` worktree (D11).
+## `--resume F-NNN`
 
-## Hand-off
+Use when the feature is already status `claimed` but this session does not own it, or
+its worktree is gone:
 
-Prints: `Worktree created. Implement: /superpowers:subagent-driven-development` (reads the F-NNN plan.md).
+- **Fresh session resuming in-flight work** — the guard blocks edits and points here.
+  Resume rewrites the owner in both `working-feature.json` and `claims.json`.
+- **Worktree deleted out-of-band** (drift) — recreates it on the surviving
+  `feat/F-NNN` branch, or off `main` if the branch is gone too.
+- Refuses if the feature is not status `claimed` — resume re-owns existing claims, it
+  never creates new ones.
+
+To abandon a claim instead of resuming it: `psrw unclaim F-NNN`.
+
+## Then
+
+Implement via `/subagent-driven-development` (it reads the F-NNN `plan.md`).
 
 ## Refuses if
 
-- No release in progress.
-- The feature is already claimed (by you or someone else).
-- `--next` with no free (unclaimed) feature available.
+No release in progress · the feature is already claimed · `--next` with no free feature.
+
+Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#d11-backlog-routing`
+Flags: `psrw claim --help`

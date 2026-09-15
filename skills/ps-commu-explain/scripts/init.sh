@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # init.sh — create a ps-commu workspace (sweeps stale ones first).
-# Usage: init.sh <slug> [--tier html|react]
+# Usage: init.sh <slug> [--tier infographic|html|react]
 #   slug    kebab-case topic id, e.g. jwt-refresh-rotation
-#   --tier  html (default) or react
+#   --tier  infographic (default) | html | react
+#           infographic  cream Markdown-driven explainer (cherry-markdown);
+#                        author app/content.md
+#           html         classic bespoke hand-written HTML; edit app/index.html
+#           react        interactive React+TS tier
 # Sweep rule (spec D5): delete workspaces >3 days old AND with no live
 # marker-verified server. Port pick here is advisory; serve.sh binding is
 # authoritative (spec D3).
@@ -10,7 +14,7 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
 usage() { grep '^#' "$0" | cut -c3-; exit "${1:-0}"; }
-slug="" tier="html"
+slug="" tier="infographic"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tier) [[ $# -ge 2 ]] || { echo "--tier requires a value" >&2; exit 1; }
@@ -21,7 +25,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 [[ "$slug" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || { echo "bad slug: '$slug' (use kebab-case)" >&2; exit 1; }
-[[ "$tier" == "html" || "$tier" == "react" ]] || { echo "bad tier: '$tier'" >&2; exit 1; }
+[[ "$tier" == "infographic" || "$tier" == "html" || "$tier" == "react" ]] || { echo "bad tier: '$tier'" >&2; exit 1; }
 
 mkdir -p "$PS_COMMU_ROOT"
 chmod 700 "$PS_COMMU_ROOT"   # spec D2: fact sheets may contain private code
@@ -45,6 +49,18 @@ done
 # --- workspace ---
 ws="$PS_COMMU_ROOT/$slug"
 mkdir -p "$ws"
+
+# --- scaffold app/ from the tier template ---
+# Copy the template (incl. mermaid.min.js for the HTML tier) so the agent edits
+# app/index.html IN PLACE. Writing app/index.html from scratch loses the diagram
+# library and mermaid blocks render as raw text. Idempotent: never clobbers an
+# existing app/index.html, so re-running init on a live slug is safe.
+tpl="$(cd "$(dirname "$0")/.." && pwd)/assets/template-$tier"
+if [[ -d "$tpl" && ! -e "$ws/app/index.html" ]]; then
+  mkdir -p "$ws/app"
+  cp -R "$tpl"/. "$ws/app"/
+  echo "scaffolded app/ from template-$tier"
+fi
 
 # --- advisory free port ---
 port=7700

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Explainer Kit</title>
+
+  <!-- Google Fonts — Bricolage Grotesque (display) + Inter (body/UI) +
+       JetBrains Mono (labels + tabular numbers) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet"
+  />
+
+  <!-- cherry-markdown (pinned 0.8.58) -->
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/cherry-markdown@0.8.58/dist/cherry-markdown.css"
+  />
+
+  <!-- design lock + components (local; must be SERVED, not file://) -->
+  <link rel="stylesheet" href="./theme.css" />
+  <link rel="stylesheet" href="./explainer.css" />
+
+  <style>
+    /* minimal boot styling only — real styling lives in explainer.css */
+    #app { min-height: 60vh; }
+    .booting {
+      position: relative; z-index: 2;
+      max-width: var(--maxw); margin: 0 auto; padding: var(--space-8) var(--space-6);
+      font-family: var(--font-mono); font-size: var(--fs-sm);
+      letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-dim);
+    }
+  </style>
+</head>
+<body>
+  <div id="app"><div class="booting">Loading explainer…</div></div>
+
+  <!-- mermaid (pinned v11) + cherry engine, then our setup.
+       NOTE: we load the *core* build, NOT cherry-markdown.min.js. The full
+       (.min.js) build auto-registers its own mermaid addon with a hardcoded
+       light `theme:"default"` that cannot be overridden and that consumes the
+       fenced ```mermaid blocks into <figure><svg> — so our locked dark theme
+       and our .mermaid-frame would both be bypassed. The core build leaves
+       fenced mermaid as <pre><code class="language-mermaid">, which is exactly
+       what cherry-setup.js's Path B expects: we frame it and run our own
+       mermaid.run() with the locked spec-style themeVariables. -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/cherry-markdown@0.8.58/dist/cherry-markdown.core.js"></script>
+  <!-- Lucide line icons (UMD, global `lucide`). cherry-setup.js guards on
+       window.lucide, so a CDN failure degrades to no-icons rather than error. -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="./cherry-setup.js"></script>
+
+  <script>
+    (function () {
+      "use strict";
+
+      // Known example docs shipped with the kit — surfaced in the error panel.
+      var KNOWN_DOCS = ["content.md", "components.md"];
+
+      function qparam(name) {
+        return new URLSearchParams(window.location.search).get(name);
+      }
+
+      function esc(s) {
+        return String(s).replace(/[&<>"']/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+        });
+      }
+
+      function showError(title, detail, doc) {
+        var links = KNOWN_DOCS.map(function (d) {
+          return '<li><a href="?doc=' + encodeURIComponent(d) + '"><code>' + esc(d) + "</code></a></li>";
+        }).join("");
+        document.getElementById("app").innerHTML =
+          '<div class="explainer-error">' +
+          '<div class="eyebrow">Explainer Kit — cannot render</div>' +
+          "<h1>" + esc(title) + "</h1>" +
+          "<p>" + esc(detail) + "</p>" +
+          (doc ? "<p>Requested doc: <code>" + esc(doc) + "</code></p>" : "") +
+          "<p>Available example documents:</p><ul>" + links + "</ul>" +
+          '<p style="color:var(--ink-dim)">This kit must be <strong>served</strong> ' +
+          "(<code>./serve.sh</code>), never opened as a bare <code>file://</code> URL — " +
+          "browsers block <code>fetch()</code> of local files under CORS.</p>" +
+          "</div>";
+      }
+
+      function boot() {
+        var doc = qparam("doc") || "content.md";
+
+        // reject path traversal / absolute / non-.md
+        if (!/^[\w.\-]+\.md$/.test(doc)) {
+          showError("Invalid document name", "The ?doc value must be a plain *.md filename in the kit folder.", doc);
+          return;
+        }
+        // window.Cherry is a UMD namespace; the real constructor is on .default.
+        var CherryCtor = window.Cherry && window.Cherry.default ? window.Cherry.default : window.Cherry;
+        if (typeof CherryCtor !== "function") {
+          showError("Engine failed to load", "cherry-markdown did not load from the CDN. Check your network / the pinned CDN URL.", doc);
+          return;
+        }
+        if (typeof mermaid === "undefined") {
+          showError("Diagram engine failed to load", "Mermaid did not load from the CDN. Diagrams cannot render. Check your network / the pinned CDN URL.", doc);
+          return;
+        }
+
+        fetch("./" + doc, { cache: "no-cache" })
+          .then(function (res) {
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            return res.text();
+          })
+          .then(
+            function (md) {
+              // fetch succeeded. Render in its own try so an engine crash is
+              // reported as a render failure, NOT a missing document.
+              document.getElementById("app").innerHTML = '<div id="container"></div>';
+              try {
+                window.renderExplainer("container", md);
+              } catch (renderErr) {
+                showError(
+                  "Engine failed to render",
+                  "The document loaded but the render engine threw while rendering it (" +
+                    renderErr.message + ").",
+                  doc
+                );
+              }
+            },
+            function (fetchErr) {
+              // fetch/HTTP failure — the document genuinely could not be loaded.
+              showError(
+                "Document not found",
+                "Could not fetch the requested markdown (" + fetchErr.message + ").",
+                doc
+              );
+            }
+          );
+      }
+
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", boot);
+      } else {
+        boot();
+      }
+    })();
+  </script>
+</body>
+</html>

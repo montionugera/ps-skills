@@ -13,32 +13,41 @@ The PreToolUse guard that enforces "edit only inside the worktree you claimed."
 
 ## How it fires
 
-This skill is **not run by hand**. The `guard_check.py` script is wired as a
-PreToolUse hook and runs automatically before every `Edit` / `Write` /
-`MultiEdit` / `NotebookEdit` tool call.
+Not run by hand. It is wired as a PreToolUse hook and runs before every `Edit` /
+`Write` / `MultiEdit` / `NotebookEdit` tool call. When no `.release.json` exists
+anywhere up the tree from the edit target, it allows immediately on a fast path.
 
-## Usage (automatic)
+## What it guarantees
 
-```bash
-# Invoked by the hook with the tool call JSON on stdin; exit 0 allow, 1 block:
-echo '<tool-call-json>' | python3 ~/.claude/ps-release-workflow/scripts/guard_check.py
-```
+Exactly two things:
 
-## What it does
+1. **No edits on the main checkout of an opted-in repo.** This keys off **filesystem
+   location, not branch name** — checking out a hotfix branch in the main checkout is
+   still blocked. Claim a feature and edit inside the worktree it creates.
+2. **Cross-machine claim safety.** A worktree claimed on another machine will not
+   accept edits here.
 
-1. Resolves the edit target's repo root (worktree pointers resolve to the main repo).
-2. Allows anything outside a ps-release-workflow repo, and all non-mutating tools (e.g. `Read`).
-3. **Blocks** edits on the main checkout of an opted-in repo.
-4. Inside `.claude/worktrees/`: reads `working-feature.json`; **blocks** if the marker's `owner` is not your `$CLAUDE_SESSION_ID`.
-5. Warns (but allows) on a marker-less legacy worktree.
-6. Bypasses entirely when `PS_RELEASE_WORKFLOW_SCRIPTED=1` (so the toolkit's own scripts can write).
+It does **not** provide per-session isolation between two Claude sessions on the same
+machine. It warns but allows on a marker-less legacy worktree, and allows the
+`_release` worktree silently.
 
 ## How to satisfy it
 
-- Don't edit on `main` — claim a feature first: `/ps-release-workflow:claim --next`, then edit inside the worktree it creates.
-- If blocked for owner mismatch, you are in someone else's worktree; claim your own.
+- Don't edit on `main` — claim a feature first: `psrw claim --next`, then edit inside
+  the worktree it creates.
+- Blocked for owner mismatch on **your own feature from a previous session**:
+  `psrw claim --resume F-NNN` (the F id is in the worktree's `working-feature.json`).
+- Otherwise it is someone else's worktree — pick different work: `psrw claim --next`.
 
-## Refuses if
+## Failure policy (fail-safe, never silent)
 
-- The target is on `main` of an opted-in repo.
-- The target is in a worktree whose `working-feature.json` owner is not the current `$CLAUDE_SESSION_ID`.
+Unparseable stdin → allow with a stderr warning. A crash after the target path is known
+→ **block** if the target sits under a workflow repo, otherwise allow with a warning. It
+never exits 1, which Claude Code would fail-open on silently.
+
+## Blocks if
+
+The target is on the main checkout of an opted-in repo, or in a worktree whose
+`working-feature.json` owner does not match this session.
+
+Rationale: `~/.claude/ps-release-workflow/docs/lifecycle.md#guard-guarantees`

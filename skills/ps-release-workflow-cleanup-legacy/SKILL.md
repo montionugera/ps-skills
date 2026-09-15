@@ -9,25 +9,29 @@ description: |
 
 # ps-release-workflow:cleanup-legacy
 
-Interactively garbage-collect marker-less ("legacy") worktrees.
+Interactively garbage-collect marker-less ("legacy") worktrees. One-off housekeeping.
 
-## Usage
+## Run
 
-```bash
-python3 ~/.claude/ps-release-workflow/scripts/cleanup_legacy_worktrees.py
-```
+There is no `psrw` verb for this yet — invoke the script directly:
+
+    python3 ~/.claude/ps-release-workflow/scripts/cleanup_legacy_worktrees.py
 
 ## What it does
 
-1. Scans `.claude/worktrees/` for worktree dirs that lack a `working-feature.json` marker (skips the long-lived `_release` worktree).
-2. For each, resolves the branch name and checks whether it is merged to `main`.
-3. Prints each legacy worktree with its branch and `merged to main` / `NOT merged` status.
-4. Prompts `[k]eep / [r]emove / [s]kip` per worktree; `r` runs `git worktree remove --force`.
+1. Scans `.claude/worktrees/` for dirs that lack a `working-feature.json` marker (skips
+   the long-lived `_release` worktree).
+2. Resolves each one's branch and checks whether it is merged to `main`.
+3. Prints each legacy worktree with its branch and `merged to main` / `NOT merged`.
+4. Prompts `[k]eep / [r]emove / [s]kip` per worktree; `r` runs
+   `git worktree remove --force`.
 
-## Hand-off
+## Then
 
-None — a one-off housekeeping command.
+Nothing — a one-off housekeeping command.
 
 ## Refuses if
 
-- Repo not opted into ps-release-workflow (no `.release.json`).
+Repo not opted into ps-release-workflow (no `.release.json`).
+
+Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#state-layout`
