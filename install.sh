@@ -175,12 +175,76 @@ configure_dispatch() {
 
   echo
   echo "============================================================"
-  echo " Multi-Agent Worker Setup (dispatch-worker)                "
+  echo " Multi-Agent Environment Discovery                          "
+  echo "============================================================"
+
+  # Auto-detect available CLI agents and models via python helper
+  local discovery_json
+  discovery_json=$(python3 - <<'PY'
+import json, os, shutil, subprocess
+
+data = {"agy": None, "codex": None, "cursor": None}
+
+if shutil.which("agy"):
+    try:
+        res = subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=3)
+        models = [line.split()[0] for line in res.stdout.splitlines() if line.strip() and not line.startswith("⠋") and not line.startswith("Fetching")]
+        data["agy"] = models[:4] if models else ["gemini-3.8-flash-high", "gemini-3.1-pro-high"]
+    except Exception:
+        data["agy"] = ["gemini-3.8-flash-high", "gemini-3.1-pro-high"]
+
+if shutil.which("codex"):
+    data["codex"] = ["gpt-5.6-terra"]
+
+cursor_bin = shutil.which("cursor-agent") or os.path.expanduser("~/.local/bin/cursor-agent")
+if os.path.exists(cursor_bin):
+    try:
+        res = subprocess.run([cursor_bin, "--list-models"], capture_output=True, text=True, timeout=3)
+        out = res.stdout.strip()
+        if "No models" not in out and out:
+            data["cursor"] = [line.strip() for line in out.splitlines() if line.strip()][:4]
+        else:
+            data["cursor"] = ["(installed; login via cursor-agent login)"]
+    except Exception:
+        data["cursor"] = ["(installed; login via cursor-agent login)"]
+
+print(json.dumps(data))
+PY
+)
+
+  local agy_model=""
+  local codex_model="gpt-5.6-terra"
+  local cursor_info=""
+
+  if [[ $(echo "$discovery_json" | python3 -c 'import sys, json; print(bool(json.load(sys.stdin).get("agy")))') == "True" ]]; then
+    agy_model=$(echo "$discovery_json" | python3 -c 'import sys, json; print(json.load(sys.stdin)["agy"][0])')
+    echo "  ✔ Antigravity CLI (agy): Available (detected model: $agy_model)"
+  else
+    echo "  ✖ Antigravity CLI (agy): Not found in PATH"
+  fi
+
+  if [[ $(echo "$discovery_json" | python3 -c 'import sys, json; print(bool(json.load(sys.stdin).get("codex")))') == "True" ]]; then
+    echo "  ✔ OpenAI Codex (codex):  Available (detected model: $codex_model)"
+  else
+    echo "  ✖ OpenAI Codex (codex):  Not found in PATH"
+  fi
+
+  if [[ $(echo "$discovery_json" | python3 -c 'import sys, json; print(bool(json.load(sys.stdin).get("cursor")))') == "True" ]]; then
+    cursor_info=$(echo "$discovery_json" | python3 -c 'import sys, json; print(json.load(sys.stdin)["cursor"][0])')
+    echo "  ✔ Cursor CLI (cursor):   Available ($cursor_info)"
+  else
+    echo "  ✖ Cursor CLI (cursor):   Not found in PATH"
+  fi
+
   echo "============================================================"
   echo "Choose your default routing preference chain:"
   echo "  1) auto [Default] (Dynamic runway across flat subscriptions: agy > codex)"
-  echo "  2) cursor:gemini-3.8-flash > agy > codex (Cursor Flash On-Demand first)"
-  echo "  3) cursor:gemini-3.8-flash > codex:gpt-5.6-terra"
+  if [[ -n "$agy_model" ]]; then
+    echo "  2) agy:$agy_model > codex:$codex_model (Auto-detected models: Fast Flash -> Terra)"
+  else
+    echo "  2) agy > codex:gpt-5.6-terra"
+  fi
+  echo "  3) cursor:gemini-3.8-flash > agy > codex (Cursor Flash On-Demand first)"
   echo "  4) agy > codex (Strict flat subscriptions only, zero on-demand)"
   echo "  5) Custom priority chain"
   echo "  6) Keep existing configuration / Skip"
@@ -196,10 +260,14 @@ configure_dispatch() {
       pref="auto"
       ;;
     2)
-      pref="cursor:gemini-3.8-flash > agy > codex"
+      if [[ -n "$agy_model" ]]; then
+        pref="agy:$agy_model > codex:$codex_model"
+      else
+        pref="agy > codex"
+      fi
       ;;
     3)
-      pref="cursor:gemini-3.8-flash > codex:gpt-5.6-terra"
+      pref="cursor:gemini-3.8-flash > agy > codex"
       ;;
     4)
       pref="agy > codex"
