@@ -4,7 +4,7 @@
 # threshold, force the agent to run the handoff skill (one-shot per session).
 #
 # Env overrides:
-#   CLAUDE_AUTO_HANDOFF_THRESHOLD   token threshold (default 150000)
+#   CLAUDE_AUTO_HANDOFF_THRESHOLD   token threshold (default 200000)
 #   CLAUDE_AUTO_HANDOFF=0           disable entirely
 
 import json
@@ -12,7 +12,7 @@ import os
 import pathlib
 import sys
 
-THRESHOLD = int(os.environ.get("CLAUDE_AUTO_HANDOFF_THRESHOLD", "150000"))
+THRESHOLD = int(os.environ.get("CLAUDE_AUTO_HANDOFF_THRESHOLD", "200000"))
 HANDOFF_SCRIPT = os.path.expanduser("~/.claude/skills/handoff/scripts/herdr-handoff.sh")
 
 

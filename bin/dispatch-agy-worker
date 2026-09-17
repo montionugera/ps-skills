@@ -1,0 +1,464 @@
+#!/usr/bin/env python3
+"""
+dispatch-worker / dispatch-agy-worker / dispatch-codex-worker
+Dispatch an implementation task to Antigravity CLI (agy) or Codex (gpt-5.6-terra)
+after verifying quota thresholds (5h > 30%, weekly > 10%).
+
+Exit Codes:
+  0: Task executed successfully by external agent
+  1: Task execution failed (or error in execution)
+  2: Invalid arguments / missing required task prompt
+  10: Insufficient quota (signals orchestrator to fall back to internal Claude subagent)
+"""
+
+import argparse
+import datetime
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+DEFAULT_AGY_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/agy-statusline.observation.json")
+DEFAULT_CODEX_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/codex-app-server.json")
+
+DEFAULT_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_MIN_5H_QUOTA", "30.0"))
+DEFAULT_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_MIN_WEEKLY_QUOTA", "10.0"))
+DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
+
+PROTECTED_CONFIG_PATTERNS = [
+    ".release.json",
+    ".git",
+    "working-feature.json",
+    "claims.json",
+]
+
+
+def detect_default_agent(prog_name):
+    base = os.path.basename(prog_name)
+    if "codex" in base:
+        return "codex"
+    if "agy" in base:
+        return "agy"
+    return "agy"
+
+
+def get_state_file(agent):
+    if agent == "codex":
+        return os.environ.get("CODEX_QUOTA_STATE_FILE", DEFAULT_CODEX_STATE)
+    return os.environ.get("AGY_QUOTA_STATE_FILE", DEFAULT_AGY_STATE)
+
+
+def _parse_resets_at(val):
+    """Parses resets_at value which could be unix timestamp (int/float) or ISO 8601 string."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val)
+        except ValueError:
+            pass
+        try:
+            # Parse ISO 8601 format like "2026-09-17T20:23:50Z"
+            dt = datetime.datetime.fromisoformat(val.replace("Z", "+00:00"))
+            return dt.timestamp()
+        except Exception:
+            return None
+    return None
+
+
+def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, current_time=None):
+    # Support positional state_file path for backwards compatibility
+    if isinstance(agent, str) and ("/" in agent or "\\" in agent or agent.endswith(".json")) and state_file is None:
+        state_file = agent
+        agent = "agy"
+
+    target_file = state_file or get_state_file(agent)
+    if not os.path.exists(target_file):
+        return False, 0.0, 0.0, f"Quota state file not found at {target_file}"
+
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return False, 0.0, 0.0, f"Failed to parse quota state for {agent}: {e}"
+
+    if current_time is None:
+        current_time = time.time()
+
+    # Both agy and codex observations have windows either at top level or under snapshot
+    windows = data.get("windows") or data.get("snapshot", {}).get("windows") or []
+    rem_5h = None
+    rem_weekly = None
+    for w in windows:
+        if w.get("kind") == "five_hour":
+            rem_val = float(w.get("remaining_percent", 0.0))
+            resets_at_ts = _parse_resets_at(w.get("resets_at"))
+            if resets_at_ts is not None and current_time > resets_at_ts:
+                rem_val = 100.0
+            rem_5h = rem_val
+        elif w.get("kind") == "weekly":
+            rem_val = float(w.get("remaining_percent", 0.0))
+            resets_at_ts = _parse_resets_at(w.get("resets_at"))
+            if resets_at_ts is not None and current_time > resets_at_ts:
+                rem_val = 100.0
+            rem_weekly = rem_val
+
+    # Fallback to payload.quota (Gemini structure) if snapshot windows missing
+    if rem_5h is None or rem_weekly is None:
+        quota = data.get("payload", {}).get("quota", {})
+        if rem_5h is None and "gemini-5h" in quota:
+            g5 = quota["gemini-5h"]
+            rem_val = float(g5.get("remaining_fraction", 0.0)) * 100.0
+            resets_at_ts = _parse_resets_at(g5.get("reset_time") or g5.get("resets_at"))
+            if resets_at_ts is not None and current_time > resets_at_ts:
+                rem_val = 100.0
+            rem_5h = rem_val
+        if rem_weekly is None and "gemini-weekly" in quota:
+            gw = quota["gemini-weekly"]
+            rem_val = float(gw.get("remaining_fraction", 0.0)) * 100.0
+            resets_at_ts = _parse_resets_at(gw.get("reset_time") or gw.get("resets_at"))
+            if resets_at_ts is not None and current_time > resets_at_ts:
+                rem_val = 100.0
+            rem_weekly = rem_val
+
+    if rem_5h is None or rem_weekly is None:
+        return False, 0.0, 0.0, f"Could not locate 5h or weekly window in {target_file}"
+
+    eligible = (rem_5h >= min_5h) and (rem_weekly >= min_weekly)
+    stale_suffix = ""
+    try:
+        mtime = os.path.getmtime(target_file)
+        age_minutes = int((current_time - mtime) / 60)
+        if age_minutes > 60:
+            stale_suffix = f" [stale: observation {age_minutes}m old]"
+    except Exception:
+        pass
+
+    msg = f"[{agent.upper()}] 5h: {rem_5h:.1f}% (min {min_5h:.1f}%), Weekly: {rem_weekly:.1f}% (min {min_weekly:.1f}%){stale_suffix}"
+    return eligible, rem_5h, rem_weekly, msg
+
+
+def calculate_runway(rem_5h, rem_weekly, min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY):
+    """Calculates runway score = min(5h_remaining - min_5h, weekly_remaining - min_weekly)"""
+    return min(rem_5h - min_5h, rem_weekly - min_weekly)
+
+
+def route_best_agent(min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, agy_state_file=None, codex_state_file=None, current_time=None):
+    """
+    Evaluates both agy and codex runway scores.
+    runway = min(5h_remaining - min_5h, weekly_remaining - min_weekly)
+    Picks the agent with the higher runway score.
+    Returns: (chosen_agent, eligible, rem_5h, rem_weekly, msg)
+    If both runway scores are negative, eligible is False.
+    """
+    el_a, r5_a, rw_a, msg_a = check_quota("agy", agy_state_file, min_5h, min_weekly, current_time=current_time)
+    el_c, r5_c, rw_c, msg_c = check_quota("codex", codex_state_file, min_5h, min_weekly, current_time=current_time)
+
+    runway_a = calculate_runway(r5_a, rw_a, min_5h, min_weekly) if (r5_a is not None and rw_a is not None) else float("-inf")
+    runway_c = calculate_runway(r5_c, rw_c, min_5h, min_weekly) if (r5_c is not None and rw_c is not None) else float("-inf")
+
+    if runway_a < 0 and runway_c < 0:
+        msg = f"Auto routing failed (insufficient runway): agy runway={runway_a:.1f} ({msg_a}) | codex runway={runway_c:.1f} ({msg_c})"
+        # Return higher of the two or agy by default
+        if runway_c > runway_a:
+            return "codex", False, r5_c, rw_c, msg
+        return "agy", False, r5_a, rw_a, msg
+
+    if runway_a >= runway_c:
+        msg = f"{msg_a} (runway: {runway_a:.1f} vs codex {runway_c:.1f})"
+        return "agy", True, r5_a, rw_a, msg
+    else:
+        msg = f"{msg_c} (runway: {runway_c:.1f} vs agy {runway_a:.1f})"
+        return "codex", True, r5_c, rw_c, msg
+
+
+def wrap_prompt_contract(task_prompt):
+    """
+    Wraps task prompt with standard standing rules:
+    - Test-Driven Development (TDD)
+    - Make new commits only (never git commit --amend)
+    - Preserve protected config files
+    """
+    contract_header = (
+        "Standing Rules & Prompt Contract:\n"
+        "1. Test-Driven Development (TDD): Write tests first (RED), implement functionality (GREEN), then refactor.\n"
+        "2. Make new commits only: Never git commit --amend. Always create fresh commits to keep git history honest.\n"
+        "3. Preserve protected config files: Do NOT overwrite or delete protected configuration files "
+        "(.release.json, working-feature.json, claims.json, or git internal state).\n"
+        "4. Evidence before assertions: Verify all changes by running unit tests or build commands before declaring completion.\n"
+        "\n"
+        "Task Brief:\n"
+    )
+    return f"{contract_header}{task_prompt.strip()}"
+
+
+def execute_in_isolated_worktree(base_repo_dir, execute_fn):
+    """
+    Executes a callback inside a temporary git worktree:
+    1. Cuts a temporary worktree via `git worktree add /tmp/worker-... HEAD`
+    2. Runs execute_fn(worktree_dir)
+    3. Merges/applies changes back on success
+    4. Always removes the worktree in a finally block
+    """
+    temp_worktree_dir = tempfile.mkdtemp(prefix="worker-", dir="/tmp")
+    # mkdtemp creates the directory, but `git worktree add <path>` requires the path to not exist or be an empty dir
+    # removing the dir so `git worktree add` can create it cleanly
+    try:
+        os.rmdir(temp_worktree_dir)
+    except OSError:
+        pass
+
+    try:
+        # Create worktree off current HEAD
+        add_res = subprocess.run(
+            ["git", "worktree", "add", "--detach", temp_worktree_dir, "HEAD"],
+            cwd=base_repo_dir,
+            capture_output=True,
+            text=True,
+        )
+        if add_res.returncode != 0:
+            raise RuntimeError(f"Failed to create git worktree at {temp_worktree_dir}: {add_res.stderr.strip()}")
+
+        exit_code, stdout, stderr, files_changed, diff_summary = execute_fn(temp_worktree_dir)
+
+        if exit_code == 0:
+            # Check if there are committed or uncommitted changes in the worktree
+            status_res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=temp_worktree_dir,
+                capture_output=True,
+                text=True,
+            )
+            uncommitted = bool(status_res.stdout.strip())
+
+            # Check if there are new commits in worktree compared to base HEAD
+            diff_commits_res = subprocess.run(
+                ["git", "rev-list", "HEAD..HEAD@{upstream}" if False else "HEAD", "--not"],
+                cwd=temp_worktree_dir,
+                capture_output=True,
+                text=True,
+            )
+
+            # Generate diff of all changes against base HEAD
+            base_head_rev = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=base_repo_dir,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            diff_patch_res = subprocess.run(
+                ["git", "diff", base_head_rev],
+                cwd=temp_worktree_dir,
+                capture_output=True,
+                text=True,
+            )
+            patch_content = diff_patch_res.stdout
+
+            # Also check untracked files
+            untracked_res = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=temp_worktree_dir,
+                capture_output=True,
+                text=True,
+            )
+            untracked_files = [line.strip() for line in untracked_res.stdout.splitlines() if line.strip()]
+
+            # Apply patch if non-empty
+            if patch_content.strip():
+                apply_res = subprocess.run(
+                    ["git", "apply", "--whitespace=nowarn", "-"],
+                    input=patch_content,
+                    cwd=base_repo_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                if apply_res.returncode != 0:
+                    backup_patch = f"/tmp/worker-conflict-{int(time.time())}.patch"
+                    try:
+                        with open(backup_patch, "w", encoding="utf-8") as f:
+                            f.write(patch_content)
+                        print(f"Warning: git apply failed back to base repo: {apply_res.stderr.strip()}", file=sys.stderr)
+                        print(f"Preserved unapplied worktree patch at: {backup_patch}", file=sys.stderr)
+                    except Exception as err:
+                        print(f"Warning: git apply failed ({apply_res.stderr.strip()}) and could not write backup patch: {err}", file=sys.stderr)
+
+            # Copy any untracked new files created in the worktree back to base_repo_dir
+            for rel_file in untracked_files:
+                src_path = Path(temp_worktree_dir) / rel_file
+                dst_path = Path(base_repo_dir) / rel_file
+                if src_path.is_file():
+                    dst_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_path, dst_path)
+
+        return exit_code, stdout, stderr, files_changed, diff_summary
+
+    finally:
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", temp_worktree_dir],
+            cwd=base_repo_dir,
+            capture_output=True,
+            text=True,
+        )
+        if os.path.exists(temp_worktree_dir):
+            shutil.rmtree(temp_worktree_dir, ignore_errors=True)
+
+
+def format_report(agent, status, exit_code, cwd, files_changed, diff_summary, tail_output):
+    """Formats a concise <= 15 line report for thin orchestrators."""
+    lines = [
+        f"=== {agent.upper()} SUBAGENT REPORT ===",
+        f"Status: {status} (exit {exit_code})",
+        f"Directory: {cwd}",
+        f"Files Modified: {files_changed} ({diff_summary})",
+        "Last Output:",
+    ]
+    out_lines = [line for line in tail_output.splitlines() if line.strip()]
+    if not out_lines:
+        lines.append("(no output)")
+    else:
+        lines.extend(out_lines[-6:])
+    lines.append("===========================")
+    return "\n".join(lines[:15])
+
+
+def main():
+    default_agent = detect_default_agent(sys.argv[0])
+
+    parser = argparse.ArgumentParser(description="Dispatch task to Antigravity CLI or Codex with quota check.")
+    parser.add_argument("--agent", choices=["agy", "codex", "auto"], default=default_agent,
+                        help=f"External agent to dispatch to (default: {default_agent})")
+    parser.add_argument("--model", type=str, default=None,
+                        help=f"Model override (for codex, defaults to {DEFAULT_CODEX_MODEL})")
+    parser.add_argument("--check-quota", action="store_true", help="Check quota and exit (0=healthy, 1=low/error)")
+    parser.add_argument("--task", type=str, help="Task prompt for external worker")
+    parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
+    parser.add_argument("--min-5h", type=float, default=DEFAULT_MIN_5H, help="Minimum 5h quota remaining percent")
+    parser.add_argument("--min-weekly", type=float, default=DEFAULT_MIN_WEEKLY, help="Minimum weekly quota remaining percent")
+    parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds for execution")
+    parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
+    parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
+    parser.add_argument("--isolated", action="store_true", help="Execute inside a temporary isolated git worktree")
+
+    args = parser.parse_args()
+
+    chosen_agent = args.agent
+
+    if chosen_agent == "auto":
+        chosen_agent, eligible, rem_5h, rem_weekly, msg = route_best_agent(
+            min_5h=args.min_5h,
+            min_weekly=args.min_weekly,
+            agy_state_file=args.state_file if default_agent == "agy" else None,
+            codex_state_file=args.state_file if default_agent == "codex" else None,
+        )
+    else:
+        eligible, rem_5h, rem_weekly, msg = check_quota(chosen_agent, args.state_file, args.min_5h, args.min_weekly)
+
+    if args.check_quota:
+        if eligible:
+            print(f"OK: {msg}")
+            sys.exit(0)
+        else:
+            print(f"QUOTA_LOW: {msg}")
+            sys.exit(1)
+
+    if not args.task:
+        parser.print_help(file=sys.stderr)
+        sys.exit(2)
+
+    if not eligible:
+        print(f"FALLBACK_INTERNAL: Quota insufficient ({msg}).")
+        sys.exit(10)  # exit code 10 signals fallback to Claude internal subagent
+
+    cwd = os.path.abspath(args.cwd)
+    model_info = ""
+    if chosen_agent == "codex":
+        model = args.model or DEFAULT_CODEX_MODEL
+        model_info = f" with {model}"
+    elif args.model:
+        model_info = f" with {args.model}"
+
+    wrapped_task = wrap_prompt_contract(args.task)
+
+    if args.dry_run:
+        iso_str = " [isolated worktree]" if args.isolated else ""
+        print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch to {chosen_agent}{model_info} in {cwd}{iso_str}.")
+        sys.exit(0)
+
+    print(f"Dispatching to {chosen_agent.upper()}{model_info} in {cwd} ({msg})...")
+
+    def run_worker_in_target(target_dir):
+        if chosen_agent == "codex":
+            model = args.model or DEFAULT_CODEX_MODEL
+            cmd = [
+                "codex", "exec",
+                "-c", f"model=\"{model}\"",
+                "--dangerously-bypass-approvals-and-sandbox",
+                wrapped_task
+            ]
+        else:  # agy
+            cmd = ["agy", "-p", wrapped_task, "--dangerously-skip-permissions"]
+            if args.model:
+                cmd.extend(["--model", args.model])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=target_dir,
+                capture_output=True,
+                text=True,
+                timeout=args.timeout,
+            )
+            exit_code = proc.returncode
+            stdout = proc.stdout.strip()
+            stderr = proc.stderr.strip()
+        except subprocess.TimeoutExpired:
+            return 1, "", f"FAILED: {chosen_agent} timed out after {args.timeout}s.", 0, "timeout"
+        except Exception as e:
+            return 1, "", f"FAILED: error launching {chosen_agent}: {e}", 0, str(e)
+
+        # Check git changes in target_dir
+        git_status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        files_changed = len(git_status.splitlines()) if git_status else 0
+
+        diff_stat = subprocess.run(
+            ["git", "diff", "--stat"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        diff_summary = diff_stat.splitlines()[-1] if diff_stat else "no git diff"
+
+        return exit_code, stdout, stderr, files_changed, diff_summary
+
+    if args.isolated:
+        try:
+            exit_code, stdout, stderr, files_changed, diff_summary = execute_in_isolated_worktree(cwd, run_worker_in_target)
+        except Exception as e:
+            print(f"FAILED: isolated execution error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        exit_code, stdout, stderr, files_changed, diff_summary = run_worker_in_target(cwd)
+
+    status = "SUCCESS" if exit_code == 0 else "FAILED"
+    tail_output = stdout if stdout else (stderr or "none")
+    report = format_report(chosen_agent, status, exit_code, cwd, files_changed, diff_summary, tail_output)
+    print(report)
+
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()

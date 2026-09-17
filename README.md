@@ -24,6 +24,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **ps-release-workflow-status** | Read-only one-screen report of the release, features, claims, and what to do next. |
 | **ps-release-workflow-unclaim** | Abandon a claimed feature: remove its worktree and clear the claim (keeps the branch). |
 | **handoff** | Compact the session into an action-first handoff doc and spawn a fresh agent tab in Herdr; ships an optional Stop hook (`hooks/auto-handoff-stop.py`) that triggers it when context grows large. |
+| **agy-worker** | Offloads coding tasks to Antigravity CLI (`agy`) or Codex (`gpt-5.6-terra`) with proactive quota checking (`>30%` 5h, `>10%` weekly), auto-routing, fallback to Claude Sonnet, and standard ≤15-line reports. Binaries: `dispatch-agy-worker`, `dispatch-codex-worker`, `dispatch-worker`. |
 
 The thirteen `ps-release-workflow-*` skills are thin wrappers over a shared Python engine
 ([`engine/ps-release-workflow`](engine/ps-release-workflow)) — they call its scripts at runtime, so the
@@ -46,22 +47,50 @@ ps-skills/
 
 ## Install
 
-Requires a [Claude Code](https://claude.com/claude-code) setup with a `~/.claude` directory.
+Requires a [Claude Code](https://claude.com/claude-code), Codex, or [Google Antigravity](https://github.com/google-gemini) setup.
 
 ```bash
 git clone https://github.com/montionugera/ps-skills.git
 cd ps-skills
-./install.sh           # symlink skills into ~/.claude (edits in the repo go live)
+./install.sh           # symlink skills into ~/.claude, ~/.agents, and ~/.gemini/config
+# or
+./install.sh --parity  # reconcile full parity: mirror Claude skills into Gemini & archive junk
 # or
 ./install.sh --copy    # copy a snapshot instead of symlinking
 ```
 
-Then restart your Claude Code session so the new skills are discovered.
+Then restart your agent session so the new skills are discovered.
 
 - `ps-commu-explain` is self-contained and works immediately.
 - `ps-release-workflow-*` use the engine installed at `~/.claude/ps-release-workflow`.
+- `dispatch-worker` / `dispatch-agy-worker` / `dispatch-codex-worker` are linked into `~/.local/bin/`.
+- `ps-plugin-bridge` is linked into `~/.local/bin/` to bridge Claude plugins to Antigravity CLI.
 
 Install into a non-default Claude home with `CLAUDE_HOME=/path ./install.sh`.
+
+## Multi-Agent External Fan-out (`dispatch-worker`)
+
+Offload token-heavy code editing and test cycles from Claude to external coding CLIs (Antigravity CLI or OpenAI Codex `gpt-5.6-terra`) with quota guarding (`5h > 30%`, `weekly > 10%`) and automated fallback to Claude internal subagents:
+
+```bash
+# Check quota and runway across providers
+dispatch-worker --agent auto --check-quota
+
+# Dispatch task with auto-routing to highest runway
+dispatch-worker --agent auto --task "Write unit test and implement feature"
+
+# Run in an isolated temporary git worktree
+dispatch-worker --agent auto --isolated --task "Refactor module X"
+```
+
+## Plugin Bridge (`ps-plugin-bridge`)
+
+Bridge Claude plugins (e.g. `superpowers`, `ecc`, `frontend-design`, `claude-obsidian`) directly into Google Antigravity CLI (`~/.gemini/config/plugins`):
+
+```bash
+ps-plugin-bridge --sync   # bridge and validate all installed Claude plugins into Antigravity
+ps-plugin-bridge --list   # inspect bridged plugins and validation status
+```
 
 ## Keeping in sync
 

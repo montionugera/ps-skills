@@ -18,7 +18,7 @@ The **Handoff** skill solves this by:
 
 `hooks/auto-handoff-stop.py` is a Claude Code **Stop hook**. After each turn it reads the transcript's last `usage` block (input + cache tokens); once context reaches the threshold it blocks the stop and instructs the agent to run this skill end to end (doc → `herdr-handoff.sh --kind claude --mode <code|plan>`). One-shot per session (flag file `/tmp/claude-auto-handoff-<session_id>.flag`).
 
-- Threshold: `CLAUDE_AUTO_HANDOFF_THRESHOLD` (default `150000`). Disable: `CLAUDE_AUTO_HANDOFF=0`.
+- Threshold: `CLAUDE_AUTO_HANDOFF_THRESHOLD` (default `200000`). Disable: `CLAUDE_AUTO_HANDOFF=0`.
 - Install on a new machine:
   ```bash
   ln -s ~/.claude/skills/handoff/hooks/auto-handoff-stop.py ~/.claude/hooks/auto-handoff-stop.py

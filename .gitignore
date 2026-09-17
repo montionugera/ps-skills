@@ -23,3 +23,8 @@ engine/ps-release-workflow/docs/superpowers/
 
 # ps-skills-sync state
 .sync/
+
+# Local cache & patches
+graft/
+*.patch
+
