@@ -620,8 +620,8 @@ id="toc-the-static-baseline-decomposed">The static baseline,
 decomposed</a></li>
 <li><a href="#ranked-optimizations" id="toc-ranked-optimizations">Ranked
 optimizations</a></li>
-<li><a href="#what-was-not-resolved" id="toc-what-was-not-resolved">What
-was NOT resolved</a></li>
+<li><a href="#filed-not-chased" id="toc-filed-not-chased">Filed, not
+chased</a></li>
 </ul></li>
 </ul>
 </nav>
@@ -1107,17 +1107,108 @@ stated rule that would have prevented it lives in prose rather than in
 config. Fixing the enforcement layer (rule 11) is what makes the saving
 stick.</p>
 </div>
-<h2 id="what-was-not-resolved">What was NOT resolved</h2>
+<h3 id="the-mcp-picture-resolved-both-blind-spots-closed">The MCP
+picture, resolved <span class="topic-chip">both blind spots
+closed</span></h3>
+<p>Both unknowns from the first pass are now settled, and both were
+smaller than feared.</p>
+<p><strong><code>coplay-mcp</code> and <code>blender</code> were already
+gone.</strong> Neither appears in any live config; the only reference is
+<code>~/.claude.json</code> →
+<code>.projects["…/quant"].disabledMcpServers</code>. They are present
+in <em>this</em> session only because its process (started 2026-09-15)
+predates their removal — two Sep-17 sessions spawn neither. <strong>The
+~2,400-token MCP saving was already banked before this work
+started</strong>, which is also why the transcript-derived baseline
+slightly overstates what a new session actually pays.</p>
+<p><strong><code>obsidian-vault</code>: 13 tools, 5,537 bytes, ~1,496
+tokens</strong> — measured by a real MCP <code>initialize</code> +
+<code>tools/list</code> handshake, not estimated. But it has
+<strong>zero calls in any transcript</strong> and is probably not
+loading at all: <code>claude mcp list</code> cannot see it, which
+suggests Claude Code does not honor <code>mcpServers</code> in
+<code>settings.json</code>. Do not budget 1,496 tokens against it
+without a fresh-session check.</p>
+<h4 id="verified-mcp-control-mechanisms">Verified MCP control
+mechanisms</h4>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Need</th>
+<th>Mechanism</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Disable a local/stdio server</td>
+<td><code>~/.claude.json</code> →
+<code>.projects["&lt;cwd&gt;"].disabledMcpServers</code> (per-project;
+written by the <code>/mcp</code> toggle)</td>
+</tr>
+<tr>
+<td>claude.ai connectors</td>
+<td><strong>Opt-in</strong>, not opt-out:
+<code>.projects["&lt;cwd&gt;"].enabledMcpServers</code></td>
+</tr>
+<tr>
+<td>Kill all 7 connectors at once</td>
+<td><code>disableClaudeAiConnectors: true</code> in settings, or
+<code>ENABLE_CLAUDEAI_MCP_SERVERS=0</code></td>
+</tr>
+<tr>
+<td>Remove permanently</td>
+<td><code>claude mcp remove &lt;name&gt;</code> — there is no
+enable/disable subcommand</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Real MCP usage across all 261 transcripts:</strong>
+<code>claude-in-chrome</code> <strong>1,425</strong> ·
+<code>graft</code> <strong>50</strong> · <code>Claude_Docs</code>
+<strong>42</strong> · <code>Notion</code> <strong>6</strong> ·
+<code>Context7</code> <strong>5</strong> · <code>Slack</code>
+<strong>1</strong> · <strong>everything else 0</strong> — including
+Gmail, Google Drive, and Google Calendar.</p>
+<div class="callout warn">
+<p><strong>Deliberately NOT done:</strong> the global connector kill
+switch would save the most in one line, but it is all-or-nothing and
+would take out <code>Claude_Docs</code> (42 calls) and
+<code>Context7</code> (5) along with the dead weight. The per-project
+<code>disabledMcpServers</code> route only helps one directory at a
+time. Cutting the four zero-use Google/Slack connectors globally is not
+currently expressible in config — worth raising upstream rather than
+hacking around.</p>
+</div>
+<h2 id="filed-not-chased">Filed, not chased</h2>
+<p>One-line findings discovered during this work, deliberately not
+pursued (rule 4):</p>
 <ul>
-<li>The <code>obsidian-vault</code> MCP server’s schemas are
-<strong>not</strong> deferred — loaded in full every session — but the
-schema text could not be located on disk. Unmeasured, likely
-non-trivial.</li>
-<li><code>coplay-mcp</code> and <code>blender</code> are live in this
-session with <strong>no local config block</strong>
-(<code>mcpServers</code> is <code>{}</code>). They are account-level
-connectors, so disabling them happens in connector settings /
-<code>/mcp</code>, not in a repo file.</li>
+<li><strong>The mermaid validator in <code>render-spec-md.sh</code>
+reports false failures.</strong> <code>mmdc</code> cannot find its
+Chrome binary, so it exits non-zero on <em>every</em> diagram and every
+rendered doc is labelled “broken”. Diagrams still render client-side.
+Fix:
+<code>npx puppeteer browsers install chrome-headless-shell</code>.</li>
+<li><strong>Deferred MCP tool names are re-serialized into every
+transcript turn</strong> — <code>coplay-mcp</code> tool names appear
+355,990 times as raw text across transcripts, Gmail 108,516. Long-lived
+stale sessions pay for servers they never call.</li>
+<li><strong>85 handoff docs (495 KB) accumulate in
+<code>/tmp</code></strong> over ~6 days with no cleanup sweep.</li>
+<li><strong>The <code>ecc</code> marketplace is mirrored twice on
+disk</strong> (<code>plugins/marketplaces/ecc/</code> and
+<code>plugins/cache/ecc/</code>, 15.2 MB, 89% of the whole
+<code>SKILL.md</code> corpus) while disabled and contributing nothing.
+Disk hygiene only — zero context cost.</li>
+<li><strong><code>~/.claude/commands/</code> holds 14 slash commands
+with ~1 total invocation</strong> between them (<code>vault</code>,
+<code>log</code>, <code>capture</code>, <code>checkpoint</code>,
+<code>retro</code>, …). Small roster cost; left alone as
+author-owned.</li>
 </ul>
 </body>
 </html>

@@ -191,7 +191,58 @@ The `CLAUDE.md` split is the cleanest win: much of its 29 KB is *narrative about
 <strong>The pattern across all three tiers:</strong> every real cost here is a payload the harness re-processes on every turn, and every stated rule that would have prevented it lives in prose rather than in config. Fixing the enforcement layer (rule 11) is what makes the saving stick.
 </div>
 
-## What was NOT resolved
+### The MCP picture, resolved <span class="topic-chip">both blind spots closed</span>
 
-- The `obsidian-vault` MCP server's schemas are **not** deferred — loaded in full every session — but the schema text could not be located on disk. Unmeasured, likely non-trivial.
-- `coplay-mcp` and `blender` are live in this session with **no local config block** (`mcpServers` is `{}`). They are account-level connectors, so disabling them happens in connector settings / `/mcp`, not in a repo file.
+Both unknowns from the first pass are now settled, and both were smaller than feared.
+
+**`coplay-mcp` and `blender` were already gone.** Neither appears in any live config; the only
+reference is `~/.claude.json` → `.projects["…/quant"].disabledMcpServers`. They are present in
+*this* session only because its process (started 2026-09-15) predates their removal — two
+Sep-17 sessions spawn neither. **The ~2,400-token MCP saving was already banked before this work
+started**, which is also why the transcript-derived baseline slightly overstates what a new
+session actually pays.
+
+**`obsidian-vault`: 13 tools, 5,537 bytes, ~1,496 tokens** — measured by a real MCP
+`initialize` + `tools/list` handshake, not estimated. But it has **zero calls in any transcript**
+and is probably not loading at all: `claude mcp list` cannot see it, which suggests Claude Code
+does not honor `mcpServers` in `settings.json`. Do not budget 1,496 tokens against it without a
+fresh-session check.
+
+#### Verified MCP control mechanisms
+
+| Need | Mechanism |
+|---|---|
+| Disable a local/stdio server | `~/.claude.json` → `.projects["<cwd>"].disabledMcpServers` (per-project; written by the `/mcp` toggle) |
+| claude.ai connectors | **Opt-in**, not opt-out: `.projects["<cwd>"].enabledMcpServers` |
+| Kill all 7 connectors at once | `disableClaudeAiConnectors: true` in settings, or `ENABLE_CLAUDEAI_MCP_SERVERS=0` |
+| Remove permanently | `claude mcp remove <name>` — there is no enable/disable subcommand |
+
+**Real MCP usage across all 261 transcripts:** `claude-in-chrome` **1,425** · `graft` **50** ·
+`Claude_Docs` **42** · `Notion` **6** · `Context7` **5** · `Slack` **1** · **everything else 0** —
+including Gmail, Google Drive, and Google Calendar.
+
+<div class="callout warn">
+<strong>Deliberately NOT done:</strong> the global connector kill switch would save the most in one
+line, but it is all-or-nothing and would take out <code>Claude_Docs</code> (42 calls) and
+<code>Context7</code> (5) along with the dead weight. The per-project <code>disabledMcpServers</code>
+route only helps one directory at a time. Cutting the four zero-use Google/Slack connectors
+globally is not currently expressible in config — worth raising upstream rather than hacking around.
+</div>
+
+## Filed, not chased
+
+One-line findings discovered during this work, deliberately not pursued (rule 4):
+
+- **The mermaid validator in `render-spec-md.sh` reports false failures.** `mmdc` cannot find its
+  Chrome binary, so it exits non-zero on *every* diagram and every rendered doc is labelled
+  "broken". Diagrams still render client-side. Fix: `npx puppeteer browsers install chrome-headless-shell`.
+- **Deferred MCP tool names are re-serialized into every transcript turn** — `coplay-mcp` tool
+  names appear 355,990 times as raw text across transcripts, Gmail 108,516. Long-lived stale
+  sessions pay for servers they never call.
+- **85 handoff docs (495 KB) accumulate in `/tmp`** over ~6 days with no cleanup sweep.
+- **The `ecc` marketplace is mirrored twice on disk** (`plugins/marketplaces/ecc/` and
+  `plugins/cache/ecc/`, 15.2 MB, 89% of the whole `SKILL.md` corpus) while disabled and
+  contributing nothing. Disk hygiene only — zero context cost.
+- **`~/.claude/commands/` holds 14 slash commands with ~1 total invocation** between them
+  (`vault`, `log`, `capture`, `checkpoint`, `retro`, …). Small roster cost; left alone as
+  author-owned.
