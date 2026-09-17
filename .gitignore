@@ -28,3 +28,6 @@ engine/ps-release-workflow/docs/superpowers/
 graft/
 *.patch
 
+# ps-release-workflow (gitignored state)
+.claude/state/
+.claude/worktrees/
