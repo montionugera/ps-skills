@@ -347,24 +347,6 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
         exit_code, stdout, stderr, files_changed, diff_summary = execute_fn(temp_worktree_dir)
 
         if exit_code == 0:
-            # Check if there are committed or uncommitted changes in the worktree
-            status_res = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=temp_worktree_dir,
-                capture_output=True,
-                text=True,
-            )
-            uncommitted = bool(status_res.stdout.strip())
-
-            # Check if there are new commits in worktree compared to base HEAD
-            diff_commits_res = subprocess.run(
-                ["git", "rev-list", "HEAD..HEAD@{upstream}" if False else "HEAD", "--not"],
-                cwd=temp_worktree_dir,
-                capture_output=True,
-                text=True,
-            )
-
-            # Generate diff of all changes against base HEAD
             base_head_rev = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=base_repo_dir,
@@ -372,15 +354,70 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
                 text=True,
             ).stdout.strip()
 
-            diff_patch_res = subprocess.run(
-                ["git", "diff", base_head_rev],
+            worktree_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=temp_worktree_dir,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            # 1. If worktree created new commits, attempt fast-forward merge into base_repo_dir
+            merged_commits = False
+            if worktree_head and worktree_head != base_head_rev:
+                merge_res = subprocess.run(
+                    ["git", "merge", "--ff-only", worktree_head],
+                    cwd=base_repo_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                if merge_res.returncode == 0:
+                    merged_commits = True
+
+            # 2. If commits were not merged, apply all committed changes as patch
+            if not merged_commits and worktree_head and worktree_head != base_head_rev:
+                diff_patch_res = subprocess.run(
+                    ["git", "diff", f"{base_head_rev}..{worktree_head}"],
+                    cwd=temp_worktree_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                commit_patch = diff_patch_res.stdout
+                if commit_patch.strip():
+                    apply_res = subprocess.run(
+                        ["git", "apply", "--whitespace=nowarn", "-"],
+                        input=commit_patch,
+                        cwd=base_repo_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if apply_res.returncode != 0:
+                        backup_patch = f"/tmp/worker-conflict-{int(time.time())}.patch"
+                        try:
+                            with open(backup_patch, "w", encoding="utf-8") as f:
+                                f.write(commit_patch)
+                            print(f"Warning: git apply failed back to base repo: {apply_res.stderr.strip()}", file=sys.stderr)
+                            print(f"Preserved unapplied worktree patch at: {backup_patch}", file=sys.stderr)
+                        except Exception:
+                            pass
+
+            # 3. Apply any uncommitted working tree changes from worktree
+            wt_diff_res = subprocess.run(
+                ["git", "diff", "HEAD"],
                 cwd=temp_worktree_dir,
                 capture_output=True,
                 text=True,
             )
-            patch_content = diff_patch_res.stdout
+            uncommitted_patch = wt_diff_res.stdout
+            if uncommitted_patch.strip():
+                subprocess.run(
+                    ["git", "apply", "--whitespace=nowarn", "-"],
+                    input=uncommitted_patch,
+                    cwd=base_repo_dir,
+                    capture_output=True,
+                    text=True,
+                )
 
-            # Also check untracked files
+            # 4. Copy untracked files
             untracked_res = subprocess.run(
                 ["git", "ls-files", "--others", "--exclude-standard"],
                 cwd=temp_worktree_dir,
@@ -388,27 +425,6 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
                 text=True,
             )
             untracked_files = [line.strip() for line in untracked_res.stdout.splitlines() if line.strip()]
-
-            # Apply patch if non-empty
-            if patch_content.strip():
-                apply_res = subprocess.run(
-                    ["git", "apply", "--whitespace=nowarn", "-"],
-                    input=patch_content,
-                    cwd=base_repo_dir,
-                    capture_output=True,
-                    text=True,
-                )
-                if apply_res.returncode != 0:
-                    backup_patch = f"/tmp/worker-conflict-{int(time.time())}.patch"
-                    try:
-                        with open(backup_patch, "w", encoding="utf-8") as f:
-                            f.write(patch_content)
-                        print(f"Warning: git apply failed back to base repo: {apply_res.stderr.strip()}", file=sys.stderr)
-                        print(f"Preserved unapplied worktree patch at: {backup_patch}", file=sys.stderr)
-                    except Exception as err:
-                        print(f"Warning: git apply failed ({apply_res.stderr.strip()}) and could not write backup patch: {err}", file=sys.stderr)
-
-            # Copy any untracked new files created in the worktree back to base_repo_dir
             for rel_file in untracked_files:
                 src_path = Path(temp_worktree_dir) / rel_file
                 dst_path = Path(base_repo_dir) / rel_file
@@ -580,6 +596,13 @@ def main():
     print(f"Dispatching to {chosen_agent.upper()}{model_info} in {cwd} ({msg})...")
 
     def run_worker_in_target(target_dir):
+        initial_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
         if chosen_agent == "codex":
             model = chosen_model or args.model or DEFAULT_CODEX_MODEL
             cmd = [
@@ -595,7 +618,7 @@ def main():
                 cmd.extend(["--model", model])
             cmd.append(wrapped_task)
         else:  # agy
-            cmd = ["agy", "-p", wrapped_task, "--dangerously-skip-permissions"]
+            cmd = ["agy", "--add-dir", target_dir, "-p", wrapped_task, "--dangerously-skip-permissions"]
             model = chosen_model or args.model
             if model:
                 cmd.extend(["--model", model])
@@ -616,22 +639,29 @@ def main():
         except Exception as e:
             return 1, "", f"FAILED: error launching {chosen_agent}: {e}", 0, str(e)
 
-        # Check git changes in target_dir
-        git_status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=target_dir,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        files_changed = len(git_status.splitlines()) if git_status else 0
-
+        # Check git changes against initial_head (including both commits and working tree edits)
         diff_stat = subprocess.run(
-            ["git", "diff", "--stat"],
+            ["git", "diff", "--stat", initial_head] if initial_head else ["git", "diff", "--stat"],
             cwd=target_dir,
             capture_output=True,
             text=True,
         ).stdout.strip()
         diff_summary = diff_stat.splitlines()[-1] if diff_stat else "no git diff"
+
+        files_changed_res = subprocess.run(
+            ["git", "diff", "--name-only", initial_head] if initial_head else ["git", "diff", "--name-only"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        all_changed = set([f for f in files_changed_res.splitlines() if f] + [f for f in untracked.splitlines() if f])
+        files_changed = len(all_changed)
 
         return exit_code, stdout, stderr, files_changed, diff_summary
 
