@@ -237,19 +237,18 @@ PY
   fi
 
   echo "============================================================"
-  echo "Choose your default routing preference chain:"
-  echo "  1) auto [Default] (Dynamic runway across flat subscriptions: agy > codex)"
+  echo "Configure your Multi-Agent Dispatch preferences:"
+  echo "  1) Step-by-Step Setup Wizard (Mode -> Tool 1 -> Model -> Tool 2 -> Model ... -> Done) [Recommended]"
   if [[ -n "$agy_model" ]]; then
-    echo "  2) agy:$agy_model > codex:$codex_model (Auto-detected models: Fast Flash -> Terra)"
+    echo "  2) Quick Preset: Flat Subscriptions (agy:$agy_model > codex:$codex_model)"
   else
-    echo "  2) agy > codex:gpt-5.6-terra"
+    echo "  2) Quick Preset: Flat Subscriptions (agy > codex)"
   fi
-  echo "  3) cursor:gemini-3.8-flash > agy > codex (Cursor Flash On-Demand first)"
-  echo "  4) agy > codex (Strict flat subscriptions only, zero on-demand)"
-  echo "  5) Custom priority chain"
-  echo "  6) Keep existing configuration / Skip"
+  echo "  3) Dynamic Runway Auto Mode (balanced across agy and codex)"
+  echo "  4) Enter Custom Priority String directly"
+  echo "  5) Keep existing configuration / Skip"
   echo
-  read -r -p "Enter selection [1-6] (default: 1): " choice
+  read -r -p "Enter selection [1-5] (default: 1): " choice
   choice="${choice:-1}"
 
   local pref=""
@@ -257,7 +256,92 @@ PY
 
   case "$choice" in
     1)
-      pref="auto"
+      echo
+      echo "--- [1/3] Billing & On-Demand Policy ---"
+      echo "  1) Strict Subscriptions Only (Flat rate, \$0 extra billing) [Default]"
+      echo "  2) Allow On-Demand Metered Billing (Enable Cursor Business pay-as-you-go)"
+      read -r -p "Select billing mode [1-2] (default: 1): " b_choice
+      if [[ "$b_choice" == "2" ]]; then
+        allow_on_demand="1"
+      else
+        allow_on_demand="0"
+      fi
+
+      echo
+      echo "--- [2/3] Primary Tool (#1 Preference) ---"
+      echo "  1) Antigravity CLI (agy)"
+      echo "  2) OpenAI Codex (codex)"
+      echo "  3) Cursor CLI (cursor)"
+      read -r -p "Select primary tool [1-3] (default: 1): " t1_choice
+      t1_choice="${t1_choice:-1}"
+
+      local tool1="agy"
+      local default_m1="$agy_model"
+      if [[ "$t1_choice" == "2" ]]; then
+        tool1="codex"
+        default_m1="$codex_model"
+      elif [[ "$t1_choice" == "3" ]]; then
+        tool1="cursor"
+        default_m1="gemini-3.8-flash"
+      fi
+
+      read -r -p "Enter model for $tool1 (default: $default_m1): " m1_choice
+      m1_choice="${m1_choice:-$default_m1}"
+      local seg1="${tool1}:${m1_choice}"
+
+      echo
+      echo "--- [3/3] Secondary Tool (#2 Fallback) ---"
+      echo "When $tool1 is busy or low on quota, route to:"
+      local t2_opts=()
+      for t in "agy" "codex" "cursor"; do
+        if [[ "$t" != "$tool1" ]]; then
+          t2_opts+=("$t")
+        fi
+      done
+      echo "  1) ${t2_opts[0]}"
+      echo "  2) ${t2_opts[1]}"
+      echo "  3) None (Stop here)"
+      read -r -p "Select secondary tool [1-3] (default: 1): " t2_choice
+      t2_choice="${t2_choice:-1}"
+
+      if [[ "$t2_choice" == "1" || "$t2_choice" == "2" ]]; then
+        local idx=$((t2_choice - 1))
+        local tool2="${t2_opts[$idx]}"
+        local default_m2=""
+        if [[ "$tool2" == "agy" ]]; then default_m2="$agy_model"; fi
+        if [[ "$tool2" == "codex" ]]; then default_m2="$codex_model"; fi
+        if [[ "$tool2" == "cursor" ]]; then default_m2="gemini-3.8-flash"; fi
+
+        read -r -p "Enter model for $tool2 (default: $default_m2): " m2_choice
+        m2_choice="${m2_choice:-$default_m2}"
+        local seg2="${tool2}:${m2_choice}"
+
+        # Check for remaining tool 3
+        local tool3=""
+        for t in "agy" "codex" "cursor"; do
+          if [[ "$t" != "$tool1" && "$t" != "$tool2" ]]; then
+            tool3="$t"
+          fi
+        done
+        echo
+        read -r -p "Add $tool3 as final fallback? [Y/n]: " add_t3
+        case "${add_t3:-y}" in
+          [yY]|[yY][eE][sS])
+            local default_m3=""
+            if [[ "$tool3" == "agy" ]]; then default_m3="$agy_model"; fi
+            if [[ "$tool3" == "codex" ]]; then default_m3="$codex_model"; fi
+            if [[ "$tool3" == "cursor" ]]; then default_m3="gemini-3.8-flash"; fi
+            read -r -p "Enter model for $tool3 (default: $default_m3): " m3_choice
+            m3_choice="${m3_choice:-$default_m3}"
+            pref="${seg1} > ${seg2} > ${tool3}:${m3_choice}"
+            ;;
+          *)
+            pref="${seg1} > ${seg2}"
+            ;;
+        esac
+      else
+        pref="$seg1"
+      fi
       ;;
     2)
       if [[ -n "$agy_model" ]]; then
@@ -267,16 +351,13 @@ PY
       fi
       ;;
     3)
-      pref="cursor:gemini-3.8-flash > agy > codex"
+      pref="auto"
       ;;
     4)
-      pref="agy > codex"
-      ;;
-    5)
       read -r -p "Enter custom chain (e.g. 'cursor:gemini-3.8-flash > codex:terra'): " custom_pref
       pref="${custom_pref:-auto}"
       ;;
-    6)
+    5)
       echo "Keeping existing dispatch configuration."
       return 0
       ;;
@@ -284,15 +365,6 @@ PY
       pref="auto"
       ;;
   esac
-
-  if [[ "$pref" == *"cursor"* ]]; then
-    echo
-    read -r -p "Allow Cursor on-demand metered billing by default? [y/N]: " od_resp
-    case "${od_resp:-n}" in
-      [yY]|[yY][eE][sS]) allow_on_demand="1" ;;
-      *) allow_on_demand="0" ;;
-    esac
-  fi
 
   cat > "$config_file" <<EOF
 # Generated by ps-skills install.sh on $(date '+%Y-%m-%d %H:%M:%S')
