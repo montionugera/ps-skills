@@ -448,11 +448,40 @@ def format_report(agent, status, exit_code, cwd, files_changed, diff_summary, ta
     return "\n".join(lines[:15])
 
 
+def get_config_mode(cfg):
+    """
+    Returns (mode_str, is_on_demand)
+    mode_str: 'subscription_quota_remaining' | 'on_demand'
+    """
+    raw = (
+        os.environ.get("AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE")
+        or cfg.get("AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE")
+        or os.environ.get("DISPATCH_MODE")
+        or cfg.get("DISPATCH_MODE")
+        or os.environ.get("DISPATCH_ALLOW_ON_DEMAND")
+        or cfg.get("DISPATCH_ALLOW_ON_DEMAND")
+        or "subscription_quota_remaining"
+    )
+    clean = str(raw).strip().lower()
+    if clean in ("on_demand", "ondemand", "1", "true", "yes"):
+        return "on_demand", True
+    return "subscription_quota_remaining", False
+
+
+def get_config_preference(cfg):
+    return (
+        os.environ.get("AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE")
+        or cfg.get("AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE")
+        or os.environ.get("DISPATCH_ROUTING_PREFERENCE")
+        or cfg.get("DISPATCH_ROUTING_PREFERENCE")
+    )
+
+
 def main():
     default_agent = detect_default_agent(sys.argv[0])
     cfg = load_dispatch_config()
-    default_preference = os.environ.get("DISPATCH_ROUTING_PREFERENCE", cfg.get("DISPATCH_ROUTING_PREFERENCE"))
-    default_on_demand = os.environ.get("DISPATCH_ALLOW_ON_DEMAND", cfg.get("DISPATCH_ALLOW_ON_DEMAND", "0")).lower() in ("1", "true", "yes")
+    default_preference = get_config_preference(cfg)
+    default_mode_str, default_on_demand = get_config_mode(cfg)
 
     parser = argparse.ArgumentParser(description="Dispatch task to Antigravity CLI, Codex, or Cursor with quota check.")
     parser.add_argument("--agent", choices=["agy", "codex", "cursor", "auto"], default=default_agent,
@@ -461,8 +490,10 @@ def main():
                         help=f"Model override (for codex defaults to {DEFAULT_CODEX_MODEL})")
     parser.add_argument("--priority", type=str, default=default_preference,
                         help="Priority chain preference (e.g. 'cursor:gemini-3.8-flash > agy > codex')")
+    parser.add_argument("--mode", choices=["subscription_quota_remaining", "on_demand"], default=default_mode_str,
+                        help="Dispatch mode: 'subscription_quota_remaining' (flat quota) or 'on_demand'")
     parser.add_argument("--allow-on-demand", action="store_true", default=default_on_demand,
-                        help="Allow metered on-demand providers (e.g. Cursor Business)")
+                        help="Allow metered on-demand providers (alias for --mode on_demand)")
     parser.add_argument("--check-quota", action="store_true", help="Check quota and exit (0=healthy, 1=low/error)")
     parser.add_argument("--task", type=str, help="Task prompt for external worker")
     parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
@@ -475,6 +506,7 @@ def main():
 
     args = parser.parse_args()
 
+    effective_on_demand = args.allow_on_demand or (args.mode == "on_demand")
     chosen_agent = args.agent
     chosen_model = args.model
     eligible = False
@@ -482,12 +514,12 @@ def main():
     msg = ""
 
     # If explicit priority chain is set or present in config/env
-    if args.priority and (chosen_agent in ("auto", default_agent) or "--priority" in sys.argv):
+    if args.priority and (chosen_agent == "auto" or "--priority" in sys.argv):
         chain = parse_priority_chain(args.priority)
         if chain:
             chosen_agent, routed_model, eligible, rem_5h, rem_weekly, msg = route_priority_chain(
                 chain,
-                allow_on_demand=args.allow_on_demand,
+                allow_on_demand=effective_on_demand,
                 min_5h=args.min_5h,
                 min_weekly=args.min_weekly,
                 agy_state_file=args.state_file if default_agent == "agy" else None,

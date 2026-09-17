@@ -88,8 +88,9 @@ dispatch-worker --agent auto --isolated --task "Refactor module X"
 
 Configure default preferences in `~/.config/dispatch/config.env` or via environment variables:
 ```bash
-export DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3.8-flash > agy > codex"
-export DISPATCH_ALLOW_ON_DEMAND=1
+# Mode: "subscription_quota_remaining" (strict flat rate, $0 extra) or "on_demand" (metered pay-as-you-go)
+export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE="subscription_quota_remaining"
+export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3.8-flash > agy > codex"
 ```
 
 ## Plugin Bridge (`ps-plugin-bridge`)

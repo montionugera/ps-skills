@@ -14,8 +14,8 @@ This workflow:
 1. **Preserves Primary Token Quota**: Coding tasks run on external provider infrastructure instead of depleting Claude limits.
 2. **Proactive Rate Limit Protection**: Reads live provider quota before dispatching. If remaining quota is **< 30% for 5-hour** or **< 10% for weekly**, it returns exit code `10` (`FALLBACK_INTERNAL`), instructing caller orchestrators to seamlessly route to Claude's internal `sonnet` subagents.
 3. **Preference Chain & Dynamic Auto-Routing**:
-   - Supports declarative priority chains via `--priority` or `DISPATCH_ROUTING_PREFERENCE` (e.g. `cursor:gemini-3.8-flash > agy > codex:terra:5.6`).
-   - Evaluates from left-to-right, respecting `--allow-on-demand` for metered providers like Cursor Business.
+   - Supports declarative priority chains via `--priority` or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE` (e.g. `cursor:gemini-3.8-flash > agy > codex:terra:5.6`).
+   - Evaluates left-to-right, respecting `--mode {subscription_quota_remaining,on_demand}` (or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE`) to guard against unexpected metered billing.
    - Defaults to best-runway auto-routing across flat providers (`agy` vs `codex`).
 4. **Prompt Contract Enforcement**: Wraps prompts with non-negotiable standing rules (TDD cycle, new commits only / never amend, preserving protected configs like `.release.json`, evidence-based verification).
 5. **Isolated Execution (`--isolated`)**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success while guaranteeing cleanup in all exit paths (saving conflict patches to `/tmp/` if needed).
@@ -34,8 +34,8 @@ dispatch-codex-worker --check-quota          # Checks Codex quota
 dispatch-cursor-worker --check-quota         # Checks Cursor authentication
 dispatch-worker --agent auto --check-quota    # Evaluates preference chain or best runway
 
-# Priority chain routing (Cost-efficient Cursor On-Demand -> AGY -> Codex)
-dispatch-worker --priority "cursor:gemini-3.8-flash > agy > codex" --allow-on-demand --task "..."
+# Priority chain routing (Cursor On-Demand -> AGY -> Codex)
+dispatch-worker --priority "cursor:gemini-3.8-flash > agy > codex" --mode on_demand --task "..."
 
 # Dispatch a coding task to Cursor with specific model
 dispatch-cursor-worker --model gemini-3.8-flash --task "Implement task from brief..." --cwd "$WORKTREE_DIR"

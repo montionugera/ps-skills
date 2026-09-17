@@ -375,6 +375,34 @@ class TestCLIExecution(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         self.assertIn("[isolated worktree]", res.stdout)
 
+    def test_cli_priority_mode_subscription_skips_cursor(self):
+        self._write_state(85.0, 95.0)
+        res = subprocess.run(
+            [str(SCRIPT_PATH), "--priority", "cursor:gemini-3.8-flash > agy", "--mode", "subscription_quota_remaining", "--task", "test", "--dry-run", "--state-file", str(self.state_file)],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("Would dispatch to agy", res.stdout)
+
+    def test_cli_priority_mode_on_demand_allows_cursor(self):
+        fake_bin_dir = Path(self.temp_dir.name) / "bin"
+        fake_bin_dir.mkdir(exist_ok=True)
+        fake_cursor = fake_bin_dir / "cursor-agent"
+        fake_cursor.write_text("#!/bin/sh\necho 'Logged in as test@example.com'\nexit 0\n")
+        fake_cursor.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = f"{fake_bin_dir}:{env.get('PATH', '')}"
+
+        res = subprocess.run(
+            [str(SCRIPT_PATH), "--priority", "cursor:gemini-3.8-flash > agy", "--mode", "on_demand", "--task", "test", "--dry-run"],
+            capture_output=True,
+            text=True,
+            env=env
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("Would dispatch to cursor with gemini-3.8-flash", res.stdout)
+
     def test_execute_in_isolated_worktree_applies_changes_and_cleans_up(self):
         # Create a git repo in temp dir to test execute_in_isolated_worktree
         repo_dir = Path(self.temp_dir.name) / "test-repo"
@@ -509,6 +537,44 @@ class TestConfigLoading(unittest.TestCase):
             if os.path.exists(temp_config):
                 os.unlink(temp_config)
 
+    def test_load_explicit_ai_agent_config(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("# explicit modern config\n")
+            f.write("AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE=\"subscription_quota_remaining\"\n")
+            f.write("AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE=\"cursor:gemini-3.8-flash > agy > codex\"\n")
+            temp_config = f.name
+
+        try:
+            cfg = dispatch_mod.load_dispatch_config(temp_config)
+            mode_str, is_on_demand = dispatch_mod.get_config_mode(cfg)
+            pref = dispatch_mod.get_config_preference(cfg)
+            self.assertEqual(mode_str, "subscription_quota_remaining")
+            self.assertFalse(is_on_demand)
+            self.assertEqual(pref, "cursor:gemini-3.8-flash > agy > codex")
+        finally:
+            if os.path.exists(temp_config):
+                os.unlink(temp_config)
+
+    def test_get_config_mode_on_demand(self):
+        cfg = {"AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE": "on_demand"}
+        mode_str, is_on_demand = dispatch_mod.get_config_mode(cfg)
+        self.assertEqual(mode_str, "on_demand")
+        self.assertTrue(is_on_demand)
+
+    def test_get_config_mode_fallback_allow_on_demand(self):
+        cfg = {"DISPATCH_ALLOW_ON_DEMAND": "1"}
+        mode_str, is_on_demand = dispatch_mod.get_config_mode(cfg)
+        self.assertEqual(mode_str, "on_demand")
+        self.assertTrue(is_on_demand)
+
+    def test_get_config_preference_precedence(self):
+        cfg = {
+            "AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE": "explicit > chain",
+            "DISPATCH_ROUTING_PREFERENCE": "old > chain"
+        }
+        self.assertEqual(dispatch_mod.get_config_preference(cfg), "explicit > chain")
+
 
 if __name__ == "__main__":
     unittest.main()
+
