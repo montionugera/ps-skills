@@ -410,6 +410,105 @@ class TestCLIExecution(unittest.TestCase):
         self.assertFalse(os.path.exists(captured_worktree[0]))
 
 
+class TestPriorityChainRouting(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.agy_file = Path(self.temp_dir.name) / "agy.json"
+        self.codex_file = Path(self.temp_dir.name) / "codex.json"
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_parse_priority_chain(self):
+        chain_str = "cursor:gemini-3.8-flash > gemini > codex:terra:5.6"
+        chain = dispatch_mod.parse_priority_chain(chain_str)
+        self.assertEqual(len(chain), 3)
+        self.assertEqual(chain[0], ("cursor", "gemini-3.8-flash"))
+        self.assertEqual(chain[1], ("agy", None))
+        self.assertEqual(chain[2], ("codex", "gpt-5.6-terra"))
+
+    def test_waterfall_skips_cursor_when_on_demand_disallowed(self):
+        # agy is healthy
+        self.agy_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 80.0},
+                {"kind": "weekly", "remaining_percent": 90.0}
+            ]
+        }))
+        chain = dispatch_mod.parse_priority_chain("cursor:gemini-3.8-flash > agy > codex")
+        agent, model, eligible, r5, rw, msg = dispatch_mod.route_priority_chain(
+            chain,
+            allow_on_demand=False,
+            agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file)
+        )
+        self.assertTrue(eligible)
+        self.assertEqual(agent, "agy")
+
+    def test_waterfall_routes_to_codex_when_agy_low(self):
+        self.agy_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 10.0},
+                {"kind": "weekly", "remaining_percent": 90.0}
+            ]
+        }))
+        self.codex_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 85.0},
+                {"kind": "weekly", "remaining_percent": 95.0}
+            ]
+        }))
+        chain = dispatch_mod.parse_priority_chain("cursor:gemini-3.8-flash > agy > codex:terra:5.6")
+        agent, model, eligible, r5, rw, msg = dispatch_mod.route_priority_chain(
+            chain,
+            allow_on_demand=False,
+            agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file)
+        )
+        self.assertTrue(eligible)
+        self.assertEqual(agent, "codex")
+        self.assertEqual(model, "gpt-5.6-terra")
+
+    def test_waterfall_all_exhausted_returns_not_eligible(self):
+        self.agy_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 10.0},
+                {"kind": "weekly", "remaining_percent": 90.0}
+            ]
+        }))
+        self.codex_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 15.0},
+                {"kind": "weekly", "remaining_percent": 95.0}
+            ]
+        }))
+        chain = dispatch_mod.parse_priority_chain("cursor > agy > codex")
+        agent, model, eligible, r5, rw, msg = dispatch_mod.route_priority_chain(
+            chain,
+            allow_on_demand=False,
+            agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file)
+        )
+        self.assertFalse(eligible)
+        self.assertIn("Chain exhausted", msg)
+
+
+class TestConfigLoading(unittest.TestCase):
+    def test_load_dispatch_config(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("# comment\n")
+            f.write("DISPATCH_ROUTING_PREFERENCE=\"cursor:gemini-3.8-flash > codex\"\n")
+            f.write("DISPATCH_ALLOW_ON_DEMAND=1\n")
+            temp_config = f.name
+
+        try:
+            cfg = dispatch_mod.load_dispatch_config(temp_config)
+            self.assertEqual(cfg.get("DISPATCH_ROUTING_PREFERENCE"), "cursor:gemini-3.8-flash > codex")
+            self.assertEqual(cfg.get("DISPATCH_ALLOW_ON_DEMAND"), "1")
+        finally:
+            if os.path.exists(temp_config):
+                os.unlink(temp_config)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -63,24 +63,33 @@ Then restart your agent session so the new skills are discovered.
 
 - `ps-commu-explain` is self-contained and works immediately.
 - `ps-release-workflow-*` use the engine installed at `~/.claude/ps-release-workflow`.
-- `dispatch-worker` / `dispatch-agy-worker` / `dispatch-codex-worker` are linked into `~/.local/bin/`.
+- `dispatch-worker` / `dispatch-agy-worker` / `dispatch-codex-worker` / `dispatch-cursor-worker` are linked into `~/.local/bin/`.
 - `ps-plugin-bridge` is linked into `~/.local/bin/` to bridge Claude plugins to Antigravity CLI.
+
+Running `./install.sh` in an interactive terminal automatically prompts you to choose your default routing chain and on-demand preferences, writing to `~/.config/dispatch/config.env`.
 
 Install into a non-default Claude home with `CLAUDE_HOME=/path ./install.sh`.
 
 ## Multi-Agent External Fan-out (`dispatch-worker`)
 
-Offload token-heavy code editing and test cycles from Claude to external coding CLIs (Antigravity CLI or OpenAI Codex `gpt-5.6-terra`) with quota guarding (`5h > 30%`, `weekly > 10%`) and automated fallback to Claude internal subagents:
+Offload token-heavy code editing and test cycles from Claude to external coding CLIs (**Antigravity CLI**, **OpenAI Codex `gpt-5.6-terra`**, or **Cursor CLI `cursor-agent`**) with quota/on-demand guarding and automated fallback to Claude internal subagents:
 
 ```bash
-# Check quota and runway across providers
+# Check quota and authentication status across providers
 dispatch-worker --agent auto --check-quota
+dispatch-cursor-worker --check-quota
 
-# Dispatch task with auto-routing to highest runway
-dispatch-worker --agent auto --task "Write unit test and implement feature"
+# Priority chain routing (Cost-efficient Cursor On-Demand -> AGY -> Codex)
+dispatch-worker --priority "cursor:gemini-3.8-flash > agy > codex" --allow-on-demand --task "Write unit test and implement feature"
 
 # Run in an isolated temporary git worktree
 dispatch-worker --agent auto --isolated --task "Refactor module X"
+```
+
+Configure default preferences in `~/.config/dispatch/config.env` or via environment variables:
+```bash
+export DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3.8-flash > agy > codex"
+export DISPATCH_ALLOW_ON_DEMAND=1
 ```
 
 ## Plugin Bridge (`ps-plugin-bridge`)

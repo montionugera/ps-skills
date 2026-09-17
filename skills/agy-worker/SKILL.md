@@ -1,45 +1,49 @@
 ---
 name: agy-worker
-description: "Dispatch coding and implementation tasks to Antigravity CLI (agy) or OpenAI Codex (gpt-5.6-terra) with proactive quota checking (>30% 5h, >10% weekly) and automated fallback to Claude internal subagents."
-argument-hint: "[task prompt] [--agent agy|codex|auto] [--cwd <dir>] [--min-5h <num>] [--min-weekly <num>]"
+description: "Dispatch coding and implementation tasks to Antigravity CLI (agy), OpenAI Codex (gpt-5.6-terra), or Cursor CLI (cursor-agent) with proactive quota/on-demand checking and automated fallback to Claude internal subagents."
+argument-hint: "[task prompt] [--agent agy|codex|cursor|auto] [--priority <chain>] [--allow-on-demand] [--cwd <dir>]"
 ---
 
-# External Worker Dispatcher (`agy-worker` & `codex-worker`)
+# External Worker Dispatcher (`agy-worker`, `codex-worker`, `cursor-worker`)
 
 ## Overview
 
-Offloads coding, refactoring, and test execution tasks to **Google Antigravity CLI (`agy`)** or **OpenAI Codex (`codex` with `gpt-5.6-terra`)** running in headless mode.
+Offloads coding, refactoring, and test execution tasks to **Google Antigravity CLI (`agy`)**, **OpenAI Codex (`codex` with `gpt-5.6-terra`)**, or **Cursor CLI (`cursor-agent`)** running in headless mode.
 
 This workflow:
 1. **Preserves Primary Token Quota**: Coding tasks run on external provider infrastructure instead of depleting Claude limits.
 2. **Proactive Rate Limit Protection**: Reads live provider quota before dispatching. If remaining quota is **< 30% for 5-hour** or **< 10% for weekly**, it returns exit code `10` (`FALLBACK_INTERNAL`), instructing caller orchestrators to seamlessly route to Claude's internal `sonnet` subagents.
-3. **Dynamic Best-Runway Auto-Routing**: With `--agent auto`, computes runway score `min(5h_remaining - min_5h, weekly_remaining - min_weekly)` and dispatches to the agent with the highest runway surplus. If both fail minimum thresholds, falls back to internal Claude subagents (exit code `10`).
+3. **Preference Chain & Dynamic Auto-Routing**:
+   - Supports declarative priority chains via `--priority` or `DISPATCH_ROUTING_PREFERENCE` (e.g. `cursor:gemini-3.8-flash > agy > codex:terra:5.6`).
+   - Evaluates from left-to-right, respecting `--allow-on-demand` for metered providers like Cursor Business.
+   - Defaults to best-runway auto-routing across flat providers (`agy` vs `codex`).
 4. **Prompt Contract Enforcement**: Wraps prompts with non-negotiable standing rules (TDD cycle, new commits only / never amend, preserving protected configs like `.release.json`, evidence-based verification).
-5. **Isolated Execution (`--isolated`)**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success while guaranteeing cleanup in all exit paths.
+5. **Isolated Execution (`--isolated`)**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success while guaranteeing cleanup in all exit paths (saving conflict patches to `/tmp/` if needed).
 6. **Enforces Thin Orchestration**: Returns a standardized **≤ 15-line report** (status, modified files, diff summary, and execution output) so orchestrator context windows remain clean and free from archaeological bloat.
 
 ---
 
 ## CLI Usage
 
-The dispatcher binary is symlinked to `dispatch-agy-worker`, `dispatch-codex-worker`, and `dispatch-worker`:
+The dispatcher binary is symlinked to `dispatch-agy-worker`, `dispatch-codex-worker`, `dispatch-cursor-worker`, and `dispatch-worker`:
 
 ```bash
-# Check quota status
-dispatch-agy-worker --check-quota         # Checks Antigravity quota
-dispatch-codex-worker --check-quota       # Checks Codex quota
-dispatch-worker --agent auto --check-quota # Auto-selects best runway
+# Check quota / auth status
+dispatch-agy-worker --check-quota            # Checks Antigravity quota
+dispatch-codex-worker --check-quota          # Checks Codex quota
+dispatch-cursor-worker --check-quota         # Checks Cursor authentication
+dispatch-worker --agent auto --check-quota    # Evaluates preference chain or best runway
 
-# Dispatch a coding task to Antigravity
-dispatch-agy-worker --task "Implement task from brief..." --cwd "$WORKTREE_DIR"
+# Priority chain routing (Cost-efficient Cursor On-Demand -> AGY -> Codex)
+dispatch-worker --priority "cursor:gemini-3.8-flash > agy > codex" --allow-on-demand --task "..."
+
+# Dispatch a coding task to Cursor with specific model
+dispatch-cursor-worker --model gemini-3.8-flash --task "Implement task from brief..." --cwd "$WORKTREE_DIR"
 
 # Dispatch a coding task to Codex Terra 5.6
 dispatch-codex-worker --task "Implement task from brief..." --cwd "$WORKTREE_DIR"
 # or
 dispatch-worker --agent auto --task "..." --cwd "$WORKTREE_DIR" --isolated
-
-# Dry run (verify quota and parameters without invoking agent)
-dispatch-codex-worker --task "..." --dry-run --isolated
 ```
 
 ### Exit Codes Contract

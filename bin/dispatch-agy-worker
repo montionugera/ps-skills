@@ -22,6 +22,7 @@ import tempfile
 import time
 from pathlib import Path
 
+DEFAULT_CONFIG_PATH = os.path.expanduser("~/.config/dispatch/config.env")
 DEFAULT_AGY_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/agy-statusline.observation.json")
 DEFAULT_CODEX_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/codex-app-server.json")
 
@@ -37,13 +38,35 @@ PROTECTED_CONFIG_PATTERNS = [
 ]
 
 
+def load_dispatch_config(config_path=None):
+    """Loads key-value pairs from ~/.config/dispatch/config.env if present."""
+    target = config_path or os.environ.get("DISPATCH_CONFIG_FILE", DEFAULT_CONFIG_PATH)
+    if not os.path.isfile(target):
+        return {}
+    config = {}
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip().strip("'\"")
+    except Exception:
+        pass
+    return config
+
+
 def detect_default_agent(prog_name):
     base = os.path.basename(prog_name)
+    if "cursor" in base:
+        return "cursor"
     if "codex" in base:
         return "codex"
     if "agy" in base:
         return "agy"
-    return "agy"
+    return "auto"
 
 
 def get_state_file(agent):
@@ -77,6 +100,20 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
     if isinstance(agent, str) and ("/" in agent or "\\" in agent or agent.endswith(".json")) and state_file is None:
         state_file = agent
         agent = "agy"
+
+    if agent == "cursor":
+        cmd_path = shutil.which("cursor-agent") or os.path.expanduser("~/.local/bin/cursor-agent")
+        if not os.path.exists(str(cmd_path)) and not shutil.which("cursor-agent"):
+            return False, 0.0, 0.0, "cursor-agent executable not found in PATH"
+        try:
+            res = subprocess.run([cmd_path, "status"], capture_output=True, text=True, timeout=5)
+            output = res.stdout.strip()
+            if "Not logged in" in output or res.returncode != 0:
+                return False, 0.0, 0.0, "Cursor CLI not logged in (run 'cursor-agent login')"
+            first_line = output.splitlines()[0] if output else "Authenticated"
+            return True, 100.0, 100.0, f"[CURSOR] Ready ({first_line})"
+        except Exception as err:
+            return False, 0.0, 0.0, f"Failed checking cursor-agent status: {err}"
 
     target_file = state_file or get_state_file(agent)
     if not os.path.exists(target_file):
@@ -176,6 +213,88 @@ def route_best_agent(min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, agy_s
     else:
         msg = f"{msg_c} (runway: {runway_c:.1f} vs agy {runway_a:.1f})"
         return "codex", True, r5_c, rw_c, msg
+
+
+def normalize_agent_name(name):
+    clean = name.strip().lower()
+    if clean in ("agy", "gemini", "antigravity"):
+        return "agy"
+    if clean in ("codex", "openai"):
+        return "codex"
+    if clean in ("cursor", "cursor-agent"):
+        return "cursor"
+    return clean
+
+
+def normalize_model_name(agent, model):
+    if not model:
+        if agent == "codex":
+            return DEFAULT_CODEX_MODEL
+        return None
+    clean = model.strip()
+    if agent == "codex":
+        if clean.lower() in ("terra", "terra:5.6", "5.6"):
+            return "gpt-5.6-terra"
+    return clean
+
+
+def parse_priority_chain(chain_str):
+    """
+    Parses strings like 'cursor:gemini-3.8-flash > agy > codex'
+    Returns list of tuples: [(agent, model), ...]
+    """
+    if not chain_str or not chain_str.strip():
+        return []
+    items = [item.strip() for item in chain_str.split(">") if item.strip()]
+    chain = []
+    for item in items:
+        if ":" in item:
+            parts = item.split(":", 1)
+            agent_raw = parts[0].strip()
+            model_raw = parts[1].strip()
+        else:
+            agent_raw = item.strip()
+            model_raw = None
+        agent = normalize_agent_name(agent_raw)
+        model = normalize_model_name(agent, model_raw)
+        chain.append((agent, model))
+    return chain
+
+
+def route_priority_chain(chain, allow_on_demand=False, min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, agy_state_file=None, codex_state_file=None, current_time=None):
+    """
+    Evaluates each candidate in chain in priority order.
+    Returns: (chosen_agent, chosen_model, eligible, rem_5h, rem_weekly, msg)
+    """
+    traces = []
+    for agent, model in chain:
+        if agent == "cursor":
+            if not allow_on_demand:
+                traces.append("cursor: skipped (on-demand disallowed)")
+                continue
+            el, r5, rw, msg = check_quota("cursor", current_time=current_time)
+            if el:
+                model_str = f" with {model}" if model else ""
+                traces.append(f"cursor: selected{model_str}")
+                return "cursor", model, True, r5, rw, f"{msg}{model_str}"
+            else:
+                traces.append(f"cursor: unavailable ({msg})")
+        elif agent in ("agy", "codex"):
+            state_file = agy_state_file if agent == "agy" else codex_state_file
+            el, r5, rw, msg = check_quota(agent, state_file, min_5h, min_weekly, current_time=current_time)
+            if el:
+                model_str = f" with {model}" if model else ""
+                traces.append(f"{agent}: selected{model_str}")
+                return agent, model, True, r5, rw, f"{msg}{model_str}"
+            else:
+                traces.append(f"{agent}: quota low ({msg})")
+        else:
+            traces.append(f"{agent}: unknown agent")
+
+    summary = " -> ".join(traces)
+    fb_agent = chain[0][0] if chain else "auto"
+    fb_model = chain[0][1] if chain else None
+    return fb_agent, fb_model, False, 0.0, 0.0, f"Chain exhausted: {summary}"
 
 
 def wrap_prompt_contract(task_prompt):
@@ -331,12 +450,19 @@ def format_report(agent, status, exit_code, cwd, files_changed, diff_summary, ta
 
 def main():
     default_agent = detect_default_agent(sys.argv[0])
+    cfg = load_dispatch_config()
+    default_preference = os.environ.get("DISPATCH_ROUTING_PREFERENCE", cfg.get("DISPATCH_ROUTING_PREFERENCE"))
+    default_on_demand = os.environ.get("DISPATCH_ALLOW_ON_DEMAND", cfg.get("DISPATCH_ALLOW_ON_DEMAND", "0")).lower() in ("1", "true", "yes")
 
-    parser = argparse.ArgumentParser(description="Dispatch task to Antigravity CLI or Codex with quota check.")
-    parser.add_argument("--agent", choices=["agy", "codex", "auto"], default=default_agent,
+    parser = argparse.ArgumentParser(description="Dispatch task to Antigravity CLI, Codex, or Cursor with quota check.")
+    parser.add_argument("--agent", choices=["agy", "codex", "cursor", "auto"], default=default_agent,
                         help=f"External agent to dispatch to (default: {default_agent})")
     parser.add_argument("--model", type=str, default=None,
-                        help=f"Model override (for codex, defaults to {DEFAULT_CODEX_MODEL})")
+                        help=f"Model override (for codex defaults to {DEFAULT_CODEX_MODEL})")
+    parser.add_argument("--priority", type=str, default=default_preference,
+                        help="Priority chain preference (e.g. 'cursor:gemini-3.8-flash > agy > codex')")
+    parser.add_argument("--allow-on-demand", action="store_true", default=default_on_demand,
+                        help="Allow metered on-demand providers (e.g. Cursor Business)")
     parser.add_argument("--check-quota", action="store_true", help="Check quota and exit (0=healthy, 1=low/error)")
     parser.add_argument("--task", type=str, help="Task prompt for external worker")
     parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
@@ -350,8 +476,33 @@ def main():
     args = parser.parse_args()
 
     chosen_agent = args.agent
+    chosen_model = args.model
+    eligible = False
+    rem_5h, rem_weekly = 0.0, 0.0
+    msg = ""
 
-    if chosen_agent == "auto":
+    # If explicit priority chain is set or present in config/env
+    if args.priority and (chosen_agent in ("auto", default_agent) or "--priority" in sys.argv):
+        chain = parse_priority_chain(args.priority)
+        if chain:
+            chosen_agent, routed_model, eligible, rem_5h, rem_weekly, msg = route_priority_chain(
+                chain,
+                allow_on_demand=args.allow_on_demand,
+                min_5h=args.min_5h,
+                min_weekly=args.min_weekly,
+                agy_state_file=args.state_file if default_agent == "agy" else None,
+                codex_state_file=args.state_file if default_agent == "codex" else None,
+            )
+            if not chosen_model and routed_model:
+                chosen_model = routed_model
+        else:
+            chosen_agent, eligible, rem_5h, rem_weekly, msg = route_best_agent(
+                min_5h=args.min_5h,
+                min_weekly=args.min_weekly,
+                agy_state_file=args.state_file if default_agent == "agy" else None,
+                codex_state_file=args.state_file if default_agent == "codex" else None,
+            )
+    elif chosen_agent == "auto":
         chosen_agent, eligible, rem_5h, rem_weekly, msg = route_best_agent(
             min_5h=args.min_5h,
             min_weekly=args.min_weekly,
@@ -379,7 +530,9 @@ def main():
 
     cwd = os.path.abspath(args.cwd)
     model_info = ""
-    if chosen_agent == "codex":
+    if chosen_model:
+        model_info = f" with {chosen_model}"
+    elif chosen_agent == "codex":
         model = args.model or DEFAULT_CODEX_MODEL
         model_info = f" with {model}"
     elif args.model:
@@ -396,17 +549,24 @@ def main():
 
     def run_worker_in_target(target_dir):
         if chosen_agent == "codex":
-            model = args.model or DEFAULT_CODEX_MODEL
+            model = chosen_model or args.model or DEFAULT_CODEX_MODEL
             cmd = [
                 "codex", "exec",
                 "-c", f"model=\"{model}\"",
                 "--dangerously-bypass-approvals-and-sandbox",
                 wrapped_task
             ]
+        elif chosen_agent == "cursor":
+            model = chosen_model or args.model
+            cmd = ["cursor-agent", "-p", "--yolo", "--trust"]
+            if model:
+                cmd.extend(["--model", model])
+            cmd.append(wrapped_task)
         else:  # agy
             cmd = ["agy", "-p", wrapped_task, "--dangerously-skip-permissions"]
-            if args.model:
-                cmd.extend(["--model", args.model])
+            model = chosen_model or args.model
+            if model:
+                cmd.extend(["--model", model])
 
         try:
             proc = subprocess.run(
