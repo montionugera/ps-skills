@@ -246,3 +246,21 @@ One-line findings discovered during this work, deliberately not pursued (rule 4)
 - **`~/.claude/commands/` holds 14 slash commands with ~1 total invocation** between them
   (`vault`, `log`, `capture`, `checkpoint`, `retro`, …). Small roster cost; left alone as
   author-owned.
+
+## Tier 3 follow-up (2026-09-17, fresh session)
+
+- **Roster cut verified from a fresh session.** No `claude-obsidian:*`, `mattpocock-skills:*`,
+  `remotion-*`, `motion-*`, `obsidian-vault-*` in the skill listing; `handoff`, `self-grill-audit`,
+  `subagent-driven-development`, `brainstorming`, `writing-plans`, `render-spec`, `skill-comply`
+  present. `ls ~/.claude/skills | wc -l` = 45; `enabledPlugins` = 2 true.
+- **Superpowers SessionStart hook — NOT applied (blocked by the auto-mode permission classifier as
+  self-modification).** No env off-switch exists in `hooks/session-start`; the only lever is
+  replacing `plugins/cache/claude-plugins-official/superpowers/6.3.0/hooks/hooks.json` with
+  `{ "hooks": {} }`. A plugin update restores the file, so it needs re-applying after upgrades.
+  Confirmed still firing: this session started with the full `using-superpowers` injection.
+- **`mmdc` headless Chrome — NOT applied (same classifier block).** `~/.cache/puppeteer` is absent.
+- **Stale handoff sweep — NOT applied (classifier block: shared scratch sweep).** Now 187
+  `handoff-*` entries (docs + `.claim` dirs) in `/tmp`. Two traps for whoever runs it: on macOS
+  `/tmp` is a symlink, so use `find /tmp/` (trailing slash) or it matches nothing; and
+  `/tmp/handoff-archive` itself matches `handoff-*`, so filter on `handoff-2*`. The durable version
+  belongs in `skills/handoff/scripts/herdr-handoff.sh` right after the file-exists check.
