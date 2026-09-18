@@ -321,6 +321,85 @@ def wrap_prompt_contract(task_prompt):
     return f"{contract_header}{task_prompt.strip()}"
 
 
+def inspect_git_changes(target_dir, initial_head=None):
+    """
+    Inspects target_dir for commits, modified files, and untracked files relative to initial_head.
+    Returns: (files_changed, diff_summary, commit_count)
+    """
+    commit_count = 0
+    if initial_head:
+        commits_res = subprocess.run(
+            ["git", "log", "--oneline", f"{initial_head}..HEAD"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+        )
+        commit_lines = [line.strip() for line in commits_res.stdout.splitlines() if line.strip()]
+        commit_count = len(commit_lines)
+
+    diff_stat_args = ["git", "diff", "--stat", initial_head] if initial_head else ["git", "diff", "--stat"]
+    diff_stat = subprocess.run(
+        diff_stat_args,
+        cwd=target_dir,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    stat_summary = diff_stat.splitlines()[-1] if diff_stat else "no git diff"
+
+    if commit_count > 0 and stat_summary != "no git diff":
+        diff_summary = f"{commit_count} commit(s), {stat_summary}"
+    elif commit_count > 0:
+        diff_summary = f"{commit_count} commit(s)"
+    else:
+        diff_summary = stat_summary
+
+    diff_name_args = ["git", "diff", "--name-only", initial_head] if initial_head else ["git", "diff", "--name-only"]
+    files_changed_res = subprocess.run(
+        diff_name_args,
+        cwd=target_dir,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    untracked_res = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=target_dir,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    all_changed = set([f for f in files_changed_res.splitlines() if f] + [f for f in untracked_res.splitlines() if f])
+    files_changed = len(all_changed)
+
+    return files_changed, diff_summary, commit_count
+
+
+def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"):
+    """
+    Executes worker subprocess in target_dir with timeout.
+    Returns: (exit_code, stdout, stderr, is_timeout)
+    Properly handles subprocess.TimeoutExpired without losing partial process output.
+    """
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip(), False
+    except subprocess.TimeoutExpired as te:
+        exit_code = 124
+        out = te.stdout if isinstance(te.stdout, str) else (te.stdout.decode("utf-8", errors="replace") if te.stdout else "")
+        err = te.stderr if isinstance(te.stderr, str) else (te.stderr.decode("utf-8", errors="replace") if te.stderr else "")
+        timeout_msg = f"FAILED: {agent_name} timed out after {timeout_seconds}s."
+        combined_err = f"{timeout_msg}\n{err}".strip() if err else timeout_msg
+        return exit_code, (out.strip() if out else ""), combined_err, True
+    except Exception as e:
+        return 1, "", f"FAILED: error launching {agent_name}: {e}", False
+
+
 def execute_in_isolated_worktree(base_repo_dir, execute_fn):
     """
     Executes a callback inside a temporary git worktree:
@@ -451,8 +530,26 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
                     text=True,
                 ).stdout.strip()
 
+                salvage_msgs = []
+                timestamp = int(time.time())
+
+                # 1. If worktree created new commits, preserve them on a dedicated salvage branch
+                if worktree_head and worktree_head != base_head_rev:
+                    salvage_branch = f"worker-salvage-{timestamp}"
+                    branch_res = subprocess.run(
+                        ["git", "branch", salvage_branch, worktree_head],
+                        cwd=base_repo_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if branch_res.returncode == 0:
+                        salvage_msgs.append(f"[Salvage] Commits preserved on git branch '{salvage_branch}'")
+                    else:
+                        salvage_msgs.append(f"[Salvage] Failed to create branch '{salvage_branch}': {branch_res.stderr.strip()}")
+
+                # 2. If uncommitted changes or untracked files exist, preserve them as a patch
                 diff_patch_res = subprocess.run(
-                    ["git", "diff", base_head_rev],
+                    ["git", "diff", worktree_head or base_head_rev],
                     cwd=temp_worktree_dir,
                     capture_output=True,
                     text=True,
@@ -467,8 +564,8 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
                 )
                 untracked_files = [line.strip() for line in untracked_res.stdout.splitlines() if line.strip()]
 
-                if salvage_diff.strip() or untracked_files or (worktree_head and worktree_head != base_head_rev):
-                    salvage_patch = f"/tmp/worker-salvage-{int(time.time())}.patch"
+                if salvage_diff.strip() or untracked_files:
+                    salvage_patch = f"/tmp/worker-salvage-{timestamp}.patch"
                     with open(salvage_patch, "w", encoding="utf-8") as f:
                         f.write(f"# Salvage patch from worker execution (exit {exit_code})\n")
                         f.write(f"# Base HEAD: {base_head_rev}\n")
@@ -487,9 +584,12 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
                                             f.write(f"+{line}\n")
                                     except Exception:
                                         pass
-                    salvage_msg = f"[Salvage] Partial work preserved at {salvage_patch}"
-                    stderr = f"{stderr}\n{salvage_msg}".strip() if stderr else salvage_msg
-                    print(salvage_msg, file=sys.stderr)
+                    salvage_msgs.append(f"[Salvage] Partial work preserved at {salvage_patch}")
+
+                if salvage_msgs:
+                    combined_msg = "\n".join(salvage_msgs)
+                    stderr = f"{stderr}\n{combined_msg}".strip() if stderr else combined_msg
+                    print(combined_msg, file=sys.stderr)
             except Exception:
                 pass
 
@@ -700,45 +800,11 @@ def main():
             if model:
                 cmd.extend(["--model", model])
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=target_dir,
-                capture_output=True,
-                text=True,
-                timeout=args.timeout,
-            )
-            exit_code = proc.returncode
-            stdout = proc.stdout.strip()
-            stderr = proc.stderr.strip()
-        except subprocess.TimeoutExpired:
-            return 1, "", f"FAILED: {chosen_agent} timed out after {args.timeout}s.", 0, "timeout"
-        except Exception as e:
-            return 1, "", f"FAILED: error launching {chosen_agent}: {e}", 0, str(e)
+        exit_code, stdout, stderr, is_timeout = execute_worker_process(
+            cmd, target_dir, timeout_seconds=args.timeout, agent_name=chosen_agent
+        )
 
-        # Check git changes against initial_head (including both commits and working tree edits)
-        diff_stat = subprocess.run(
-            ["git", "diff", "--stat", initial_head] if initial_head else ["git", "diff", "--stat"],
-            cwd=target_dir,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        diff_summary = diff_stat.splitlines()[-1] if diff_stat else "no git diff"
-
-        files_changed_res = subprocess.run(
-            ["git", "diff", "--name-only", initial_head] if initial_head else ["git", "diff", "--name-only"],
-            cwd=target_dir,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"],
-            cwd=target_dir,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        all_changed = set([f for f in files_changed_res.splitlines() if f] + [f for f in untracked.splitlines() if f])
-        files_changed = len(all_changed)
+        files_changed, diff_summary, commit_count = inspect_git_changes(target_dir, initial_head)
 
         return exit_code, stdout, stderr, files_changed, diff_summary
 
@@ -751,7 +817,13 @@ def main():
     else:
         exit_code, stdout, stderr, files_changed, diff_summary = run_worker_in_target(cwd)
 
-    status = "SUCCESS" if exit_code == 0 else "FAILED"
+    if exit_code == 0:
+        status = "SUCCESS"
+    elif exit_code == 124:
+        status = "TIMEOUT_PARTIAL_WORK" if files_changed > 0 else "TIMEOUT_NO_PROGRESS"
+    else:
+        status = "FAILED_PARTIAL_WORK" if files_changed > 0 else "FAILED"
+
     tail_output = stdout if stdout else (stderr or "none")
     report = format_report(chosen_agent, status, exit_code, cwd, files_changed, diff_summary, tail_output)
     print(report)
