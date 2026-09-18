@@ -467,6 +467,90 @@ class TestCLIExecution(unittest.TestCase):
             os.unlink(patch_path)
 
 
+class TestTimeoutAndGitInspection(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo_dir = Path(self.temp_dir.name) / "test-repo"
+        self.repo_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.repo_dir, check=True, capture_output=True)
+        (self.repo_dir / "base.txt").write_text("base content\n", encoding="utf-8")
+        subprocess.run(["git", "add", "base.txt"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "base commit"], cwd=self.repo_dir, check=True, capture_output=True)
+        self.initial_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True
+        ).stdout.strip()
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_execute_worker_process_timeout_handling(self):
+        cmd = ["python3", "-c", "import time, sys; sys.stdout.write('partial output\\n'); sys.stdout.flush(); time.sleep(5)"]
+        exit_code, stdout, stderr, is_timeout = dispatch_mod.execute_worker_process(
+            cmd, str(self.repo_dir), timeout_seconds=1, agent_name="test-worker"
+        )
+        self.assertEqual(exit_code, 124)
+        self.assertTrue(is_timeout)
+        self.assertIn("FAILED: test-worker timed out after 1s.", stderr)
+        self.assertIn("partial output", stdout)
+
+    def test_inspect_git_changes_with_commits_and_working_tree(self):
+        # 1. Create a commit
+        (self.repo_dir / "committed_file.txt").write_text("committed content\n", encoding="utf-8")
+        subprocess.run(["git", "add", "committed_file.txt"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "worker commit 1"], cwd=self.repo_dir, check=True, capture_output=True)
+
+        # 2. Modify base.txt (uncommitted modification)
+        (self.repo_dir / "base.txt").write_text("modified uncommitted\n", encoding="utf-8")
+
+        # 3. Create an untracked file
+        (self.repo_dir / "untracked.txt").write_text("untracked content\n", encoding="utf-8")
+
+        files_changed, diff_summary, commit_count = dispatch_mod.inspect_git_changes(
+            str(self.repo_dir), self.initial_head
+        )
+        self.assertEqual(commit_count, 1)
+        self.assertEqual(files_changed, 3)
+        self.assertIn("1 commit(s)", diff_summary)
+
+    def test_execute_in_isolated_worktree_creates_salvage_branch_on_failure(self):
+        def worker_that_commits_then_fails(wt_dir):
+            (Path(wt_dir) / "committed_before_timeout.txt").write_text("critical saved work\n", encoding="utf-8")
+            subprocess.run(["git", "add", "committed_before_timeout.txt"], cwd=wt_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "partial commit before timeout"], cwd=wt_dir, check=True, capture_output=True)
+            return 124, "finished tests", "FAILED: worker timed out after 900s", 1, "1 commit(s), 1 file changed"
+
+        exit_code, stdout, stderr, files_changed, diff_summary = dispatch_mod.execute_in_isolated_worktree(
+            str(self.repo_dir), worker_that_commits_then_fails
+        )
+
+        self.assertEqual(exit_code, 124)
+        self.assertIn("[Salvage] Commits preserved on git branch 'worker-salvage-", stderr)
+
+        # Verify that the salvage branch actually exists in self.repo_dir and contains the commit
+        branches_res = subprocess.run(["git", "branch"], cwd=self.repo_dir, capture_output=True, text=True)
+        salvage_branches = [b.strip() for b in branches_res.stdout.splitlines() if "worker-salvage-" in b]
+        self.assertTrue(len(salvage_branches) >= 1)
+        target_branch = salvage_branches[0].replace("*", "").strip()
+
+        log_res = subprocess.run(["git", "log", "-n", "1", "--oneline", target_branch], cwd=self.repo_dir, capture_output=True, text=True)
+        self.assertIn("partial commit before timeout", log_res.stdout)
+
+    def test_format_report_status_derivation(self):
+        rep_partial = dispatch_mod.format_report(
+            "agy", "TIMEOUT_PARTIAL_WORK", 124, "/path/to/repo", 2, "1 commit(s), 2 files changed", "tail log"
+        )
+        self.assertIn("Status: TIMEOUT_PARTIAL_WORK (exit 124)", rep_partial)
+        self.assertIn("Files Modified: 2 (1 commit(s), 2 files changed)", rep_partial)
+
+        rep_none = dispatch_mod.format_report(
+            "agy", "TIMEOUT_NO_PROGRESS", 124, "/path/to/repo", 0, "no git diff", "tail log"
+        )
+        self.assertIn("Status: TIMEOUT_NO_PROGRESS (exit 124)", rep_none)
+        self.assertIn("Files Modified: 0 (no git diff)", rep_none)
+
+
 class TestPriorityChainRouting(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
