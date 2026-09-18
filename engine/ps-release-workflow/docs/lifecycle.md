@@ -40,17 +40,19 @@ proceeds UNVERIFIED, for repos that never had one.
 
 An **epic** (`E-NNN`) is one outcome delivered by several features. Its gates run a
 repo-supplied outcome check (`hooks.epic_check`, default `scripts/epic-check.sh`, the
-fourth key in the `hooks` block below) against the *combined* release tree, and only
-once the epic is **complete**: every idea tagged to it (`epic_children`) has been
-refined, and every resulting feature has `status` `shipped`/`promoted` *and*
-`release_version` equal to the release under test. Both fields are needed because
-`unclaim` clears the claim but leaves `release_version` set.
+fourth key in the `hooks` block below) against the *combined* release tree. An epic is
+**complete** when every idea tagged to it (`epic_children`) has been refined, and every
+resulting feature has `status` `shipped`/`promoted` *and* `release_version` equal to the
+release under test (both fields are needed because `unclaim` clears the claim but leaves
+`release_version` set). Completeness gates the automatic runs: `ship` only triggers the
+check once the epic is complete, and `promote` refuses an incomplete one. The hand-run
+`psrw epic verify` does not check completeness at all.
 
 - **G-E2 (ship-time).** When a `ship` makes its epic complete, that ship wins a
   compare-and-set (`open`/`failed_verification` to `verifying`), commits the claim on
   `release/<v>`, then runs the check **outside** the shared lock. `psrw epic verify E-NNN`
-  runs the same path by hand; `--force` also reclaims a stale `verifying`
-  (a crashed run) or re-checks a `verified` epic. A failing check records
+  runs the same claim-and-check path by hand, without a completeness check; `--force`
+  also reclaims a stale `verifying` (a hard-killed run) or re-checks a `verified` epic. A failing check records
   `failed_verification` and warns; the merge that triggered it still stands.
 - **G-E3 (promote-time).** `promote` runs `check_epics` first, before Gate 2, for every
   epic with a feature shipped into this release. An incomplete epic refuses the

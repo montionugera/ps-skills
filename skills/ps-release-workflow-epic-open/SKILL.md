@@ -25,7 +25,8 @@ route through the `_release` worktree.
 ## Then
 
 Brainstorm `E-NNN/spec.md` until the outcome and its slices are solid. Write
-`E-NNN/verification.md` — what must be true once every slice has shipped.
+`E-NNN/verification.md` — what must be true once every slice has shipped. It is a
+human-written statement only; the check that actually runs is the repo's `hooks.epic_check`.
 Only then fan out. Never auto-chain open -> fanout -> refine -> claim.
 
 ## Refuses if

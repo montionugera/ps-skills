@@ -24,8 +24,9 @@ The epic exists (`psrw epic open`) and its `spec.md` names the slices.
 
 Fanout mints **ideas, never features**. Each slice still needs its own brainstorm
 and approved spec before `psrw refine I-NNN`. Do NOT chain fanout -> refine -> claim.
-Once every slice has shipped, the epic outcome is checked against
-`E-NNN/verification.md` (`psrw epic verify E-NNN` to re-run it by hand).
+Once every slice has shipped, the repo's `hooks.epic_check` script runs against the
+combined tree (`psrw epic verify E-NNN` to re-run it by hand). `E-NNN/verification.md`
+is the human-written statement of what must be true; no code reads it.
 
 ## Refuses if
 

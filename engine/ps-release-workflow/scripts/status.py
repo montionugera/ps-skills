@@ -88,11 +88,16 @@ def _epic_rollup(epics: list[dict], ideas: list[dict], features: list[dict]) -> 
             continue
         slices = []
         for idea in (i for i in ideas if i.get("epic") == eid):
-            feat = by_id.get(idea.get("promoted_to") or "")
-            slices.append({
-                "id": feat["id"] if feat else idea.get("id"),
-                "status": feat.get("status", "open") if feat else "idea",
-            })
+            promoted_to = idea.get("promoted_to")
+            feat = by_id.get(promoted_to or "")
+            if feat:
+                slices.append({"id": feat["id"], "status": feat.get("status", "open")})
+            elif promoted_to:
+                # Refined but absent from the catalog: real drift (epic_completeness
+                # will hard-block promote on it), so never render it as a plain idea.
+                slices.append({"id": promoted_to, "status": "missing"})
+            else:
+                slices.append({"id": idea.get("id"), "status": "idea"})
         claimed = sorted(
             f["id"] for f in features if f.get("epic") == eid and f.get("status") == "claimed"
         )
@@ -113,6 +118,12 @@ def _sibling_warnings(rollup: list[dict]) -> list[str]:
     # developed blind to each other.
     out = []
     for e in rollup:
+        for s in e["slices"]:
+            if s["status"] == "missing":
+                out.append(
+                    f"{s['id']} (slice of {e['id']}) is missing from the refined catalog — "
+                    f"psrw promote will block until it is restored"
+                )
         n = len(e["claimed_siblings"])
         if n >= 2:
             out.append(
@@ -329,10 +340,12 @@ def render_full(st: dict) -> str:
     else:
         lines.append("  (no open/claimed features, none shipped this release)")
 
-    if st.get("epics"):
+    # Same trimming as the feature table: promoted epics are history, summarised.
+    live_epics = [e for e in st.get("epics", []) if e["status"] != "promoted"]
+    if live_epics:
         lines.append("")
         lines.append("Epics:")
-        for e in st["epics"]:
+        for e in live_epics:
             title = e["title"][:36] + ("…" if len(e["title"]) > 36 else "")
             lines.append(
                 f"  {e['id']:<7} {title:<37} {e['status']:<20} "
@@ -340,6 +353,10 @@ def render_full(st: dict) -> str:
             )
             if e["slices"]:
                 lines.append("    " + ", ".join(f"{s['id']} {s['status']}" for s in e["slices"]))
+    omitted_epics = len(st.get("epics", [])) - len(live_epics)
+    if omitted_epics:
+        lines.append("")
+        lines.append(f"  (+{omitted_epics} promoted epic(s) omitted)")
     for w in st.get("warnings", []):
         lines.append("")
         lines.append(f"⚠️  {w}")

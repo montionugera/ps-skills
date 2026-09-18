@@ -18,7 +18,7 @@ One line per issue. Filed here rather than chased, so they are not lost.
 
 ## Epic layer
 
-- **A crashed epic outcome check strands the epic in `verifying`.** There is deliberately no timestamp or timeout (any threshold would be indefensible); recovery is `psrw epic verify --force E-NNN`. G-E3 refuses, naming the live claim, rather than steal an in-flight check.
+- **A hard-killed epic outcome check strands the epic in `verifying`.** An exception in the check is caught and recorded as `failed_verification`, so only a hard process kill (SIGKILL, power loss) leaves the claim behind. There is deliberately no timestamp or timeout (any threshold would be indefensible); recovery is `psrw epic verify --force E-NNN`. G-E3 refuses, naming the live claim, rather than steal an in-flight check.
 - **The outcome check is machine-local and optional.** `hooks.epic_check` (default `scripts/epic-check.sh`) missing or unusable warns on stderr and skips, so a repo without it gets completeness enforcement only, never an outcome check. Mirrors Gate 1.
 - **Sibling features are developed blind to each other.** Epic branches are cut off `main`, so nothing shows one slice the others' work until the combined tree is verified at ship/promote. `psrw status` only warns when two or more siblings are claimed at once; it does not prevent it.
 - **An idea created by hand carries no `epic` tag.** Only `psrw epic fanout` sets it, and `refine` only copies it forward; tagging later means editing the catalog by hand, and a drifted epic id is caught only at G-E3 (refuses) and `epic fanout` (raises).
