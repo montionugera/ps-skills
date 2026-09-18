@@ -251,6 +251,8 @@ class TestPromptContract(unittest.TestCase):
         self.assertIn("Test-Driven Development (TDD)", wrapped)
         self.assertIn("never git commit --amend", wrapped.lower())
         self.assertIn("preserve protected config files", wrapped.lower())
+        self.assertIn("Scoped Verification", wrapped)
+        self.assertIn("TARGETED unit tests", wrapped)
         self.assertIn(".release.json", wrapped)
         self.assertIn("Task Brief:\nImplement feature X and fix bug Y.", wrapped)
 
@@ -437,6 +439,33 @@ class TestCLIExecution(unittest.TestCase):
         self.assertEqual(len(captured_worktree), 1)
         self.assertFalse(os.path.exists(captured_worktree[0]))
 
+    def test_execute_in_isolated_worktree_salvages_on_failure(self):
+        repo_dir = Path(self.temp_dir.name) / "test-salvage-repo"
+        repo_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True)
+        (repo_dir / "initial.txt").write_text("initial content\n", encoding="utf-8")
+        subprocess.run(["git", "add", "initial.txt"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial commit"], cwd=repo_dir, check=True, capture_output=True)
+
+        def failing_worker(wt_dir):
+            (Path(wt_dir) / "partial_fix.txt").write_text("critical partial fix\n", encoding="utf-8")
+            return 1, "", "FAILED: timed out", 1, "1 file modified"
+
+        exit_code, stdout, stderr, files_changed, diff_summary = dispatch_mod.execute_in_isolated_worktree(
+            str(repo_dir), failing_worker
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("[Salvage] Partial work preserved at", stderr)
+        patch_path = stderr.split("[Salvage] Partial work preserved at")[-1].strip()
+        self.assertTrue(os.path.isfile(patch_path))
+        patch_content = Path(patch_path).read_text(encoding="utf-8")
+        self.assertIn("critical partial fix", patch_content)
+        if os.path.exists(patch_path):
+            os.unlink(patch_path)
+
 
 class TestPriorityChainRouting(unittest.TestCase):
     def setUp(self):
@@ -573,6 +602,11 @@ class TestConfigLoading(unittest.TestCase):
             "DISPATCH_ROUTING_PREFERENCE": "old > chain"
         }
         self.assertEqual(dispatch_mod.get_config_preference(cfg), "explicit > chain")
+
+    def test_get_config_timeout_precedence_and_default(self):
+        self.assertEqual(dispatch_mod.get_config_timeout({}), 900)
+        self.assertEqual(dispatch_mod.get_config_timeout({"DISPATCH_TIMEOUT": "600"}), 600)
+        self.assertEqual(dispatch_mod.get_config_timeout({"AI_AGENT_AUTO_DISPATCH_TIMEOUT": "1200", "DISPATCH_TIMEOUT": "600"}), 1200)
 
 
 if __name__ == "__main__":
