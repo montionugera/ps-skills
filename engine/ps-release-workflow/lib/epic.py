@@ -5,7 +5,8 @@ Pure state only — no git, no subprocess. lib/epic_gate.py owns execution.
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lib.catalog import CatalogEntryNotFoundError, list_entries, next_id
+from lib.backlog_paths import get_release_worktree
+from lib.catalog import CatalogEntryNotFoundError, list_entries, next_id, update_entry
 from lib.state import mutate_state
 
 
@@ -77,7 +78,7 @@ class _NoTransition(Exception):
     """Raised inside the mutate_state callback to leave the file untouched."""
 
 
-def try_begin_verification(epic_cat: Path, epic_id: str, sha: str) -> bool:
+def try_begin_verification(epic_cat: Path, epic_id: str, sha: str, force: bool = False) -> bool:
     """Compare-and-set: open|failed_verification -> verifying. True == this caller won.
 
     False means only "someone else is verifying, or already verified" — a lost
@@ -86,20 +87,33 @@ def try_begin_verification(epic_cat: Path, epic_id: str, sha: str) -> bool:
     run (the same silent-drift class this catalog already kills — see
     CatalogEntryNotFoundError's docstring).
 
+    force=True additionally accepts verifying|verified as source states, in the
+    SAME atomic mutation. This is the single path for the two callers that must
+    claim an epic out of a non-idle state: `psrw epic verify --force` clearing a
+    stale 'verifying' left by a crashed run, and G-E3 re-running a 'verified'
+    epic whose verified_sha no longer matches release HEAD. Composing
+    demote_epic() then try_begin_verification() instead would open a
+    lock-acquisition gap between the two calls where a second caller could win
+    a fresh CAS against the same stale epic — the exact double-run the CAS
+    exists to prevent.
+
     No timestamp and no timeout: 'recently verifying' is not implementable without
     inventing a threshold nobody can defend. A crashed run is cleared by
     `psrw epic verify --force`.
     """
     won = False
     found = False
+    allowed = ("open", "failed_verification", "verifying", "verified") if force \
+        else ("open", "failed_verification")
 
     def cas(entries: list) -> list:
         nonlocal won, found
+        won = found = False
         for e in entries:
             if e["id"] != epic_id:
                 continue
             found = True
-            if e.get("status") not in ("open", "failed_verification"):
+            if e.get("status") not in allowed:
                 raise _NoTransition()
             e["status"] = "verifying"
             e["verifying_sha"] = sha
@@ -117,41 +131,60 @@ def try_begin_verification(epic_cat: Path, epic_id: str, sha: str) -> bool:
 
 
 def _set_fields(epic_cat: Path, epic_id: str, **fields) -> dict:
+    """Unconditional field update, reusing catalog.update_entry so an unknown id
+    raises CatalogEntryNotFoundError (not a bare KeyError) and an unchanged entry
+    is not rewritten — the same found-or-raise and churn contract every other
+    catalog mutator in this codebase already gives its callers."""
     updated: dict = {}
 
-    def apply(entries: list) -> list:
-        for e in entries:
-            if e["id"] == epic_id:
-                e.update(fields)
-                updated.update(e)
-                return entries
-        raise _NoTransition()
+    def updater(e: dict) -> None:
+        e.update(fields)
+        updated.update(e)
 
-    try:
-        mutate_state(epic_cat, apply, default=[])
-    except _NoTransition:
-        raise KeyError(f"epic {epic_id} not found in {epic_cat}")
+    update_entry(epic_cat, epic_id, updater)
+    return updated
+
+
+def _transition(epic_cat: Path, epic_id: str, from_status: str, **fields) -> dict:
+    """Like _set_fields, but only applies `fields` when the entry's CURRENT status
+    is `from_status`; otherwise the file is left untouched and the entry is
+    returned as-is. Guards the CAS's exit the same way try_begin_verification
+    guards its entry — a force-cleared or already re-verified epic must not be
+    silently overwritten by a stale finishing run landing after it."""
+    updated: dict = {}
+
+    def updater(e: dict) -> None:
+        if e.get("status") == from_status:
+            e.update(fields)
+        updated.update(e)
+
+    update_entry(epic_cat, epic_id, updater)
     return updated
 
 
 def mark_epic_verified(epic_cat: Path, epic_id: str, sha: str, release_version: str) -> dict:
-    return _set_fields(
-        epic_cat, epic_id, status="verified", verified_sha=sha,
+    return _transition(
+        epic_cat, epic_id, "verifying", status="verified", verified_sha=sha,
         verified_at=_now(), release_version=release_version, verifying_sha=None,
     )
 
 
 def mark_epic_failed(epic_cat: Path, epic_id: str, release_version: str) -> dict:
-    return _set_fields(
-        epic_cat, epic_id, status="failed_verification",
+    return _transition(
+        epic_cat, epic_id, "verifying", status="failed_verification",
         verified_sha=None, release_version=release_version, verifying_sha=None,
     )
 
 
 def demote_epic(epic_cat: Path, epic_id: str) -> dict:
     """Back to 'open' — never to 'verifying', which would collide with the CAS
-    and strand the epic forever."""
-    return _set_fields(epic_cat, epic_id, status="open", verified_sha=None, verified_at=None)
+    and strand the epic forever. Clears verifying_sha and release_version too, so
+    an idle epic carries no stale in-flight or release breadcrumb (the same
+    reasoning that clears verifying_sha on the verified/failed terminal states)."""
+    return _set_fields(
+        epic_cat, epic_id, status="open", verified_sha=None, verified_at=None,
+        verifying_sha=None, release_version=None,
+    )
 
 
 def mark_epic_promoted(epic_cat: Path, epic_id: str) -> dict:
@@ -165,9 +198,11 @@ def set_split_approved(epic_cat: Path, epic_id: str, owner: str) -> dict:
     return _set_fields(epic_cat, epic_id, split_approved_by=owner)
 
 
-def epic_folder_path(repo: Path, epic_id: str):
-    """`E-NNN-<slug>/` inside the _release worktree, or None if absent."""
-    from lib.backlog_paths import get_release_worktree
+def epic_folder_path(repo: Path, epic_id: str) -> Path | None:
+    """`E-NNN-<slug>/` inside the _release worktree, or None if no folder matches
+    that id. Requires a release in progress — raises NoReleaseInProgressError via
+    get_release_worktree if not (same contract as every other _release-scoped
+    path helper in this codebase)."""
     root = get_release_worktree(repo) / ".claude" / "epic_backlog"
     for child in sorted(root.glob(f"{epic_id}-*")):
         if child.is_dir():
