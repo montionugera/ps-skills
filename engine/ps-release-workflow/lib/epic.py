@@ -78,7 +78,8 @@ class _NoTransition(Exception):
     """Raised inside the mutate_state callback to leave the file untouched."""
 
 
-def try_begin_verification(epic_cat: Path, epic_id: str, sha: str, force: bool = False) -> bool:
+def try_begin_verification(epic_cat: Path, epic_id: str, sha: str, force: bool = False,
+                            reclaim_settled: bool = False) -> bool:
     """Compare-and-set: open|failed_verification -> verifying. True == this caller won.
 
     False means only "someone else is verifying, or already verified" — a lost
@@ -87,15 +88,22 @@ def try_begin_verification(epic_cat: Path, epic_id: str, sha: str, force: bool =
     run (the same silent-drift class this catalog already kills — see
     CatalogEntryNotFoundError's docstring).
 
-    force=True additionally accepts verifying|verified as source states, in the
-    SAME atomic mutation. This is the single path for the two callers that must
-    claim an epic out of a non-idle state: `psrw epic verify --force` clearing a
-    stale 'verifying' left by a crashed run, and G-E3 re-running a 'verified'
-    epic whose verified_sha no longer matches release HEAD. Composing
-    demote_epic() then try_begin_verification() instead would open a
-    lock-acquisition gap between the two calls where a second caller could win
-    a fresh CAS against the same stale epic — the exact double-run the CAS
-    exists to prevent.
+    Two widenings of the accepted source states, both applied in the SAME atomic
+    mutation (composing demote_epic() then try_begin_verification() instead would
+    open a lock-acquisition gap between the two calls where a second caller could
+    win a fresh CAS against the same stale epic — the exact double-run the CAS
+    exists to prevent):
+
+    - force=True additionally accepts verifying|verified. This is the explicit
+      human override, `psrw epic verify --force`, whose whole job is clearing a
+      stale 'verifying' left by a crashed run.
+    - reclaim_settled=True additionally accepts verified|promoted — SETTLED
+      states, i.e. a finished verdict that is merely no longer fresh. It
+      deliberately does NOT accept 'verifying': G-E3 must never steal an
+      in-flight check from a concurrent ship-time G-E2 or `psrw epic verify`
+      (two epic_check runs against the same epic would then execute
+      concurrently and write into the same epic_dir). G-E3 loses the CAS and
+      refuses with a message naming the live claim instead.
 
     No timestamp and no timeout: 'recently verifying' is not implementable without
     inventing a threshold nobody can defend. A crashed run is cleared by
@@ -103,8 +111,11 @@ def try_begin_verification(epic_cat: Path, epic_id: str, sha: str, force: bool =
     """
     won = False
     found = False
-    allowed = ("open", "failed_verification", "verifying", "verified") if force \
-        else ("open", "failed_verification")
+    allowed = {"open", "failed_verification"}
+    if force:
+        allowed |= {"verifying", "verified"}
+    if reclaim_settled:
+        allowed |= {"verified", "promoted"}
 
     def cas(entries: list) -> list:
         nonlocal won, found

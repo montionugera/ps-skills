@@ -127,9 +127,39 @@ def test_promote_refuses_when_a_slice_is_unrefined(tmp_repo_with_release: Path, 
     assert "release 1.1" not in log.lower()
 
 
+def _release_epic_catalog(repo: Path) -> Path:
+    """The populated epic catalog — it lives in the _release worktree while a
+    release is in progress, not in the main checkout."""
+    return (repo / ".claude" / "worktrees" / "_release" / ".claude"
+            / "epic_backlog" / "_catalog.json")
+
+
+def _rewrite_release_epic_catalog(repo: Path, epic_id: str, **fields) -> None:
+    """Hand-edit one epic entry on release/<v> and commit it, simulating a state
+    G-E3 has to cope with (a drifted id, an in-flight verification, ...)."""
+    cat = _release_epic_catalog(repo)
+    entries = json.loads(cat.read_text())
+    if fields:
+        for e in entries:
+            if e["id"] == epic_id:
+                e.update(fields)
+    else:  # no fields == delete the entry (drift)
+        entries = [e for e in entries if e["id"] != epic_id]
+    cat.write_text(json.dumps(entries, indent=2) + "\n")
+    wt = repo / ".claude" / "worktrees" / "_release"
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-m", f"test: doctor {epic_id}"], cwd=wt,
+                   check=True, capture_output=True)
+
+
 def test_promote_reruns_the_check_when_verified_sha_is_stale(tmp_repo_with_release: Path, fixed_owner: str):
     """An unrelated ship after verification must re-trigger the check —
-    otherwise 'verified' is a stale label at the only moment it matters."""
+    otherwise 'verified' is a stale label at the only moment it matters.
+
+    The negative half of this assertion lives in the test below: without it,
+    `== 2` passes even when the gate re-runs unconditionally (which it did,
+    because the freshness fast path could never fire — see
+    promote_release._verification_is_fresh)."""
     repo = tmp_repo_with_release
     marker = _epic_invocation_marker(repo)
     _scaffold_gates(repo, integration=False,
@@ -147,6 +177,146 @@ def test_promote_reruns_the_check_when_verified_sha_is_stale(tmp_repo_with_relea
     result = promote_release(repo, run_gate2=False, run_deploy=False, push=False, use_pr=False)
     assert result["ok"] is True
     assert marker.read_text().count("\n") == 2, "G-E3 must re-run the outcome check at the fresh HEAD"
+
+
+def test_promote_skips_the_check_when_nothing_shipped_since_verification(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """The freshness FAST PATH (spec 5.3's "Pass" row). Ship-time G-E2 verifies
+    at cas_sha, then psrw itself commits the CAS claim and the outcome onto
+    release/<v> — so verified_sha is permanently >=2 commits behind release
+    HEAD and a literal `verified_sha == HEAD` comparison never fired. The gate
+    re-ran a multi-minute check for every epic on every promote."""
+    repo = tmp_repo_with_release
+    marker = _epic_invocation_marker(repo)
+    _scaffold_gates(repo, integration=False,
+                    epic_check=f'#!/bin/sh\necho ran >> "{marker}"\nexit 0\n')
+    new_release(repo, version="1.1")
+    epic_id, ideas = _open_epic_and_fanout(repo, ["only slice"])
+    _ship_idea_as_feature(repo, ideas[0]["id"], fixed_owner)  # G-E2 verifies at ship time
+    assert marker.read_text().count("\n") == 1
+
+    # Nothing shipped in between: the only commits on release/<v> since the
+    # verified sha are psrw's own epic bookkeeping.
+    result = promote_release(repo, run_gate2=False, run_deploy=False, push=False, use_pr=False)
+    assert result["ok"] is True
+    assert marker.read_text().count("\n") == 1, \
+        "G-E3 must NOT re-run the outcome check when the promoted content is unchanged"
+
+
+def test_promote_refuses_instead_of_stealing_an_in_flight_verification(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """G-E3 used force=True, which accepts 'verifying' as a source state — so it
+    stole a concurrent ship-time G-E2 (or `psrw epic verify`) mid-flight and ran
+    a second epic_check against the same epic, into the same epic_dir."""
+    repo = tmp_repo_with_release
+    marker = _epic_invocation_marker(repo)
+    _scaffold_gates(repo, integration=False,
+                    epic_check=f'#!/bin/sh\necho ran >> "{marker}"\nexit 0\n')
+    new_release(repo, version="1.1")
+    epic_id, ideas = _open_epic_and_fanout(repo, ["only slice"])
+    _ship_idea_as_feature(repo, ideas[0]["id"], fixed_owner)
+    # Simulate another run holding the claim right now.
+    _rewrite_release_epic_catalog(repo, epic_id, status="verifying",
+                                  verifying_sha="deadbeefdeadbeef")
+
+    with pytest.raises(EpicGateError) as exc:
+        promote_release(repo, run_gate2=False, run_deploy=False, push=False, use_pr=False)
+    msg = str(exc.value)
+    assert epic_id in msg and "verifying" in msg
+    assert "epic verify --force" in msg, "the refusal must name an actual way out"
+    assert marker.read_text().count("\n") == 1, "the in-flight check must not be stolen"
+
+
+def test_promote_warns_loudly_when_a_shipped_features_epic_is_missing(
+    tmp_repo_with_release: Path, fixed_owner: str, capsys
+):
+    """A drifted epic id disables G-E3 for that epic entirely — it must never do
+    so silently (mirrors cleanup()'s warning for the identical condition)."""
+    repo = tmp_repo_with_release
+    _scaffold_gates(repo, integration=False)
+    new_release(repo, version="1.1")
+    epic_id, ideas = _open_epic_and_fanout(repo, ["slice one", "slice two"])
+    _ship_idea_as_feature(repo, ideas[0]["id"], fixed_owner)
+    # ideas[1] stays unrefined: with the entry present this promote would REFUSE.
+    _rewrite_release_epic_catalog(repo, epic_id)  # delete it → drift
+
+    result = promote_release(repo, run_gate2=False, run_deploy=False, push=False, use_pr=False)
+    assert result["ok"] is True
+    err = capsys.readouterr().err
+    assert epic_id in err and "MISSING from the epic catalog" in err
+
+
+def test_promote_does_not_leave_a_split_approval_behind_when_a_later_epic_fails(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """set_split_approved is PERMANENT and has no inverse. Committing it for one
+    epic and then refusing the promote over a later one left a real operator
+    decision on release/<v> as the side effect of a failed attempt."""
+    repo = tmp_repo_with_release
+    marker = _epic_invocation_marker(repo)
+    _scaffold_gates(repo, integration=False,
+                    epic_check=f'#!/bin/sh\necho ran >> "{marker}"\nexit 1\n')
+    new_release(repo, version="1.1")
+    # E-001: incomplete (second slice never refined) → would be split-approved.
+    epic_a, ideas_a = _open_epic_and_fanout(repo, ["a one", "a two"], title="Epic A")
+    _ship_idea_as_feature(repo, ideas_a[0]["id"], fixed_owner, filename="a.txt")
+    # E-002: complete, but its outcome check fails → refuses the whole promote.
+    epic_b, ideas_b = _open_epic_and_fanout(repo, ["b one"], title="Epic B")
+    _ship_idea_as_feature(repo, ideas_b[0]["id"], fixed_owner, filename="b.txt")
+
+    with pytest.raises(EpicGateError) as exc:
+        promote_release(repo, run_gate2=False, run_deploy=False, push=False,
+                        use_pr=False, allow_split_epic=True)
+    entries = json.loads(_release_epic_catalog(repo).read_text())
+    approved = next(e for e in entries if e["id"] == epic_a)
+    assert approved["split_approved_by"] is None, \
+        "a permanent split approval must not survive a promote that refused"
+
+    # ...and the refusal must not advertise an escape hatch that does nothing:
+    # allow_split is consulted for INCOMPLETENESS only (spec 5.3), never for a
+    # failed outcome check, so "pass --allow-split-epic to promote anyway" sent
+    # the operator into another full multi-minute check for no reason.
+    assert epic_b in str(exc.value)
+    assert "--allow-split-epic does NOT cover this" in str(exc.value)
+
+
+def test_promote_records_failed_verification_when_the_gate_itself_crashes(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch
+):
+    """Between the CAS win and run_and_record's own try/except, a raise left the
+    epic pinned in 'verifying' forever — and GitError / lib.backlog_paths'
+    NoReleaseInProgressError are not in main()'s catch tuple, so they escaped as
+    raw tracebacks instead of the guaranteed `ERROR: ...` line."""
+    import scripts.promote_release as pr_mod
+    from lib.git_ops import GitError
+
+    repo = tmp_repo_with_release
+    marker = _epic_invocation_marker(repo)
+    _scaffold_gates(repo, integration=False,
+                    epic_check=f'#!/bin/sh\necho ran >> "{marker}"\nexit 0\n')
+    new_release(repo, version="1.1")
+    epic_id, ideas = _open_epic_and_fanout(repo, ["only slice"])
+    _ship_idea_as_feature(repo, ideas[0]["id"], fixed_owner)
+    # Force a re-check (fresh verification would short-circuit), then blow up
+    # inside the window between the CAS win and run_and_record.
+    idea2 = new_idea(repo, title="Unrelated")
+    _ship_idea_as_feature(repo, idea2["id"], fixed_owner, filename="g.txt")
+
+    def boom(*a, **k):
+        raise GitError("worktree add exploded")
+
+    monkeypatch.setattr(pr_mod, "epic_folder_path", boom)
+
+    with pytest.raises(EpicGateError) as exc:  # NOT a bare GitError
+        promote_release(repo, run_gate2=False, run_deploy=False, push=False, use_pr=False)
+    assert "GitError" in str(exc.value)
+
+    entries = json.loads(_release_epic_catalog(repo).read_text())
+    epic = next(e for e in entries if e["id"] == epic_id)
+    assert epic["status"] == "failed_verification", \
+        "the epic must not be left pinned in 'verifying' with no timeout"
 
 
 def test_split_approval_is_permanent(tmp_repo_with_release: Path, fixed_owner: str):
@@ -198,6 +368,25 @@ def test_split_disclosure_survives_pr_adoption(tmp_repo_with_release: Path, fixe
     body = edit_cmds[-1][edit_cmds[-1].index("--body") + 1]
     assert "split epic" in body.lower()
     assert epic_id in body
+
+
+def test_pr_body_refresh_failure_warns_but_does_not_fail_promote(
+    tmp_repo_with_release: Path, fixed_owner: str, capsys
+):
+    """The adopt path's `gh pr edit` is best-effort: the PR still exists and is
+    still usable, so a failed body refresh must warn, never raise."""
+    _setup_and_ship_feature(tmp_repo_with_release, fixed_owner)
+    gh = FakeGh({
+        "create": (1, "", 'a pull request for branch "release/1.1" already exists'),
+        "view": (0, PR_URL, ""),
+        "edit": (1, "", "gh: could not update pull request"),
+    })
+    result = promote_release(tmp_repo_with_release, run_gate2=False, run_deploy=False,
+                             gh_runner=gh)
+    assert result["ok"] is True
+    assert result["note"] == "PR already existed" and result["pr_url"] == PR_URL
+    err = capsys.readouterr().err
+    assert "gh pr edit failed" in err and "could not update pull request" in err
 
 
 def test_missing_epic_check_script_warns_but_does_not_block(
