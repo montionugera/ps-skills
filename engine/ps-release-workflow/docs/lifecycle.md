@@ -36,16 +36,50 @@ proceeds UNVERIFIED, for repos that never had one.
 `_release` worktree, because the shared local DB may already be migrated ahead of
 `main` by the release's own migrations.
 
+### Epic gates: G-E2 and G-E3
+
+An **epic** (`E-NNN`) is one outcome delivered by several features. Its gates run a
+repo-supplied outcome check (`hooks.epic_check`, default `scripts/epic-check.sh`, the
+fourth key in the `hooks` block below) against the *combined* release tree, and only
+once the epic is **complete**: every idea tagged to it (`epic_children`) has been
+refined, and every resulting feature has `status` `shipped`/`promoted` *and*
+`release_version` equal to the release under test. Both fields are needed because
+`unclaim` clears the claim but leaves `release_version` set.
+
+- **G-E2 (ship-time).** When a `ship` makes its epic complete, that ship wins a
+  compare-and-set (`open`/`failed_verification` to `verifying`), commits the claim on
+  `release/<v>`, then runs the check **outside** the shared lock. `psrw epic verify E-NNN`
+  runs the same path by hand; `--force` also reclaims a stale `verifying`
+  (a crashed run) or re-checks a `verified` epic. A failing check records
+  `failed_verification` and warns; the merge that triggered it still stands.
+- **G-E3 (promote-time).** `promote` runs `check_epics` first, before Gate 2, for every
+  epic with a feature shipped into this release. An incomplete epic refuses the
+  promote; `--allow-split-epic` instead records `split_approved_by` permanently
+  (exempting the epic from later releases too) and lists it in the PR body. A
+  complete epic that is not `verified`, or whose verification is stale, is re-checked.
+  *Fresh* means only psrw's own `.claude/epic_backlog` bookkeeping changed since
+  `verified_sha`; any other change re-runs the check. A missing epic-catalog entry
+  refuses outright. `--allow-split-epic` never overrides a failed outcome check.
+- **Environment.** The hook runs in a throwaway worktree detached at the captured sha,
+  never in `_release`, with `PSRW_EPIC_ID`, `PSRW_EPIC_FEATURES` (comma-separated
+  `F-NNN`), `PSRW_EPIC_SHA`, `PSRW_RELEASE_VERSION`, and `PSRW_EPIC_DIR` (output copied
+  into the epic folder afterward). A missing hook warns loudly on stderr and skips —
+  completeness is still enforced at promote — exactly like Gate 1.
+- **Demotion.** `unclaim` of a feature whose epic is `verified` demotes the epic to
+  `open` (clearing `verified_sha`, `verifying_sha`, `release_version`), because the
+  completeness the verification vouched for is gone.
+
 ### Overriding the gate scripts: the `hooks` block
 
 A repo whose scripts do not live at the default paths can redirect them with an
-optional `hooks` object in `.release.json`. Three keys, each with a default:
+optional `hooks` object in `.release.json`. Four keys, each with a default:
 
 | key | default | used by |
 | --- | --- | --- |
 | `precheck` | `scripts/precheck.sh` | Gate 1, `ship` |
 | `integration` | `scripts/integration.sh` | Gate 2, `promote` |
 | `deploy_local` | `scripts/deploy-local.sh` | the local deploy in `ship` and `promote --deploy` |
+| `epic_check` | `scripts/epic-check.sh` | G-E2 (`ship`, `epic verify`) and G-E3 (`promote`) |
 
 ```json
 { "version": "1.4", "in_progress": true,
@@ -104,11 +138,32 @@ clean up.
     _catalog.json                     # F-NNN registry (committed on release/<v>)
     F-NNN-<slug>/spec.md plan.md
     _archive/                         # promoted/closed features
+  epic_backlog/
+    _catalog.json                     # E-NNN registry (committed on release/<v>)
+    E-NNN-<slug>/spec.md verification.md
+    _archive/<v>/                     # epics archived by cleanup
   state/claims.json                   # gitignored — F-NNN -> owner map
   worktrees/                          # gitignored
     _release/                         # long-lived, on release/<v>
     F-NNN-<slug>/                     # claimed feature worktree (owner marker)
 ```
+
+### Epics in the catalogs
+
+Absent `epic` key means a legacy entry; nothing is migrated and every predicate
+tolerates its absence. The link runs through the ideas: `psrw epic fanout E-NNN` mints
+**one idea per slice** with `epic: E-NNN` (never a feature), and `refine` copies the
+tag onto the resulting `F-NNN`. The epic entry holds `status` (`open`, `verifying`,
+`verified`, `failed_verification`, `promoted`), `release_version`, `verified_sha` /
+`verified_at`, the in-flight `verifying_sha`, and `split_approved_by`. Every write goes
+through `mutate_state`, and each mutate+commit pair holds the `_release` file lock
+(never across a hook run). `psrw status` adds an **Epics** section (slices shipped out
+of slices minted) and warns when two or more siblings of one epic are claimed at once:
+epic branches are cut off `main`, so siblings are developed blind to each other.
+
+`--cleanup-only` archives the `E-NNN-<slug>/` folder to `epic_backlog/_archive/<v>/` for
+each epic touched by the release, stamping it `promoted`. It leaves an incomplete epic
+that is not split-approved un-archived, with a warning, rather than losing it.
 
 The guard only intercepts Claude Code's own `Edit`/`Write`/`MultiEdit`/`NotebookEdit`
 tool calls — it never sees a script's own file writes or `git commit` subprocesses,
