@@ -96,11 +96,12 @@ def _rollback_ideas(idea_cat: Path, minted: list[dict], folders: list[Path]) -> 
 
 def epic_open(repo: Path, title: str) -> dict:
     title = _sanitize(title)
+    slug = slugify(title)  # fail fast before any catalog mutation
     wt = get_release_worktree(repo)
     epic_cat = get_backlog_catalog_path(repo, "epic")
     with file_lock(wt):
         epic = add_epic_entry(epic_cat, title)
-        folder = wt / ".claude" / "epic_backlog" / f"{epic['id']}-{slugify(title)}"
+        folder = wt / ".claude" / "epic_backlog" / f"{epic['id']}-{slug}"
         try:
             folder.mkdir(parents=True)
             (folder / "spec.md").write_text(
@@ -123,6 +124,8 @@ def epic_open(repo: Path, title: str) -> dict:
 def epic_fanout(repo: Path, epic_id: str, titles: list[str]) -> dict:
     """Mint one IDEA per slice — never a feature. Minting F-NNN directly would
     break the from_idea invariant and auto-chain idea -> refine."""
+    if not titles:
+        raise ValueError("epic_fanout requires at least one slice title")
     titles = [_sanitize(t) for t in titles]
     wt = get_release_worktree(repo)
     # A typo'd id must not silently mint N ideas tagged to an epic that does not

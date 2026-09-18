@@ -109,6 +109,36 @@ def test_open_rolls_back_on_commit_failure(tmp_repo_in_release, fixed_owner, mon
                      / ".claude" / "epic_backlog").glob("E-*"))
 
 
+def test_open_rejects_unslugifiable_title_before_minting(tmp_repo_in_release, fixed_owner):
+    """slugify() raises SlugError on a title with no ASCII alphanumerics (e.g.
+    pure punctuation). epic_open now validates this BEFORE calling
+    add_epic_entry, so a bad title fails fast with nothing minted at all — no
+    rollback needed, and no unrecoverable orphan catalog entry (the earlier bug:
+    slugify ran after the catalog write but before the rollback-guarded try, so
+    a retry minted E-002 instead of reusing the orphaned E-001)."""
+    from lib.slug import SlugError
+
+    repo = tmp_repo_in_release
+    with pytest.raises(SlugError):
+        epic_open(repo, "???")
+
+    catalog = get_backlog_catalog_path(repo, "epic")
+    assert not catalog.exists(), "nothing should be minted for an unslugifiable title"
+
+    result = epic_open(repo, "Real epic title")
+    assert result["epic"]["id"] == "E-001", "the id space must be untouched by the rejected call"
+
+
+def test_fanout_with_no_titles_raises_clearly(tmp_repo_in_release, fixed_owner):
+    """Called directly with an empty list (the CLI's nargs="+" already blocks
+    this from the command line), fanout used to fall through to a confusing
+    GitError from committing nothing staged."""
+    repo = tmp_repo_in_release
+    epic_open(repo, "Multi-account risk limits")
+    with pytest.raises(ValueError):
+        epic_fanout(repo, "E-001", [])
+
+
 def test_fanout_rolls_back_on_commit_failure(tmp_repo_in_release, fixed_owner, monkeypatch):
     """Same commit-failure-rollback gap as epic_open, on the fanout path."""
     repo = tmp_repo_in_release
