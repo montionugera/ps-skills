@@ -223,3 +223,74 @@ def test_corrupt_release_json_never_raises(tmp_repo: Path):
     cp = _run_script(tmp_repo, "--repo", str(tmp_repo), "--brief")
     assert cp.returncode == 0
     assert "Traceback" not in cp.stderr
+
+
+# ── epic rollup ───────────────────────────────────────────────────────────
+
+
+def _setup_epic_with_three_slices(repo: Path) -> list[dict]:
+    """Release 1.1 in progress; E-001 fanned out into 3 ideas, each refined
+    into F-001..F-003 (all 'open'). Returns the three feature entries."""
+    from scripts.epic import epic_fanout, epic_open
+    from scripts.init_work_new_release import new_release
+    from scripts.promote_idea_to_refined import promote_idea_to_refined
+
+    new_release(repo, version="1.1")
+    epic_open(repo, "Multi-account risk limits")
+    ideas = epic_fanout(repo, "E-001", ["per-account cap", "aggregate cap", "breach alert"])["ideas"]
+    return [promote_idea_to_refined(repo, i["id"]) for i in ideas]
+
+
+def test_status_groups_features_under_their_epic(tmp_repo_with_release: Path, fixed_owner: str):
+    feats = _setup_epic_with_three_slices(tmp_repo_with_release)
+    _set_statuses(tmp_repo_with_release, {feats[0]["id"]: "shipped", feats[1]["id"]: "shipped"})
+
+    st = collect_status(tmp_repo_with_release)
+    out = render_full(st)
+
+    assert "E-001" in out
+    assert "2/3 slices shipped" in out
+    assert [e["id"] for e in st["epics"]] == ["E-001"]
+    # Existing counts are untouched by the added section.
+    assert st["counts"]["shipped"] == 2 and st["counts"]["total"] == 3
+
+
+def test_status_warns_when_two_siblings_are_claimed_at_once(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """Mitigation for F2: epic branches are cut off main, so siblings are
+    developed blind to each other."""
+    from scripts.init_work_refined_backlog import claim_feature
+
+    feats = _setup_epic_with_three_slices(tmp_repo_with_release)
+    claim_feature(tmp_repo_with_release, feats[0]["id"], owner=fixed_owner)
+    st = collect_status(tmp_repo_with_release)
+    assert "siblings" not in render_full(st).lower(), "one claimed sibling must not warn"
+
+    claim_feature(tmp_repo_with_release, feats[1]["id"], owner=fixed_owner)
+    st = collect_status(tmp_repo_with_release)
+    assert "two siblings of e-001 are claimed" in render_full(st).lower()
+    assert "two siblings of e-001 are claimed" in render_brief(st).lower()
+
+
+def test_rollup_does_not_assume_plan_md_exists(tmp_repo_with_release: Path, fixed_owner: str):
+    """'All three files always exist' is explicitly NOT an invariant (F-015)."""
+    feats = _setup_epic_with_three_slices(tmp_repo_with_release)
+    rel_wt = tmp_repo_with_release / ".claude" / "worktrees" / "_release"
+    plans = list((rel_wt / ".claude" / "refined_backlog").glob(f"{feats[0]['id']}-*/plan.md"))
+    for p in plans:
+        p.unlink()
+    for f in (rel_wt / ".claude" / "refined_backlog").glob(f"{feats[1]['id']}-*"):
+        for child in f.iterdir():
+            child.unlink()  # a feature folder with NO files at all
+
+    render_full(collect_status(tmp_repo_with_release))  # must not raise
+
+
+def test_rollup_tolerates_legacy_entries_without_epic_key(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    _setup_release_with_features(tmp_repo_with_release, fixed_owner)  # no epics anywhere
+    st = collect_status(tmp_repo_with_release)
+    assert st["epics"] == []
+    assert "Epics" not in render_full(st)
