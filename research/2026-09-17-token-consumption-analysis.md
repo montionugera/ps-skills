@@ -253,14 +253,27 @@ One-line findings discovered during this work, deliberately not pursued (rule 4)
   `remotion-*`, `motion-*`, `obsidian-vault-*` in the skill listing; `handoff`, `self-grill-audit`,
   `subagent-driven-development`, `brainstorming`, `writing-plans`, `render-spec`, `skill-comply`
   present. `ls ~/.claude/skills | wc -l` = 45; `enabledPlugins` = 2 true.
-- **Superpowers SessionStart hook — NOT applied (blocked by the auto-mode permission classifier as
-  self-modification).** No env off-switch exists in `hooks/session-start`; the only lever is
-  replacing `plugins/cache/claude-plugins-official/superpowers/6.3.0/hooks/hooks.json` with
-  `{ "hooks": {} }`. A plugin update restores the file, so it needs re-applying after upgrades.
-  Confirmed still firing: this session started with the full `using-superpowers` injection.
-- **`mmdc` headless Chrome — NOT applied (same classifier block).** `~/.cache/puppeteer` is absent.
-- **Stale handoff sweep — NOT applied (classifier block: shared scratch sweep).** Now 187
-  `handoff-*` entries (docs + `.claim` dirs) in `/tmp`. Two traps for whoever runs it: on macOS
-  `/tmp` is a symlink, so use `find /tmp/` (trailing slash) or it matches nothing; and
-  `/tmp/handoff-archive` itself matches `handoff-*`, so filter on `handoff-2*`. The durable version
-  belongs in `skills/handoff/scripts/herdr-handoff.sh` right after the file-exists check.
+All three Tier 3 items needed the user to run the command: the auto-mode permission classifier
+blocks the agent from editing Claude's own config, installing browsers, or sweeping shared `/tmp`.
+
+- **Superpowers SessionStart hook — APPLIED.** No env off-switch exists in `hooks/session-start`;
+  the only lever is replacing
+  `plugins/cache/claude-plugins-official/superpowers/6.3.0/hooks/hooks.json` with `{ "hooks": {} }`
+  (backup: `~/.claude/superpowers-hooks.json.bak`). Verified on disk; the ~862 tok/start saving
+  needs a fresh session to confirm, since plugin hooks load at session start.
+  **A superpowers plugin update restores the file — re-apply after upgrades.**
+- **`mmdc` headless Chrome — APPLIED, verified.** The trap: `mmdc` bundles its own puppeteer-core
+  pinned to Chrome `148.0.7778.97`, so plain `npx puppeteer browsers install chrome-headless-shell`
+  fetches the latest (153) and `mmdc` still fails with `Could not find Chrome (ver. 148.0.7778.97)`.
+  The working command pins it:
+  `npx -y @puppeteer/browsers install chrome-headless-shell@148.0.7778.97 --path ~/.cache/puppeteer`.
+  Test render now exits 0 with a valid 10.5 KB SVG, so `render-spec-md.sh` no longer emits false
+  "mermaid syntax error" warnings. Residual (filed, not chased): Node is the x64 build on Apple
+  Silicon, so Chrome runs under Rosetta and `mmdc` prints a degraded-performance warning.
+- **Stale handoff sweep — APPLIED (one-off).** 12 docs older than 3 days moved to
+  `/tmp/handoff-archive/`; 101 newer ones remain; 0 stale left. Two traps: on macOS `/tmp` is a
+  symlink, so `find /tmp` (no trailing slash) silently matches nothing — use `find /tmp/`; and
+  `/tmp/handoff-archive` itself matches `handoff-*`, so filter on `handoff-2*`.
+  **Still one-off, not enforced** — the durable version belongs in
+  `skills/handoff/scripts/herdr-handoff.sh` right after the file-exists check, so every handoff
+  sweeps as a side effect.
