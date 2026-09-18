@@ -19,7 +19,7 @@ from lib.slug import slugify
 from lib.state import file_lock, mutate_state
 
 _SPEC_SKELETON = """---
-title: {title}
+title: {yaml_title}
 id: {epic_id}
 status: epic
 ---
@@ -36,7 +36,7 @@ status: epic
 """
 
 _VERIFICATION_SKELETON = """---
-title: {title}
+title: {yaml_title}
 id: {epic_id}
 ---
 
@@ -52,9 +52,18 @@ toolkit never parses this file.
 
 
 def _sanitize(title: str) -> str:
-    """Double quotes break the YAML in skeletons and in the identity rewrite
-    (docs/known-issues.md). Strip them on the way in rather than inherit the bug."""
-    return title.replace('"', "'").strip()
+    """Collapse to a single line so a stray newline can't break out of the
+    YAML front matter or the markdown heading. YAML-significant characters
+    (quotes, colons) are handled at the point of use by _yaml_quote, not here."""
+    return " ".join(title.split())
+
+
+def _yaml_quote(s: str) -> str:
+    """Render as a YAML double-quoted scalar. An unquoted `title: {title}` plain
+    scalar breaks on a colon (e.g. "Epic: Payment gateway"), not just on quotes —
+    docs/known-issues.md's fix only stripped quotes, which is moot since the
+    skeleton was unquoted to begin with. Quoting closes both bugs at once."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _rollback_epic(epic_cat: Path, epic_id: str, folder: Path) -> None:
@@ -74,8 +83,6 @@ def _rollback_ideas(idea_cat: Path, minted: list[dict], folders: list[Path]) -> 
     """Mirror of promote_idea_to_refined's rollback, generalized to a batch: drop
     every minted idea from the catalog, then best-effort remove every folder that
     was created, so a retry re-mints the SAME ids instead of orphaning them."""
-    from lib.state import mutate_state
-
     minted_ids = {idea["id"] for idea in minted}
 
     def drop_minted(entries: list) -> list:
@@ -97,15 +104,19 @@ def epic_open(repo: Path, title: str) -> dict:
         try:
             folder.mkdir(parents=True)
             (folder / "spec.md").write_text(
-                _SPEC_SKELETON.format(title=title, epic_id=epic["id"])
+                _SPEC_SKELETON.format(
+                    title=title, yaml_title=_yaml_quote(title), epic_id=epic["id"]
+                )
             )
             (folder / "verification.md").write_text(
-                _VERIFICATION_SKELETON.format(title=title, epic_id=epic["id"])
+                _VERIFICATION_SKELETON.format(
+                    title=title, yaml_title=_yaml_quote(title), epic_id=epic["id"]
+                )
             )
-        except Exception:
+            commit_all(wt, f"chore(epic): open {epic['id']} {title}")
+        except BaseException:
             _rollback_epic(epic_cat, epic["id"], folder)
             raise
-        commit_all(wt, f"chore(epic): open {epic['id']} {title}")
     return {"epic": epic, "folder": folder}
 
 
@@ -132,13 +143,14 @@ def epic_fanout(repo: Path, epic_id: str, titles: list[str]) -> dict:
                 folder.mkdir(parents=True)
                 folders.append(folder)
                 (folder / "spec.md").write_text(
-                    f"---\ntitle: {title}\nid: {idea['id']}\nstatus: idea\n---\n\n# {title}\n"
+                    f"---\ntitle: {_yaml_quote(title)}\nid: {idea['id']}\n"
+                    f"status: idea\n---\n\n# {title}\n"
                 )
                 (folder / "research.md").write_text(f"# Research — {title}\n")
-        except Exception:
+            commit_all(wt, f"chore(epic): fan out {epic_id} into {len(minted)} ideas")
+        except BaseException:
             _rollback_ideas(idea_cat, minted, folders)
             raise
-        commit_all(wt, f"chore(epic): fan out {epic_id} into {len(minted)} ideas")
     return {"epic_id": epic_id, "ideas": minted}
 
 
