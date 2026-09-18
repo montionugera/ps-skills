@@ -29,6 +29,7 @@ DEFAULT_CODEX_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-age
 DEFAULT_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_MIN_5H_QUOTA", "30.0"))
 DEFAULT_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_MIN_WEEKLY_QUOTA", "10.0"))
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
+DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "900")
 
 PROTECTED_CONFIG_PATTERNS = [
     ".release.json",
@@ -303,6 +304,7 @@ def wrap_prompt_contract(task_prompt):
     - Test-Driven Development (TDD)
     - Make new commits only (never git commit --amend)
     - Preserve protected config files
+    - Scoped Verification (targeted tests only)
     """
     contract_header = (
         "Standing Rules & Prompt Contract:\n"
@@ -310,7 +312,9 @@ def wrap_prompt_contract(task_prompt):
         "2. Make new commits only: Never git commit --amend. Always create fresh commits to keep git history honest.\n"
         "3. Preserve protected config files: Do NOT overwrite or delete protected configuration files "
         "(.release.json, working-feature.json, claims.json, or git internal state).\n"
-        "4. Evidence before assertions: Verify all changes by running unit tests or build commands before declaring completion.\n"
+        "4. Evidence before assertions & Scoped Verification: Run TARGETED unit tests or build commands for the touched "
+        "files/modules (e.g. pytest path/to/test.py, npm test -- specific.test.ts) before declaring completion. Do NOT run the "
+        "entire monorepo or end-to-end suite for scoped implementation tasks.\n"
         "\n"
         "Task Brief:\n"
     )
@@ -431,6 +435,63 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
                 if src_path.is_file():
                     dst_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src_path, dst_path)
+        else:
+            # Worker failed or timed out: salvage any partial work before removing worktree
+            try:
+                base_head_rev = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=base_repo_dir,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+                worktree_head = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=temp_worktree_dir,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+
+                diff_patch_res = subprocess.run(
+                    ["git", "diff", base_head_rev],
+                    cwd=temp_worktree_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                salvage_diff = diff_patch_res.stdout
+
+                untracked_res = subprocess.run(
+                    ["git", "ls-files", "--others", "--exclude-standard"],
+                    cwd=temp_worktree_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                untracked_files = [line.strip() for line in untracked_res.stdout.splitlines() if line.strip()]
+
+                if salvage_diff.strip() or untracked_files or (worktree_head and worktree_head != base_head_rev):
+                    salvage_patch = f"/tmp/worker-salvage-{int(time.time())}.patch"
+                    with open(salvage_patch, "w", encoding="utf-8") as f:
+                        f.write(f"# Salvage patch from worker execution (exit {exit_code})\n")
+                        f.write(f"# Base HEAD: {base_head_rev}\n")
+                        f.write(f"# Worktree HEAD: {worktree_head}\n\n")
+                        if salvage_diff.strip():
+                            f.write(salvage_diff)
+                        if untracked_files:
+                            f.write("\n# Untracked files:\n")
+                            for u in untracked_files:
+                                u_path = Path(temp_worktree_dir) / u
+                                if u_path.is_file():
+                                    try:
+                                        content = u_path.read_text(encoding="utf-8")
+                                        f.write(f"\n--- /dev/null\n+++ b/{u}\n@@ -0,0 +1,{len(content.splitlines())} @@\n")
+                                        for line in content.splitlines():
+                                            f.write(f"+{line}\n")
+                                    except Exception:
+                                        pass
+                    salvage_msg = f"[Salvage] Partial work preserved at {salvage_patch}"
+                    stderr = f"{stderr}\n{salvage_msg}".strip() if stderr else salvage_msg
+                    print(salvage_msg, file=sys.stderr)
+            except Exception:
+                pass
 
         return exit_code, stdout, stderr, files_changed, diff_summary
 
@@ -493,11 +554,26 @@ def get_config_preference(cfg):
     )
 
 
+def get_config_timeout(cfg):
+    raw = (
+        os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT")
+        or cfg.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT")
+        or os.environ.get("DISPATCH_TIMEOUT")
+        or cfg.get("DISPATCH_TIMEOUT")
+        or str(DEFAULT_TIMEOUT)
+    )
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return DEFAULT_TIMEOUT
+
+
 def main():
     default_agent = detect_default_agent(sys.argv[0])
     cfg = load_dispatch_config()
     default_preference = get_config_preference(cfg)
     default_mode_str, default_on_demand = get_config_mode(cfg)
+    default_timeout = get_config_timeout(cfg)
 
     parser = argparse.ArgumentParser(description="Dispatch task to Antigravity CLI, Codex, or Cursor with quota check.")
     parser.add_argument("--agent", choices=["agy", "codex", "cursor", "auto"], default=default_agent,
@@ -515,7 +591,8 @@ def main():
     parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
     parser.add_argument("--min-5h", type=float, default=DEFAULT_MIN_5H, help="Minimum 5h quota remaining percent")
     parser.add_argument("--min-weekly", type=float, default=DEFAULT_MIN_WEEKLY, help="Minimum weekly quota remaining percent")
-    parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds for execution")
+    parser.add_argument("--timeout", type=int, default=default_timeout,
+                        help=f"Timeout in seconds for execution (default: {default_timeout}s)")
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
     parser.add_argument("--isolated", action="store_true", help="Execute inside a temporary isolated git worktree")

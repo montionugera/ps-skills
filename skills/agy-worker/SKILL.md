@@ -17,8 +17,8 @@ This workflow:
    - Supports declarative priority chains via `--priority` or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE` (e.g. `cursor:gemini-3.8-flash > agy > codex:terra:5.6`).
    - Evaluates left-to-right, respecting `--mode {subscription_quota_remaining,on_demand}` (or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE`) to guard against unexpected metered billing.
    - Defaults to best-runway auto-routing across flat providers (`agy` vs `codex`).
-4. **Prompt Contract Enforcement**: Wraps prompts with non-negotiable standing rules (TDD cycle, new commits only / never amend, preserving protected configs like `.release.json`, evidence-based verification).
-5. **Isolated Execution (`--isolated`)**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success while guaranteeing cleanup in all exit paths (saving conflict patches to `/tmp/` if needed).
+4. **Prompt Contract & Scoped Verification**: Wraps prompts with non-negotiable standing rules (TDD cycle, new commits only / never amend, preserving protected configs like `.release.json`, running targeted tests for touched modules rather than the full 10+ minute monorepo suite).
+5. **Isolated Execution (`--isolated`) & Salvage**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success. If a worker fails or times out (default 900s / 15m, configurable via `AI_AGENT_AUTO_DISPATCH_TIMEOUT`), any partial work is automatically preserved to `/tmp/worker-salvage-<timestamp>.patch` before cleanup.
 6. **Enforces Thin Orchestration**: Returns a standardized **≤ 15-line report** (status, modified files, diff summary, and execution output) so orchestrator context windows remain clean and free from archaeological bloat.
 
 ---
