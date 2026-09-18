@@ -182,8 +182,15 @@ def epic_verify(repo: Path, epic_id: str, force: bool = False) -> dict:
     release_version = state["version"]
     epic_cat = get_backlog_catalog_path(repo, "epic")
     idea_cat = get_backlog_catalog_path(repo, "idea")
-    sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
-    if not try_begin_verification(epic_cat, epic_id, sha, force=force):
+    # Read HEAD and CAS under the same lock ship uses (ship_current_work_to_
+    # release.py) — HEAD is only stable there. Unlocked, a concurrent ship's
+    # merge -> Gate-1-fails -> `reset --hard HEAD~1` can land between the
+    # read and the CAS, pinning verifying_sha to a commit that release/<v>
+    # no longer contains (finding 6/14).
+    with file_lock(rel_wt):
+        sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
+        won = try_begin_verification(epic_cat, epic_id, sha, force=force)
+    if not won:
         raise EpicNotVerifiableError(
             f"{epic_id} is already verifying or verified — pass --force to "
             f"reclaim it (e.g. a stale run from a crash)"

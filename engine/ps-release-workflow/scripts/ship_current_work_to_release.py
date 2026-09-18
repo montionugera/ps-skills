@@ -159,18 +159,36 @@ def ship_current_work(worktree: Path) -> dict:
                 head = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
                 if try_begin_verification(epic_cat, epic_id, head):
                     cas_sha = head
+                    # Commit the CAS win NOW, still inside the lock. try_begin_
+                    # verification's write is a plain, uncommitted filesystem
+                    # change (mutate_state does tmp-write + replace, no git);
+                    # left uncommitted, a concurrent ship's Gate-1 rollback
+                    # (`git reset --hard HEAD~1`, above) wipes it and reverts
+                    # the epic to "open" while this run's multi-minute check
+                    # is still in flight — the exact double-run the CAS exists
+                    # to prevent (finding 1/7).
+                    commit_all(rel_wt, f"chore(epic): {epic_id} verification claimed at {head}")
 
     # Lock released; only the CAS winner reaches here. The check can take
     # minutes, so holding the _release lock across it would stall every
     # concurrent ship — only the catalog write recording its outcome
     # (lib.epic_gate.run_and_record) is serialized, under its own short lock.
+    epic_outcome = None
     if cas_sha:
-        features = [i["promoted_to"] for i in epic_children(idea_cat, epic_id)]
+        # promoted_to is None until an idea is promoted to refined (finding
+        # 5/13) — filter it out exactly like epic.py's epic_verify does, so a
+        # concurrent `epic fanout` landing between the lock release above and
+        # this read can't crash `",".join(sorted(features))` on a mixed
+        # str/None list downstream in run_epic_check.
+        features = [i["promoted_to"] for i in epic_children(idea_cat, epic_id)
+                    if i.get("promoted_to")]
         epic_dir = epic_folder_path(repo, epic_id)
-        run_and_record(repo, rel_wt, epic_cat, epic_id, features, cas_sha,
-                        epic_dir, release_version)
+        rc, _entry = run_and_record(repo, rel_wt, epic_cat, epic_id, features, cas_sha,
+                                     epic_dir, release_version)
+        epic_outcome = {"epic": epic_id, "rc": rc, "sha": cas_sha}
 
-    return {"ok": True, "feature": feature_id, "release": release_version, "rel_wt": str(rel_wt)}
+    return {"ok": True, "feature": feature_id, "release": release_version,
+            "rel_wt": str(rel_wt), "epic_outcome": epic_outcome}
 
 
 def main() -> int:
@@ -199,6 +217,20 @@ def main() -> int:
         return 1
     print(json.dumps(result))
     print(f"\n✅ Shipped {result['feature']} to release/{result['release']}")
+    # The epic outcome check is separate from Gate 1 (finding 12): ship must
+    # never go silently green when it ran and failed — an operator reading
+    # only the checkmark below would not learn about it until G-E3 blocks
+    # promote, minutes or a release cycle later.
+    epic_outcome = result.get("epic_outcome")
+    if epic_outcome is not None and epic_outcome["rc"] not in (None, 0):
+        print(
+            f"\n⚠️  Epic {epic_outcome['epic']} outcome check FAILED (exit "
+            f"{epic_outcome['rc']}) at {epic_outcome['sha'][:12]} — recorded as "
+            f"failed_verification. The merge above still stands; fix the epic "
+            f"before promote, or re-check with "
+            f"`psrw epic verify --force {epic_outcome['epic']}`.",
+            file=sys.stderr,
+        )
 
     rel_wt = Path(result["rel_wt"])
     # Resolve through the hooks block exactly as promote does — a hardcoded

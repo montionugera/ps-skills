@@ -145,16 +145,23 @@ def _set_fields(epic_cat: Path, epic_id: str, **fields) -> dict:
     return updated
 
 
-def _transition(epic_cat: Path, epic_id: str, from_status: str, **fields) -> dict:
+def _transition(epic_cat: Path, epic_id: str, from_status: str, sha: str | None = None,
+                 **fields) -> dict:
     """Like _set_fields, but only applies `fields` when the entry's CURRENT status
     is `from_status`; otherwise the file is left untouched and the entry is
     returned as-is. Guards the CAS's exit the same way try_begin_verification
     guards its entry — a force-cleared or already re-verified epic must not be
-    silently overwritten by a stale finishing run landing after it."""
+    silently overwritten by a stale finishing run landing after it.
+
+    When `sha` is given, ALSO requires entry['verifying_sha'] == sha: status
+    alone is not enough once `force=True` can re-enter 'verifying' with a new
+    sha while an older run for a different sha is still in flight (a stale
+    run finishing after the fresh one would otherwise overwrite its verdict —
+    see mark_epic_verified/mark_epic_failed)."""
     updated: dict = {}
 
     def updater(e: dict) -> None:
-        if e.get("status") == from_status:
+        if e.get("status") == from_status and (sha is None or e.get("verifying_sha") == sha):
             e.update(fields)
         updated.update(e)
 
@@ -164,14 +171,15 @@ def _transition(epic_cat: Path, epic_id: str, from_status: str, **fields) -> dic
 
 def mark_epic_verified(epic_cat: Path, epic_id: str, sha: str, release_version: str) -> dict:
     return _transition(
-        epic_cat, epic_id, "verifying", status="verified", verified_sha=sha,
+        epic_cat, epic_id, "verifying", sha=sha, status="verified", verified_sha=sha,
         verified_at=_now(), release_version=release_version, verifying_sha=None,
     )
 
 
-def mark_epic_failed(epic_cat: Path, epic_id: str, release_version: str) -> dict:
+def mark_epic_failed(epic_cat: Path, epic_id: str, release_version: str,
+                      sha: str | None = None) -> dict:
     return _transition(
-        epic_cat, epic_id, "verifying", status="failed_verification",
+        epic_cat, epic_id, "verifying", sha=sha, status="failed_verification",
         verified_sha=None, release_version=release_version, verifying_sha=None,
     )
 
