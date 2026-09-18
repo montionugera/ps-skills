@@ -38,6 +38,7 @@ VERBS = {
     "unclaim":     Verb("unclaim.py", "Abandon a claim, keeping the feature branch", True),
     "status":      Verb("status.py", "One-screen report of what is in flight", True),
     "hotfix":      Verb("hotfix.py", "Create a sibling hotfix worktree", True),
+    "epic":        Verb("epic.py", "Open an epic, fan it out into ideas, verify it", True),
 }
 
 # Scripts with no verb, on purpose.
