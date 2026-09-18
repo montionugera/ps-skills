@@ -261,7 +261,9 @@ def promote_idea_to_refined(repo: Path, idea_id: str) -> dict:
         # the mint rolls back on failure (m-4): remove the minted refined entry
         # + folder (and best-effort unstamp the idea) so a retry re-mints the
         # SAME id instead of orphaning it and minting the next one.
-        feat = add_refined_entry(ref_cat, idea_id=idea_id, title=idea["title"])
+        feat = add_refined_entry(
+            ref_cat, idea_id=idea_id, title=idea["title"], epic=idea.get("epic")
+        )
         folder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-{slugify(idea['title'])}"
         try:
             folder.mkdir(parents=True)

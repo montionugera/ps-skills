@@ -35,6 +35,6 @@ def get_release_worktree(repo: Path) -> Path:
     return release_worktree_path(repo)
 
 def get_backlog_catalog_path(repo: Path, kind: str) -> Path:
-    """kind in {idea, refined}. Returns _release_worktree/.claude/<kind>_backlog/_catalog.json."""
+    """kind in {idea, refined, epic}. Returns _release_worktree/.claude/<kind>_backlog/_catalog.json."""
     wt = get_release_worktree(repo)
     return wt / ".claude" / f"{kind}_backlog" / "_catalog.json"

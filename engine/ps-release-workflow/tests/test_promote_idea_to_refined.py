@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from lib.backlog_paths import NoReleaseInProgressError
+from lib.backlog_paths import NoReleaseInProgressError, get_backlog_catalog_path
+from lib.catalog import add_idea_entry
 from scripts.init_work_new_release import new_release
 from scripts.new_idea import new_idea
 from scripts.promote_idea_to_refined import (
@@ -465,3 +466,13 @@ def test_undecodable_research_is_never_deleted(tmp_repo_with_release: Path):
     feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     assert (ffolder / "research.md").read_bytes() == blob
+
+
+def test_refine_carries_the_epic_tag_forward(tmp_repo_in_release, fixed_owner):
+    repo = tmp_repo_in_release
+    idea_cat = get_backlog_catalog_path(repo, "idea")
+    add_idea_entry(idea_cat, "slice a", epic="E-001")
+    result = promote_idea_to_refined(repo, "I-001")
+    refined = json.loads(get_backlog_catalog_path(repo, "refined").read_text())
+    assert refined[0]["epic"] == "E-001"
+    assert refined[0]["id"] == result["id"]

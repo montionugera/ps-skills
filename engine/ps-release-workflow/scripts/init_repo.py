@@ -61,6 +61,8 @@ def init_repo(repo: Path) -> None:
     (repo / ".claude" / "idea_backlog" / "_catalog.json").write_text("[]\n")
     (repo / ".claude" / "refined_backlog").mkdir(parents=True, exist_ok=True)
     (repo / ".claude" / "refined_backlog" / "_catalog.json").write_text("[]\n")
+    (repo / ".claude" / "epic_backlog").mkdir(parents=True, exist_ok=True)
+    (repo / ".claude" / "epic_backlog" / "_catalog.json").write_text("[]\n")
 
     # 3. Extend .gitignore
     gi = repo / ".gitignore"
