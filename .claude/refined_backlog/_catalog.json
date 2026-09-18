@@ -4,8 +4,9 @@
     "title": "Epic layer: deliver and verify multiple features under one epic",
     "from_idea": "I-001",
     "created_at": "2026-09-18T12:40:48.918973+00:00",
-    "claimed_by": null,
-    "status": "open",
-    "release_version": null
+    "claimed_by": "claude-a6c35399",
+    "status": "claimed",
+    "release_version": null,
+    "claimed_at": "2026-09-18T12:40:49.214065+00:00"
   }
 ]
