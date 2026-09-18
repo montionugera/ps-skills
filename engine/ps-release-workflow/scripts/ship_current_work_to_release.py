@@ -19,7 +19,9 @@ from lib.backlog_paths import (
     get_release_worktree,
     read_release_state,
 )
-from lib.catalog import CatalogEntryNotFoundError, mark_shipped
+from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped
+from lib.epic import epic_children, epic_completeness, epic_folder_path, try_begin_verification
+from lib.epic_gate import run_and_record
 from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
 from lib.hooks import HookPathError, resolve_hook
 from lib.repo import is_ps_release_workflow_repo
@@ -143,6 +145,30 @@ def ship_current_work(worktree: Path) -> dict:
         refined_cat = get_backlog_catalog_path(repo, "refined")
         if mark_shipped(refined_cat, feature_id, release_version) or is_dirty(rel_wt):
             commit_all(rel_wt, f"chore(catalog): {feature_id} status=shipped on {release_version}")
+
+        # G-E2 CAS: decide, under this same lock (HEAD is stable here), whether
+        # THIS ship is the one that triggers the epic outcome check. The check
+        # itself must not run inside this lock — see below, outside the `with`.
+        epic_id = (find_entry(refined_cat, feature_id) or {}).get("epic")
+        cas_sha = None
+        idea_cat = get_backlog_catalog_path(repo, "idea")
+        epic_cat = get_backlog_catalog_path(repo, "epic")
+        if epic_id:
+            complete, _ = epic_completeness(idea_cat, refined_cat, epic_id, release_version)
+            if complete:
+                head = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
+                if try_begin_verification(epic_cat, epic_id, head):
+                    cas_sha = head
+
+    # Lock released; only the CAS winner reaches here. The check can take
+    # minutes, so holding the _release lock across it would stall every
+    # concurrent ship — only the catalog write recording its outcome
+    # (lib.epic_gate.run_and_record) is serialized, under its own short lock.
+    if cas_sha:
+        features = [i["promoted_to"] for i in epic_children(idea_cat, epic_id)]
+        epic_dir = epic_folder_path(repo, epic_id)
+        run_and_record(repo, rel_wt, epic_cat, epic_id, features, cas_sha,
+                        epic_dir, release_version)
 
     return {"ok": True, "feature": feature_id, "release": release_version, "rel_wt": str(rel_wt)}
 

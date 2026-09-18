@@ -10,13 +10,20 @@ from pathlib import Path
 
 from lib.backlog_paths import (
     NoReleaseInProgressError, get_backlog_catalog_path, get_release_worktree,
+    read_release_state,
 )
 from lib.catalog import CatalogEntryNotFoundError, add_idea_entry, find_entry
-from lib.epic import add_epic_entry
-from lib.git_ops import GitError, commit_all
+from lib.epic import add_epic_entry, epic_children, epic_folder_path, try_begin_verification
+from lib.epic_gate import run_and_record
+from lib.git_ops import GitError, _run as git_run, commit_all
 from lib.repo import find_repo_root
 from lib.slug import slugify
 from lib.state import file_lock, mutate_state
+
+
+class EpicNotVerifiableError(Exception):
+    """try_begin_verification lost the CAS: without --force this means someone
+    else is already verifying epic_id, or it is already verified."""
 
 _SPEC_SKELETON = """---
 title: {yaml_title}
@@ -157,6 +164,37 @@ def epic_fanout(repo: Path, epic_id: str, titles: list[str]) -> dict:
     return {"epic_id": epic_id, "ideas": minted}
 
 
+def epic_verify(repo: Path, epic_id: str, force: bool = False) -> dict:
+    """Manually (re-)run the G-E2 outcome check against the release's current HEAD.
+
+    Shares the CAS + run-outside-lock/record-under-lock path with ship's
+    automatic trigger (lib.epic_gate.run_and_record) so exactly one place
+    decides verified vs failed. `force` is the only way to reclaim an epic
+    stuck 'verifying' from a crashed run, or to re-check an already-'verified'
+    epic whose verified_sha no longer matches release HEAD — see
+    try_begin_verification's docstring for why that must be one atomic CAS,
+    not demote_epic() + try_begin_verification().
+    """
+    rel_wt = get_release_worktree(repo)
+    state = read_release_state(repo)
+    if state is None:
+        raise NoReleaseInProgressError("No release in progress")
+    release_version = state["version"]
+    epic_cat = get_backlog_catalog_path(repo, "epic")
+    idea_cat = get_backlog_catalog_path(repo, "idea")
+    sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
+    if not try_begin_verification(epic_cat, epic_id, sha, force=force):
+        raise EpicNotVerifiableError(
+            f"{epic_id} is already verifying or verified — pass --force to "
+            f"reclaim it (e.g. a stale run from a crash)"
+        )
+    features = [i["promoted_to"] for i in epic_children(idea_cat, epic_id) if i.get("promoted_to")]
+    epic_dir = epic_folder_path(repo, epic_id)
+    rc, entry = run_and_record(repo, rel_wt, epic_cat, epic_id, features, sha,
+                                epic_dir, release_version)
+    return {"epic_id": epic_id, "sha": sha, "rc": rc, "entry": entry}
+
+
 def main() -> int:
     import argparse
     p = argparse.ArgumentParser(prog="psrw epic", description=__doc__)
@@ -183,7 +221,8 @@ def main() -> int:
             result = epic_fanout(repo, args.epic_id, args.titles)
         else:
             result = epic_verify(repo, args.epic_id, force=args.force)
-    except (NoReleaseInProgressError, CatalogEntryNotFoundError, GitError) as e:
+    except (NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,
+            EpicNotVerifiableError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result, default=str, indent=2))

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.epic import epic_fanout, epic_open
 from scripts.init_work_new_release import new_release
 from scripts.new_idea import new_idea
 from scripts.promote_idea_to_refined import promote_idea_to_refined
@@ -526,3 +527,88 @@ def test_ship_main_refuses_a_bad_hooks_deploy_local_loudly(
     assert "Traceback" not in captured.err
     # The merge really did stand — this is not the rollback path.
     assert (rel_wt / "feature.txt").exists()
+
+
+def _scaffold_epic_check(repo: Path, body: str = "#!/bin/sh\nexit 0\n") -> None:
+    """Commit scripts/epic-check.sh on main BEFORE cutting release/feature
+    branches, same pattern as _scaffold_precheck, so the release tree snapshot
+    G-E2 runs against carries it."""
+    d = repo / "scripts"
+    d.mkdir(exist_ok=True)
+    f = d / "epic-check.sh"
+    f.write_text(body)
+    f.chmod(0o755)
+    subprocess.run(["git", "add", "scripts/epic-check.sh"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "scaffold epic-check"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=repo, check=True, capture_output=True)
+
+
+def _ship_single_slice_epic_feature(repo: Path, fixed_owner: str, epic_check_body: str):
+    """Scaffold precheck + epic-check on main, open a 1-slice epic, promote that
+    slice into a feature, claim + ship it. Completeness is true the moment this
+    single slice ships, so this ship is the one that wins the G-E2 CAS.
+    Returns (epic_id, feature_id, rel_wt)."""
+    _scaffold_precheck(repo)
+    _scaffold_epic_check(repo, epic_check_body)
+    new_release(repo, version="1.1")
+    epic = epic_open(repo, "Cap the risk")
+    epic_id = epic["epic"]["id"]
+    fan = epic_fanout(repo, epic_id, ["cap it"])
+    idea_id = fan["ideas"][0]["id"]
+    feat = promote_idea_to_refined(repo, idea_id)
+    claim = claim_feature(repo, feat["id"], owner=fixed_owner)
+    wt = Path(claim["worktree"])
+    _commit_feature_file(wt)
+    ship_current_work(wt)
+    rel_wt = repo / ".claude" / "worktrees" / "_release"
+    return epic_id, feat["id"], rel_wt, wt
+
+
+def test_failing_epic_check_leaves_the_merge_standing(tmp_repo_with_release: Path, fixed_owner: str):
+    """v1 rolled the merge back on ANY post-merge gate failure; that erased the
+    failure record ship_current_work_to_release.py:earlier wrote and made a
+    re-run land on an emptied tree. The epic outcome check is NOT that gate —
+    G-E3 (Task 4) guards the way to main, so a failing epic must leave
+    release/<v> exactly as shipped."""
+    repo = tmp_repo_with_release
+    epic_id, feature_id, rel_wt, _wt = _ship_single_slice_epic_feature(
+        repo, fixed_owner, "#!/bin/sh\nexit 3\n"
+    )
+    epic_cat = json.loads((rel_wt / ".claude" / "epic_backlog" / "_catalog.json").read_text())
+    epic_entry = next(e for e in epic_cat if e["id"] == epic_id)
+    assert epic_entry["status"] == "failed_verification"
+
+    refined_cat = json.loads((rel_wt / ".claude" / "refined_backlog" / "_catalog.json").read_text())
+    feature_entry = next(e for e in refined_cat if e["id"] == feature_id)
+    assert feature_entry["status"] == "shipped"  # merge still standing
+
+    log = subprocess.run(["git", "log", "--oneline", "-5"], cwd=rel_wt,
+                         capture_output=True, text=True, check=True).stdout
+    assert feature_id in log
+
+
+def test_second_ship_does_not_run_a_second_check(tmp_repo_with_release: Path, fixed_owner: str):
+    """The CAS must let exactly one caller through. try_begin_verification's own
+    lost-CAS behavior is unit-tested in tests/test_epic.py — this proves the
+    SHIP WIRING actually honors it: a re-ship of an already-verified epic's
+    feature (worktree clean, merge a no-op, HEAD unchanged) must not re-run
+    epic-check.sh, because try_begin_verification refuses a non-idle status
+    without --force."""
+    repo = tmp_repo_with_release
+    epic_id, feature_id, rel_wt, wt = _ship_single_slice_epic_feature(
+        repo, fixed_owner, '#!/bin/sh\necho ran >> "$PSRW_EPIC_DIR/marker"\nexit 0\n'
+    )
+    epic_dir = rel_wt / ".claude" / "epic_backlog"
+    marker = next(epic_dir.glob(f"{epic_id}-*")) / "marker"
+    assert marker.read_text().count("\n") == 1
+
+    epic_cat = json.loads((rel_wt / ".claude" / "epic_backlog" / "_catalog.json").read_text())
+    assert next(e for e in epic_cat if e["id"] == epic_id)["status"] == "verified"
+
+    # Re-ship the same, already-merged feature worktree — a no-op merge, so HEAD
+    # does not move and the feature stays "shipped" (mark_shipped is idempotent).
+    ship_current_work(wt)
+
+    assert marker.read_text().count("\n") == 1, "epic-check.sh must not have run again"
+    epic_cat = json.loads((rel_wt / ".claude" / "epic_backlog" / "_catalog.json").read_text())
+    assert next(e for e in epic_cat if e["id"] == epic_id)["status"] == "verified"

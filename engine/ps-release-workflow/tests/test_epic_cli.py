@@ -4,7 +4,7 @@ import pytest
 import yaml
 
 from lib.backlog_paths import get_backlog_catalog_path
-from scripts.epic import epic_open, epic_fanout
+from scripts.epic import EpicNotVerifiableError, epic_fanout, epic_open, epic_verify
 
 
 def test_open_mints_epic_with_spec_and_verification(tmp_repo_in_release, fixed_owner):
@@ -158,3 +158,33 @@ def test_fanout_rolls_back_on_commit_failure(tmp_repo_in_release, fixed_owner, m
     assert ideas == [], "a commit failure must roll back every minted idea"
     assert not list((repo / ".claude" / "worktrees" / "_release"
                      / ".claude" / "idea_backlog").glob("I-*"))
+
+
+def test_verify_manually_reruns_the_check(tmp_repo_in_release, fixed_owner):
+    """psrw epic verify lets an operator (re-)run G-E2 directly, without a ship.
+    No epic-check.sh is scaffolded here, so the run is a documented skip (rc is
+    None), not a failure — mirroring Gate 1's own missing-script contract."""
+    repo = tmp_repo_in_release
+    epic = epic_open(repo, "E")
+    epic_id = epic["epic"]["id"]
+    epic_fanout(repo, epic_id, ["only slice"])
+    result = epic_verify(repo, epic_id)
+    assert result["rc"] is None
+    assert result["entry"]["status"] == "verified"
+
+
+def test_verify_without_force_refuses_an_already_verified_epic(tmp_repo_in_release, fixed_owner):
+    """Without --force, a second verify call must lose the CAS instead of
+    silently re-running (and possibly re-marking) an epic that already has a
+    result — --force is the one documented escape hatch."""
+    repo = tmp_repo_in_release
+    epic = epic_open(repo, "E")
+    epic_id = epic["epic"]["id"]
+    epic_fanout(repo, epic_id, ["only slice"])
+    epic_verify(repo, epic_id)
+
+    with pytest.raises(EpicNotVerifiableError):
+        epic_verify(repo, epic_id)
+
+    result = epic_verify(repo, epic_id, force=True)
+    assert result["entry"]["status"] == "verified"
