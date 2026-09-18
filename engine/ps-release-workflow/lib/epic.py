@@ -5,7 +5,7 @@ Pure state only — no git, no subprocess. lib/epic_gate.py owns execution.
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lib.catalog import list_entries, next_id
+from lib.catalog import CatalogEntryNotFoundError, list_entries, next_id
 from lib.state import mutate_state
 
 
@@ -80,17 +80,25 @@ class _NoTransition(Exception):
 def try_begin_verification(epic_cat: Path, epic_id: str, sha: str) -> bool:
     """Compare-and-set: open|failed_verification -> verifying. True == this caller won.
 
+    False means only "someone else is verifying, or already verified" — a lost
+    CAS, not a missing epic. An absent id raises CatalogEntryNotFoundError
+    instead, so a typo'd/drifted epic id cannot make the gate silently never
+    run (the same silent-drift class this catalog already kills — see
+    CatalogEntryNotFoundError's docstring).
+
     No timestamp and no timeout: 'recently verifying' is not implementable without
     inventing a threshold nobody can defend. A crashed run is cleared by
     `psrw epic verify --force`.
     """
     won = False
+    found = False
 
     def cas(entries: list) -> list:
-        nonlocal won
+        nonlocal won, found
         for e in entries:
             if e["id"] != epic_id:
                 continue
+            found = True
             if e.get("status") not in ("open", "failed_verification"):
                 raise _NoTransition()
             e["status"] = "verifying"
@@ -102,6 +110,8 @@ def try_begin_verification(epic_cat: Path, epic_id: str, sha: str) -> bool:
     try:
         mutate_state(epic_cat, cas, default=[])
     except _NoTransition:
+        if not found:
+            raise CatalogEntryNotFoundError(epic_id, epic_cat)
         return False
     return won
 
@@ -127,14 +137,14 @@ def _set_fields(epic_cat: Path, epic_id: str, **fields) -> dict:
 def mark_epic_verified(epic_cat: Path, epic_id: str, sha: str, release_version: str) -> dict:
     return _set_fields(
         epic_cat, epic_id, status="verified", verified_sha=sha,
-        verified_at=_now(), release_version=release_version,
+        verified_at=_now(), release_version=release_version, verifying_sha=None,
     )
 
 
 def mark_epic_failed(epic_cat: Path, epic_id: str, release_version: str) -> dict:
     return _set_fields(
         epic_cat, epic_id, status="failed_verification",
-        verified_sha=None, release_version=release_version,
+        verified_sha=None, release_version=release_version, verifying_sha=None,
     )
 
 

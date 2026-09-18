@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.catalog import CatalogEntryNotFoundError
 from lib.epic import add_epic_entry, epic_completeness, try_begin_verification
 
 
@@ -87,3 +88,13 @@ def test_cas_lets_exactly_one_caller_begin(tmp_path):
     assert try_begin_verification(cat, "E-001", "deadbeef") is False
     entry = json.loads(cat.read_text())[0]
     assert entry["status"] == "verifying"
+
+
+def test_cas_on_unknown_epic_id_raises_rather_than_silently_skipping(tmp_path):
+    """A typo'd/drifted epic id must not read as 'someone else is verifying' —
+    that is the same silent-drift class CatalogEntryNotFoundError already kills
+    for the idea/refined catalogs."""
+    cat = _write(tmp_path / "epic.json", [])
+    add_epic_entry(cat, "Multi-account risk limits")
+    with pytest.raises(CatalogEntryNotFoundError):
+        try_begin_verification(cat, "E-999", "deadbeef")
