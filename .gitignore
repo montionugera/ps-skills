@@ -31,3 +31,7 @@ graft/
 # ps-release-workflow (gitignored state)
 .claude/state/
 .claude/worktrees/
+
+# Rendered view artifacts from render-spec-md.sh (local only)
+research/*.html
+docs/superpowers/**/*.html
