@@ -190,6 +190,13 @@ def epic_verify(repo: Path, epic_id: str, force: bool = False) -> dict:
     with file_lock(rel_wt):
         sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
         won = try_begin_verification(epic_cat, epic_id, sha, force=force)
+        if won:
+            # Same race as ship_current_work's CAS win (finding 1/7): the CAS
+            # write is a plain, uncommitted filesystem change. Left uncommitted,
+            # a concurrent ship's Gate-1 rollback (`reset --hard HEAD~1`) wipes
+            # it and reverts the epic to its prior status while this run's
+            # multi-minute check is still in flight.
+            commit_all(rel_wt, f"chore(epic): {epic_id} verification claimed at {sha}")
     if not won:
         raise EpicNotVerifiableError(
             f"{epic_id} is already verifying or verified — pass --force to "
