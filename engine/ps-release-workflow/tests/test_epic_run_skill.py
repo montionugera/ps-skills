@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(not SKILLS.is_dir(), reason=f"{SKILLS} not prese
 
 def _skill(name: str) -> tuple[str, str, str]:
     """(full text, frontmatter, body) of skills/ps-release-workflow-<name>/SKILL.md."""
-    text = (SKILLS / f"ps-release-workflow-{name}" / "SKILL.md").read_text()
+    text = (SKILLS / f"ps-release-workflow-{name}" / "SKILL.md").read_text(encoding="utf-8")
     _, frontmatter, body = text.split("---", 2)
     return text, frontmatter, body
 
@@ -85,4 +85,4 @@ def test_epic_run_uses_every_verb_the_chain_needs():
 
 def test_no_skill_uses_the_slash_form_of_the_namespace():
     for skill in sorted(SKILLS.glob("ps-release-workflow-*/SKILL.md")):
-        assert "/ps-release-workflow:" not in skill.read_text(), skill.parent.name
+        assert "/ps-release-workflow:" not in skill.read_text(encoding="utf-8"), skill.parent.name
