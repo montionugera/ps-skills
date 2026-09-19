@@ -504,6 +504,9 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn, merge_lock=None):
                                 print(f"Preserved unapplied worktree patch at: {backup_patch}", file=sys.stderr)
                             except Exception:
                                 pass
+                            exit_code = 1
+                            stderr = f"FAILED: merge conflict applying patch to base repo: {apply_res.stderr.strip()}\nPreserved conflict patch at: {backup_patch}"
+                            diff_summary = f"MERGE_CONFLICT (saved patch: {backup_patch})"
 
                 # 3. Apply any uncommitted working tree changes from worktree
                 wt_diff_res = subprocess.run(
@@ -514,13 +517,25 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn, merge_lock=None):
                 )
                 uncommitted_patch = wt_diff_res.stdout
                 if uncommitted_patch.strip():
-                    subprocess.run(
+                    apply_wt_res = subprocess.run(
                         ["git", "apply", "--whitespace=nowarn", "-"],
                         input=uncommitted_patch,
                         cwd=base_repo_dir,
                         capture_output=True,
                         text=True,
                     )
+                    if apply_wt_res.returncode != 0:
+                        backup_patch = f"/tmp/worker-conflict-uncommitted-{int(time.time())}.patch"
+                        try:
+                            with open(backup_patch, "w", encoding="utf-8") as f:
+                                f.write(uncommitted_patch)
+                            print(f"Warning: git apply failed back to base repo for uncommitted changes: {apply_wt_res.stderr.strip()}", file=sys.stderr)
+                            print(f"Preserved unapplied worktree patch at: {backup_patch}", file=sys.stderr)
+                        except Exception:
+                            pass
+                        exit_code = 1
+                        stderr = f"FAILED: merge conflict applying uncommitted changes: {apply_wt_res.stderr.strip()}\nPreserved conflict patch at: {backup_patch}"
+                        diff_summary = f"MERGE_CONFLICT (saved patch: {backup_patch})"
 
                 # 4. Copy untracked files
                 untracked_res = subprocess.run(
@@ -813,6 +828,54 @@ def parse_batch_tasks(batch_args=None, batch_file=None):
     return tasks
 
 
+def extract_tasks_from_plan(plan_path, target_phase=None):
+    """
+    Extracts task descriptions from a markdown plan file (e.g. docs/superpowers/plans/... or plan.md).
+    Supports filtering by phase header (e.g. target_phase=1 or 'Phase 1').
+    """
+    p = Path(plan_path)
+    if not p.is_file():
+        raise FileNotFoundError(f"Plan file not found: {plan_path}")
+    text = p.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    selected_lines = []
+    if target_phase:
+        norm_phase = str(target_phase).lower().replace("phase", "").strip()
+        in_phase = False
+        for line in lines:
+            lower = line.lower()
+            if ("phase " in lower or "phase-" in lower) and any(line.lstrip().startswith(h) for h in ("##", "###", "####")):
+                phase_match = (
+                    f"phase {norm_phase}" in lower
+                    or f"phase-{norm_phase}" in lower
+                    or f"phase {str(target_phase).lower()}" in lower
+                )
+                if phase_match:
+                    in_phase = True
+                elif in_phase:
+                    break
+            if in_phase:
+                selected_lines.append(line)
+    else:
+        selected_lines = lines
+
+    extracted = []
+    for line in selected_lines:
+        line_s = line.strip()
+        # Extract checkboxes: - [ ] Task ... or - [ ] ...
+        if line_s.startswith("- [ ]") or line_s.startswith("- [x]"):
+            task_text = line_s[5:].strip()
+            if task_text:
+                extracted.append({"task": task_text})
+        elif (line_s.startswith("### Task") or line_s.startswith("#### Task")) and ":" in line_s:
+            task_text = line_s.split(":", 1)[1].strip()
+            if task_text:
+                extracted.append({"task": task_text})
+
+    return extracted
+
+
 def format_batch_report(results):
     total = len(results)
     succeeded = sum(1 for r in results if r.get("exit_code") == 0)
@@ -827,6 +890,14 @@ def format_batch_report(results):
         fc = r.get("files_changed", 0)
         ds = r.get("diff_summary", "no diff")
         lines.append(f"#{idx} [{agent}] {status_icon}: {fc} files ({ds}) - '{task_preview}'")
+
+    failed_tasks = [r.get("task", "") for r in results if r.get("exit_code") != 0 and r.get("task")]
+    if failed_tasks and len(lines) < 14:
+        sample_task = failed_tasks[0]
+        if len(sample_task) > 35:
+            sample_task = sample_task[:32] + "..."
+        lines.append(f"Retry: dispatch-worker --task \"{sample_task}\"")
+
     lines.append("==================================================")
     return "\n".join(lines[:15])
 
@@ -850,9 +921,72 @@ def format_status_report(jobs):
         created = j.get("created_at", 0)
         elapsed = int(time.time() - created) if created else 0
         diff_str = f" | {fc} files ({ds})" if fc > 0 else ""
-        lines.append(f"[{jid}] {agent} | {status} | elapsed={elapsed}s{diff_str}")
+
+        tail_snippet = ""
+        log_file = j.get("log_file")
+        if log_file and os.path.isfile(log_file) and status == "RUNNING":
+            try:
+                with open(log_file, "r", encoding="utf-8", errors="replace") as lf:
+                    content_lines = [l.strip() for l in lf.readlines() if l.strip()]
+                    if content_lines:
+                        last_l = content_lines[-1]
+                        if len(last_l) > 28:
+                            last_l = last_l[:25] + "..."
+                        tail_snippet = f" | tail: {last_l}"
+            except Exception:
+                pass
+
+        lines.append(f"[{jid}] {agent} | {status} | elapsed={elapsed}s{diff_str}{tail_snippet}")
     lines.append("===============================================")
     return "\n".join(lines[:15])
+
+
+def tail_job(job_target="latest", num_lines=20, follow=False, job_dir=DEFAULT_JOB_DIR):
+    jobs = list_all_jobs(job_dir=job_dir)
+    if not jobs:
+        print("No dispatch jobs found.", file=sys.stderr)
+        sys.exit(1)
+
+    target_job = None
+    if not job_target or job_target == "latest":
+        sorted_jobs = sorted(jobs, key=lambda j: j.get("created_at", 0), reverse=True)
+        target_job = sorted_jobs[0]
+    else:
+        for j in jobs:
+            if j.get("job_id") == job_target:
+                target_job = j
+                break
+
+    if not target_job:
+        print(f"Job '{job_target}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    log_file = target_job.get("log_file")
+    if not log_file or not os.path.isfile(log_file):
+        print(f"No log file found for job {target_job.get('job_id')}.", file=sys.stderr)
+        sys.exit(1)
+
+    jid = target_job.get("job_id")
+    status = target_job.get("status", "UNKNOWN")
+    print(f"=== TAIL LOG: {jid} ({status}) [{log_file}] ===")
+
+    with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+        all_lines = f.readlines()
+        for l in all_lines[-num_lines:]:
+            sys.stdout.write(l)
+        sys.stdout.flush()
+
+        if follow:
+            while True:
+                line = f.readline()
+                if line:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                else:
+                    st = load_job_state(jid, job_dir=job_dir)
+                    if st and st.get("status") not in ("RUNNING", "PENDING"):
+                        break
+                    time.sleep(0.5)
 
 
 def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
@@ -982,6 +1116,11 @@ def main():
     parser.add_argument("--detach", "--async", dest="detach", action="store_true", help="Launch task in background and exit immediately")
     parser.add_argument("--status", type=str, nargs="?", const="all", help="Check status of background job(s)")
     parser.add_argument("--wait", type=str, nargs="?", const="all", help="Wait for background job(s) to finish")
+    parser.add_argument("--tail", type=str, nargs="?", const="latest", help="Show recent log output for a job (default: latest)")
+    parser.add_argument("-n", "--lines", type=int, default=20, help="Number of lines to show with --tail (default: 20)")
+    parser.add_argument("-f", "--follow", action="store_true", help="Follow log output in real-time (like tail -f)")
+    parser.add_argument("--from-plan", type=str, help="Extract tasks from a markdown plan file (e.g. plan.md)")
+    parser.add_argument("--phase", type=str, default=None, help="Phase to extract from plan (e.g. 1 or 'Phase 1')")
     parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
     parser.add_argument("--min-5h", type=float, default=DEFAULT_MIN_5H, help="Minimum 5h quota remaining percent")
     parser.add_argument("--min-weekly", type=float, default=DEFAULT_MIN_WEEKLY, help="Minimum weekly quota remaining percent")
@@ -998,6 +1137,11 @@ def main():
     # 1. Internal runner invocation
     if args.internal_run_job:
         run_internal_job(args.internal_run_job, job_dir=args.job_dir)
+
+    # 1b. Tail job log
+    if args.tail:
+        tail_job(args.tail, num_lines=args.lines, follow=args.follow, job_dir=args.job_dir)
+        sys.exit(0)
 
     # 2. Check status of job(s)
     if args.status:
@@ -1118,7 +1262,7 @@ def main():
             print(f"QUOTA_LOW: {msg}")
             sys.exit(1)
 
-    is_batch = bool(args.batch or args.batch_file)
+    is_batch = bool(args.batch or args.batch_file or args.from_plan)
     if not is_batch and not args.task:
         parser.print_help(file=sys.stderr)
         sys.exit(2)
@@ -1126,7 +1270,10 @@ def main():
     batch_tasks = []
     if is_batch:
         try:
-            batch_tasks = parse_batch_tasks(args.batch, args.batch_file)
+            if args.from_plan:
+                batch_tasks = extract_tasks_from_plan(args.from_plan, args.phase)
+            else:
+                batch_tasks = parse_batch_tasks(args.batch, args.batch_file)
         except Exception as e:
             print(f"FAILED: error parsing batch tasks: {e}", file=sys.stderr)
             sys.exit(2)
