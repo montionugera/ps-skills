@@ -55,8 +55,8 @@ def test_epic_run_never_promotes():
 # Clause 1+2 of the ban: never legitimate outside the BAN line itself.
 STRICT_HAZARD = re.compile(r"psrw\s+promote|(?<!-)--deploy")
 # Clause 3 (merge to main): legitimate only inside a "never ..." prohibition.
-MERGE_HAZARD = re.compile(r"merge\s+(?:\S+\s+){0,3}(?:to|into)\s+main|git\s+merge\s+main"
-                          r"|push\s+(?:\S+\s+){0,2}main\b")
+MERGE_HAZARD = re.compile(r"merge\s+(?:\S+\s+){0,3}(?:to|into)\s+main\b|git\s+merge\s+main\b"
+                          r"|push\s+(?:\S+\s+){0,2}main\b", re.IGNORECASE)
 
 
 def _is_prohibited(body: str, start: int) -> bool:
