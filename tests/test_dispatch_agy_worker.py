@@ -693,6 +693,360 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(dispatch_mod.get_config_timeout({"AI_AGENT_AUTO_DISPATCH_TIMEOUT": "1200", "DISPATCH_TIMEOUT": "600"}), 1200)
 
 
+class TestBatchAndAsyncFeatures(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.job_dir = Path(self.temp_dir.name) / "jobs"
+        self.job_dir.mkdir(parents=True, exist_ok=True)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir(parents=True, exist_ok=True)
+
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True, capture_output=True)
+
+        (self.repo_dir / "base.txt").write_text("initial line\n", encoding="utf-8")
+        subprocess.run(["git", "add", "base.txt"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_parse_batch_tasks_args(self):
+        tasks = dispatch_mod.parse_batch_tasks(batch_args=["task A", "task B"])
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(tasks[0]["task"], "task A")
+        self.assertEqual(tasks[1]["task"], "task B")
+
+    def test_parse_batch_tasks_json_list(self):
+        json_file = Path(self.temp_dir.name) / "tasks.json"
+        json_file.write_text(json.dumps(["task 1", "task 2"]), encoding="utf-8")
+        tasks = dispatch_mod.parse_batch_tasks(batch_file=str(json_file))
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(tasks[0]["task"], "task 1")
+        self.assertEqual(tasks[1]["task"], "task 2")
+
+    def test_parse_batch_tasks_json_dict_list(self):
+        json_file = Path(self.temp_dir.name) / "tasks_dict.json"
+        json_file.write_text(json.dumps([
+            {"task": "task 1", "agent": "cursor", "model": "gemini-3.8-flash"},
+            {"task": "task 2", "agent": "codex"}
+        ]), encoding="utf-8")
+        tasks = dispatch_mod.parse_batch_tasks(batch_file=str(json_file))
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(tasks[0]["task"], "task 1")
+        self.assertEqual(tasks[0]["agent"], "cursor")
+        self.assertEqual(tasks[0]["model"], "gemini-3.8-flash")
+        self.assertEqual(tasks[1]["agent"], "codex")
+
+    def test_parse_batch_tasks_txt(self):
+        txt_file = Path(self.temp_dir.name) / "tasks.txt"
+        txt_file.write_text("# comment\ntask alpha\n\ntask beta\n", encoding="utf-8")
+        tasks = dispatch_mod.parse_batch_tasks(batch_file=str(txt_file))
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(tasks[0]["task"], "task alpha")
+        self.assertEqual(tasks[1]["task"], "task beta")
+
+    def test_job_state_crud(self):
+        jid = "dw-test-123"
+        state = {"job_id": jid, "status": "RUNNING", "agent": "cursor"}
+        dispatch_mod.save_job_state(jid, state, job_dir=str(self.job_dir))
+
+        loaded = dispatch_mod.load_job_state(jid, job_dir=str(self.job_dir))
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded["job_id"], jid)
+        self.assertEqual(loaded["status"], "RUNNING")
+
+        all_jobs = dispatch_mod.list_all_jobs(job_dir=str(self.job_dir))
+        self.assertEqual(len(all_jobs), 1)
+        self.assertEqual(all_jobs[0]["job_id"], jid)
+
+    def test_format_status_report(self):
+        jobs = [
+            {"job_id": "dw-1", "agent": "cursor", "status": "SUCCESS", "files_changed": 2, "diff_summary": "1 commit"},
+            {"job_id": "dw-2", "agent": "agy", "status": "RUNNING", "created_at": time.time() - 30}
+        ]
+        rep = dispatch_mod.format_status_report(jobs)
+        self.assertIn("DISPATCH JOBS STATUS", rep)
+        self.assertIn("[dw-1] CURSOR | SUCCESS", rep)
+        self.assertIn("[dw-2] AGY | RUNNING", rep)
+        self.assertLessEqual(len(rep.splitlines()), 15)
+
+    def test_format_batch_report(self):
+        results = [
+            {"task": "fix auth endpoint", "agent": "cursor", "exit_code": 0, "files_changed": 2, "diff_summary": "1 commit"},
+            {"task": "update billing schema", "agent": "agy", "exit_code": 0, "files_changed": 1, "diff_summary": "1 commit"}
+        ]
+        rep = dispatch_mod.format_batch_report(results)
+        self.assertIn("BATCH DISPATCH REPORT (2 tasks: 2 succeeded, 0 failed)", rep)
+        self.assertIn("#1 [CURSOR] SUCCESS", rep)
+        self.assertIn("#2 [AGY] SUCCESS", rep)
+        self.assertLessEqual(len(rep.splitlines()), 15)
+
+    def test_execute_batch_parallel_mocked(self):
+        tasks = [
+            {"task": "task 1"},
+            {"task": "task 2"}
+        ]
+
+        def mock_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds):
+            file_name = "file1.txt" if "task 1" in task_text else "file2.txt"
+            (Path(target_dir) / file_name).write_text(f"created by {task_text}\n", encoding="utf-8")
+            subprocess.run(["git", "add", file_name], cwd=target_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", f"commit for {task_text}"], cwd=target_dir, check=True, capture_output=True)
+            return 0, "output", "", 1, "1 commit"
+
+        orig_run_single_task = dispatch_mod.run_single_task
+        try:
+            dispatch_mod.run_single_task = mock_single_task
+            results = dispatch_mod.execute_batch_parallel(
+                tasks,
+                base_repo_dir=str(self.repo_dir),
+                chosen_agent="cursor",
+                chosen_model=None,
+                timeout_seconds=30,
+                max_parallel=2
+            )
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0]["exit_code"], 0)
+            self.assertEqual(results[1]["exit_code"], 0)
+
+            # Check that base_repo_dir has both files merged!
+            self.assertTrue((self.repo_dir / "file1.txt").exists())
+            self.assertTrue((self.repo_dir / "file2.txt").exists())
+        finally:
+            dispatch_mod.run_single_task = orig_run_single_task
+
+    def test_dry_run_batch_cli(self):
+        state_file = Path(self.temp_dir.name) / "healthy.json"
+        state_file.write_text(json.dumps({
+            "snapshot": {
+                "windows": [
+                    {"kind": "five_hour", "remaining_percent": 80.0},
+                    {"kind": "weekly", "remaining_percent": 90.0}
+                ]
+            }
+        }), encoding="utf-8")
+
+        res = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--agent", "agy", "--state-file", str(state_file),
+             "--dry-run", "--batch", "task 1", "task 2", "--cwd", str(self.repo_dir)],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("DRY_RUN", res.stdout)
+        self.assertIn("Would dispatch 2 task(s) in parallel", res.stdout)
+
+    def test_status_and_wait_cli(self):
+        jid = "dw-test-cli"
+        state = {
+            "job_id": jid,
+            "agent": "cursor",
+            "model": "gemini-3.8-flash",
+            "task": "build something",
+            "status": "SUCCESS",
+            "exit_code": 0,
+            "cwd": str(self.repo_dir),
+            "files_changed": 1,
+            "diff_summary": "1 commit(s)",
+            "tail_output": "All done"
+        }
+        dispatch_mod.save_job_state(jid, state, job_dir=str(self.job_dir))
+
+        # Check status CLI
+        status_res = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--status", jid, "--job-dir", str(self.job_dir)],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(status_res.returncode, 0)
+        self.assertIn("[dw-test-cli] CURSOR | SUCCESS", status_res.stdout)
+
+        # Check wait CLI
+        wait_res = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--wait", jid, "--job-dir", str(self.job_dir)],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(wait_res.returncode, 0)
+        self.assertIn("Status: SUCCESS (exit 0)", wait_res.stdout)
+
+    def test_extract_tasks_from_plan(self):
+        plan_content = """# Plan
+
+## Phase 1: Authentication
+- [ ] Task 1.1: Implement login route
+- [ ] Task 1.2: Add token validation
+### Task 1.3: Refresh token endpoint
+
+## Phase 2: Billing
+- [ ] Task 2.1: Add stripe webhook
+"""
+        plan_file = Path(self.temp_dir.name) / "plan.md"
+        plan_file.write_text(plan_content, encoding="utf-8")
+
+        # Phase 1 only
+        p1_tasks = dispatch_mod.extract_tasks_from_plan(str(plan_file), target_phase="1")
+        self.assertEqual(len(p1_tasks), 3)
+        self.assertEqual(p1_tasks[0]["task"], "Task 1.1: Implement login route")
+        self.assertEqual(p1_tasks[1]["task"], "Task 1.2: Add token validation")
+        self.assertEqual(p1_tasks[2]["task"], "Refresh token endpoint")
+
+        # Phase 2 only
+        p2_tasks = dispatch_mod.extract_tasks_from_plan(str(plan_file), target_phase="2")
+        self.assertEqual(len(p2_tasks), 1)
+        self.assertEqual(p2_tasks[0]["task"], "Task 2.1: Add stripe webhook")
+
+    def test_tail_job(self):
+        jid = "dw-tail-test"
+        log_file = Path(self.temp_dir.name) / "dw-tail.log"
+        log_file.write_text("line 1\nline 2\nline 3\n", encoding="utf-8")
+        state = {
+            "job_id": jid,
+            "status": "RUNNING",
+            "log_file": str(log_file),
+            "created_at": time.time()
+        }
+        dispatch_mod.save_job_state(jid, state, job_dir=str(self.job_dir))
+
+        tail_res = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--tail", jid, "--job-dir", str(self.job_dir), "-n", "2"],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(tail_res.returncode, 0)
+        self.assertIn("TAIL LOG: dw-tail-test", tail_res.stdout)
+        self.assertIn("line 2", tail_res.stdout)
+        self.assertIn("line 3", tail_res.stdout)
+        self.assertNotIn("line 1", tail_res.stdout)
+
+    def test_format_status_report_live_tail(self):
+        log_file = Path(self.temp_dir.name) / "live.log"
+        log_file.write_text("running pytest unit tests...\n", encoding="utf-8")
+        jobs = [{
+            "job_id": "dw-live",
+            "agent": "cursor",
+            "status": "RUNNING",
+            "log_file": str(log_file),
+            "created_at": time.time() - 10
+        }]
+        rep = dispatch_mod.format_status_report(jobs)
+        self.assertIn("tail: running pytest", rep)
+
+    def test_format_batch_report_retry_hint(self):
+        results = [
+            {"task": "task 1", "agent": "cursor", "exit_code": 0, "files_changed": 1, "diff_summary": "ok"},
+            {"task": "task 2 failed prompt", "agent": "agy", "exit_code": 1, "files_changed": 0, "diff_summary": "err"}
+        ]
+        rep = dispatch_mod.format_batch_report(results)
+        self.assertIn("Retry: dispatch-worker --task \"task 2 failed prompt\"", rep)
+
+    def test_execute_batch_parallel_merge_conflict_detected(self):
+        tasks = [
+            {"task": "task 1 edit base"},
+            {"task": "task 2 edit base"}
+        ]
+
+        def conflicting_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds):
+            # Both tasks edit base.txt with conflicting lines
+            (Path(target_dir) / "base.txt").write_text(f"conflicting edit from {task_text}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "base.txt"], cwd=target_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", f"edit from {task_text}"], cwd=target_dir, check=True, capture_output=True)
+            return 0, "output", "", 1, "1 commit"
+
+        orig_run_single_task = dispatch_mod.run_single_task
+        try:
+            dispatch_mod.run_single_task = conflicting_single_task
+            results = dispatch_mod.execute_batch_parallel(
+                tasks,
+                base_repo_dir=str(self.repo_dir),
+                chosen_agent="cursor",
+                chosen_model=None,
+                timeout_seconds=30,
+                max_parallel=2
+            )
+            self.assertEqual(len(results), 2)
+            exit_codes = sorted([r["exit_code"] for r in results])
+            self.assertEqual(exit_codes, [0, 1])
+            failed_task = [r for r in results if r["exit_code"] == 1][0]
+            self.assertIn("MERGE_CONFLICT", failed_task["diff_summary"])
+        finally:
+            dispatch_mod.run_single_task = orig_run_single_task
+
+    def test_think_quota_thresholds_and_model(self):
+        # 5h=75%, weekly=30% -> Passes normal (min 30/10), but fails thinking (min 80/20)
+        codex_file = Path(self.temp_dir.name) / "codex-status.json"
+        codex_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 75.0},
+                {"kind": "weekly", "remaining_percent": 30.0}
+            ]
+        }), encoding="utf-8")
+        # Standard check should pass
+        el, r5, rw, msg = dispatch_mod.check_quota("codex", str(codex_file), min_5h=30.0, min_weekly=10.0)
+        self.assertTrue(el)
+
+        # Thinking check should fail because 5h is 75.0 < 80.0
+        el_think, r5_t, rw_t, msg_t = dispatch_mod.check_quota(
+            "codex", str(codex_file),
+            min_5h=dispatch_mod.DEFAULT_THINK_MIN_5H,
+            min_weekly=dispatch_mod.DEFAULT_THINK_MIN_WEEKLY
+        )
+        self.assertFalse(el_think)
+        self.assertIn("75.0%", msg_t)
+        self.assertIn("min 80.0%", msg_t)
+
+    def test_normalize_model_name_thinking_aliases(self):
+        self.assertEqual(dispatch_mod.normalize_model_name("codex", "sol"), "gpt-5.6-sol")
+        self.assertEqual(dispatch_mod.normalize_model_name("codex", "sol:5.6"), "gpt-5.6-sol")
+        self.assertEqual(dispatch_mod.normalize_model_name("codex", "thinking"), "gpt-5.6-sol")
+
+    def test_wrap_prompt_contract_with_context_and_output(self):
+        cfile = Path(self.temp_dir.name) / "spec.md"
+        cfile.write_text("# Feature Spec\nMust implement auth endpoint.", encoding="utf-8")
+        out_file = "docs/output.md"
+
+        wrapped = dispatch_mod.wrap_prompt_contract(
+            "Implement auth endpoint",
+            context_files=[str(cfile)],
+            output_file=out_file,
+            is_thinking=True
+        )
+        self.assertIn("Thinking / Architecture Mode", wrapped)
+        self.assertIn("Context Document: spec.md", wrapped)
+        self.assertIn("Must implement auth endpoint.", wrapped)
+        self.assertIn(f"Write your primary output/deliverable directly to the file: '{out_file}'", wrapped)
+
+    def test_extract_tasks_from_plan_attaches_context(self):
+        plan_path = Path(self.temp_dir.name) / "plan.md"
+        plan_path.write_text(
+            "## Phase 1: Setup\n"
+            "- [ ] Task 1.1: Create database migration\n",
+            encoding="utf-8"
+        )
+        tasks = dispatch_mod.extract_tasks_from_plan(str(plan_path), target_phase=1)
+        self.assertEqual(len(tasks), 1)
+        self.assertIn("Create database migration", tasks[0]["task"])
+        self.assertEqual(tasks[0]["context_files"], [str(plan_path)])
+
+    def test_format_report_with_artifact_and_context(self):
+        rep = dispatch_mod.format_report(
+            agent="codex",
+            status="SUCCESS",
+            exit_code=0,
+            cwd="/tmp/repo",
+            files_changed=2,
+            diff_summary="2 files",
+            tail_output="all done",
+            artifact="docs/specs/auth.md",
+            context_count=3
+        )
+        self.assertIn("Artifact: docs/specs/auth.md", rep)
+        self.assertIn("Context: 3 document(s) referenced", rep)
+        self.assertIn("Files Modified: 2 (2 files)", rep)
+
+
 if __name__ == "__main__":
     unittest.main()
 

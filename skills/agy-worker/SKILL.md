@@ -44,6 +44,36 @@ dispatch-cursor-worker --model gemini-3.8-flash --task "Implement task from brie
 dispatch-codex-worker --task "Implement task from brief..." --cwd "$WORKTREE_DIR"
 # or
 dispatch-worker --agent auto --task "..." --cwd "$WORKTREE_DIR" --isolated
+
+# --- Parallel Batch Mode (Zero Cold-Start LLM Tax, Python Concurrency) ---
+# Run multiple independent tasks concurrently in separate git worktrees
+dispatch-worker --batch "Fix test A in src/auth" "Fix test B in src/billing" --cwd "$REPO_DIR"
+
+# Or from a manifest file (JSON list or one-task-per-line txt)
+dispatch-worker --batch-file tasks.json --max-parallel 4 --cwd "$REPO_DIR"
+
+# --- Detached / Async Mode (Non-Blocking Fire-and-Forget) ---
+# Fire off in background immediately (returns job ID, exits 0)
+dispatch-worker --task "Heavy refactor in src/engine" --detach --cwd "$REPO_DIR"
+
+# --- Heavy Thinking & Architecture Mode (High Quota Guard: 5h > 80%, Weekly > 20%) ---
+# Offload deep reasoning, RFC generation, or code reviews to gpt-5.6-sol
+dispatch-worker --think --task "Review architecture for multi-tenant auth" \
+  --context docs/superpowers/specs/auth-spec.md logs/auth.log \
+  --output-file docs/reviews/phase-1-review.md
+
+# --- Context Bundling (No Token Bloat on CLI) ---
+# Bundle reference documents directly without stuffing prompts into CLI args
+dispatch-worker --task "Implement task 2.1" --context docs/spec.md logs/test.log --cwd "$REPO_DIR"
+
+# --- Plan Extraction Mode ---
+# Extract tasks directly from an implementation plan (writing-plans markdown)
+dispatch-worker --from-plan docs/superpowers/specs/2026-09-plan.md --phase 1 --cwd "$REPO_DIR"
+
+# --- Live Log Tail & Monitoring ---
+# View last N lines of a running or completed worker job
+dispatch-worker --tail latest -n 20
+dispatch-worker --tail dw-1789785000-a1b2 -f    # Follow live output stream
 ```
 
 ### Exit Codes Contract
@@ -59,14 +89,14 @@ dispatch-worker --agent auto --task "..." --cwd "$WORKTREE_DIR" --isolated
 
 ## Integration with Subagent-Driven Development (SDD)
 
-When using `subagent-driven-development`, the orchestrator executes each batch with:
+When using `subagent-driven-development`:
 
+### 1. Synchronous or Detached Single Batch
 ```bash
 dispatch-codex-worker \
   --task "Read brief: [BRIEF_FILE]. Implement exactly what is specified. Run tests and keep output." \
   --cwd "[directory]"
 ```
-
 - If exit code is `0`: Process the ≤ 15-line report and proceed directly to Gate 1 / Review Gate.
 - If exit code is `10`: Automatically fallback to internal subagent:
   ```
@@ -75,3 +105,12 @@ dispatch-codex-worker \
     description: "Implement Task N: [task name]"
     model: sonnet
   ```
+
+### 2. Multi-Task Parallel Execution (Optimal Tokenomics)
+Instead of spawning N separate Claude subagents (which burn ~70K cold-start tokens each), dispatch all tasks in a single batch call:
+```bash
+dispatch-worker \
+  --batch "Implement task 1 from brief 1" "Implement task 2 from brief 2" \
+  --cwd "[directory]"
+```
+Python runs the tasks concurrently in isolated worktrees and merges back sequentially without burning primary context tokens.

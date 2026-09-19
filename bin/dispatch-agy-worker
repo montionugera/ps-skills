@@ -12,6 +12,8 @@ Exit Codes:
 """
 
 import argparse
+import concurrent.futures
+from contextlib import nullcontext
 import datetime
 import json
 import os
@@ -19,16 +21,22 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.config/dispatch/config.env")
 DEFAULT_AGY_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/agy-statusline.observation.json")
 DEFAULT_CODEX_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/codex-app-server.json")
+DEFAULT_JOB_DIR = os.path.expanduser("~/.local/state/dispatch/jobs")
+DEFAULT_LOG_DIR = "/tmp/dispatch-jobs"
 
 DEFAULT_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_MIN_5H_QUOTA", "30.0"))
 DEFAULT_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_MIN_WEEKLY_QUOTA", "10.0"))
+DEFAULT_THINK_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_5H_QUOTA", "80.0"))
+DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKLY_QUOTA", "20.0"))
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
+DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "900")
 
 PROTECTED_CONFIG_PATTERNS = [
@@ -236,6 +244,8 @@ def normalize_model_name(agent, model):
     if agent == "codex":
         if clean.lower() in ("terra", "terra:5.6", "5.6"):
             return "gpt-5.6-terra"
+        if clean.lower() in ("sol", "sol:5.6", "thinking"):
+            return "gpt-5.6-sol"
     return clean
 
 
@@ -298,27 +308,83 @@ def route_priority_chain(chain, allow_on_demand=False, min_5h=DEFAULT_MIN_5H, mi
     return fb_agent, fb_model, False, 0.0, 0.0, f"Chain exhausted: {summary}"
 
 
-def wrap_prompt_contract(task_prompt):
+def build_context_block(context_paths, max_lines_per_file=300):
+    """
+    Builds a structured context section referencing files or directories.
+    For files, embeds relative path and header/content if feasible, or points the worker to read them directly.
+    """
+    if not context_paths:
+        return ""
+    blocks = ["\nContext & Reference Documents:"]
+    for path_str in context_paths:
+        p = Path(path_str)
+        if not p.exists():
+            blocks.append(f"- [NOT_FOUND] {path_str}")
+            continue
+        if p.is_file():
+            blocks.append(f"\n--- Context Document: {p.name} ({path_str}) ---")
+            try:
+                content = p.read_text(encoding="utf-8", errors="replace")
+                lines = content.splitlines()
+                if len(lines) > max_lines_per_file:
+                    preview = "\n".join(lines[:max_lines_per_file])
+                    blocks.append(f"{preview}\n... [TRUNCATED: {len(lines) - max_lines_per_file} more lines in {path_str}. Read directly if needed.]")
+                else:
+                    blocks.append(content)
+            except Exception as err:
+                blocks.append(f"(Could not read file inline: {err}. Please inspect '{path_str}' directly on disk.)")
+        elif p.is_dir():
+            blocks.append(f"\n--- Context Directory: {path_str} ---")
+            blocks.append("Files in directory:")
+            try:
+                for child in sorted(p.iterdir())[:20]:
+                    blocks.append(f"  - {child.name} ({'dir' if child.is_dir() else 'file'})")
+            except Exception as err:
+                blocks.append(f"  (Error listing directory: {err})")
+    blocks.append("\nInstructions regarding Context:")
+    blocks.append("Do NOT overwrite or delete reference documents unless explicitly instructed.")
+    return "\n".join(blocks) + "\n"
+
+
+def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_thinking=False):
     """
     Wraps task prompt with standard standing rules:
-    - Test-Driven Development (TDD)
+    - Test-Driven Development (TDD) (for implementation) or Rigorous Reasoning (for thinking)
     - Make new commits only (never git commit --amend)
     - Preserve protected config files
     - Scoped Verification (targeted tests only)
+    - Context bundling and output file destination
     """
-    contract_header = (
-        "Standing Rules & Prompt Contract:\n"
-        "1. Test-Driven Development (TDD): Write tests first (RED), implement functionality (GREEN), then refactor.\n"
-        "2. Make new commits only: Never git commit --amend. Always create fresh commits to keep git history honest.\n"
-        "3. Preserve protected config files: Do NOT overwrite or delete protected configuration files "
-        "(.release.json, working-feature.json, claims.json, or git internal state).\n"
-        "4. Evidence before assertions & Scoped Verification: Run TARGETED unit tests or build commands for the touched "
-        "files/modules (e.g. pytest path/to/test.py, npm test -- specific.test.ts) before declaring completion. Do NOT run the "
-        "entire monorepo or end-to-end suite for scoped implementation tasks.\n"
-        "\n"
-        "Task Brief:\n"
-    )
-    return f"{contract_header}{task_prompt.strip()}"
+    if is_thinking:
+        contract_header = (
+            "Standing Rules & Prompt Contract (Thinking / Architecture Mode):\n"
+            "1. Deep Analysis & Verification: Reason carefully about edge cases, backward compatibility, performance, and failure modes.\n"
+            "2. Preserve protected config files: Do NOT overwrite or delete protected configuration files "
+            "(.release.json, working-feature.json, claims.json, or git internal state).\n"
+            "3. Structured Deliverables: Provide actionable, unambiguous recommendations, task breakdowns, or code diffs.\n"
+        )
+    else:
+        contract_header = (
+            "Standing Rules & Prompt Contract:\n"
+            "1. Test-Driven Development (TDD): Write tests first (RED), implement functionality (GREEN), then refactor.\n"
+            "2. Make new commits only: Never git commit --amend. Always create fresh commits to keep git history honest.\n"
+            "3. Preserve protected config files: Do NOT overwrite or delete protected configuration files "
+            "(.release.json, working-feature.json, claims.json, or git internal state).\n"
+            "4. Evidence before assertions & Scoped Verification: Run TARGETED unit tests or build commands for the touched "
+            "files/modules (e.g. pytest path/to/test.py, npm test -- specific.test.ts) before declaring completion. Do NOT run the "
+            "entire monorepo or end-to-end suite for scoped implementation tasks.\n"
+        )
+
+    context_section = build_context_block(context_files) if context_files else ""
+    output_section = ""
+    if output_file:
+        output_section = (
+            f"\nArtifact Output Requirement:\n"
+            f"Write your primary output/deliverable directly to the file: '{output_file}'. "
+            f"Ensure parent directories exist if necessary.\n"
+        )
+
+    return f"{contract_header}{context_section}{output_section}\nTask Brief:\n{task_prompt.strip()}"
 
 
 def inspect_git_changes(target_dir, initial_head=None):
@@ -400,12 +466,12 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
         return 1, "", f"FAILED: error launching {agent_name}: {e}", False
 
 
-def execute_in_isolated_worktree(base_repo_dir, execute_fn):
+def execute_in_isolated_worktree(base_repo_dir, execute_fn, merge_lock=None):
     """
     Executes a callback inside a temporary git worktree:
     1. Cuts a temporary worktree via `git worktree add /tmp/worker-... HEAD`
     2. Runs execute_fn(worktree_dir)
-    3. Merges/applies changes back on success
+    3. Merges/applies changes back on success (serialized if merge_lock provided)
     4. Always removes the worktree in a finally block
     """
     temp_worktree_dir = tempfile.mkdtemp(prefix="worker-", dir="/tmp")
@@ -417,6 +483,13 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
         pass
 
     try:
+        initial_base_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=base_repo_dir,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
         # Create worktree off current HEAD
         add_res = subprocess.run(
             ["git", "worktree", "add", "--detach", temp_worktree_dir, "HEAD"],
@@ -429,100 +502,16 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
 
         exit_code, stdout, stderr, files_changed, diff_summary = execute_fn(temp_worktree_dir)
 
-        if exit_code == 0:
-            base_head_rev = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=base_repo_dir,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-
-            worktree_head = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=temp_worktree_dir,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-
-            # 1. If worktree created new commits, attempt fast-forward merge into base_repo_dir
-            merged_commits = False
-            if worktree_head and worktree_head != base_head_rev:
-                merge_res = subprocess.run(
-                    ["git", "merge", "--ff-only", worktree_head],
-                    cwd=base_repo_dir,
-                    capture_output=True,
-                    text=True,
-                )
-                if merge_res.returncode == 0:
-                    merged_commits = True
-
-            # 2. If commits were not merged, apply all committed changes as patch
-            if not merged_commits and worktree_head and worktree_head != base_head_rev:
-                diff_patch_res = subprocess.run(
-                    ["git", "diff", f"{base_head_rev}..{worktree_head}"],
-                    cwd=temp_worktree_dir,
-                    capture_output=True,
-                    text=True,
-                )
-                commit_patch = diff_patch_res.stdout
-                if commit_patch.strip():
-                    apply_res = subprocess.run(
-                        ["git", "apply", "--whitespace=nowarn", "-"],
-                        input=commit_patch,
-                        cwd=base_repo_dir,
-                        capture_output=True,
-                        text=True,
-                    )
-                    if apply_res.returncode != 0:
-                        backup_patch = f"/tmp/worker-conflict-{int(time.time())}.patch"
-                        try:
-                            with open(backup_patch, "w", encoding="utf-8") as f:
-                                f.write(commit_patch)
-                            print(f"Warning: git apply failed back to base repo: {apply_res.stderr.strip()}", file=sys.stderr)
-                            print(f"Preserved unapplied worktree patch at: {backup_patch}", file=sys.stderr)
-                        except Exception:
-                            pass
-
-            # 3. Apply any uncommitted working tree changes from worktree
-            wt_diff_res = subprocess.run(
-                ["git", "diff", "HEAD"],
-                cwd=temp_worktree_dir,
-                capture_output=True,
-                text=True,
-            )
-            uncommitted_patch = wt_diff_res.stdout
-            if uncommitted_patch.strip():
-                subprocess.run(
-                    ["git", "apply", "--whitespace=nowarn", "-"],
-                    input=uncommitted_patch,
-                    cwd=base_repo_dir,
-                    capture_output=True,
-                    text=True,
-                )
-
-            # 4. Copy untracked files
-            untracked_res = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=temp_worktree_dir,
-                capture_output=True,
-                text=True,
-            )
-            untracked_files = [line.strip() for line in untracked_res.stdout.splitlines() if line.strip()]
-            for rel_file in untracked_files:
-                src_path = Path(temp_worktree_dir) / rel_file
-                dst_path = Path(base_repo_dir) / rel_file
-                if src_path.is_file():
-                    dst_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src_path, dst_path)
-        else:
-            # Worker failed or timed out: salvage any partial work before removing worktree
-            try:
+        lock_ctx = merge_lock if merge_lock is not None else nullcontext()
+        with lock_ctx:
+            if exit_code == 0:
                 base_head_rev = subprocess.run(
                     ["git", "rev-parse", "HEAD"],
                     cwd=base_repo_dir,
                     capture_output=True,
                     text=True,
                 ).stdout.strip()
+
                 worktree_head = subprocess.run(
                     ["git", "rev-parse", "HEAD"],
                     cwd=temp_worktree_dir,
@@ -530,32 +519,86 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
                     text=True,
                 ).stdout.strip()
 
-                salvage_msgs = []
-                timestamp = int(time.time())
-
-                # 1. If worktree created new commits, preserve them on a dedicated salvage branch
+                # 1. If worktree created new commits, attempt fast-forward merge into base_repo_dir
+                merged_commits = False
                 if worktree_head and worktree_head != base_head_rev:
-                    salvage_branch = f"worker-salvage-{timestamp}"
-                    branch_res = subprocess.run(
-                        ["git", "branch", salvage_branch, worktree_head],
+                    merge_res = subprocess.run(
+                        ["git", "merge", "--ff-only", worktree_head],
                         cwd=base_repo_dir,
                         capture_output=True,
                         text=True,
                     )
-                    if branch_res.returncode == 0:
-                        salvage_msgs.append(f"[Salvage] Commits preserved on git branch '{salvage_branch}'")
-                    else:
-                        salvage_msgs.append(f"[Salvage] Failed to create branch '{salvage_branch}': {branch_res.stderr.strip()}")
+                    if merge_res.returncode == 0:
+                        merged_commits = True
 
-                # 2. If uncommitted changes or untracked files exist, preserve them as a patch
-                diff_patch_res = subprocess.run(
-                    ["git", "diff", worktree_head or base_head_rev],
+                # 2. If commits were not merged, apply all committed changes as patch relative to initial_base_head
+                if not merged_commits and worktree_head and worktree_head != initial_base_head:
+                    diff_patch_res = subprocess.run(
+                        ["git", "diff", f"{initial_base_head}..{worktree_head}"],
+                        cwd=temp_worktree_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    commit_patch = diff_patch_res.stdout
+                    if commit_patch.strip():
+                        apply_res = subprocess.run(
+                            ["git", "apply", "--whitespace=nowarn", "-"],
+                            input=commit_patch,
+                            cwd=base_repo_dir,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if apply_res.returncode == 0:
+                            subprocess.run(["git", "add", "-A"], cwd=base_repo_dir, capture_output=True)
+                            subprocess.run(
+                                ["git", "commit", "-C", worktree_head],
+                                cwd=base_repo_dir,
+                                capture_output=True,
+                                text=True,
+                            )
+                        else:
+                            backup_patch = f"/tmp/worker-conflict-{int(time.time())}.patch"
+                            try:
+                                with open(backup_patch, "w", encoding="utf-8") as f:
+                                    f.write(commit_patch)
+                                print(f"Warning: git apply failed back to base repo: {apply_res.stderr.strip()}", file=sys.stderr)
+                                print(f"Preserved unapplied worktree patch at: {backup_patch}", file=sys.stderr)
+                            except Exception:
+                                pass
+                            exit_code = 1
+                            stderr = f"FAILED: merge conflict applying patch to base repo: {apply_res.stderr.strip()}\nPreserved conflict patch at: {backup_patch}"
+                            diff_summary = f"MERGE_CONFLICT (saved patch: {backup_patch})"
+
+                # 3. Apply any uncommitted working tree changes from worktree
+                wt_diff_res = subprocess.run(
+                    ["git", "diff", "HEAD"],
                     cwd=temp_worktree_dir,
                     capture_output=True,
                     text=True,
                 )
-                salvage_diff = diff_patch_res.stdout
+                uncommitted_patch = wt_diff_res.stdout
+                if uncommitted_patch.strip():
+                    apply_wt_res = subprocess.run(
+                        ["git", "apply", "--whitespace=nowarn", "-"],
+                        input=uncommitted_patch,
+                        cwd=base_repo_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if apply_wt_res.returncode != 0:
+                        backup_patch = f"/tmp/worker-conflict-uncommitted-{int(time.time())}.patch"
+                        try:
+                            with open(backup_patch, "w", encoding="utf-8") as f:
+                                f.write(uncommitted_patch)
+                            print(f"Warning: git apply failed back to base repo for uncommitted changes: {apply_wt_res.stderr.strip()}", file=sys.stderr)
+                            print(f"Preserved unapplied worktree patch at: {backup_patch}", file=sys.stderr)
+                        except Exception:
+                            pass
+                        exit_code = 1
+                        stderr = f"FAILED: merge conflict applying uncommitted changes: {apply_wt_res.stderr.strip()}\nPreserved conflict patch at: {backup_patch}"
+                        diff_summary = f"MERGE_CONFLICT (saved patch: {backup_patch})"
 
+                # 4. Copy untracked files
                 untracked_res = subprocess.run(
                     ["git", "ls-files", "--others", "--exclude-standard"],
                     cwd=temp_worktree_dir,
@@ -563,35 +606,90 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
                     text=True,
                 )
                 untracked_files = [line.strip() for line in untracked_res.stdout.splitlines() if line.strip()]
+                for rel_file in untracked_files:
+                    src_path = Path(temp_worktree_dir) / rel_file
+                    dst_path = Path(base_repo_dir) / rel_file
+                    if src_path.is_file():
+                        dst_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src_path, dst_path)
+            else:
+                # Worker failed or timed out: salvage any partial work before removing worktree
+                try:
+                    base_head_rev = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=base_repo_dir,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+                    worktree_head = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=temp_worktree_dir,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
 
-                if salvage_diff.strip() or untracked_files:
-                    salvage_patch = f"/tmp/worker-salvage-{timestamp}.patch"
-                    with open(salvage_patch, "w", encoding="utf-8") as f:
-                        f.write(f"# Salvage patch from worker execution (exit {exit_code})\n")
-                        f.write(f"# Base HEAD: {base_head_rev}\n")
-                        f.write(f"# Worktree HEAD: {worktree_head}\n\n")
-                        if salvage_diff.strip():
-                            f.write(salvage_diff)
-                        if untracked_files:
-                            f.write("\n# Untracked files:\n")
-                            for u in untracked_files:
-                                u_path = Path(temp_worktree_dir) / u
-                                if u_path.is_file():
-                                    try:
-                                        content = u_path.read_text(encoding="utf-8")
-                                        f.write(f"\n--- /dev/null\n+++ b/{u}\n@@ -0,0 +1,{len(content.splitlines())} @@\n")
-                                        for line in content.splitlines():
-                                            f.write(f"+{line}\n")
-                                    except Exception:
-                                        pass
-                    salvage_msgs.append(f"[Salvage] Partial work preserved at {salvage_patch}")
+                    salvage_msgs = []
+                    timestamp = int(time.time())
 
-                if salvage_msgs:
-                    combined_msg = "\n".join(salvage_msgs)
-                    stderr = f"{stderr}\n{combined_msg}".strip() if stderr else combined_msg
-                    print(combined_msg, file=sys.stderr)
-            except Exception:
-                pass
+                    # 1. If worktree created new commits, preserve them on a dedicated salvage branch
+                    if worktree_head and worktree_head != base_head_rev:
+                        salvage_branch = f"worker-salvage-{timestamp}"
+                        branch_res = subprocess.run(
+                            ["git", "branch", salvage_branch, worktree_head],
+                            cwd=base_repo_dir,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if branch_res.returncode == 0:
+                            salvage_msgs.append(f"[Salvage] Commits preserved on git branch '{salvage_branch}'")
+                        else:
+                            salvage_msgs.append(f"[Salvage] Failed to create branch '{salvage_branch}': {branch_res.stderr.strip()}")
+
+                    # 2. If uncommitted changes or untracked files exist, preserve them as a patch
+                    diff_patch_res = subprocess.run(
+                        ["git", "diff", worktree_head or base_head_rev],
+                        cwd=temp_worktree_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    salvage_diff = diff_patch_res.stdout
+
+                    untracked_res = subprocess.run(
+                        ["git", "ls-files", "--others", "--exclude-standard"],
+                        cwd=temp_worktree_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    untracked_files = [line.strip() for line in untracked_res.stdout.splitlines() if line.strip()]
+
+                    if salvage_diff.strip() or untracked_files:
+                        salvage_patch = f"/tmp/worker-salvage-{timestamp}.patch"
+                        with open(salvage_patch, "w", encoding="utf-8") as f:
+                            f.write(f"# Salvage patch from worker execution (exit {exit_code})\n")
+                            f.write(f"# Base HEAD: {base_head_rev}\n")
+                            f.write(f"# Worktree HEAD: {worktree_head}\n\n")
+                            if salvage_diff.strip():
+                                f.write(salvage_diff)
+                            if untracked_files:
+                                f.write("\n# Untracked files:\n")
+                                for u in untracked_files:
+                                    u_path = Path(temp_worktree_dir) / u
+                                    if u_path.is_file():
+                                        try:
+                                            content = u_path.read_text(encoding="utf-8")
+                                            f.write(f"\n--- /dev/null\n+++ b/{u}\n@@ -0,0 +1,{len(content.splitlines())} @@\n")
+                                            for line in content.splitlines():
+                                                f.write(f"+{line}\n")
+                                        except Exception:
+                                            pass
+                        salvage_msgs.append(f"[Salvage] Partial work preserved at {salvage_patch}")
+
+                    if salvage_msgs:
+                        combined_msg = "\n".join(salvage_msgs)
+                        stderr = f"{stderr}\n{combined_msg}".strip() if stderr else combined_msg
+                        print(combined_msg, file=sys.stderr)
+                except Exception:
+                    pass
 
         return exit_code, stdout, stderr, files_changed, diff_summary
 
@@ -607,20 +705,27 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn):
             shutil.rmtree(temp_worktree_dir, ignore_errors=True)
 
 
-def format_report(agent, status, exit_code, cwd, files_changed, diff_summary, tail_output):
+def format_report(agent, status, exit_code, cwd, files_changed, diff_summary, tail_output, artifact=None, context_count=0):
     """Formats a concise <= 15 line report for thin orchestrators."""
     lines = [
         f"=== {agent.upper()} SUBAGENT REPORT ===",
         f"Status: {status} (exit {exit_code})",
         f"Directory: {cwd}",
+    ]
+    if artifact:
+        lines.append(f"Artifact: {artifact}")
+    if context_count > 0:
+        lines.append(f"Context: {context_count} document(s) referenced")
+    lines.extend([
         f"Files Modified: {files_changed} ({diff_summary})",
         "Last Output:",
-    ]
+    ])
     out_lines = [line for line in tail_output.splitlines() if line.strip()]
     if not out_lines:
         lines.append("(no output)")
     else:
-        lines.extend(out_lines[-6:])
+        remaining_slots = max(1, 14 - len(lines))
+        lines.extend(out_lines[-remaining_slots:])
     lines.append("===========================")
     return "\n".join(lines[:15])
 
@@ -668,6 +773,412 @@ def get_config_timeout(cfg):
         return DEFAULT_TIMEOUT
 
 
+def get_job_path(job_id, job_dir=DEFAULT_JOB_DIR):
+    return Path(job_dir) / f"{job_id}.json"
+
+
+def save_job_state(job_id, state, job_dir=DEFAULT_JOB_DIR):
+    p = get_job_path(job_id, job_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    temp_p = p.with_suffix(".tmp")
+    with open(temp_p, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    temp_p.replace(p)
+
+
+def load_job_state(job_id, job_dir=DEFAULT_JOB_DIR):
+    p = get_job_path(job_id, job_dir)
+    if not p.is_file():
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def is_pid_running(pid):
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def list_all_jobs(job_dir=DEFAULT_JOB_DIR):
+    p = Path(job_dir)
+    if not p.is_dir():
+        return []
+    jobs = []
+    for jf in sorted(p.glob("*.json")):
+        try:
+            with open(jf, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                jobs.append(data)
+        except Exception:
+            pass
+    return jobs
+
+
+def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir):
+    if chosen_agent == "codex":
+        model = chosen_model or DEFAULT_CODEX_MODEL
+        return [
+            "codex", "exec",
+            "-c", f"model=\"{model}\"",
+            "--dangerously-bypass-approvals-and-sandbox",
+            wrapped_task
+        ]
+    elif chosen_agent == "cursor":
+        cmd = ["cursor-agent", "-p", "--yolo", "--trust"]
+        if chosen_model:
+            cmd.extend(["--model", chosen_model])
+        cmd.append(wrapped_task)
+        return cmd
+    else:  # agy
+        cmd = ["agy", "--add-dir", target_dir, "-p", wrapped_task, "--dangerously-skip-permissions"]
+        if chosen_model:
+            cmd.extend(["--model", chosen_model])
+        return cmd
+
+
+def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, context_files=None, output_file=None, is_thinking=False):
+    initial_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=target_dir,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    wrapped_task = wrap_prompt_contract(
+        task_text,
+        context_files=context_files,
+        output_file=output_file,
+        is_thinking=is_thinking,
+    )
+    cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir)
+
+    exit_code, stdout, stderr, is_timeout = execute_worker_process(
+        cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent
+    )
+
+    files_changed, diff_summary, commit_count = inspect_git_changes(target_dir, initial_head)
+    return exit_code, stdout, stderr, files_changed, diff_summary
+
+
+def parse_batch_tasks(batch_args=None, batch_file=None):
+    tasks = []
+    if batch_file:
+        bf = Path(batch_file)
+        if not bf.is_file():
+            raise FileNotFoundError(f"Batch file not found: {batch_file}")
+        content = bf.read_text(encoding="utf-8").strip()
+        if content.startswith("[") or content.startswith("{"):
+            parsed = json.loads(content)
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, str) and item.strip():
+                        tasks.append({"task": item.strip()})
+                    elif isinstance(item, dict) and item.get("task"):
+                        tasks.append(item)
+            elif isinstance(parsed, dict) and parsed.get("tasks"):
+                for item in parsed["tasks"]:
+                    if isinstance(item, str) and item.strip():
+                        tasks.append({"task": item.strip()})
+                    elif isinstance(item, dict) and item.get("task"):
+                        tasks.append(item)
+        else:
+            for line in content.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    tasks.append({"task": line})
+    if batch_args:
+        for t in batch_args:
+            if isinstance(t, str) and t.strip():
+                tasks.append({"task": t.strip()})
+    return tasks
+
+
+def extract_tasks_from_plan(plan_path, target_phase=None):
+    """
+    Extracts task descriptions from a markdown plan file (e.g. docs/superpowers/plans/... or plan.md).
+    Supports filtering by phase header (e.g. target_phase=1 or 'Phase 1').
+    """
+    p = Path(plan_path)
+    if not p.is_file():
+        raise FileNotFoundError(f"Plan file not found: {plan_path}")
+    text = p.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    selected_lines = []
+    if target_phase:
+        norm_phase = str(target_phase).lower().replace("phase", "").strip()
+        in_phase = False
+        for line in lines:
+            lower = line.lower()
+            if ("phase " in lower or "phase-" in lower) and any(line.lstrip().startswith(h) for h in ("##", "###", "####")):
+                phase_match = (
+                    f"phase {norm_phase}" in lower
+                    or f"phase-{norm_phase}" in lower
+                    or f"phase {str(target_phase).lower()}" in lower
+                )
+                if phase_match:
+                    in_phase = True
+                elif in_phase:
+                    break
+            if in_phase:
+                selected_lines.append(line)
+    else:
+        selected_lines = lines
+
+    extracted = []
+    for line in selected_lines:
+        line_s = line.strip()
+        # Extract checkboxes: - [ ] Task ... or - [ ] ...
+        if line_s.startswith("- [ ]") or line_s.startswith("- [x]"):
+            task_text = line_s[5:].strip()
+            if task_text:
+                extracted.append({"task": task_text, "context_files": [str(p)]})
+        elif (line_s.startswith("### Task") or line_s.startswith("#### Task")) and ":" in line_s:
+            task_text = line_s.split(":", 1)[1].strip()
+            if task_text:
+                extracted.append({"task": task_text, "context_files": [str(p)]})
+
+    return extracted
+
+
+def format_batch_report(results):
+    total = len(results)
+    succeeded = sum(1 for r in results if r.get("exit_code") == 0)
+    failed = total - succeeded
+    lines = [
+        f"=== BATCH DISPATCH REPORT ({total} tasks: {succeeded} succeeded, {failed} failed) ==="
+    ]
+    for idx, r in enumerate(results, 1):
+        task_preview = r.get("task", "")[:28] + "..." if len(r.get("task", "")) > 28 else r.get("task", "")
+        status_icon = "SUCCESS" if r.get("exit_code") == 0 else "FAILED"
+        agent = r.get("agent", "worker").upper()
+        fc = r.get("files_changed", 0)
+        ds = r.get("diff_summary", "no diff")
+        lines.append(f"#{idx} [{agent}] {status_icon}: {fc} files ({ds}) - '{task_preview}'")
+
+    failed_tasks = [r.get("task", "") for r in results if r.get("exit_code") != 0 and r.get("task")]
+    if failed_tasks and len(lines) < 14:
+        sample_task = failed_tasks[0]
+        if len(sample_task) > 35:
+            sample_task = sample_task[:32] + "..."
+        lines.append(f"Retry: dispatch-worker --task \"{sample_task}\"")
+
+    lines.append("==================================================")
+    return "\n".join(lines[:15])
+
+
+def format_status_report(jobs):
+    if not jobs:
+        return "No dispatch jobs found."
+    lines = [
+        f"=== DISPATCH JOBS STATUS ({len(jobs)} total) ==="
+    ]
+    for j in jobs[-12:]:
+        jid = j.get("job_id", "unknown")
+        agent = j.get("agent", "worker").upper()
+        status = j.get("status", "UNKNOWN")
+        pid = j.get("pid")
+        if status == "RUNNING" and pid:
+            if not is_pid_running(pid):
+                status = "FAILED_DIED"
+        fc = j.get("files_changed", 0)
+        ds = j.get("diff_summary", "")
+        created = j.get("created_at", 0)
+        elapsed = int(time.time() - created) if created else 0
+        diff_str = f" | {fc} files ({ds})" if fc > 0 else ""
+
+        tail_snippet = ""
+        log_file = j.get("log_file")
+        if log_file and os.path.isfile(log_file) and status == "RUNNING":
+            try:
+                with open(log_file, "r", encoding="utf-8", errors="replace") as lf:
+                    content_lines = [l.strip() for l in lf.readlines() if l.strip()]
+                    if content_lines:
+                        last_l = content_lines[-1]
+                        if len(last_l) > 28:
+                            last_l = last_l[:25] + "..."
+                        tail_snippet = f" | tail: {last_l}"
+            except Exception:
+                pass
+
+        lines.append(f"[{jid}] {agent} | {status} | elapsed={elapsed}s{diff_str}{tail_snippet}")
+    lines.append("===============================================")
+    return "\n".join(lines[:15])
+
+
+def tail_job(job_target="latest", num_lines=20, follow=False, job_dir=DEFAULT_JOB_DIR):
+    jobs = list_all_jobs(job_dir=job_dir)
+    if not jobs:
+        print("No dispatch jobs found.", file=sys.stderr)
+        sys.exit(1)
+
+    target_job = None
+    if not job_target or job_target == "latest":
+        sorted_jobs = sorted(jobs, key=lambda j: j.get("created_at", 0), reverse=True)
+        target_job = sorted_jobs[0]
+    else:
+        for j in jobs:
+            if j.get("job_id") == job_target:
+                target_job = j
+                break
+
+    if not target_job:
+        print(f"Job '{job_target}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    log_file = target_job.get("log_file")
+    if not log_file or not os.path.isfile(log_file):
+        print(f"No log file found for job {target_job.get('job_id')}.", file=sys.stderr)
+        sys.exit(1)
+
+    jid = target_job.get("job_id")
+    status = target_job.get("status", "UNKNOWN")
+    print(f"=== TAIL LOG: {jid} ({status}) [{log_file}] ===")
+
+    with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+        all_lines = f.readlines()
+        for l in all_lines[-num_lines:]:
+            sys.stdout.write(l)
+        sys.stdout.flush()
+
+        if follow:
+            while True:
+                line = f.readline()
+                if line:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                else:
+                    st = load_job_state(jid, job_dir=job_dir)
+                    if st and st.get("status") not in ("RUNNING", "PENDING"):
+                        break
+                    time.sleep(0.5)
+
+
+def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
+    state = load_job_state(job_id, job_dir)
+    if not state:
+        print(f"FAILED: Job {job_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    cwd = state.get("cwd", os.getcwd())
+    task = state.get("task", "")
+    agent = state.get("agent", "auto")
+    model = state.get("model", None)
+    timeout = state.get("timeout", DEFAULT_TIMEOUT)
+    isolated = state.get("isolated", False)
+
+    context_files = state.get("context_files")
+    output_file = state.get("output_file")
+    is_thinking = state.get("is_thinking", False)
+
+    state["status"] = "RUNNING"
+    state["pid"] = os.getpid()
+    save_job_state(job_id, state, job_dir)
+
+    def _execute(target_dir):
+        return run_single_task(
+            task, target_dir, agent, model, timeout,
+            context_files=context_files, output_file=output_file, is_thinking=is_thinking
+        )
+
+    try:
+        if isolated:
+            exit_code, stdout, stderr, files_changed, diff_summary = execute_in_isolated_worktree(cwd, _execute)
+        else:
+            exit_code, stdout, stderr, files_changed, diff_summary = _execute(cwd)
+    except Exception as e:
+        exit_code, stdout, stderr, files_changed, diff_summary = 1, "", f"Execution error: {e}", 0, "error"
+
+    if exit_code == 0:
+        status = "SUCCESS"
+    elif exit_code == 124:
+        status = "TIMEOUT_PARTIAL_WORK" if files_changed > 0 else "TIMEOUT_NO_PROGRESS"
+    else:
+        status = "FAILED_PARTIAL_WORK" if files_changed > 0 else "FAILED"
+
+    tail_output = stdout if stdout else (stderr or "none")
+    state["status"] = status
+    state["exit_code"] = exit_code
+    state["files_changed"] = files_changed
+    state["diff_summary"] = diff_summary
+    state["tail_output"] = tail_output[-2000:] if tail_output else ""
+    state["completed_at"] = time.time()
+    save_job_state(job_id, state, job_dir)
+
+    sys.exit(exit_code)
+
+
+def spawn_detached_process(job_id, cwd, log_file, job_dir=DEFAULT_JOB_DIR, script_path=None):
+    sp = script_path or os.path.abspath(sys.argv[0])
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as lf:
+        proc = subprocess.Popen(
+            [sys.executable, sp, "--internal-run-job", job_id, "--job-dir", job_dir],
+            cwd=cwd,
+            stdout=lf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    return proc.pid
+
+
+def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, timeout_seconds, max_parallel=4):
+    results = [None] * len(tasks)
+    merge_lock = threading.Lock()
+
+    def _run_task_item(idx, item):
+        t_task = item.get("task", "")
+        t_cwd = item.get("cwd") or base_repo_dir
+        t_agent = item.get("agent") or chosen_agent
+        t_model = item.get("model") or chosen_model
+        t_timeout = item.get("timeout") or timeout_seconds
+        t_context_files = item.get("context_files")
+        t_output_file = item.get("output_file")
+        t_is_thinking = item.get("is_thinking", False)
+
+        def _execute(target_dir):
+            try:
+                return run_single_task(
+                    t_task, target_dir, t_agent, t_model, t_timeout,
+                    context_files=t_context_files, output_file=t_output_file, is_thinking=t_is_thinking
+                )
+            except TypeError:
+                return run_single_task(t_task, target_dir, t_agent, t_model, t_timeout)
+
+        try:
+            exit_code, stdout, stderr, files_changed, diff_summary = execute_in_isolated_worktree(
+                t_cwd, _execute, merge_lock=merge_lock
+            )
+        except Exception as e:
+            exit_code, stdout, stderr, files_changed, diff_summary = 1, "", str(e), 0, "error"
+
+        results[idx] = {
+            "task": t_task,
+            "agent": t_agent,
+            "model": t_model,
+            "exit_code": exit_code,
+            "files_changed": files_changed,
+            "diff_summary": diff_summary,
+            "tail_output": stdout if stdout else (stderr or "none")
+        }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(len(tasks), max_parallel))) as executor:
+        futures = [executor.submit(_run_task_item, idx, item) for idx, item in enumerate(tasks)]
+        concurrent.futures.wait(futures)
+
+    return results
+
+
 def main():
     default_agent = detect_default_agent(sys.argv[0])
     cfg = load_dispatch_config()
@@ -688,33 +1199,148 @@ def main():
                         help="Allow metered on-demand providers (alias for --mode on_demand)")
     parser.add_argument("--check-quota", action="store_true", help="Check quota and exit (0=healthy, 1=low/error)")
     parser.add_argument("--task", type=str, help="Task prompt for external worker")
+    parser.add_argument("--batch", nargs="+", help="Multiple task prompts to run in parallel")
+    parser.add_argument("--batch-file", type=str, help="JSON or text file containing list of tasks to run in parallel")
+    parser.add_argument("--max-parallel", type=int, default=4, help="Max concurrent workers in batch mode (default: 4)")
+    parser.add_argument("--detach", "--async", dest="detach", action="store_true", help="Launch task in background and exit immediately")
+    parser.add_argument("--status", type=str, nargs="?", const="all", help="Check status of background job(s)")
+    parser.add_argument("--wait", type=str, nargs="?", const="all", help="Wait for background job(s) to finish")
+    parser.add_argument("--tail", type=str, nargs="?", const="latest", help="Show recent log output for a job (default: latest)")
+    parser.add_argument("-n", "--lines", type=int, default=20, help="Number of lines to show with --tail (default: 20)")
+    parser.add_argument("-f", "--follow", action="store_true", help="Follow log output in real-time (like tail -f)")
+    parser.add_argument("--from-plan", type=str, help="Extract tasks from a markdown plan file (e.g. plan.md)")
+    parser.add_argument("--phase", type=str, default=None, help="Phase to extract from plan (e.g. 1 or 'Phase 1')")
     parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
     parser.add_argument("--min-5h", type=float, default=DEFAULT_MIN_5H, help="Minimum 5h quota remaining percent")
     parser.add_argument("--min-weekly", type=float, default=DEFAULT_MIN_WEEKLY, help="Minimum weekly quota remaining percent")
     parser.add_argument("--timeout", type=int, default=default_timeout,
                         help=f"Timeout in seconds for execution (default: {default_timeout}s)")
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
+    parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
+    parser.add_argument("--think", action="store_true", help="Heavy thinking mode: defaults to gpt-5.6-sol and enforces 5h > 80%%, weekly > 20%% quota")
+    parser.add_argument("--context", nargs="+", dest="context_files", help="Paths to context/reference files or directories")
+    parser.add_argument("--output-file", type=str, default=None, help="File path where worker must write primary deliverable")
     parser.add_argument("--isolated", action="store_true", help="Execute inside a temporary isolated git worktree")
+    parser.add_argument("--internal-run-job", type=str, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
+    # 1. Internal runner invocation
+    if args.internal_run_job:
+        run_internal_job(args.internal_run_job, job_dir=args.job_dir)
+
+    # 1b. Tail job log
+    if args.tail:
+        tail_job(args.tail, num_lines=args.lines, follow=args.follow, job_dir=args.job_dir)
+        sys.exit(0)
+
+    # 2. Check status of job(s)
+    if args.status:
+        if args.status == "all":
+            jobs = list_all_jobs(job_dir=args.job_dir)
+            print(format_status_report(jobs))
+            sys.exit(0)
+        else:
+            state = load_job_state(args.status, job_dir=args.job_dir)
+            if not state:
+                print(f"Job '{args.status}' not found.", file=sys.stderr)
+                sys.exit(1)
+            print(format_status_report([state]))
+            sys.exit(0)
+
+    # 3. Wait for job(s)
+    if args.wait:
+        target_ids = []
+        if args.wait == "all":
+            all_jobs = list_all_jobs(job_dir=args.job_dir)
+            active = [j for j in all_jobs if j.get("status") in ("RUNNING", "PENDING")]
+            target_ids = [j["job_id"] for j in active]
+            if not target_ids:
+                print("No running jobs to wait for.")
+                sys.exit(0)
+        else:
+            target_ids = [args.wait]
+
+        start_time = time.time()
+        completed_results = {}
+        while True:
+            all_done = True
+            for jid in target_ids:
+                st = load_job_state(jid, job_dir=args.job_dir)
+                if not st:
+                    completed_results[jid] = {"exit_code": 1, "status": "NOT_FOUND"}
+                    continue
+                status = st.get("status")
+                pid = st.get("pid")
+                if status in ("RUNNING", "PENDING"):
+                    if pid and not is_pid_running(pid):
+                        st["status"] = "FAILED_DIED"
+                        st["exit_code"] = 1
+                        save_job_state(jid, st, job_dir=args.job_dir)
+                        completed_results[jid] = st
+                    else:
+                        all_done = False
+                else:
+                    completed_results[jid] = st
+
+            if all_done or (time.time() - start_time) > args.timeout:
+                break
+            time.sleep(0.5)
+
+        if len(target_ids) == 1:
+            res = completed_results.get(target_ids[0], {})
+            ec = res.get("exit_code", 1)
+            rep = format_report(
+                res.get("agent", args.agent),
+                res.get("status", "UNKNOWN"),
+                ec,
+                res.get("cwd", args.cwd),
+                res.get("files_changed", 0),
+                res.get("diff_summary", ""),
+                res.get("tail_output", ""),
+                artifact=res.get("output_file"),
+                context_count=len(res.get("context_files") or [])
+            )
+            print(rep)
+            sys.exit(ec if ec is not None else 1)
+        else:
+            results_list = [completed_results.get(jid, {"task": jid, "agent": args.agent, "exit_code": 1, "files_changed": 0, "diff_summary": "error"}) for jid in target_ids]
+            print(format_batch_report(results_list))
+            overall_ec = 0 if all(r.get("exit_code") == 0 for r in results_list) else 1
+            sys.exit(overall_ec)
+
+    # 4. Quota check / evaluation
     effective_on_demand = args.allow_on_demand or (args.mode == "on_demand")
     chosen_agent = args.agent
     chosen_model = args.model
+
+    # If --think is set, adjust thresholds if user didn't explicitly override them
+    min_5h = args.min_5h
+    min_weekly = args.min_weekly
+    if args.think:
+        if "--min-5h" not in sys.argv:
+            min_5h = DEFAULT_THINK_MIN_5H
+        if "--min-weekly" not in sys.argv:
+            min_weekly = DEFAULT_THINK_MIN_WEEKLY
+        # For thinking tasks, default agent to codex and model to gpt-5.6-sol unless overridden
+        if chosen_agent == "auto" and "--agent" not in sys.argv:
+            chosen_agent = "codex"
+        if not chosen_model and chosen_agent == "codex":
+            chosen_model = DEFAULT_CODEX_THINK_MODEL
+
     eligible = False
     rem_5h, rem_weekly = 0.0, 0.0
     msg = ""
 
-    # If explicit priority chain is set or present in config/env
     if args.priority and (chosen_agent == "auto" or "--priority" in sys.argv):
         chain = parse_priority_chain(args.priority)
         if chain:
             chosen_agent, routed_model, eligible, rem_5h, rem_weekly, msg = route_priority_chain(
                 chain,
                 allow_on_demand=effective_on_demand,
-                min_5h=args.min_5h,
-                min_weekly=args.min_weekly,
+                min_5h=min_5h,
+                min_weekly=min_weekly,
                 agy_state_file=args.state_file if default_agent == "agy" else None,
                 codex_state_file=args.state_file if default_agent == "codex" else None,
             )
@@ -722,20 +1348,20 @@ def main():
                 chosen_model = routed_model
         else:
             chosen_agent, eligible, rem_5h, rem_weekly, msg = route_best_agent(
-                min_5h=args.min_5h,
-                min_weekly=args.min_weekly,
+                min_5h=min_5h,
+                min_weekly=min_weekly,
                 agy_state_file=args.state_file if default_agent == "agy" else None,
                 codex_state_file=args.state_file if default_agent == "codex" else None,
             )
     elif chosen_agent == "auto":
         chosen_agent, eligible, rem_5h, rem_weekly, msg = route_best_agent(
-            min_5h=args.min_5h,
-            min_weekly=args.min_weekly,
+            min_5h=min_5h,
+            min_weekly=min_weekly,
             agy_state_file=args.state_file if default_agent == "agy" else None,
             codex_state_file=args.state_file if default_agent == "codex" else None,
         )
     else:
-        eligible, rem_5h, rem_weekly, msg = check_quota(chosen_agent, args.state_file, args.min_5h, args.min_weekly)
+        eligible, rem_5h, rem_weekly, msg = check_quota(chosen_agent, args.state_file, min_5h, min_weekly)
 
     if args.check_quota:
         if eligible:
@@ -745,9 +1371,24 @@ def main():
             print(f"QUOTA_LOW: {msg}")
             sys.exit(1)
 
-    if not args.task:
+    is_batch = bool(args.batch or args.batch_file or args.from_plan)
+    if not is_batch and not args.task:
         parser.print_help(file=sys.stderr)
         sys.exit(2)
+
+    batch_tasks = []
+    if is_batch:
+        try:
+            if args.from_plan:
+                batch_tasks = extract_tasks_from_plan(args.from_plan, args.phase)
+            else:
+                batch_tasks = parse_batch_tasks(args.batch, args.batch_file)
+        except Exception as e:
+            print(f"FAILED: error parsing batch tasks: {e}", file=sys.stderr)
+            sys.exit(2)
+        if not batch_tasks:
+            print("FAILED: no valid tasks found for batch dispatch.", file=sys.stderr)
+            sys.exit(2)
 
     if not eligible:
         print(f"FALLBACK_INTERNAL: Quota insufficient ({msg}).")
@@ -763,50 +1404,107 @@ def main():
     elif args.model:
         model_info = f" with {args.model}"
 
-    wrapped_task = wrap_prompt_contract(args.task)
-
+    # Dry-run check
     if args.dry_run:
-        iso_str = " [isolated worktree]" if args.isolated else ""
-        print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch to {chosen_agent}{model_info} in {cwd}{iso_str}.")
+        if is_batch:
+            print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch {len(batch_tasks)} task(s) in parallel to {chosen_agent}{model_info} in {cwd} [isolated worktrees].")
+        else:
+            iso_str = " [isolated worktree]" if args.isolated else ""
+            print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch to {chosen_agent}{model_info} in {cwd}{iso_str}.")
         sys.exit(0)
 
+    # Detached / Background mode
+    if args.detach:
+        if is_batch:
+            job_ids = []
+            for item in batch_tasks:
+                jid = f"dw-{int(time.time())}-{os.urandom(3).hex()}"
+                state = {
+                    "job_id": jid,
+                    "agent": item.get("agent") or chosen_agent,
+                    "model": item.get("model") or chosen_model,
+                    "task": item.get("task", ""),
+                    "cwd": os.path.abspath(item.get("cwd") or args.cwd),
+                    "isolated": True,
+                    "timeout": args.timeout,
+                    "context_files": item.get("context_files") or args.context_files,
+                    "output_file": item.get("output_file") or args.output_file,
+                    "is_thinking": item.get("is_thinking", args.think),
+                    "status": "PENDING",
+                    "created_at": time.time(),
+                    "log_file": f"{DEFAULT_LOG_DIR}/{jid}.log",
+                }
+                save_job_state(jid, state, job_dir=args.job_dir)
+                pid = spawn_detached_process(jid, state["cwd"], state["log_file"], job_dir=args.job_dir)
+                state["pid"] = pid
+                save_job_state(jid, state, job_dir=args.job_dir)
+                job_ids.append(jid)
+            print(f"BATCH_DETACHED: {len(job_ids)} jobs launched in background.")
+            for jid in job_ids:
+                print(f"  - {jid} (Log: {DEFAULT_LOG_DIR}/{jid}.log)")
+            print(f"Check: dispatch-worker --status")
+            print(f"Wait:  dispatch-worker --wait all")
+            sys.exit(0)
+        else:
+            jid = f"dw-{int(time.time())}-{os.urandom(3).hex()}"
+            state = {
+                "job_id": jid,
+                "agent": chosen_agent,
+                "model": chosen_model,
+                "task": args.task,
+                "cwd": cwd,
+                "isolated": args.isolated,
+                "timeout": args.timeout,
+                "context_files": args.context_files,
+                "output_file": args.output_file,
+                "is_thinking": args.think,
+                "status": "PENDING",
+                "created_at": time.time(),
+                "log_file": f"{DEFAULT_LOG_DIR}/{jid}.log",
+            }
+            save_job_state(jid, state, job_dir=args.job_dir)
+            pid = spawn_detached_process(jid, cwd, state["log_file"], job_dir=args.job_dir)
+            state["pid"] = pid
+            save_job_state(jid, state, job_dir=args.job_dir)
+            print(f"JOB_DETACHED: job_id={jid} agent={chosen_agent.upper()} status=RUNNING")
+            print(f"Log: {state['log_file']}")
+            print(f"Check: dispatch-worker --status {jid}")
+            print(f"Wait:  dispatch-worker --wait {jid}")
+            sys.exit(0)
+
+    # Synchronous Batch Execution
+    if is_batch:
+        print(f"Dispatching {len(batch_tasks)} task(s) in parallel to {chosen_agent.upper()}{model_info} in {cwd} ({msg})...")
+        # Propagate context_files and is_thinking to batch items if not already present
+        for b_item in batch_tasks:
+            if "context_files" not in b_item and args.context_files:
+                b_item["context_files"] = args.context_files
+            if "is_thinking" not in b_item:
+                b_item["is_thinking"] = args.think
+            if "output_file" not in b_item and args.output_file:
+                b_item["output_file"] = args.output_file
+
+        results = execute_batch_parallel(
+            batch_tasks,
+            base_repo_dir=cwd,
+            chosen_agent=chosen_agent,
+            chosen_model=chosen_model,
+            timeout_seconds=args.timeout,
+            max_parallel=args.max_parallel,
+        )
+        report = format_batch_report(results)
+        print(report)
+        overall_exit = 0 if all(r.get("exit_code") == 0 for r in results) else 1
+        sys.exit(overall_exit)
+
+    # Synchronous Single Task Execution
     print(f"Dispatching to {chosen_agent.upper()}{model_info} in {cwd} ({msg})...")
 
     def run_worker_in_target(target_dir):
-        initial_head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=target_dir,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-
-        if chosen_agent == "codex":
-            model = chosen_model or args.model or DEFAULT_CODEX_MODEL
-            cmd = [
-                "codex", "exec",
-                "-c", f"model=\"{model}\"",
-                "--dangerously-bypass-approvals-and-sandbox",
-                wrapped_task
-            ]
-        elif chosen_agent == "cursor":
-            model = chosen_model or args.model
-            cmd = ["cursor-agent", "-p", "--yolo", "--trust"]
-            if model:
-                cmd.extend(["--model", model])
-            cmd.append(wrapped_task)
-        else:  # agy
-            cmd = ["agy", "--add-dir", target_dir, "-p", wrapped_task, "--dangerously-skip-permissions"]
-            model = chosen_model or args.model
-            if model:
-                cmd.extend(["--model", model])
-
-        exit_code, stdout, stderr, is_timeout = execute_worker_process(
-            cmd, target_dir, timeout_seconds=args.timeout, agent_name=chosen_agent
+        return run_single_task(
+            args.task, target_dir, chosen_agent, chosen_model, args.timeout,
+            context_files=args.context_files, output_file=args.output_file, is_thinking=args.think
         )
-
-        files_changed, diff_summary, commit_count = inspect_git_changes(target_dir, initial_head)
-
-        return exit_code, stdout, stderr, files_changed, diff_summary
 
     if args.isolated:
         try:
@@ -825,7 +1523,10 @@ def main():
         status = "FAILED_PARTIAL_WORK" if files_changed > 0 else "FAILED"
 
     tail_output = stdout if stdout else (stderr or "none")
-    report = format_report(chosen_agent, status, exit_code, cwd, files_changed, diff_summary, tail_output)
+    report = format_report(
+        chosen_agent, status, exit_code, cwd, files_changed, diff_summary, tail_output,
+        artifact=args.output_file, context_count=len(args.context_files or [])
+    )
     print(report)
 
     sys.exit(exit_code)
