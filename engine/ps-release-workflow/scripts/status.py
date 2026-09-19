@@ -71,6 +71,68 @@ def _feature_worktree(repo: Path, feature_id: str, claims: dict) -> Path | None:
     return matches[0] if matches else None
 
 
+_SHIPPED = ("shipped", "promoted")
+_NUMWORDS = {2: "two", 3: "three", 4: "four"}
+
+
+def _epic_rollup(epics: list[dict], ideas: list[dict], features: list[dict]) -> list[dict]:
+    """Group slices under their epic. A slice is an idea tagged with the epic; once
+    refined it is represented by its feature. Read-only and tolerant: entries with no
+    `epic` key are legacy and simply never match, and no feature folder is read (so
+    a missing spec/plan/research file cannot break it)."""
+    by_id = {f["id"]: f for f in features}
+    rollup: list[dict] = []
+    for epic in epics:
+        eid = epic.get("id")
+        if not eid:
+            continue
+        slices = []
+        for idea in (i for i in ideas if i.get("epic") == eid):
+            promoted_to = idea.get("promoted_to")
+            feat = by_id.get(promoted_to or "")
+            if feat:
+                slices.append({"id": feat["id"], "status": feat.get("status", "open")})
+            elif promoted_to:
+                # Refined but absent from the catalog: real drift (epic_completeness
+                # will hard-block promote on it), so never render it as a plain idea.
+                slices.append({"id": promoted_to, "status": "missing"})
+            else:
+                slices.append({"id": idea.get("id"), "status": "idea"})
+        claimed = sorted(
+            f["id"] for f in features if f.get("epic") == eid and f.get("status") == "claimed"
+        )
+        rollup.append({
+            "id": eid,
+            "title": epic.get("title", ""),
+            "status": epic.get("status", "open"),
+            "slices": slices,
+            "slices_total": len(slices),
+            "slices_shipped": sum(1 for s in slices if s["status"] in _SHIPPED),
+            "claimed_siblings": claimed,
+        })
+    return rollup
+
+
+def _sibling_warnings(rollup: list[dict]) -> list[str]:
+    # Epic branches are cut off main, so concurrently-claimed siblings are
+    # developed blind to each other.
+    out = []
+    for e in rollup:
+        for s in e["slices"]:
+            if s["status"] == "missing":
+                out.append(
+                    f"{s['id']} (slice of {e['id']}) is missing from the refined catalog — "
+                    f"psrw promote will block until it is restored"
+                )
+        n = len(e["claimed_siblings"])
+        if n >= 2:
+            out.append(
+                f"{_NUMWORDS.get(n, n)} siblings of {e['id']} are claimed at once "
+                f"({', '.join(e['claimed_siblings'])}) — they are developed blind to each other"
+            )
+    return out
+
+
 def _next_hint(in_progress: bool, pending_cleanup: bool, cleanup_version: str | None,
                counts: dict) -> str:
     if pending_cleanup:
@@ -111,6 +173,9 @@ def collect_status(repo: Path) -> dict:
     ) or []
     ideas = read_state(
         cat_root / ".claude" / "idea_backlog" / "_catalog.json", default=[]
+    ) or []
+    epics = read_state(
+        cat_root / ".claude" / "epic_backlog" / "_catalog.json", default=[]
     ) or []
     claims = read_state(repo / ".claude" / "state" / "claims.json", default={}) or {}
     registered = _registered_worktrees(repo)
@@ -163,6 +228,8 @@ def collect_status(repo: Path) -> dict:
         if c.get("owner") in me and (fid in still_claimed or fid not in {f["id"] for f in enriched})
     )
 
+    epic_rollup = _epic_rollup(epics, ideas, features)
+
     return {
         "opted_in": True,
         "repo": str(repo),
@@ -180,6 +247,8 @@ def collect_status(repo: Path) -> dict:
             "total": len(ideas),
             "unpromoted": sum(1 for i in ideas if not i.get("promoted_to")),
         },
+        "epics": epic_rollup,
+        "warnings": _sibling_warnings(epic_rollup),
         "own_claims": own_claims,
         "leftover_worktrees": leftover_worktrees,
         "pending_cleanup": pending_cleanup,
@@ -230,6 +299,8 @@ def render_brief(st: dict) -> str:
     if drifted:
         lines.append(f"drift: {len(drifted)} claimed feature(s) with worktree problems "
                      f"({', '.join(f['id'] for f in drifted[:3])})")
+    for w in st.get("warnings", [])[:2]:  # keep the brief within its line budget
+        lines.append(f"warning: {w}")
     lines.append(f"Next: {st['next']}")
     return "\n".join(lines)
 
@@ -268,6 +339,27 @@ def render_full(st: dict) -> str:
             lines.append(f"  (+{omitted} shipped/promoted feature(s) from earlier releases omitted)")
     else:
         lines.append("  (no open/claimed features, none shipped this release)")
+
+    # Same trimming as the feature table: promoted epics are history, summarised.
+    live_epics = [e for e in st.get("epics", []) if e["status"] != "promoted"]
+    if live_epics:
+        lines.append("")
+        lines.append("Epics:")
+        for e in live_epics:
+            title = e["title"][:36] + ("…" if len(e["title"]) > 36 else "")
+            lines.append(
+                f"  {e['id']:<7} {title:<37} {e['status']:<20} "
+                f"{e['slices_shipped']}/{e['slices_total']} slices shipped"
+            )
+            if e["slices"]:
+                lines.append("    " + ", ".join(f"{s['id']} {s['status']}" for s in e["slices"]))
+    omitted_epics = len(st.get("epics", [])) - len(live_epics)
+    if omitted_epics:
+        lines.append("")
+        lines.append(f"  (+{omitted_epics} promoted epic(s) omitted)")
+    for w in st.get("warnings", []):
+        lines.append("")
+        lines.append(f"⚠️  {w}")
 
     if st["pending_cleanup"]:
         lines.append("")

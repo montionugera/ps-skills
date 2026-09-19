@@ -11,19 +11,38 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lib.backlog_paths import read_release_state
-from lib.catalog import CatalogEntryNotFoundError, list_entries, mark_promoted_to_main
+from lib.backlog_paths import NoReleaseInProgressError as PathsNoReleaseInProgressError
+from lib.backlog_paths import get_backlog_catalog_path, read_release_state
+from lib.catalog import CatalogEntryNotFoundError, find_entry, list_entries, mark_promoted_to_main
+from lib.epic import (
+    epic_children, epic_completeness, epic_folder_path, mark_epic_failed,
+    mark_epic_promoted, set_split_approved, try_begin_verification,
+)
+from lib.epic_gate import run_and_record
 from lib.git_ops import (
-    GitError, _run as git_run, commit_all,
+    GitError, _run as git_run, commit_all, is_dirty,
     delete_branch_local, delete_branch_remote, push, remove_worktree,
 )
 from lib.hooks import resolve_hook
+from lib.owner import resolve_owner_id
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
-from lib.state import mutate_state
+from lib.state import file_lock, mutate_state
 
 
 class NoReleaseInProgressError(Exception): pass
 class Gate2FailedError(Exception): pass
+
+
+class EpicGateError(RuntimeError):
+    """G-E3 refused to promote: an epic with a feature shipped into this
+    release is incomplete, or failed/needs re-verification at release HEAD.
+
+    Subclasses RuntimeError deliberately: promote_release.main() catches
+    (NoReleaseInProgressError, Gate2FailedError, CatalogEntryNotFoundError,
+    RuntimeError) — a plain Exception here would escape as a raw traceback
+    instead of the guaranteed `ERROR: ...` line every other verb gives.
+    lib/hooks.py's HookPathError follows the exact same pattern.
+    """
 
 
 def _now() -> str:
@@ -119,6 +138,21 @@ def _create_or_adopt_pr(repo: Path, release_branch: str, version: str,
     )
     existing = (view.stdout or "").strip() if view.returncode == 0 else ""
     if existing:
+        # ADOPT path: an existing PR is being reused, not created — `gh pr
+        # create` above never ran, so the PR's body (which may carry a
+        # split-epic disclosure, or an updated Gate 2 line) would otherwise go
+        # stale forever. Best-effort: a failed edit must not fail the whole
+        # promote — the PR still exists and is still usable.
+        edit = runner(
+            ["gh", "pr", "edit", release_branch, "--body", pr_body],
+            cwd=repo, capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            print(
+                f"⚠️  gh pr edit failed to refresh the body of the existing PR "
+                f"for {release_branch}: {(edit.stderr or edit.stdout or '').strip()}",
+                file=sys.stderr,
+            )
         return existing, "PR already existed"
     raise Gate2FailedError(f"gh pr create failed: {err or out}")
 
@@ -170,6 +204,244 @@ def _ensure_release_pr_merged_or_absent(repo: Path, release_branch: str,
     )
 
 
+def _relevant_epics(refined_cat: Path, version: str) -> set[str]:
+    """Every epic id with >=1 feature shipped/promoted into `version`."""
+    return {
+        f["epic"] for f in list_entries(refined_cat)
+        if f.get("epic") and f.get("release_version") == version
+        and f.get("status") in ("shipped", "promoted")
+    }
+
+
+# Everything psrw's own epic bookkeeping writes to release/<v> lives under this
+# one directory: the epic catalog (the CAS-claim commit) and the E-NNN-<slug>/
+# folder the outcome check copies its output into (lib/epic_gate.py).
+_EPIC_BOOKKEEPING_PATHSPEC = ":(exclude).claude/epic_backlog"
+
+
+def _verification_is_fresh(rel_wt: Path, verified_sha: str | None, head: str) -> bool:
+    """True when `verified_sha` verified the same release content that `head` carries.
+
+    A literal `verified_sha == head` comparison (spec 5.3's "Pass" row, as
+    originally implemented) can NEVER be true: ship-time G-E2 captures
+    `cas_sha = HEAD` and psrw itself then adds at least two more commits to
+    release/<v> — the CAS-claim commit (ship_current_work_to_release.py) and the
+    outcome commit (lib/epic_gate.run_and_record) — so `verified_sha` is
+    permanently >=2 commits behind release HEAD by the time promote reads it.
+    The fast path was dead code, and every promote re-ran the multi-minute
+    epic_check for every epic unconditionally: exactly the cost blowup spec 5.4
+    warns gets a gate disabled.
+
+    What the gate actually cares about is spec 5.3's own wording — "the answer
+    is always about the tree actually being promoted". So the comparison is
+    content-based: the verification is still fresh while NOTHING but psrw's own
+    epic bookkeeping has changed between the two commits. Any real change (a
+    ship's merge, a doc, another catalog's status flip) makes it stale and the
+    check re-runs. `git diff --quiet` exits 0 for "no difference", 1 for
+    "differs", 128 for anything it cannot answer (a missing or garbage sha) —
+    only 0 is treated as fresh, so every unknown is stale, never a false pass.
+    """
+    if not verified_sha:
+        return False
+    if verified_sha == head:
+        return True
+    return git_run(rel_wt, "diff", "--quiet", verified_sha, head, "--",
+                   _EPIC_BOOKKEEPING_PATHSPEC, check=False).returncode == 0
+
+
+def check_epics(repo: Path, rel_wt: Path, version: str, allow_split: bool = False) -> None:
+    """G-E3: the completeness-and-freshness gate at promote time.
+
+    For every epic with at least one feature shipped into `version`:
+    - split_approved_by already set -> exempt, permanently.
+    - not complete (lib.epic.epic_completeness) -> refuse, UNLESS allow_split
+      is True, in which case this promote permanently split-approves it
+      (lib.epic.set_split_approved) instead of raising.
+    - complete, verified against the content being promoted -> pass
+      (_verification_is_fresh).
+    - complete but never verified / failed / verified against stale content ->
+      re-run the outcome check at release HEAD (same CAS + throwaway-worktree
+      mechanism ship-time G-E2 already uses — lib.epic_gate.run_and_record),
+      then pass or raise.
+
+    Raises EpicGateError on any refusal. The multi-minute epic_check hook run
+    happens OUTSIDE file_lock(rel_wt) — only the CAS win + its commit, the
+    split-approval writes, and the outcome recording inside run_and_record,
+    take the lock.
+
+    Every escaping exception is normalised to EpicGateError (a RuntimeError, so
+    main() turns it into the guaranteed `ERROR: ...` line): the helpers this
+    calls raise lib.backlog_paths.NoReleaseInProgressError — a DIFFERENT class
+    from this module's own same-named one — and lib.git_ops.GitError, a plain
+    Exception subclass, neither of which main() catches. Without this they
+    escaped as raw tracebacks, defeating EpicGateError's whole design.
+    """
+    try:
+        _check_epics(repo, rel_wt, version, allow_split)
+    except (EpicGateError, CatalogEntryNotFoundError):
+        raise  # already an intended, main()-caught refusal
+    except (GitError, PathsNoReleaseInProgressError) as e:
+        raise EpicGateError(
+            f"G-E3 could not complete for release {version} "
+            f"({type(e).__name__}: {e}) — refusing to promote unverified"
+        ) from e
+
+
+def _check_epics(repo: Path, rel_wt: Path, version: str, allow_split: bool) -> None:
+    if not rel_wt.exists():
+        raise EpicGateError(
+            f"_release worktree missing at {rel_wt} — cannot verify epic "
+            f"completeness for {version}"
+        )
+    epic_cat = get_backlog_catalog_path(repo, "epic")
+    idea_cat = get_backlog_catalog_path(repo, "idea")
+    refined_cat = get_backlog_catalog_path(repo, "refined")
+
+    # ── Pass 1: decide for every epic, writing NOTHING ─────────────────────
+    # set_split_approved is PERMANENT (there is no un-approve verb), so it must
+    # not be committed for an earlier epic while a later epic in the same sweep
+    # can still refuse the promote — that left a real, permanent operator
+    # decision on release/<v> as a side effect of a promote that never
+    # succeeded. Nothing is written until the whole sweep is known to pass.
+    to_split_approve: list[str] = []
+    to_verify: list[str] = []
+    for epic_id in sorted(_relevant_epics(refined_cat, version)):
+        epic = find_entry(epic_cat, epic_id)
+        if epic is None:
+            # Drifted/typo'd epic id: a feature shipped into this release names
+            # an epic the catalog does not have, so completeness CANNOT be
+            # evaluated — F1 (a half-epic reaching main) is exactly what would
+            # slip through. Refusing is not an option: no override in this
+            # toolkit can fix a missing catalog entry (--allow-split-epic would
+            # itself raise CatalogEntryNotFoundError, `epic verify` needs the
+            # entry too), so a hard error would brick promote with no way out.
+            # Warn UNMISSABLY instead and keep going — the same call this
+            # codebase already makes for the identical condition in cleanup().
+            print(
+                f"⚠️  G-E3: epic {epic_id} is MISSING from the epic catalog "
+                f"({epic_cat}) but is named by a feature shipped into {version} "
+                f"— its completeness could NOT be checked and this release may "
+                f"be carrying a half-epic to main. Restore the catalog entry (or "
+                f"clear the `epic` field on that feature) and re-run promote.",
+                file=sys.stderr,
+            )
+            continue
+        if epic.get("split_approved_by"):
+            continue  # exempt, permanently
+
+        complete, reasons = epic_completeness(idea_cat, refined_cat, epic_id, version)
+        if not complete:
+            if allow_split:
+                to_split_approve.append(epic_id)
+                continue
+            raise EpicGateError(
+                f"{epic_id} is not complete for release {version}: "
+                f"{'; '.join(reasons)} (pass --allow-split-epic to promote anyway "
+                f"and permanently mark this epic as an approved split)"
+            )
+        to_verify.append(epic_id)
+
+    # ── Pass 2: freshness + outcome check for every complete epic ─────────
+    for epic_id in to_verify:
+        with file_lock(rel_wt):
+            head = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
+            # Re-read under the lock: pass 1's snapshot predates this loop's own
+            # catalog commits (and any concurrent ship's).
+            epic = find_entry(epic_cat, epic_id) or {}
+            if epic.get("status") == "verified" and _verification_is_fresh(
+                rel_wt, epic.get("verified_sha"), head
+            ):
+                continue  # pass — already verified against this exact content
+            status = epic.get("status")
+            claim_sha = epic.get("verifying_sha")
+            # reclaim_settled, NOT force: a 'verifying' epic has a check in
+            # flight (a concurrent ship's G-E2, or `psrw epic verify`) and
+            # stealing it would run two epic_checks against the same epic
+            # concurrently, both writing the same epic_dir.
+            won = try_begin_verification(epic_cat, epic_id, head, reclaim_settled=True)
+            if won and is_dirty(rel_wt):
+                commit_all(
+                    rel_wt,
+                    f"chore(epic): {epic_id} verification reclaimed at {head} (G-E3)",
+                )
+        if not won:
+            sha_note = f" at {claim_sha[:12]}" if claim_sha else ""
+            raise EpicGateError(
+                f"{epic_id} could not be claimed for verification (status="
+                f"{status}). G-E3 never steals an in-flight check: another run "
+                f"— a concurrent ship's G-E2, or `psrw epic verify` — holds the "
+                f"claim{sha_note}. Wait for it to finish and re-run promote; if "
+                f"that run died, clear the stale claim with "
+                f"`psrw epic verify --force {epic_id}`, then re-run promote"
+            )
+
+        # From the CAS win to run_and_record's own try/except there is a window
+        # (epic_children / epic_folder_path, both of which can raise) where an
+        # exception would leave the epic pinned in 'verifying' forever, with no
+        # timeout — recoverable only by a human running `epic verify --force`.
+        # Record the failure on the way out, matching run_and_record's pattern.
+        try:
+            features = [i["promoted_to"] for i in epic_children(idea_cat, epic_id)
+                        if i.get("promoted_to")]
+            epic_dir = epic_folder_path(repo, epic_id)
+            rc, entry = run_and_record(repo, rel_wt, epic_cat, epic_id, features, head,
+                                       epic_dir, version)
+        except Exception as e:
+            with file_lock(rel_wt):
+                mark_epic_failed(epic_cat, epic_id, version, sha=head)
+                if is_dirty(rel_wt):
+                    commit_all(
+                        rel_wt,
+                        f"chore(epic): {epic_id} verification result (G-E3 crashed)",
+                    )
+            raise EpicGateError(
+                f"{epic_id} verification crashed at promote (G-E3) "
+                f"({type(e).__name__}: {e}) — recorded as failed_verification. "
+                f"Fix it, then re-run promote"
+            ) from e
+        if entry.get("status") != "verified":
+            raise EpicGateError(
+                f"{epic_id} failed its outcome check at promote (G-E3), exit "
+                f"code {rc} at {head[:12]} — fix the epic (or its hooks.epic_check) "
+                f"and re-run promote; re-run just the check with "
+                f"`psrw epic verify --force {epic_id}`. --allow-split-epic does "
+                f"NOT cover this: per spec 5.3 it only approves promoting an "
+                f"INCOMPLETE epic, never one whose outcome check failed"
+            )
+
+    # ── Pass 3: the permanent split approvals, now that the sweep has passed ──
+    for epic_id in to_split_approve:
+        with file_lock(rel_wt):
+            set_split_approved(epic_cat, epic_id, resolve_owner_id())
+            if is_dirty(rel_wt):
+                commit_all(
+                    rel_wt,
+                    f"chore(epic): {epic_id} split-approved at promote {version}",
+                )
+
+
+def _epic_split_disclosure_lines(rel_wt: Path, version: str) -> list[str]:
+    """PR-body lines for every split-approved epic touched by this release.
+
+    _create_or_adopt_pr passes pr_body only to `gh pr create`; without this,
+    the adopt path (an existing PR being reused) never updated the PR body, so
+    a second promote silently dropped the split-epic disclosure a reviewer
+    needs to see (fixed alongside this: the adopt branch now also calls
+    `gh pr edit`).
+    """
+    epic_cat = rel_wt / ".claude" / "epic_backlog" / "_catalog.json"
+    refined_cat = rel_wt / ".claude" / "refined_backlog" / "_catalog.json"
+    lines = []
+    for epic_id in sorted(_relevant_epics(refined_cat, version)):
+        epic = find_entry(epic_cat, epic_id)
+        if epic and epic.get("split_approved_by"):
+            lines.append(
+                f"- ⚠️ SPLIT EPIC: `{epic_id}` is being promoted incomplete — "
+                f"approved by {epic['split_approved_by']}."
+            )
+    return lines
+
+
 def promote_release(
     repo: Path,
     *,
@@ -179,6 +451,7 @@ def promote_release(
     keep: bool = False,
     use_pr: bool = True,
     allow_missing_gate2: bool = False,
+    allow_split_epic: bool = False,
     babysit: bool = False,
     gh_runner=subprocess.run,
 ) -> dict:
@@ -202,6 +475,11 @@ def promote_release(
     version = state["version"]
     release_branch = f"release/{version}"
     rel_wt = repo / ".claude" / "worktrees" / "_release"
+
+    # G-E3: the completeness-and-freshness epic gate, before any other gate —
+    # a release must not reach Gate 2 (let alone main) carrying an epic that
+    # is incomplete or unverified at this release's HEAD.
+    check_epics(repo, rel_wt, version, allow_split_epic)
 
     if run_deploy:
         # Deploy the RELEASE tree, not the main checkout: deploy-local is
@@ -258,10 +536,13 @@ def promote_release(
             if gate2_ran else
             "- ⚠️ Gate 2 did NOT run at promote (skipped or `integration.sh` missing) — UNVERIFIED."
         )
+        split_lines = _epic_split_disclosure_lines(rel_wt, version)
+        split_block = ("\n".join(split_lines) + "\n") if split_lines else ""
         pr_body = (
             f"Promote `{release_branch}` → `main`.\n\n"
             f"- Gate 1 (`precheck.sh`) passed at ship.\n"
-            f"{gate2_line}\n\n"
+            f"{gate2_line}\n"
+            f"{split_block}\n"
             f"Squash-merging this PR triggers the prod (Vultr) deploy.\n"
             f"After it merges, run: `promote_release.py --cleanup-only {version}` "
             f"(archives the F-NNN folders, prunes worktrees/branches, finalizes `.release.json`)."
@@ -398,11 +679,14 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
             git_run(repo, "reset", "--hard", "origin/main")
 
     refined_cat = repo / ".claude" / "refined_backlog" / "_catalog.json"
+    idea_cat = repo / ".claude" / "idea_backlog" / "_catalog.json"
+    epic_cat = repo / ".claude" / "epic_backlog" / "_catalog.json"
     claims_file = repo / ".claude" / "state" / "claims.json"
     archive_root = repo / ".claude" / "refined_backlog" / "_archive" / version
     archive_root.mkdir(parents=True, exist_ok=True)
 
     # For each F-NNN shipped in this version: archive + remove worktree + delete branches.
+    touched_epics: set[str] = set()
     for entry in list_entries(refined_cat):
         if entry.get("release_version") != version:
             continue
@@ -410,6 +694,8 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
             continue
 
         feature_id = entry["id"]
+        if entry.get("epic"):
+            touched_epics.add(entry["epic"])
         # 1. Mark promoted. This is a bulk sweep: one drifted entry (removed
         # concurrently between the list_entries snapshot and here) must not kill
         # the whole cleanup — warn, then keep cleaning this feature + the rest
@@ -459,6 +745,41 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
             mutate_state(claims_file, drop_claim, default={})
         except FileNotFoundError:
             pass
+
+    # For each epic touched by a feature shipped into this version: archive
+    # its E-NNN-<slug>/ folder, mirroring the refined-feature archival above.
+    # Reads from THIS (main) checkout, not _release — that worktree is removed
+    # later in this same call. Refuses to archive an INCOMPLETE epic unless it
+    # is permanently split-approved (G-E3 already gated this at promote time;
+    # this is a defensive mirror for a standalone --cleanup-only run).
+    if touched_epics:
+        epic_archive_root = repo / ".claude" / "epic_backlog" / "_archive" / version
+        epic_archive_root.mkdir(parents=True, exist_ok=True)
+        for epic_id in sorted(touched_epics):
+            epic_entry = find_entry(epic_cat, epic_id)
+            if epic_entry is None:
+                print(f"⚠️ cleanup: epic {epic_id} missing from catalog — archive "
+                      f"skipped, continuing sweep", file=sys.stderr)
+                continue
+            complete, reasons = epic_completeness(idea_cat, refined_cat, epic_id, version)
+            if not complete and not epic_entry.get("split_approved_by"):
+                print(f"⚠️ cleanup: {epic_id} is not complete for {version} and not "
+                      f"split-approved — leaving it un-archived: {'; '.join(reasons)}",
+                      file=sys.stderr)
+                continue
+            if epic_entry.get("status") != "promoted":
+                try:
+                    mark_epic_promoted(epic_cat, epic_id)
+                except CatalogEntryNotFoundError as e:
+                    print(f"⚠️ cleanup: {e} — epic promote-stamp skipped, "
+                          f"continuing sweep", file=sys.stderr)
+
+            candidates = list((repo / ".claude" / "epic_backlog").glob(f"{epic_id}-*"))
+            for src in candidates:
+                if src.is_dir() and "_archive" not in src.parts:
+                    dst = epic_archive_root / src.name
+                    if not dst.exists():
+                        shutil.move(str(src), str(dst))
 
     # Remove _release worktree FIRST (must precede release branch deletion).
     rel_wt = repo / ".claude" / "worktrees" / "_release"
@@ -526,6 +847,11 @@ def _build_parser():
     p.add_argument("--allow-missing-gate2", action="store_true", dest="allow_missing_gate2",
                    help="proceed even when scripts/integration.sh is missing on the "
                         "release branch (the release goes to main UNVERIFIED)")
+    p.add_argument("--allow-split-epic", action="store_true", dest="allow_split_epic",
+                   help="permanently mark any incomplete epic touched by this release "
+                        "as an approved split (lib.epic.set_split_approved) instead of "
+                        "refusing G-E3 — disclosed in the PR body, and exempts the epic "
+                        "from G-E3 in every later release too")
     p.add_argument("--deploy", action="store_true",
                    help="run the repo-specific local deploy (scripts/deploy-local.sh) first "
                         "(default: off)")
@@ -556,6 +882,7 @@ def main() -> int:
             result = promote_release(repo, run_gate2=args.gate2, run_deploy=args.deploy,
                                      push=args.push, keep=args.keep, use_pr=args.use_pr,
                                      allow_missing_gate2=args.allow_missing_gate2,
+                                     allow_split_epic=args.allow_split_epic,
                                      babysit=args.babysit)
     except (NoReleaseInProgressError, Gate2FailedError,
             CatalogEntryNotFoundError, RuntimeError) as e:

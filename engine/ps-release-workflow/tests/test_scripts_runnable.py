@@ -29,6 +29,7 @@ RUNNABLE_SCRIPTS = [
     "cleanup_legacy_worktrees.py",
     "guard_check.py",
     "hotfix.py",
+    "epic.py",
 ]
 
 

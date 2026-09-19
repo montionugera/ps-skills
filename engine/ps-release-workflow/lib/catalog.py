@@ -50,7 +50,7 @@ def find_entry(catalog: Path, entry_id: str) -> Optional[dict]:
     return None
 
 
-def add_idea_entry(catalog: Path, title: str) -> dict:
+def add_idea_entry(catalog: Path, title: str, epic: str | None = None) -> dict:
     new_entry: dict = {}
     def add(entries: list) -> list:
         nid = next_id(entries, "I")
@@ -58,12 +58,14 @@ def add_idea_entry(catalog: Path, title: str) -> dict:
             "id": nid, "title": title,
             "created_at": _now(), "promoted_to": None,
         })
+        if epic:
+            new_entry["epic"] = epic
         return entries + [new_entry]
     mutate_state(catalog, add, default=[])
     return new_entry
 
 
-def add_refined_entry(catalog: Path, idea_id: str, title: str) -> dict:
+def add_refined_entry(catalog: Path, idea_id: str, title: str, epic: str | None = None) -> dict:
     new_entry: dict = {}
     def add(entries: list) -> list:
         nid = next_id(entries, "F")
@@ -72,6 +74,8 @@ def add_refined_entry(catalog: Path, idea_id: str, title: str) -> dict:
             "created_at": _now(),
             "claimed_by": None, "status": "open", "release_version": None,
         })
+        if epic:
+            new_entry["epic"] = epic
         return entries + [new_entry]
     mutate_state(catalog, add, default=[])
     return new_entry

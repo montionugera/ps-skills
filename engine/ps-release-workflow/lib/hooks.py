@@ -16,6 +16,7 @@ DEFAULT_HOOKS = {
     "precheck": "scripts/precheck.sh",
     "integration": "scripts/integration.sh",
     "deploy_local": "scripts/deploy-local.sh",
+    "epic_check": "scripts/epic-check.sh",
 }
 
 
