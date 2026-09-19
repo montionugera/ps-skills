@@ -62,7 +62,7 @@ STRICT_HAZARD = re.compile(r"psrw\s+promote|(?<!-)--deploy")
 # Clause 3 (merge to main): legitimate only inside a "never ..." prohibition.
 MERGE_HAZARD = re.compile(r"merge\s+(?:\S+\s+){0,3}(?:to|into)\s+main\b|git\s+merge\s+main\b"
                           r"|push\s+(?:\S+\s+){0,2}main\b|gh\s+pr\s+merge\b"
-                          r"|push\s+(?:\S+\s+){0,2}\S*:main\b", re.IGNORECASE)
+                          r"|push\s+(?:\S+\s+){0,2}\S*[:/]main\b", re.IGNORECASE)
 
 
 def _is_prohibited(body: str, start: int) -> bool:
@@ -86,6 +86,7 @@ def _merge_offenders(body: str) -> list[str]:
 
 @pytest.mark.parametrize("instruction", ["Then run gh pr merge 12 --squash.",
                                          "Then run git push origin HEAD:main.",
+                                         "Then run git push origin HEAD:refs/heads/main.",
                                          "Then run git push origin main."])
 def test_merge_hazard_flags_gh_pr_merge_and_refspec_push_to_main(instruction):
     assert _merge_offenders(instruction), instruction

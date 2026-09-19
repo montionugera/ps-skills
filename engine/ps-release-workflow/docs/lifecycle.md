@@ -78,6 +78,8 @@ check once the epic is complete, and `promote` refuses an incomplete one. The ha
 "never auto-chain", and only for slices a human names in an explicit `--slices`
 allowlist (approval lives in that list, not in any catalog field). It never runs
 `promote`, `--deploy`, or a merge to main.
+It stops at the first failed gate (refusal, unclean tree, failed review, failed ship)
+and does not retry a ship blindly.
 
 - **`psrw epic plan E-NNN --slices I-a,I-b`** is a read-only preflight. It prints each
   allowlisted slice in fanout order with `state` (`idea`, `refined`, `claimed`,
