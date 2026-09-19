@@ -341,7 +341,8 @@ def epic_plan(repo: Path, epic_id: str, slices: str,
             f"re-runs the outcome check; to re-check now run: psrw epic verify {epic_id}")
 
     children = epic_children(get_backlog_catalog_path(repo, "idea"), epic_id)
-    stray = [i for i in allowlist if i not in {c["id"] for c in children}]
+    child_ids = {c["id"] for c in children}
+    stray = [i for i in allowlist if i not in child_ids]
     if stray:
         raise EpicPlanError(f"not slices of {epic_id}: {', '.join(stray)}")
     refined_cat = get_backlog_catalog_path(repo, "refined")

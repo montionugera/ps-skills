@@ -88,10 +88,6 @@ def tmp_repo_in_release(tmp_repo_with_release: Path) -> Path:
     return tmp_repo_with_release
 
 
-def _release_wt(repo: Path) -> Path:
-    return repo / ".claude" / "worktrees" / "_release"
-
-
 @pytest.fixture
 def epic_repo_raw(tmp_repo_in_release: Path, fixed_owner: str) -> Path:
     """release/1.1 open; epic E-001 fanned out into I-001 'alpha' and I-002 'beta'.
@@ -108,8 +104,9 @@ def epic_repo_raw(tmp_repo_in_release: Path, fixed_owner: str) -> Path:
 def idea_spec():
     """Callable (repo, idea_id) -> Path of that idea's spec.md on release/<v>."""
     def path(repo: Path, idea_id: str) -> Path:
+        from lib.backlog_paths import get_release_worktree
         from lib.slug import slugify
-        folder = _release_wt(repo) / ".claude" / "idea_backlog"
+        folder = get_release_worktree(repo) / ".claude" / "idea_backlog"
         catalog = json.loads((folder / "_catalog.json").read_text())
         title = next(i["title"] for i in catalog if i["id"] == idea_id)
         return folder / f"{idea_id}-{slugify(title)}" / "spec.md"
@@ -120,13 +117,15 @@ def idea_spec():
 def epic_repo(epic_repo_raw: Path, idea_spec) -> Path:
     """epic_repo_raw plus real content in both slice specs and a passing precheck.sh,
     all committed on release/<v>. `epic plan` accepts this repo as-is."""
+    from lib.backlog_paths import get_release_worktree
     from lib.git_ops import commit_all
     repo = epic_repo_raw
+    rel = get_release_worktree(repo)
     for idea_id in ("I-001", "I-002"):
         idea_spec(repo, idea_id).write_text(f"# {idea_id}\n\nApproved design content.\n")
-    script = _release_wt(repo) / "scripts" / "precheck.sh"
+    script = rel / "scripts" / "precheck.sh"
     script.parent.mkdir(exist_ok=True)
     script.write_text("#!/usr/bin/env bash\nexit 0\n")
     script.chmod(0o755)
-    commit_all(_release_wt(repo), "test: fill slice specs, add precheck")
+    commit_all(rel, "test: fill slice specs, add precheck")
     return repo
