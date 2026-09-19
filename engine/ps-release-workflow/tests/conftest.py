@@ -86,3 +86,47 @@ def tmp_repo_in_release(tmp_repo_with_release: Path) -> Path:
     from scripts.init_work_new_release import new_release
     new_release(tmp_repo_with_release)
     return tmp_repo_with_release
+
+
+def _release_wt(repo: Path) -> Path:
+    return repo / ".claude" / "worktrees" / "_release"
+
+
+@pytest.fixture
+def epic_repo_raw(tmp_repo_in_release: Path, fixed_owner: str) -> Path:
+    """release/1.1 open; epic E-001 fanned out into I-001 'alpha' and I-002 'beta'.
+
+    The slice specs are the untouched fanout skeletons and there is no
+    scripts/precheck.sh, so `epic plan` must refuse this repo until both are fixed."""
+    from scripts.epic import epic_fanout, epic_open
+    epic_open(tmp_repo_in_release, "E")
+    epic_fanout(tmp_repo_in_release, "E-001", ["alpha", "beta"])
+    return tmp_repo_in_release
+
+
+@pytest.fixture
+def idea_spec():
+    """Callable (repo, idea_id) -> Path of that idea's spec.md on release/<v>."""
+    def path(repo: Path, idea_id: str) -> Path:
+        from lib.slug import slugify
+        folder = _release_wt(repo) / ".claude" / "idea_backlog"
+        catalog = json.loads((folder / "_catalog.json").read_text())
+        title = next(i["title"] for i in catalog if i["id"] == idea_id)
+        return folder / f"{idea_id}-{slugify(title)}" / "spec.md"
+    return path
+
+
+@pytest.fixture
+def epic_repo(epic_repo_raw: Path, idea_spec) -> Path:
+    """epic_repo_raw plus real content in both slice specs and a passing precheck.sh,
+    all committed on release/<v>. `epic plan` accepts this repo as-is."""
+    from lib.git_ops import commit_all
+    repo = epic_repo_raw
+    for idea_id in ("I-001", "I-002"):
+        idea_spec(repo, idea_id).write_text(f"# {idea_id}\n\nApproved design content.\n")
+    script = _release_wt(repo) / "scripts" / "precheck.sh"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text("#!/usr/bin/env bash\nexit 0\n")
+    script.chmod(0o755)
+    commit_all(_release_wt(repo), "test: fill slice specs, add precheck")
+    return repo
