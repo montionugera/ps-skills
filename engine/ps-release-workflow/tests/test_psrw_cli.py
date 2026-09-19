@@ -168,11 +168,12 @@ def test_help_never_mutates_state(verb, tmp_repo_in_release, tmp_path):
 
 
 @pytest.mark.parametrize("verb", ["init", "new-release", "idea", "refine", "claim",
-                                   "ship", "promote", "unclaim", "status", "hotfix"])
+                                   "ship", "promote", "unclaim", "status", "hotfix",
+                                   "epic"])
 def test_help_is_forwarded_for_argparse_safe_verbs(verb, tmp_path):
     """Safe verbs get the script's real argparse usage, so flags stay discoverable.
 
-    All 10 verbs are now argparse_safe — `hotfix` was missing from this list even
+    All 11 verbs are now argparse_safe — `hotfix` was missing from this list even
     though the docstring claimed full coverage. This test now overlaps with
     test_help_never_mutates_state for init/idea/refine/ship (same claim
     of a clean, forwarded --help) — kept separately because this one checks

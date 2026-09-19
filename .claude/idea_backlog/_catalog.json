@@ -1,1 +1,41 @@
-[]
+[
+  {
+    "id": "I-001",
+    "title": "Epic layer: deliver and verify multiple features under one epic",
+    "created_at": "2026-09-18T12:40:16.054706+00:00",
+    "promoted_to": "F-001"
+  },
+  {
+    "id": "I-002",
+    "title": "epic run: spec-gated sequential slice auto-chain",
+    "created_at": "2026-09-19T01:55:21.761449+00:00",
+    "promoted_to": "F-002"
+  },
+  {
+    "id": "I-003",
+    "title": "Share one git test helper",
+    "created_at": "2026-09-19T07:27:22.545983+00:00",
+    "promoted_to": "F-003",
+    "epic": "E-001"
+  },
+  {
+    "id": "I-004",
+    "title": "Cover the untested epic plan refusals",
+    "created_at": "2026-09-19T07:27:22.547737+00:00",
+    "promoted_to": "F-004",
+    "epic": "E-001"
+  },
+  {
+    "id": "I-005",
+    "title": "Fix the stale refine skill text",
+    "created_at": "2026-09-19T07:27:22.548274+00:00",
+    "promoted_to": "F-006",
+    "epic": "E-001"
+  },
+  {
+    "id": "I-006",
+    "title": "list",
+    "created_at": "2026-09-19T09:13:01.731575+00:00",
+    "promoted_to": "F-005"
+  }
+]

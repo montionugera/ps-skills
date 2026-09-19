@@ -1,1 +1,70 @@
-[]
+[
+  {
+    "id": "F-001",
+    "title": "Epic layer: deliver and verify multiple features under one epic",
+    "from_idea": "I-001",
+    "created_at": "2026-09-18T12:40:48.918973+00:00",
+    "claimed_by": "claude-a6c35399",
+    "status": "shipped",
+    "release_version": "1.1",
+    "claimed_at": "2026-09-18T12:40:49.214065+00:00",
+    "shipped_at": "2026-09-19T00:19:51.077406+00:00"
+  },
+  {
+    "id": "F-002",
+    "title": "epic run: spec-gated sequential slice auto-chain",
+    "from_idea": "I-002",
+    "created_at": "2026-09-19T01:55:27.659408+00:00",
+    "claimed_by": "claude-a6c35399",
+    "status": "shipped",
+    "release_version": "1.1",
+    "claimed_at": "2026-09-19T01:55:27.990004+00:00",
+    "shipped_at": "2026-09-19T04:06:10.663896+00:00"
+  },
+  {
+    "id": "F-003",
+    "title": "Share one git test helper",
+    "from_idea": "I-003",
+    "created_at": "2026-09-19T07:31:17.618226+00:00",
+    "claimed_by": "claude-a6c35399",
+    "status": "shipped",
+    "release_version": "1.1",
+    "epic": "E-001",
+    "claimed_at": "2026-09-19T07:31:27.610782+00:00",
+    "shipped_at": "2026-09-19T08:27:41.094231+00:00"
+  },
+  {
+    "id": "F-004",
+    "title": "Cover the untested epic plan refusals",
+    "from_idea": "I-004",
+    "created_at": "2026-09-19T08:28:38.947367+00:00",
+    "claimed_by": "claude-a6c35399",
+    "status": "shipped",
+    "release_version": "1.1",
+    "epic": "E-001",
+    "claimed_at": "2026-09-19T08:28:39.588343+00:00",
+    "shipped_at": "2026-09-19T09:22:10.870505+00:00"
+  },
+  {
+    "id": "F-005",
+    "title": "list",
+    "from_idea": "I-006",
+    "created_at": "2026-09-19T09:13:12.172648+00:00",
+    "claimed_by": "claude-a6c35399",
+    "status": "shipped",
+    "release_version": "1.1",
+    "claimed_at": "2026-09-19T09:13:18.349825+00:00",
+    "shipped_at": "2026-09-19T09:14:29.910561+00:00"
+  },
+  {
+    "id": "F-006",
+    "title": "Fix the stale refine skill text",
+    "from_idea": "I-005",
+    "created_at": "2026-09-19T09:23:40.488081+00:00",
+    "claimed_by": "claude-a6c35399",
+    "status": "claimed",
+    "release_version": null,
+    "epic": "E-001",
+    "claimed_at": "2026-09-19T09:23:56.064494+00:00"
+  }
+]

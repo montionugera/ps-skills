@@ -6,6 +6,7 @@ description: |
   commits the backlog entry on the release branch via the _release worktree.
   After this skill: brainstorm the idea into a SOLID, approved spec FIRST;
   refine only once the spec is solid. Never auto-chain idea -> refine -> claim.
+  Sole exception: the epic-run skill, for slices a human allowlisted.
 ---
 
 # ps-release-workflow:idea
@@ -28,6 +29,9 @@ claim. Each step is a deliberate, human-approved gate:
 
 Refining or claiming an idea whose spec is still the empty skeleton is the exact mistake
 this gate prevents.
+
+**Sole exception:** the `epic-run` skill (`ps-release-workflow-epic-run`) refines and
+claims slices in one chain, but only those a human listed in its `--slices` allowlist.
 
 ## Refuses if
 
