@@ -39,6 +39,7 @@ def test_two_slice_chain_ships_in_order_and_verifies_the_epic(epic_repo):
     repo = epic_repo
     rel = get_release_worktree(repo)
     main_before = _git(repo, "rev-parse", "main")
+    origin_main_before = _git(repo, "rev-parse", "origin/main")
 
     first = _run_slice(repo, "I-001", "one.txt")
     assert first["shipped"]["epic_outcome"] is None, "epic is not complete after slice 1"
@@ -62,6 +63,7 @@ def test_two_slice_chain_ships_in_order_and_verifies_the_epic(epic_repo):
         "shipped", "shipped"]
     assert (rel / "one.txt").is_file() and (rel / "two.txt").is_file()
     assert _git(repo, "rev-parse", "main") == main_before, "the chain never touches main"
+    assert _git(repo, "rev-parse", "origin/main") == origin_main_before, "nor pushes main"
 
     with pytest.raises(EpicPlanError, match="verified"):
         epic_plan(repo, "E-001", "I-001,I-002")
