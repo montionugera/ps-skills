@@ -5,6 +5,7 @@ description: |
   in a ps-release-workflow repo. Mints F-NNN, moves the folder, and commits
   on the release branch via the _release worktree. Refine ONLY an idea that
   already has a solid, approved spec — never auto-chain idea -> refine -> claim.
+  Sole exception: the epic-run skill, for slices a human allowlisted.
 ---
 
 # ps-release-workflow:refine
@@ -17,6 +18,8 @@ Refine is a **promotion gate**, not a formatting step. The idea must already be
 brainstormed with an **approved spec** under `docs/superpowers/specs/`. Do **NOT** run
 idea -> refine -> claim as one automatic chain — promoting an under-specified idea mints
 an `F-NNN` (and invites a premature claim + worktree) before the design is settled.
+The sole exception is the `epic-run` skill, which refines only slices a human listed in
+its `--slices` allowlist; `psrw epic plan` refuses a slice whose spec is still a skeleton.
 
 > ⚠️ Refine writes **fresh skeleton** `spec.md`/`plan.md`/`research.md` into the new
 > `F-NNN` folder — it does **not** copy the idea folder's contents. Keep the canonical

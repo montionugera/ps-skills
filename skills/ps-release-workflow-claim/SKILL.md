@@ -7,6 +7,7 @@ description: |
   --resume to re-own an already-claimed feature (fresh session resuming
   in-flight work, or after the guard blocks with "claim --resume F-NNN").
   After this skill: hint to implement via /subagent-driven-development.
+  Chained automatically only by the epic-run skill, for slices a human allowlisted.
 ---
 
 # ps-release-workflow:claim
@@ -17,7 +18,8 @@ Claim a refined feature and get an isolated worktree to build it in.
 
 Claim only a feature that already has an **approved spec** (under
 `docs/superpowers/specs/`) and a **written plan**. **Never auto-chain
-idea -> refine -> claim** — each is a separate, human-approved step.
+idea -> refine -> claim** — each is a separate, human-approved step. The sole
+exception is the `epic-run` skill, for slices a human listed in its `--slices` allowlist.
 
 ## Run
 

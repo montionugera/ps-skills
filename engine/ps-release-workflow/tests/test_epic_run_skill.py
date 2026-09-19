@@ -14,6 +14,7 @@ SKILLS = TOOLKIT.parent.parent / "skills"
 ANCHORS = ["d11-backlog-routing", "gates", "promote-sequence",
            "state-layout", "guard-guarantees"]
 LINE_BUDGET = 40
+CHAIN_BANS = ["idea", "refine", "claim", "epic-open", "epic-fanout"]
 BAN = "- **NEVER run `psrw promote`, `psrw ship --deploy`, or merge anything to main.**"
 
 pytestmark = pytest.mark.skipif(not SKILLS.is_dir(), reason=f"{SKILLS} not present")
@@ -86,3 +87,12 @@ def test_epic_run_uses_every_verb_the_chain_needs():
 def test_no_skill_uses_the_slash_form_of_the_namespace():
     for skill in sorted(SKILLS.glob("ps-release-workflow-*/SKILL.md")):
         assert "/ps-release-workflow:" not in skill.read_text(encoding="utf-8"), skill.parent.name
+
+
+@pytest.mark.parametrize("name", CHAIN_BANS)
+def test_every_auto_chain_ban_names_epic_run_as_the_exception(name):
+    """The description is the auto-trigger surface, so the exception must be in the
+    frontmatter as well as the body, or a session would still refuse to chain."""
+    _, frontmatter, body = _skill(name)
+    assert "epic-run" in frontmatter, f"{name}: description does not name epic-run"
+    assert "epic-run" in body, f"{name}: body does not name epic-run"
