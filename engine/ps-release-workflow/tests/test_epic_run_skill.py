@@ -14,6 +14,7 @@ SKILLS = TOOLKIT.parent.parent / "skills"
 ANCHORS = ["d11-backlog-routing", "gates", "promote-sequence",
            "state-layout", "guard-guarantees"]
 LINE_BUDGET = 40
+BAN = "- **NEVER run `psrw promote`, `psrw ship --deploy`, or merge anything to main.**"
 
 pytestmark = pytest.mark.skipif(not SKILLS.is_dir(), reason=f"{SKILLS} not present")
 
@@ -51,8 +52,16 @@ def test_epic_run_never_promotes():
     assert "`psrw ship --deploy`" in body and "merge anything to main" in body
 
 
+def test_epic_run_body_never_instructs_promote_or_deploy():
+    _, _, body = _skill("epic-run")
+    offenders = [ln for ln in body.splitlines()
+                 if ln.strip() != BAN
+                 and ("psrw promote" in ln or re.search(r"(?<!no-)--deploy", ln))]
+    assert offenders == [], offenders
+
+
 def test_epic_run_uses_every_verb_the_chain_needs():
-    text, _, _ = _skill("epic-run")
+    _, _, text = _skill("epic-run")
     for token in ("psrw epic plan", "--allow-no-precheck", "psrw refine", "psrw claim",
                   "--resume", "psrw epic sync", "psrw ship --no-deploy", '{"ok"',
                   "git diff --quiet", "git log release/", "/self-grill-audit",
