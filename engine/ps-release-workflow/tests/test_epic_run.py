@@ -1,6 +1,9 @@
 """psrw epic plan / psrw epic sync — the deterministic half of `epic run`."""
+import contextlib
 import json
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -10,10 +13,12 @@ from lib.backlog_paths import (
 from lib.catalog import CatalogEntryNotFoundError, mark_promoted_to_main, mark_shipped
 from lib.epic import mark_epic_failed, mark_epic_promoted, try_begin_verification
 from lib.git_ops import commit_all
-from scripts.epic import EpicPlanError, epic_plan, epic_verify
+from lib.slug import slugify
+from scripts.epic import EpicPlanError, EpicSyncError, epic_plan, epic_sync, epic_verify
 from scripts.init_work_refined_backlog import claim_feature
 from scripts.new_idea import SPEC_TEMPLATE as IDEA_SPEC_TEMPLATE
 from scripts.promote_idea_to_refined import promote_idea_to_refined
+from scripts.ship_current_work_to_release import DirtyTreeError, NotInFeatureWorktreeError
 
 
 def _git(cwd, *args):
@@ -207,3 +212,143 @@ def test_cli_plan_refusal_is_one_error_line_not_a_traceback(epic_repo, monkeypat
     assert main() == 1
     err = capsys.readouterr().err
     assert err.startswith("ERROR: ") and "--slices" in err and "Traceback" not in err
+
+
+# ── epic sync ────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def slice_worktree(epic_repo):
+    """(repo, feature worktree, F-id) for slice I-001, refined then claimed."""
+    feature = promote_idea_to_refined(epic_repo, "I-001")["id"]
+    claimed = claim_feature(epic_repo, feature, owner="chain-owner")
+    return epic_repo, Path(claimed["worktree"]), feature
+
+
+def test_sync_makes_the_slice_spec_and_plan_visible(slice_worktree):
+    repo, wt, feature = slice_worktree
+    folder = wt / ".claude" / "refined_backlog" / f"{feature}-{slugify('alpha')}"
+    assert not folder.exists(), "a worktree cut from main must not see it yet"
+
+    result = epic_sync(wt)
+
+    assert (folder / "spec.md").is_file() and (folder / "plan.md").is_file()
+    assert result["feature"] == feature
+    assert result["branch"] == f"feat/{feature}"
+    assert result["release"] == "1.1"
+    assert result["base"] == _git(get_release_worktree(repo), "rev-parse", "HEAD")
+    assert result["sha"] == _git(wt, "rev-parse", "HEAD")
+
+
+def test_sync_fast_forward_puts_the_feature_on_the_release_head(slice_worktree):
+    _, wt, _ = slice_worktree
+    result = epic_sync(wt)
+    assert result["sha"] == result["base"]
+
+
+def test_sync_merges_when_the_feature_already_has_commits(slice_worktree):
+    _, wt, _ = slice_worktree
+    (wt / "feature.txt").write_text("work\n")
+    commit_all(wt, "feat: work before the sync")
+
+    result = epic_sync(wt)
+
+    assert result["sha"] != result["base"], "a real merge commit expected"
+    assert _git(wt, "status", "--porcelain") == ""
+    # the review anchor: `base` isolates exactly the slice's own work
+    assert _git(wt, "diff", "--name-only", result["base"], "HEAD") == "feature.txt"
+
+
+def test_sync_twice_is_a_no_op(slice_worktree):
+    _, wt, _ = slice_worktree
+    first = epic_sync(wt)
+    second = epic_sync(wt)
+    assert second == first
+
+
+def test_sync_conflict_aborts_cleanly_and_leaves_the_feature_claimed(slice_worktree):
+    repo, wt, feature = slice_worktree
+    rel = get_release_worktree(repo)
+    (rel / "shared.txt").write_text("release side\n")
+    commit_all(rel, "test: release adds shared.txt")
+    (wt / "shared.txt").write_text("feature side\n")
+    commit_all(wt, "test: feature adds shared.txt")
+    head = _git(wt, "rev-parse", "HEAD")
+
+    with pytest.raises(EpicSyncError, match="shared.txt"):
+        epic_sync(wt)
+
+    assert _git(wt, "rev-parse", "HEAD") == head
+    assert _git(wt, "status", "--porcelain") == ""
+    assert subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                          cwd=wt, capture_output=True).returncode != 0
+    catalog = json.loads(get_backlog_catalog_path(repo, "refined").read_text())
+    assert next(f for f in catalog if f["id"] == feature)["status"] == "claimed"
+
+
+def test_sync_refuses_outside_a_feature_worktree(slice_worktree):
+    repo, _, _ = slice_worktree
+    with pytest.raises(NotInFeatureWorktreeError):
+        epic_sync(repo)                                  # the main checkout
+    with pytest.raises(NotInFeatureWorktreeError):
+        epic_sync(get_release_worktree(repo))            # the _release worktree
+
+
+def test_sync_refuses_a_dirty_tree_and_keeps_the_edit(slice_worktree):
+    _, wt, _ = slice_worktree
+    head = _git(wt, "rev-parse", "HEAD")
+    (wt / "scratch.txt").write_text("uncommitted\n")
+    with pytest.raises(DirtyTreeError):
+        epic_sync(wt)
+    assert _git(wt, "rev-parse", "HEAD") == head
+    assert (wt / "scratch.txt").read_text() == "uncommitted\n"
+
+
+def test_sync_holds_the_release_lock_around_the_merge_only(slice_worktree, monkeypatch):
+    repo, wt, _ = slice_worktree
+    import scripts.epic as epic_mod
+    events = []
+    real_lock, real_run = epic_mod.file_lock, epic_mod.git_run
+
+    @contextlib.contextmanager
+    def spy_lock(target):
+        events.append(("lock", Path(target).resolve()))
+        with real_lock(target):
+            yield
+        events.append(("unlock", Path(target).resolve()))
+
+    def spy_run(cwd, *args, **kwargs):
+        if args and args[0] == "merge":
+            events.append(("merge", None))
+        return real_run(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(epic_mod, "file_lock", spy_lock)
+    monkeypatch.setattr(epic_mod, "git_run", spy_run)
+
+    epic_sync(wt)
+
+    rel = get_release_worktree(repo).resolve()
+    assert events == [("lock", rel), ("merge", None), ("unlock", rel)]
+
+
+def test_cli_sync_prints_the_sha_and_fails_cleanly_outside_a_worktree(
+        slice_worktree, monkeypatch, capsys):
+    from scripts.epic import main
+    repo, wt, _ = slice_worktree
+    monkeypatch.setattr("sys.argv", ["epic.py", "sync"])
+
+    monkeypatch.chdir(wt)
+    assert main() == 0
+    assert json.loads(capsys.readouterr().out)["sha"] == _git(wt, "rev-parse", "HEAD")
+
+    monkeypatch.chdir(repo)
+    assert main() == 1
+    err = capsys.readouterr().err
+    assert err.startswith("ERROR: ") and "Traceback" not in err
+
+
+def test_epic_help_lists_plan_and_sync():
+    scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+    proc = subprocess.run([sys.executable, str(scripts_dir / "epic.py"), "--help"],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0
+    assert "plan" in proc.stdout and "sync" in proc.stdout

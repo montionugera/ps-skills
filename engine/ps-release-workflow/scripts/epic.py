@@ -1,4 +1,4 @@
-"""psrw epic — open an epic, fan it out into ideas, verify it."""
+"""psrw epic — open an epic, fan it out into ideas, verify it, plan or sync an epic run."""
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
@@ -15,13 +15,16 @@ from lib.backlog_paths import (
 from lib.catalog import CatalogEntryNotFoundError, add_idea_entry, find_entry
 from lib.epic import add_epic_entry, epic_children, epic_folder_path, try_begin_verification
 from lib.epic_gate import run_and_record
-from lib.git_ops import GitError, _run as git_run, commit_all
+from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
 from lib.hooks import HookPathError, resolve_hook
 from lib.repo import find_repo_root
 from lib.slug import SlugError, slugify
 from lib.state import file_lock, mutate_state
 from scripts.new_idea import SPEC_TEMPLATE as IDEA_SPEC_TEMPLATE
 from scripts.promote_idea_to_refined import _is_untouched_skeleton
+from scripts.ship_current_work_to_release import (
+    DirtyTreeError, NotInFeatureWorktreeError, _find_marker,
+)
 
 
 class EpicNotVerifiableError(Exception):
@@ -31,6 +34,11 @@ class EpicNotVerifiableError(Exception):
 
 class EpicPlanError(Exception):
     """A preflight refusal: `epic run` must not start."""
+
+
+class EpicSyncError(Exception):
+    """The release merge could not complete; it was aborted and the feature
+    worktree is as it was."""
 
 
 _SPEC_SKELETON = """---
@@ -359,6 +367,51 @@ def epic_plan(repo: Path, epic_id: str, slices: str,
     }
 
 
+def epic_sync(cwd: Path) -> dict:
+    """Merge the release branch's current HEAD into this feature branch.
+
+    Feature branches are cut from main, so without this a slice sees neither the
+    earlier slices' code nor its own spec/plan (those live under .claude/*_backlog
+    on release/<v>). Run inside a claimed feature worktree. The read of the
+    release HEAD and the merge happen under the same file_lock(_release) that
+    ship holds, so a concurrent ship that is later rolled back cannot be merged
+    half-way. On failure the merge is aborted and the tree is left as it was.
+    """
+    top = Path(git_run(Path(cwd), "rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    feature_id = _find_marker(top)["feature"]
+    repo = find_repo_root(top)
+    state = read_release_state(repo)
+    if state is None:
+        raise NoReleaseInProgressError("No release in progress")
+    release_branch = f"release/{state['version']}"
+    feat_branch = f"feat/{feature_id}"
+    rel_wt = get_release_worktree(repo)
+    # A merge that starts on a dirty tree cannot be aborted back to that tree.
+    if is_dirty(top):
+        raise DirtyTreeError(f"{top} has uncommitted changes; commit or stash first")
+
+    with file_lock(rel_wt):
+        base = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
+        merged = git_run(
+            top, "merge", "--no-edit", "-m",
+            f"chore(epic): sync {release_branch} into {feat_branch}", base, check=False)
+        if merged.returncode != 0:
+            conflicted = git_run(top, "diff", "--name-only", "--diff-filter=U",
+                                 check=False).stdout.split()
+            git_run(top, "merge", "--abort", check=False)
+            detail = ", ".join(conflicted) or (merged.stderr.strip() or merged.stdout.strip())
+            raise EpicSyncError(
+                f"merging {release_branch} ({base[:12]}) into {feat_branch} failed: "
+                f"{detail}. The merge was aborted and {feature_id} stays claimed.")
+    return {
+        "feature": feature_id,
+        "branch": feat_branch,
+        "release": state["version"],
+        "base": base,
+        "sha": git_run(top, "rev-parse", "HEAD").stdout.strip(),
+    }
+
+
 def main() -> int:
     import argparse
     p = argparse.ArgumentParser(prog="psrw epic", description=__doc__)
@@ -384,6 +437,9 @@ def main() -> int:
     p_plan.add_argument("--allow-no-precheck", action="store_true",
                         help="accept a repo with no Gate 1 script (ship then skips Gate 1)")
 
+    sub.add_parser(
+        "sync", help="merge release/<v> into this feature branch (run in the feature worktree)")
+
     args = p.parse_args()
     repo = find_repo_root(Path.cwd())
     try:
@@ -394,10 +450,13 @@ def main() -> int:
         elif args.cmd == "plan":
             result = epic_plan(repo, args.epic_id, args.slices,
                                allow_no_precheck=args.allow_no_precheck)
+        elif args.cmd == "sync":
+            result = epic_sync(Path.cwd())
         else:
             result = epic_verify(repo, args.epic_id, force=args.force)
     except (NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,
-            EpicNotVerifiableError, EpicPlanError, SlugError) as e:
+            EpicNotVerifiableError, EpicPlanError, EpicSyncError,
+            DirtyTreeError, NotInFeatureWorktreeError, SlugError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result, default=str, indent=2))
