@@ -188,3 +188,16 @@ def test_verify_without_force_refuses_an_already_verified_epic(tmp_repo_in_relea
 
     result = epic_verify(repo, epic_id, force=True)
     assert result["entry"]["status"] == "verified"
+
+
+@pytest.mark.parametrize("title", ["", "???"])
+def test_cli_open_unslugifiable_title_prints_error_line_not_traceback(
+        tmp_repo_in_release, fixed_owner, monkeypatch, capsys, title):
+    """The CLI must turn SlugError into a one-line `ERROR:` and exit 1."""
+    from scripts.epic import main
+
+    monkeypatch.chdir(tmp_repo_in_release)
+    monkeypatch.setattr("sys.argv", ["epic.py", "open", title])
+    assert main() == 1
+    err = capsys.readouterr().err
+    assert err.startswith("ERROR: ") and "Traceback" not in err

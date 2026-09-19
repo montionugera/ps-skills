@@ -17,7 +17,7 @@ from lib.epic import add_epic_entry, epic_children, epic_folder_path, try_begin_
 from lib.epic_gate import run_and_record
 from lib.git_ops import GitError, _run as git_run, commit_all
 from lib.repo import find_repo_root
-from lib.slug import slugify
+from lib.slug import SlugError, slugify
 from lib.state import file_lock, mutate_state
 
 
@@ -236,7 +236,7 @@ def main() -> int:
         else:
             result = epic_verify(repo, args.epic_id, force=args.force)
     except (NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,
-            EpicNotVerifiableError) as e:
+            EpicNotVerifiableError, SlugError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result, default=str, indent=2))
