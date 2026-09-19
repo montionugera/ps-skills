@@ -52,11 +52,25 @@ def test_epic_run_never_promotes():
     assert "`psrw ship --deploy`" in body and "merge anything to main" in body
 
 
+# Clause 1+2 of the ban: never legitimate outside the BAN line itself.
+STRICT_HAZARD = re.compile(r"psrw\s+promote|(?<!-)--deploy")
+# Clause 3 (merge to main): legitimate only inside a "never ..." prohibition.
+MERGE_HAZARD = re.compile(r"merge\s+(?:\S+\s+){0,3}(?:to|into)\s+main|git\s+merge\s+main"
+                          r"|push\s+(?:\S+\s+){0,2}main\b")
+
+
+def _is_prohibited(body: str, start: int) -> bool:
+    """True when a `never` opens the same sentence as the match at body[start]."""
+    sentence = re.split(r"[.;!?]", body[:start])[-1]
+    return re.search(r"\bnever\b", sentence, re.IGNORECASE) is not None
+
+
 def test_epic_run_body_never_instructs_promote_or_deploy():
     _, _, body = _skill("epic-run")
     offenders = [ln for ln in body.splitlines()
-                 if ln.strip() != BAN
-                 and ("psrw promote" in ln or re.search(r"(?<!no-)--deploy", ln))]
+                 if ln.strip() != BAN and STRICT_HAZARD.search(ln)]
+    offenders += [m.group(0) for m in MERGE_HAZARD.finditer(body)
+                  if not _is_prohibited(body, m.start())]
     assert offenders == [], offenders
 
 
