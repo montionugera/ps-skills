@@ -33,7 +33,7 @@ One line per issue. Filed here rather than chased, so they are not lost.
 - `epic sync` reads state before taking the lock.
 - The precheck script is resolved from `_release`, not from the feature worktree.
 - Refusal ordering in `epic plan`: the precheck refusal versus the other refusals is not specified or tested.
-- Three refusal branches are untested (`scripts/epic.py`: the idea whose `promoted_to` feature is missing from the refined catalog, ~line 270; a slice shipped on another release, ~280; an unexpected feature status, ~283).
+- Two `_plan_slice` refusal branches in `scripts/epic.py` are now covered by `tests/test_epic_plan_refusals.py` (the idea whose `promoted_to` feature is missing from the refined catalog; a feature with an unexpected status). The third branch this entry once counted — a slice shipped on another release — was already covered by `tests/test_epic_run.py::test_plan_refuses_a_slice_shipped_on_another_release`, so the original "three untested" count was wrong.
 - Several skill assertions are presence-only (a token appearing somewhere), not placement or order.
 - `CHAIN_BANS` and `LINE_BUDGET` pin the current instances, not the seed that stamps them out.
 - The e2e test cannot detect a promote: promote pushes `release/<v>` and opens a PR without moving local `main`, so never-promote rests on the skill lint alone.
