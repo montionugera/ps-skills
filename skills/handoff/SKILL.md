@@ -115,10 +115,13 @@ Save the generated markdown to `/tmp/`:
 Run the bundled Herdr handoff script:
 
 ```bash
-~/.claude/skills/handoff/scripts/herdr-handoff.sh "/tmp/handoff-<timestamp>-<slug>.md" --kind <agent-kind> --mode <code|plan> --prompt "<immediate next steps>" [--close-source]
+~/.claude/skills/handoff/scripts/herdr-handoff.sh "/tmp/handoff-<timestamp>-<slug>.md" --kind <agent-kind> --mode <code|plan> --prompt "<immediate next steps>" [--close-source] [--no-yolo]
 ```
 
 The script ends with a banner — `✅ HANDOFF CONFIRMED` + `🟢 SAFE TO CLOSE` / `🚪 Closing THIS tab in 20s`, or `⛔ DO NOT CLOSE` (new agent not confirmed running after 60s; exit 1). It verifies via `herdr pane get` that the new pane actually runs an agent — "launched" is not "running".
+
+### YOLO Mode (Default):
+All handoffs launch with permission-skipping enabled by default (`--dangerously-skip-permissions` for `claude`, `agy`, and `gemini`), ensuring the incoming agent never gets stalled on interactive permission prompts. Pass `--no-yolo` to disable.
 
 ### Choosing `--mode` (always pass it for `--kind claude`):
 - `code` → new session starts on **Sonnet**. Use when the Immediate Next Action is implementation: editing code, running/fixing tests, executing tasks of an already-approved plan.
