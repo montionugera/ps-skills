@@ -377,7 +377,7 @@ def epic_sync(cwd: Path) -> dict:
     ship holds, so a concurrent ship that is later rolled back cannot be merged
     half-way. On failure the merge is aborted and the tree is left as it was.
     """
-    top = Path(git_run(Path(cwd), "rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    top = Path(git_run(cwd, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
     feature_id = _find_marker(top)["feature"]
     repo = find_repo_root(top)
     state = read_release_state(repo)
