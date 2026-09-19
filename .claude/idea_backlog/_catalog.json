@@ -29,7 +29,7 @@
     "id": "I-005",
     "title": "Fix the stale refine skill text",
     "created_at": "2026-09-19T07:27:22.548274+00:00",
-    "promoted_to": null,
+    "promoted_to": "F-006",
     "epic": "E-001"
   },
   {

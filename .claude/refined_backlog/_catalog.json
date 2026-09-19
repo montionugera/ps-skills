@@ -55,5 +55,15 @@
     "release_version": "1.1",
     "claimed_at": "2026-09-19T09:13:18.349825+00:00",
     "shipped_at": "2026-09-19T09:14:29.910561+00:00"
+  },
+  {
+    "id": "F-006",
+    "title": "Fix the stale refine skill text",
+    "from_idea": "I-005",
+    "created_at": "2026-09-19T09:23:40.488081+00:00",
+    "claimed_by": null,
+    "status": "open",
+    "release_version": null,
+    "epic": "E-001"
   }
 ]
