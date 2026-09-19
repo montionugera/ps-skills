@@ -5,7 +5,6 @@ call the chain makes is the real one, so this pins the mechanics the skill relie
 on: slice 2 sees slice 1, sync's `base` isolates a slice's own diff, ship works on
 a synced branch, the last ship records the epic outcome, and main never moves.
 """
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,12 +16,7 @@ from scripts.epic import EpicPlanError, epic_plan, epic_sync
 from scripts.init_work_refined_backlog import claim_feature
 from scripts.promote_idea_to_refined import promote_idea_to_refined
 from scripts.ship_current_work_to_release import ship_current_work
-
-
-def _git(cwd, *args):
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
-    ).stdout.strip()
+from tests._helpers import git as _git
 
 
 def _run_slice(repo: Path, idea_id: str, filename: str) -> dict:

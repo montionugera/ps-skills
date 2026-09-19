@@ -19,12 +19,7 @@ from scripts.init_work_refined_backlog import claim_feature
 from scripts.new_idea import SPEC_TEMPLATE as IDEA_SPEC_TEMPLATE
 from scripts.promote_idea_to_refined import promote_idea_to_refined
 from scripts.ship_current_work_to_release import DirtyTreeError, NotInFeatureWorktreeError
-
-
-def _git(cwd, *args):
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
-    ).stdout.strip()
+from tests._helpers import git as _git
 
 
 def _plan_error(repo, *args, **kwargs) -> str:
