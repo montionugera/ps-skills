@@ -1,5 +1,6 @@
 """status: one-screen "what's in flight" report + Next hint chosen by state."""
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -223,3 +224,182 @@ def test_corrupt_release_json_never_raises(tmp_repo: Path):
     cp = _run_script(tmp_repo, "--repo", str(tmp_repo), "--brief")
     assert cp.returncode == 0
     assert "Traceback" not in cp.stderr
+
+
+# ── epic rollup ───────────────────────────────────────────────────────────
+
+
+def _setup_epic_with_three_slices(repo: Path) -> list[dict]:
+    """Release 1.1 in progress; E-001 fanned out into 3 ideas, each refined
+    into F-001..F-003 (all 'open'). Returns the three feature entries."""
+    from scripts.epic import epic_fanout, epic_open
+    from scripts.init_work_new_release import new_release
+    from scripts.promote_idea_to_refined import promote_idea_to_refined
+
+    new_release(repo, version="1.1")
+    epic_open(repo, "Multi-account risk limits")
+    ideas = epic_fanout(repo, "E-001", ["per-account cap", "aggregate cap", "breach alert"])["ideas"]
+    return [promote_idea_to_refined(repo, i["id"]) for i in ideas]
+
+
+def test_status_groups_features_under_their_epic(tmp_repo_with_release: Path, fixed_owner: str):
+    feats = _setup_epic_with_three_slices(tmp_repo_with_release)
+    _set_statuses(tmp_repo_with_release, {feats[0]["id"]: "shipped", feats[1]["id"]: "shipped"})
+
+    st = collect_status(tmp_repo_with_release)
+    out = render_full(st)
+
+    assert "E-001" in out
+    assert "2/3 slices shipped" in out
+    assert [e["id"] for e in st["epics"]] == ["E-001"]
+    # Existing counts are untouched by the added section.
+    assert st["counts"]["shipped"] == 2 and st["counts"]["total"] == 3
+
+
+def test_status_warns_when_two_siblings_are_claimed_at_once(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """Mitigation for F2: epic branches are cut off main, so siblings are
+    developed blind to each other."""
+    from scripts.init_work_refined_backlog import claim_feature
+
+    feats = _setup_epic_with_three_slices(tmp_repo_with_release)
+    claim_feature(tmp_repo_with_release, feats[0]["id"], owner=fixed_owner)
+    st = collect_status(tmp_repo_with_release)
+    assert "siblings" not in render_full(st).lower(), "one claimed sibling must not warn"
+
+    claim_feature(tmp_repo_with_release, feats[1]["id"], owner=fixed_owner)
+    st = collect_status(tmp_repo_with_release)
+    assert "two siblings of e-001 are claimed" in render_full(st).lower()
+    assert "two siblings of e-001 are claimed" in render_brief(st).lower()
+
+
+def _release_wt(repo: Path) -> Path:
+    return repo / ".claude" / "worktrees" / "_release"
+
+
+def _edit_catalog(path: Path, mutate) -> None:
+    entries = json.loads(path.read_text())
+    mutate(entries)
+    path.write_text(json.dumps(entries, indent=2) + "\n")
+
+
+def test_rollup_does_not_assume_plan_md_exists(tmp_repo_with_release: Path, fixed_owner: str):
+    """'All three files always exist' is explicitly NOT an invariant (F-015).
+    Real feature folders: one with plan.md deleted, one with no files at all,
+    one with the folder itself gone."""
+    feats = _setup_epic_with_three_slices(tmp_repo_with_release)
+    refined = _release_wt(tmp_repo_with_release) / ".claude" / "refined_backlog"
+
+    folders = [next(refined.glob(f"{f['id']}-*")) for f in feats]
+    assert all(d.is_dir() for d in folders), "fixture must create real feature folders"
+    assert (folders[0] / "plan.md").exists(), "fixture must start with a plan.md to delete"
+    (folders[0] / "plan.md").unlink()
+    for child in folders[1].iterdir():
+        child.unlink()
+    shutil.rmtree(folders[2])
+
+    st = collect_status(tmp_repo_with_release)
+    out = render_full(st)
+    assert st["epics"][0]["slices_total"] == 3
+    assert [s["status"] for s in st["epics"][0]["slices"]] == ["open", "open", "open"]
+    assert "0/3 slices shipped" in out
+
+
+def test_rollup_tolerates_legacy_entries_without_epic_key(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """Legacy ideas/features (no `epic` key) coexist with a real epic and are
+    neither counted as its slices nor break the rollup."""
+    from scripts.epic import epic_fanout, epic_open
+
+    legacy = _setup_release_with_features(tmp_repo_with_release, fixed_owner)
+    assert all("epic" not in f for f in legacy)
+    epic_open(tmp_repo_with_release, "Multi-account risk limits")
+    epic_fanout(tmp_repo_with_release, "E-001", ["per-account cap", "aggregate cap"])
+
+    st = collect_status(tmp_repo_with_release)
+    assert [e["id"] for e in st["epics"]] == ["E-001"]
+    assert st["epics"][0]["slices_total"] == 2
+    assert st["epics"][0]["slices_shipped"] == 0
+    assert st["epics"][0]["claimed_siblings"] == []  # legacy claimed F-001 is not a sibling
+    assert "0/2 slices shipped" in render_full(st)
+
+
+def _promote_epic(repo: Path, epic_id: str) -> None:
+    cat = _release_wt(repo) / ".claude" / "epic_backlog" / "_catalog.json"
+
+    def mutate(entries):
+        for e in entries:
+            if e["id"] == epic_id:
+                e["status"] = "promoted"
+
+    _edit_catalog(cat, mutate)
+
+
+def test_promoted_epics_are_summarised_not_listed(tmp_repo_with_release: Path, fixed_owner: str):
+    from scripts.epic import epic_fanout, epic_open
+
+    _setup_epic_with_three_slices(tmp_repo_with_release)  # E-001
+    epic_open(tmp_repo_with_release, "Second epic")  # E-002
+    epic_fanout(tmp_repo_with_release, "E-002", ["only slice"])
+    _promote_epic(tmp_repo_with_release, "E-001")
+
+    st = collect_status(tmp_repo_with_release)
+    out = render_full(st)
+    assert {e["id"] for e in st["epics"]} == {"E-001", "E-002"}  # structured state stays complete
+    epics_section = out.split("Epics:")[1]
+    assert "E-002" in epics_section
+    assert "E-001" not in epics_section
+    assert "(+1 promoted epic(s) omitted)" in out
+
+
+def test_in_flight_epic_is_still_shown_without_omitted_line(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    _setup_epic_with_three_slices(tmp_repo_with_release)
+    out = render_full(collect_status(tmp_repo_with_release))
+    assert "E-001" in out
+    assert "epic(s) omitted" not in out
+
+
+def test_only_promoted_epics_shows_no_empty_epics_table(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    _setup_epic_with_three_slices(tmp_repo_with_release)
+    _promote_epic(tmp_repo_with_release, "E-001")
+    out = render_full(collect_status(tmp_repo_with_release))
+    assert "(+1 promoted epic(s) omitted)" in out
+    assert "slices shipped" not in out
+
+
+def test_promoted_idea_whose_feature_is_missing_is_reported_missing(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    feats = _setup_epic_with_three_slices(tmp_repo_with_release)
+    gone = feats[1]["id"]
+    _edit_catalog(
+        _refined_catalog_path(tmp_repo_with_release),
+        lambda entries: entries.__setitem__(slice(None), [e for e in entries if e["id"] != gone]),
+    )
+
+    st = collect_status(tmp_repo_with_release)
+    slices = {s["id"]: s["status"] for s in st["epics"][0]["slices"]}
+    assert slices[gone] == "missing"
+    assert slices[feats[0]["id"]] == "open"
+    assert any(gone in w and "missing" in w for w in st["warnings"])
+    assert f"{gone} missing" in render_full(st)
+
+
+def test_unpromoted_slice_stays_idea_with_no_warning(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    from scripts.epic import epic_fanout, epic_open
+    from scripts.init_work_new_release import new_release
+
+    new_release(tmp_repo_with_release, version="1.1")
+    epic_open(tmp_repo_with_release, "Epic")
+    epic_fanout(tmp_repo_with_release, "E-001", ["a", "b"])
+    st = collect_status(tmp_repo_with_release)
+    assert [s["status"] for s in st["epics"][0]["slices"]] == ["idea", "idea"]
+    assert st["warnings"] == []

@@ -23,6 +23,7 @@ from lib.backlog_paths import (
     get_release_worktree,
 )
 from lib.catalog import CatalogEntryNotFoundError, find_entry, update_entry
+from lib.epic import demote_epic
 from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty, remove_worktree
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
 from lib.slug import slugify
@@ -114,7 +115,24 @@ def unclaim_feature(repo: Path, feature_id: str, *, force: bool = False) -> dict
 
     if not catalog_entry_missing:
         with file_lock(wt):
-            if update_entry(refined_cat, feature_id, reopen) or is_dirty(wt):
+            changed = update_entry(refined_cat, feature_id, reopen)
+
+            # Demote the epic this feature belongs to, IF it was already
+            # 'verified' — a shipped→reclaimed→unclaimed feature (unclaim
+            # leaves release_version set above; see epic_completeness's
+            # docstring) means the epic's completeness truth just changed
+            # underneath a verdict that no longer holds. Demote to 'open',
+            # NEVER 'verifying' — that would collide with the ship-time CAS
+            # (lib.epic.try_begin_verification) and strand the epic forever
+            # in 'verifying' with no owner to finish it.
+            epic_id = feat.get("epic") if feat is not None else None
+            if epic_id:
+                epic_cat = get_backlog_catalog_path(repo, "epic")
+                epic_entry = find_entry(epic_cat, epic_id)
+                if epic_entry is not None and epic_entry.get("status") == "verified":
+                    demote_epic(epic_cat, epic_id)
+
+            if changed or is_dirty(wt):
                 commit_all(wt, f"chore(catalog): unclaim {feature_id}")
 
     return {
