@@ -17,7 +17,11 @@ LINE_BUDGET = 40
 CHAIN_BANS = ["idea", "refine", "claim", "epic-open", "epic-fanout"]
 BAN = "- **NEVER run `psrw promote`, `psrw ship --deploy`, or merge anything to main.**"
 
-pytestmark = pytest.mark.skipif(not SKILLS.is_dir(), reason=f"{SKILLS} not present")
+# Never skip: a copy-mode install resolves SKILLS to $HOME/skills, and a skip would
+# silently vacate every test here, including the never-promote lint.
+assert SKILLS.is_dir(), (
+    f"{SKILLS} is missing: run these tests from a repo checkout (a copy-mode install "
+    f"puts this file where ../../skills is not the repo's skills/)")
 
 
 def _skill(name: str) -> tuple[str, str, str]:
@@ -57,7 +61,8 @@ def test_epic_run_never_promotes():
 STRICT_HAZARD = re.compile(r"psrw\s+promote|(?<!-)--deploy")
 # Clause 3 (merge to main): legitimate only inside a "never ..." prohibition.
 MERGE_HAZARD = re.compile(r"merge\s+(?:\S+\s+){0,3}(?:to|into)\s+main\b|git\s+merge\s+main\b"
-                          r"|push\s+(?:\S+\s+){0,2}main\b", re.IGNORECASE)
+                          r"|push\s+(?:\S+\s+){0,2}main\b|gh\s+pr\s+merge\b"
+                          r"|push\s+(?:\S+\s+){0,2}\S*:main\b", re.IGNORECASE)
 
 
 def _is_prohibited(body: str, start: int) -> bool:
@@ -70,9 +75,26 @@ def test_epic_run_body_never_instructs_promote_or_deploy():
     _, _, body = _skill("epic-run")
     offenders = [ln for ln in body.splitlines()
                  if ln.strip() != BAN and STRICT_HAZARD.search(ln)]
-    offenders += [m.group(0) for m in MERGE_HAZARD.finditer(body)
-                  if not _is_prohibited(body, m.start())]
+    offenders += _merge_offenders(body)
     assert offenders == [], offenders
+
+
+def _merge_offenders(body: str) -> list[str]:
+    return [m.group(0) for m in MERGE_HAZARD.finditer(body)
+            if not _is_prohibited(body, m.start())]
+
+
+@pytest.mark.parametrize("instruction", ["Then run gh pr merge 12 --squash.",
+                                         "Then run git push origin HEAD:main.",
+                                         "Then run git push origin main."])
+def test_merge_hazard_flags_gh_pr_merge_and_refspec_push_to_main(instruction):
+    assert _merge_offenders(instruction), instruction
+
+
+def test_merge_hazard_allows_the_skills_own_prohibitions():
+    assert _merge_offenders("Never run gh pr merge or git push origin HEAD:main.") == []
+    _, _, body = _skill("epic-run")
+    assert _merge_offenders(body) == []
 
 
 def test_epic_run_uses_every_verb_the_chain_needs():

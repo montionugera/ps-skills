@@ -433,7 +433,8 @@ def main() -> int:
         "plan", help="preflight for an epic run: print the ordered slice plan (read-only)")
     p_plan.add_argument("epic_id", metavar="E-NNN")
     p_plan.add_argument("--slices", default="", metavar="I-NNN,I-NNN",
-                        help="comma-separated approved slice ideas (required)")
+                        help="comma-separated approved slice ideas (required); slice order follows "
+                             "the epic's fanout order, not the order given")
     p_plan.add_argument("--allow-no-precheck", action="store_true",
                         help="accept a repo with no Gate 1 script (ship then skips Gate 1)")
 

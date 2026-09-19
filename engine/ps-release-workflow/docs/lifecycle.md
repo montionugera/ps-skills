@@ -83,9 +83,9 @@ allowlist (approval lives in that list, not in any catalog field). It never runs
   allowlisted slice in fanout order with `state` (`idea`, `refined`, `claimed`,
   `shipped`), `claimed_by` and next `action` (`refine`, `claim`, `resume`, `skip`). It
   refuses an epic that is `verified`, `promoted` or `verifying`; a slice that is not a
-  child of the epic or is already promoted; a slice whose idea `spec.md` is still an
-  untouched skeleton; and a repo with no Gate 1 script unless `--allow-no-precheck`
-  (ship would otherwise skip Gate 1 with only a warning). A `failed_verification` epic
+  child of the epic or is already promoted; an unshipped slice whose idea `spec.md` is
+  still an untouched skeleton (already-shipped slices are skipped, not checked); and a repo with no Gate 1
+  script unless `--allow-no-precheck` (ship would otherwise skip Gate 1 with only a warning). A `failed_verification` epic
   is allowed, with a note.
 - **`psrw epic sync`**, run inside a claimed feature worktree, merges `release/<v>`'s
   HEAD into the feature branch under `file_lock(_release)`. Feature branches are cut

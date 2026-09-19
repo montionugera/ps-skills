@@ -351,4 +351,4 @@ def test_epic_help_lists_plan_and_sync():
     proc = subprocess.run([sys.executable, str(scripts_dir / "epic.py"), "--help"],
                           capture_output=True, text=True)
     assert proc.returncode == 0
-    assert "plan" in proc.stdout and "sync" in proc.stdout
+    assert "{open,fanout,verify,plan,sync}" in proc.stdout
