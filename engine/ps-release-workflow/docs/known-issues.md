@@ -20,9 +20,23 @@ One line per issue. Filed here rather than chased, so they are not lost.
 
 - **A hard-killed epic outcome check strands the epic in `verifying`.** An exception in the check is caught and recorded as `failed_verification`, so only a hard process kill (SIGKILL, power loss) leaves the claim behind. There is deliberately no timestamp or timeout (any threshold would be indefensible); recovery is `psrw epic verify --force E-NNN`. G-E3 refuses, naming the live claim, rather than steal an in-flight check.
 - **The outcome check is machine-local and optional.** `hooks.epic_check` (default `scripts/epic-check.sh`) missing or unusable warns on stderr and skips, so a repo without it gets completeness enforcement only, never an outcome check. Mirrors Gate 1.
-- **Sibling features are developed blind to each other.** Epic branches are cut off `main`, so nothing shows one slice the others' work until the combined tree is verified at ship/promote. `psrw status` only warns when two or more siblings are claimed at once; it does not prevent it.
+- **Sibling features are developed blind to each other.** Epic branches are cut off `main`, so nothing shows one slice the others' work until the combined tree is verified at ship/promote. `psrw status` only warns when two or more siblings are claimed at once; it does not prevent it. `psrw epic sync` (used by the `epic-run` skill) closes this for a chained run; a hand-run claim is still blind.
 - **An idea created by hand carries no `epic` tag.** Only `psrw epic fanout` sets it, and `refine` only copies it forward; tagging later means editing the catalog by hand, and a drifted epic id is caught only at G-E3 (refuses) and `epic fanout` (raises).
-- **`verify.sh` is gitignored and reads the installed skills.** It lives in the working tree only (`.gitignore`, machine-local), so its skill-count bump (13 to 15) cannot ride the feature branch and must be applied on the main checkout. It also counts `~/.claude/skills`, so it reports the old count until the new skills are merged and installed.
+- **`verify.sh` is gitignored and reads the installed skills.** It lives in the working tree only (`.gitignore`, machine-local), so its skill-count bump (13 to 16) cannot ride the feature branch and must be applied on the main checkout. It also counts `~/.claude/skills`, so it reports the old count until the new skills are merged and installed.
+- **`ship`'s post-merge rollback can drop an unrelated release commit.** When the feature branch is already contained in `release/<v>` (a slice that added no commits after `psrw epic sync`, which fast-forwards), `git merge --no-ff` prints "Already up to date" and creates no commit, so a Gate 1 failure on the merged tree runs `git reset --hard HEAD~1` against whatever release commit was last (for example a catalog commit). Pre-existing in `ship_current_work_to_release.py`; `epic run` makes it likelier. Not fixed here. Untested mitigation candidate: have `epic sync` merge with `--no-ff` so a synced feature always carries a commit.
+- **`skills/ps-release-workflow-refine/SKILL.md` lines 24-26 are stale.** They say refine writes fresh skeleton `spec.md`/`plan.md`/`research.md` and does not copy the idea folder; the code carries the idea's content forward (`_carry_forward` copies the folder, replacing only untouched skeletons). The description's "moves the folder" is also wrong: the idea folder stays in place.
+
+### Deferred from the epic-run final review
+
+- `psrw epic sync` has no current-branch guard (it merges into whatever branch the worktree is on).
+- `merge --abort`'s return code is discarded, while the message says the merge "was aborted".
+- `epic sync` reads state before taking the lock.
+- The precheck script is resolved from `_release`, not from the feature worktree.
+- Refusal ordering in `epic plan`: the precheck refusal versus the other refusals is not specified or tested.
+- Three refusal branches are untested (`scripts/epic.py`: the idea whose `promoted_to` feature is missing from the refined catalog, ~line 270; a slice shipped on another release, ~280; an unexpected feature status, ~283).
+- Several skill assertions are presence-only (a token appearing somewhere), not placement or order.
+- `CHAIN_BANS` and `LINE_BUDGET` pin the current instances, not the seed that stamps them out.
+- The e2e test cannot detect a promote: promote pushes `release/<v>` and opens a PR without moving local `main`, so never-promote rests on the skill lint alone.
 
 ## Test-suite cost
 

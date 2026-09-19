@@ -5,7 +5,8 @@ description: |
   ps-release-workflow repo. Mints one IDEA per slice, tagged to the epic, and
   commits them on the release branch via the _release worktree. Never mints a
   feature. After this skill: brainstorm each slice into its own approved spec
-  before refining it.
+  before refining it. Only the epic-run skill may chain refine and claim, and only for
+  slices a human allowlisted.
 ---
 
 # ps-release-workflow:epic-fanout
@@ -23,7 +24,8 @@ The epic exists (`psrw epic open`) and its `spec.md` names the slices.
 ## Then
 
 Fanout mints **ideas, never features**. Each slice still needs its own brainstorm
-and approved spec before `psrw refine I-NNN`. Do NOT chain fanout -> refine -> claim.
+and approved spec before `psrw refine I-NNN`. Do NOT chain fanout -> refine -> claim,
+except through the `epic-run` skill, for slices a human listed in its `--slices` allowlist.
 Once every slice has shipped, the repo's `hooks.epic_check` script runs against the
 combined tree (`psrw epic verify E-NNN` to re-run it by hand). `E-NNN/verification.md`
 is the human-written statement of what must be true; no code reads it.

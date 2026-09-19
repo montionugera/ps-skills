@@ -71,6 +71,34 @@ check once the epic is complete, and `promote` refuses an incomplete one. The ha
   `open` (clearing `verified_sha`, `verifying_sha`, `release_version`), because the
   completeness the verification vouched for is gone.
 
+### Epic run: the sanctioned auto-chain
+
+`ps-release-workflow-epic-run` chains refine, claim, implement, review and
+`ship --no-deploy` over an epic's slices, one at a time. It is the one exception to
+"never auto-chain", and only for slices a human names in an explicit `--slices`
+allowlist (approval lives in that list, not in any catalog field). It never runs
+`promote`, `--deploy`, or a merge to main.
+It stops at the first failed gate (refusal, unclean tree, failed review, failed ship)
+and does not retry a ship blindly.
+
+- **`psrw epic plan E-NNN --slices I-a,I-b`** is a read-only preflight. It prints each
+  allowlisted slice in fanout order with `state` (`idea`, `refined`, `claimed`,
+  `shipped`), `claimed_by` and next `action` (`refine`, `claim`, `resume`, `skip`). It
+  refuses an epic that is `verified`, `promoted` or `verifying`; a slice that is not a
+  child of the epic or is already promoted; an unshipped slice whose idea `spec.md` is
+  still an untouched skeleton (already-shipped slices are skipped, not checked); and a repo with no Gate 1
+  script unless `--allow-no-precheck` (ship would otherwise skip Gate 1 with only a warning). A `failed_verification` epic
+  is allowed, with a note.
+- **`psrw epic sync`**, run inside a claimed feature worktree, merges `release/<v>`'s
+  HEAD into the feature branch under `file_lock(_release)`. Feature branches are cut
+  from `main`, so without it slice N cannot see slices 1..N-1 or its own spec and plan.
+  It prints `base` (the release HEAD merged; `git diff <base> HEAD` is the slice's own
+  work) and `sha` (the post-merge HEAD). A conflict aborts the merge and leaves the
+  feature claimed; a dirty tree is refused.
+- **State** lives only in the catalogs. There is no run lock, so two chains on one epic
+  are unsupported, and re-running the same command resumes at the first unshipped
+  slice. Gate 1 runs twice on the combined tree per slice, so each ship is slower.
+
 ### Overriding the gate scripts: the `hooks` block
 
 A repo whose scripts do not live at the default paths can redirect them with an

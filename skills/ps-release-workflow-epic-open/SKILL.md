@@ -6,7 +6,8 @@ description: |
   deliver. Creates E-NNN-<slug> with spec + verification skeletons and commits
   the epic entry on the release branch via the _release worktree.
   After this skill: brainstorm the epic spec into a SOLID outcome statement
-  FIRST, then fan it out with ps-release-workflow-epic-fanout.
+  FIRST, then fan it out with ps-release-workflow-epic-fanout. Only the epic-run skill
+  may later chain the slices, and only those a human allowlisted.
 ---
 
 # ps-release-workflow:epic-open
@@ -27,7 +28,8 @@ route through the `_release` worktree.
 Brainstorm `E-NNN/spec.md` until the outcome and its slices are solid. Write
 `E-NNN/verification.md` — what must be true once every slice has shipped. It is a
 human-written statement only; the check that actually runs is the repo's `hooks.epic_check`.
-Only then fan out. Never auto-chain open -> fanout -> refine -> claim.
+Only then fan out. Never auto-chain open -> fanout -> refine -> claim. The sole exception
+is the `epic-run` skill, which chains refine -> claim for slices a human allowlists.
 
 ## Refuses if
 
