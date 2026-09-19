@@ -38,9 +38,10 @@
     "title": "Cover the untested epic plan refusals",
     "from_idea": "I-004",
     "created_at": "2026-09-19T08:28:38.947367+00:00",
-    "claimed_by": null,
-    "status": "open",
+    "claimed_by": "claude-a6c35399",
+    "status": "claimed",
     "release_version": null,
-    "epic": "E-001"
+    "epic": "E-001",
+    "claimed_at": "2026-09-19T08:28:39.588343+00:00"
   }
 ]
