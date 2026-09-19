@@ -15,7 +15,7 @@
     "id": "I-003",
     "title": "Share one git test helper",
     "created_at": "2026-09-19T07:27:22.545983+00:00",
-    "promoted_to": null,
+    "promoted_to": "F-003",
     "epic": "E-001"
   },
   {
