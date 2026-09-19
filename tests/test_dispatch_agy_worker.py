@@ -872,6 +872,108 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertEqual(wait_res.returncode, 0)
         self.assertIn("Status: SUCCESS (exit 0)", wait_res.stdout)
 
+    def test_extract_tasks_from_plan(self):
+        plan_content = """# Plan
+
+## Phase 1: Authentication
+- [ ] Task 1.1: Implement login route
+- [ ] Task 1.2: Add token validation
+### Task 1.3: Refresh token endpoint
+
+## Phase 2: Billing
+- [ ] Task 2.1: Add stripe webhook
+"""
+        plan_file = Path(self.temp_dir.name) / "plan.md"
+        plan_file.write_text(plan_content, encoding="utf-8")
+
+        # Phase 1 only
+        p1_tasks = dispatch_mod.extract_tasks_from_plan(str(plan_file), target_phase="1")
+        self.assertEqual(len(p1_tasks), 3)
+        self.assertEqual(p1_tasks[0]["task"], "Task 1.1: Implement login route")
+        self.assertEqual(p1_tasks[1]["task"], "Task 1.2: Add token validation")
+        self.assertEqual(p1_tasks[2]["task"], "Refresh token endpoint")
+
+        # Phase 2 only
+        p2_tasks = dispatch_mod.extract_tasks_from_plan(str(plan_file), target_phase="2")
+        self.assertEqual(len(p2_tasks), 1)
+        self.assertEqual(p2_tasks[0]["task"], "Task 2.1: Add stripe webhook")
+
+    def test_tail_job(self):
+        jid = "dw-tail-test"
+        log_file = Path(self.temp_dir.name) / "dw-tail.log"
+        log_file.write_text("line 1\nline 2\nline 3\n", encoding="utf-8")
+        state = {
+            "job_id": jid,
+            "status": "RUNNING",
+            "log_file": str(log_file),
+            "created_at": time.time()
+        }
+        dispatch_mod.save_job_state(jid, state, job_dir=str(self.job_dir))
+
+        tail_res = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--tail", jid, "--job-dir", str(self.job_dir), "-n", "2"],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(tail_res.returncode, 0)
+        self.assertIn("TAIL LOG: dw-tail-test", tail_res.stdout)
+        self.assertIn("line 2", tail_res.stdout)
+        self.assertIn("line 3", tail_res.stdout)
+        self.assertNotIn("line 1", tail_res.stdout)
+
+    def test_format_status_report_live_tail(self):
+        log_file = Path(self.temp_dir.name) / "live.log"
+        log_file.write_text("running pytest unit tests...\n", encoding="utf-8")
+        jobs = [{
+            "job_id": "dw-live",
+            "agent": "cursor",
+            "status": "RUNNING",
+            "log_file": str(log_file),
+            "created_at": time.time() - 10
+        }]
+        rep = dispatch_mod.format_status_report(jobs)
+        self.assertIn("tail: running pytest", rep)
+
+    def test_format_batch_report_retry_hint(self):
+        results = [
+            {"task": "task 1", "agent": "cursor", "exit_code": 0, "files_changed": 1, "diff_summary": "ok"},
+            {"task": "task 2 failed prompt", "agent": "agy", "exit_code": 1, "files_changed": 0, "diff_summary": "err"}
+        ]
+        rep = dispatch_mod.format_batch_report(results)
+        self.assertIn("Retry: dispatch-worker --task \"task 2 failed prompt\"", rep)
+
+    def test_execute_batch_parallel_merge_conflict_detected(self):
+        tasks = [
+            {"task": "task 1 edit base"},
+            {"task": "task 2 edit base"}
+        ]
+
+        def conflicting_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds):
+            # Both tasks edit base.txt with conflicting lines
+            (Path(target_dir) / "base.txt").write_text(f"conflicting edit from {task_text}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "base.txt"], cwd=target_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", f"edit from {task_text}"], cwd=target_dir, check=True, capture_output=True)
+            return 0, "output", "", 1, "1 commit"
+
+        orig_run_single_task = dispatch_mod.run_single_task
+        try:
+            dispatch_mod.run_single_task = conflicting_single_task
+            results = dispatch_mod.execute_batch_parallel(
+                tasks,
+                base_repo_dir=str(self.repo_dir),
+                chosen_agent="cursor",
+                chosen_model=None,
+                timeout_seconds=30,
+                max_parallel=2
+            )
+            self.assertEqual(len(results), 2)
+            exit_codes = sorted([r["exit_code"] for r in results])
+            self.assertEqual(exit_codes, [0, 1])
+            failed_task = [r for r in results if r["exit_code"] == 1][0]
+            self.assertIn("MERGE_CONFLICT", failed_task["diff_summary"])
+        finally:
+            dispatch_mod.run_single_task = orig_run_single_task
+
 
 if __name__ == "__main__":
     unittest.main()

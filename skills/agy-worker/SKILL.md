@@ -56,13 +56,14 @@ dispatch-worker --batch-file tasks.json --max-parallel 4 --cwd "$REPO_DIR"
 # Fire off in background immediately (returns job ID, exits 0)
 dispatch-worker --task "Heavy refactor in src/engine" --detach --cwd "$REPO_DIR"
 
-# Inspect active jobs (0 LLM tokens, 3-line status)
-dispatch-worker --status dw-1789785000-a1b2
-dispatch-worker --status all
+# --- Plan Extraction Mode ---
+# Extract tasks directly from an implementation plan (writing-plans markdown)
+dispatch-worker --from-plan docs/superpowers/specs/2026-09-plan.md --phase 1 --cwd "$REPO_DIR"
 
-# Wait for completion when ready (Python blocks locally, 0 LLM polling tokens)
-dispatch-worker --wait dw-1789785000-a1b2
-dispatch-worker --wait all
+# --- Live Log Tail & Monitoring ---
+# View last N lines of a running or completed worker job
+dispatch-worker --tail latest -n 20
+dispatch-worker --tail dw-1789785000-a1b2 -f    # Follow live output stream
 ```
 
 ### Exit Codes Contract
