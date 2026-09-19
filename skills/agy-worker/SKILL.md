@@ -56,6 +56,16 @@ dispatch-worker --batch-file tasks.json --max-parallel 4 --cwd "$REPO_DIR"
 # Fire off in background immediately (returns job ID, exits 0)
 dispatch-worker --task "Heavy refactor in src/engine" --detach --cwd "$REPO_DIR"
 
+# --- Heavy Thinking & Architecture Mode (High Quota Guard: 5h > 80%, Weekly > 20%) ---
+# Offload deep reasoning, RFC generation, or code reviews to gpt-5.6-sol
+dispatch-worker --think --task "Review architecture for multi-tenant auth" \
+  --context docs/superpowers/specs/auth-spec.md logs/auth.log \
+  --output-file docs/reviews/phase-1-review.md
+
+# --- Context Bundling (No Token Bloat on CLI) ---
+# Bundle reference documents directly without stuffing prompts into CLI args
+dispatch-worker --task "Implement task 2.1" --context docs/spec.md logs/test.log --cwd "$REPO_DIR"
+
 # --- Plan Extraction Mode ---
 # Extract tasks directly from an implementation plan (writing-plans markdown)
 dispatch-worker --from-plan docs/superpowers/specs/2026-09-plan.md --phase 1 --cwd "$REPO_DIR"

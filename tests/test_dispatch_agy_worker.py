@@ -974,6 +974,78 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         finally:
             dispatch_mod.run_single_task = orig_run_single_task
 
+    def test_think_quota_thresholds_and_model(self):
+        # 5h=75%, weekly=30% -> Passes normal (min 30/10), but fails thinking (min 80/20)
+        codex_file = Path(self.temp_dir.name) / "codex-status.json"
+        codex_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 75.0},
+                {"kind": "weekly", "remaining_percent": 30.0}
+            ]
+        }), encoding="utf-8")
+        # Standard check should pass
+        el, r5, rw, msg = dispatch_mod.check_quota("codex", str(codex_file), min_5h=30.0, min_weekly=10.0)
+        self.assertTrue(el)
+
+        # Thinking check should fail because 5h is 75.0 < 80.0
+        el_think, r5_t, rw_t, msg_t = dispatch_mod.check_quota(
+            "codex", str(codex_file),
+            min_5h=dispatch_mod.DEFAULT_THINK_MIN_5H,
+            min_weekly=dispatch_mod.DEFAULT_THINK_MIN_WEEKLY
+        )
+        self.assertFalse(el_think)
+        self.assertIn("75.0%", msg_t)
+        self.assertIn("min 80.0%", msg_t)
+
+    def test_normalize_model_name_thinking_aliases(self):
+        self.assertEqual(dispatch_mod.normalize_model_name("codex", "sol"), "gpt-5.6-sol")
+        self.assertEqual(dispatch_mod.normalize_model_name("codex", "sol:5.6"), "gpt-5.6-sol")
+        self.assertEqual(dispatch_mod.normalize_model_name("codex", "thinking"), "gpt-5.6-sol")
+
+    def test_wrap_prompt_contract_with_context_and_output(self):
+        cfile = Path(self.temp_dir.name) / "spec.md"
+        cfile.write_text("# Feature Spec\nMust implement auth endpoint.", encoding="utf-8")
+        out_file = "docs/output.md"
+
+        wrapped = dispatch_mod.wrap_prompt_contract(
+            "Implement auth endpoint",
+            context_files=[str(cfile)],
+            output_file=out_file,
+            is_thinking=True
+        )
+        self.assertIn("Thinking / Architecture Mode", wrapped)
+        self.assertIn("Context Document: spec.md", wrapped)
+        self.assertIn("Must implement auth endpoint.", wrapped)
+        self.assertIn(f"Write your primary output/deliverable directly to the file: '{out_file}'", wrapped)
+
+    def test_extract_tasks_from_plan_attaches_context(self):
+        plan_path = Path(self.temp_dir.name) / "plan.md"
+        plan_path.write_text(
+            "## Phase 1: Setup\n"
+            "- [ ] Task 1.1: Create database migration\n",
+            encoding="utf-8"
+        )
+        tasks = dispatch_mod.extract_tasks_from_plan(str(plan_path), target_phase=1)
+        self.assertEqual(len(tasks), 1)
+        self.assertIn("Create database migration", tasks[0]["task"])
+        self.assertEqual(tasks[0]["context_files"], [str(plan_path)])
+
+    def test_format_report_with_artifact_and_context(self):
+        rep = dispatch_mod.format_report(
+            agent="codex",
+            status="SUCCESS",
+            exit_code=0,
+            cwd="/tmp/repo",
+            files_changed=2,
+            diff_summary="2 files",
+            tail_output="all done",
+            artifact="docs/specs/auth.md",
+            context_count=3
+        )
+        self.assertIn("Artifact: docs/specs/auth.md", rep)
+        self.assertIn("Context: 3 document(s) referenced", rep)
+        self.assertIn("Files Modified: 2 (2 files)", rep)
+
 
 if __name__ == "__main__":
     unittest.main()
