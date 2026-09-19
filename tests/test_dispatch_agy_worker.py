@@ -693,6 +693,186 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(dispatch_mod.get_config_timeout({"AI_AGENT_AUTO_DISPATCH_TIMEOUT": "1200", "DISPATCH_TIMEOUT": "600"}), 1200)
 
 
+class TestBatchAndAsyncFeatures(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.job_dir = Path(self.temp_dir.name) / "jobs"
+        self.job_dir.mkdir(parents=True, exist_ok=True)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir(parents=True, exist_ok=True)
+
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True, capture_output=True)
+
+        (self.repo_dir / "base.txt").write_text("initial line\n", encoding="utf-8")
+        subprocess.run(["git", "add", "base.txt"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_parse_batch_tasks_args(self):
+        tasks = dispatch_mod.parse_batch_tasks(batch_args=["task A", "task B"])
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(tasks[0]["task"], "task A")
+        self.assertEqual(tasks[1]["task"], "task B")
+
+    def test_parse_batch_tasks_json_list(self):
+        json_file = Path(self.temp_dir.name) / "tasks.json"
+        json_file.write_text(json.dumps(["task 1", "task 2"]), encoding="utf-8")
+        tasks = dispatch_mod.parse_batch_tasks(batch_file=str(json_file))
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(tasks[0]["task"], "task 1")
+        self.assertEqual(tasks[1]["task"], "task 2")
+
+    def test_parse_batch_tasks_json_dict_list(self):
+        json_file = Path(self.temp_dir.name) / "tasks_dict.json"
+        json_file.write_text(json.dumps([
+            {"task": "task 1", "agent": "cursor", "model": "gemini-3.8-flash"},
+            {"task": "task 2", "agent": "codex"}
+        ]), encoding="utf-8")
+        tasks = dispatch_mod.parse_batch_tasks(batch_file=str(json_file))
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(tasks[0]["task"], "task 1")
+        self.assertEqual(tasks[0]["agent"], "cursor")
+        self.assertEqual(tasks[0]["model"], "gemini-3.8-flash")
+        self.assertEqual(tasks[1]["agent"], "codex")
+
+    def test_parse_batch_tasks_txt(self):
+        txt_file = Path(self.temp_dir.name) / "tasks.txt"
+        txt_file.write_text("# comment\ntask alpha\n\ntask beta\n", encoding="utf-8")
+        tasks = dispatch_mod.parse_batch_tasks(batch_file=str(txt_file))
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(tasks[0]["task"], "task alpha")
+        self.assertEqual(tasks[1]["task"], "task beta")
+
+    def test_job_state_crud(self):
+        jid = "dw-test-123"
+        state = {"job_id": jid, "status": "RUNNING", "agent": "cursor"}
+        dispatch_mod.save_job_state(jid, state, job_dir=str(self.job_dir))
+
+        loaded = dispatch_mod.load_job_state(jid, job_dir=str(self.job_dir))
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded["job_id"], jid)
+        self.assertEqual(loaded["status"], "RUNNING")
+
+        all_jobs = dispatch_mod.list_all_jobs(job_dir=str(self.job_dir))
+        self.assertEqual(len(all_jobs), 1)
+        self.assertEqual(all_jobs[0]["job_id"], jid)
+
+    def test_format_status_report(self):
+        jobs = [
+            {"job_id": "dw-1", "agent": "cursor", "status": "SUCCESS", "files_changed": 2, "diff_summary": "1 commit"},
+            {"job_id": "dw-2", "agent": "agy", "status": "RUNNING", "created_at": time.time() - 30}
+        ]
+        rep = dispatch_mod.format_status_report(jobs)
+        self.assertIn("DISPATCH JOBS STATUS", rep)
+        self.assertIn("[dw-1] CURSOR | SUCCESS", rep)
+        self.assertIn("[dw-2] AGY | RUNNING", rep)
+        self.assertLessEqual(len(rep.splitlines()), 15)
+
+    def test_format_batch_report(self):
+        results = [
+            {"task": "fix auth endpoint", "agent": "cursor", "exit_code": 0, "files_changed": 2, "diff_summary": "1 commit"},
+            {"task": "update billing schema", "agent": "agy", "exit_code": 0, "files_changed": 1, "diff_summary": "1 commit"}
+        ]
+        rep = dispatch_mod.format_batch_report(results)
+        self.assertIn("BATCH DISPATCH REPORT (2 tasks: 2 succeeded, 0 failed)", rep)
+        self.assertIn("#1 [CURSOR] SUCCESS", rep)
+        self.assertIn("#2 [AGY] SUCCESS", rep)
+        self.assertLessEqual(len(rep.splitlines()), 15)
+
+    def test_execute_batch_parallel_mocked(self):
+        tasks = [
+            {"task": "task 1"},
+            {"task": "task 2"}
+        ]
+
+        def mock_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds):
+            file_name = "file1.txt" if "task 1" in task_text else "file2.txt"
+            (Path(target_dir) / file_name).write_text(f"created by {task_text}\n", encoding="utf-8")
+            subprocess.run(["git", "add", file_name], cwd=target_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", f"commit for {task_text}"], cwd=target_dir, check=True, capture_output=True)
+            return 0, "output", "", 1, "1 commit"
+
+        orig_run_single_task = dispatch_mod.run_single_task
+        try:
+            dispatch_mod.run_single_task = mock_single_task
+            results = dispatch_mod.execute_batch_parallel(
+                tasks,
+                base_repo_dir=str(self.repo_dir),
+                chosen_agent="cursor",
+                chosen_model=None,
+                timeout_seconds=30,
+                max_parallel=2
+            )
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0]["exit_code"], 0)
+            self.assertEqual(results[1]["exit_code"], 0)
+
+            # Check that base_repo_dir has both files merged!
+            self.assertTrue((self.repo_dir / "file1.txt").exists())
+            self.assertTrue((self.repo_dir / "file2.txt").exists())
+        finally:
+            dispatch_mod.run_single_task = orig_run_single_task
+
+    def test_dry_run_batch_cli(self):
+        state_file = Path(self.temp_dir.name) / "healthy.json"
+        state_file.write_text(json.dumps({
+            "snapshot": {
+                "windows": [
+                    {"kind": "five_hour", "remaining_percent": 80.0},
+                    {"kind": "weekly", "remaining_percent": 90.0}
+                ]
+            }
+        }), encoding="utf-8")
+
+        res = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--agent", "agy", "--state-file", str(state_file),
+             "--dry-run", "--batch", "task 1", "task 2", "--cwd", str(self.repo_dir)],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("DRY_RUN", res.stdout)
+        self.assertIn("Would dispatch 2 task(s) in parallel", res.stdout)
+
+    def test_status_and_wait_cli(self):
+        jid = "dw-test-cli"
+        state = {
+            "job_id": jid,
+            "agent": "cursor",
+            "model": "gemini-3.8-flash",
+            "task": "build something",
+            "status": "SUCCESS",
+            "exit_code": 0,
+            "cwd": str(self.repo_dir),
+            "files_changed": 1,
+            "diff_summary": "1 commit(s)",
+            "tail_output": "All done"
+        }
+        dispatch_mod.save_job_state(jid, state, job_dir=str(self.job_dir))
+
+        # Check status CLI
+        status_res = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--status", jid, "--job-dir", str(self.job_dir)],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(status_res.returncode, 0)
+        self.assertIn("[dw-test-cli] CURSOR | SUCCESS", status_res.stdout)
+
+        # Check wait CLI
+        wait_res = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--wait", jid, "--job-dir", str(self.job_dir)],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(wait_res.returncode, 0)
+        self.assertIn("Status: SUCCESS (exit 0)", wait_res.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
 
