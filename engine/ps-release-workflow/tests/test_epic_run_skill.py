@@ -119,3 +119,13 @@ def test_every_auto_chain_ban_names_epic_run_as_the_exception(name):
     _, frontmatter, body = _skill(name)
     assert "epic-run" in frontmatter, f"{name}: description does not name epic-run"
     assert "epic-run" in body, f"{name}: body does not name epic-run"
+
+
+def test_refine_skill_describes_carry_forward_not_fresh_skeletons():
+    """`_carry_forward` COPIES the idea folder and replaces only untouched skeletons;
+    the skill used to claim it moved the folder and wrote fresh skeletons."""
+    _, frontmatter, body = _skill("refine")
+    assert "moves the folder" not in frontmatter, "description still says refine moves the idea folder"
+    assert "fresh skeleton" not in body, "body still claims refine writes fresh skeletons"
+    assert "does **not** copy" not in body, "body still denies the copy"
+    assert "carries the idea's content forward" in body, "body never states the carry-forward"
