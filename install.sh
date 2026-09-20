@@ -58,7 +58,7 @@ mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$AGENTS_HOME/skills" "$GEMI
 replace_destination() {  # dest
   local dest="$1"
   case "$dest" in
-    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge") ;;
+    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge") ;;
     *) echo "refuse unsafe destination: $dest" >&2; return 1 ;;
   esac
   rm -rf -- "$dest"
