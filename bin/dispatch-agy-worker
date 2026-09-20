@@ -373,6 +373,9 @@ def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_t
             "4. Evidence before assertions & Scoped Verification: Run TARGETED unit tests or build commands for the touched "
             "files/modules (e.g. pytest path/to/test.py, npm test -- specific.test.ts) before declaring completion. Do NOT run the "
             "entire monorepo or end-to-end suite for scoped implementation tasks.\n"
+            "5. NO CSS/Class Invention (Visual Integrity): When writing HTML, JSX, Svelte, or Vue markup, NEVER invent class "
+            "names or Tailwind utilities that do not exist in the project's CSS/tokens. Always verify defined classes directly in the "
+            "theme or component source before applying them.\n"
         )
 
     context_section = build_context_block(context_files) if context_files else ""
