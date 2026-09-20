@@ -1,0 +1,908 @@
+#!/usr/bin/env python3
+"""
+mesh — Durable Cross-Session Agent Coordination Plane
+Zero-daemon, single SQLite file with WAL mode, atomic leases, presence, and messaging.
+"""
+
+import argparse
+import json
+import os
+import socket
+import sqlite3
+import sys
+import time
+import uuid
+
+DEFAULT_DB = os.path.expanduser("~/.agentmesh/mesh.db")
+DB_PATH = os.environ.get("AGENT_MESH_DB", DEFAULT_DB)
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def get_db(path: str = DB_PATH) -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    c = sqlite3.connect(path, timeout=10.0, isolation_level=None)
+    c.execute("PRAGMA journal_mode = WAL;")
+    c.execute("PRAGMA busy_timeout = 10000;")
+    c.execute("PRAGMA synchronous = NORMAL;")
+    c.execute("PRAGMA foreign_keys = ON;")
+    c.row_factory = sqlite3.Row
+    return c
+
+
+def init_db(c: sqlite3.Connection) -> None:
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS agents (
+      id                TEXT PRIMARY KEY,
+      harness           TEXT NOT NULL,
+      role              TEXT NOT NULL DEFAULT 'worker',
+      session_ref       TEXT,
+      cwd               TEXT NOT NULL,
+      host              TEXT NOT NULL,
+      pid               INTEGER NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'active'
+                          CHECK (status IN ('active','idle','draining','dead')),
+      started_at        INTEGER NOT NULL,
+      last_heartbeat_at INTEGER NOT NULL,
+      lease_ttl_ms      INTEGER NOT NULL DEFAULT 120000,
+      meta_json         TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_agents_live ON agents(status, last_heartbeat_at);
+
+    CREATE TABLE IF NOT EXISTS claims (
+      resource   TEXT PRIMARY KEY,
+      owner_id   TEXT NOT NULL REFERENCES agents(id),
+      claimed_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      fence      INTEGER NOT NULL DEFAULT 1,
+      state      TEXT NOT NULL DEFAULT 'held' CHECK (state IN ('held','released')),
+      note       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_claims_owner ON claims(owner_id, state);
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id            TEXT PRIMARY KEY,
+      plan_id       TEXT,
+      title         TEXT NOT NULL,
+      description   TEXT NOT NULL DEFAULT '',
+      status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending','claimed','in_progress','verified','done','failed')),
+      owner_id      TEXT REFERENCES agents(id),
+      claimed_at    INTEGER,
+      expires_at    INTEGER,
+      result_json   TEXT NOT NULL DEFAULT '{}',
+      created_at    INTEGER NOT NULL,
+      updated_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      from_agent TEXT NOT NULL,
+      to_agent   TEXT,
+      topic      TEXT NOT NULL DEFAULT 'direct',
+      kind       TEXT NOT NULL CHECK (kind IN ('request','reply','status','handoff','alert')),
+      corr_id    TEXT,
+      body_json  TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      read_at    INTEGER,
+      acked_at   INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_msg_inbox ON messages(to_agent, acked_at, id);
+
+    CREATE TABLE IF NOT EXISTS events (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id     TEXT,
+      resource     TEXT,
+      verb         TEXT NOT NULL,
+      phase        TEXT,
+      ok           INTEGER,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_events_recent ON events(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS ideas (
+      id              TEXT PRIMARY KEY,
+      title           TEXT NOT NULL,
+      origin_agent    TEXT,
+      origin_resource TEXT,
+      priority        TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low','normal','high')),
+      blast_radius    TEXT CHECK (blast_radius IN (NULL,'R0','R1','R2')),
+      status          TEXT NOT NULL DEFAULT 'backlog'
+                        CHECK (status IN ('backlog','ready','promoted','dropped')),
+      notes           TEXT,
+      created_at      INTEGER NOT NULL,
+      updated_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ideas_status ON ideas(status);
+    """)
+
+
+def get_or_create_agent_id(c: sqlite3.Connection, harness: str = "auto", role: str = "worker") -> str:
+    env_id = os.environ.get("MESH_AGENT_ID")
+    if env_id:
+        row = c.execute("SELECT id FROM agents WHERE id=?", (env_id,)).fetchone()
+        if row:
+            return env_id
+
+    host = socket.gethostname()
+    pid = os.getpid()
+    if harness == "auto":
+        if os.environ.get("CLAUDE_SESSION_ID") or "claude" in sys.argv[0]:
+            harness = "claude"
+        elif "antigravity" in sys.argv[0] or "agy" in sys.argv[0]:
+            harness = "agy"
+        else:
+            harness = "agent"
+
+    agent_id = f"{harness}:{host}:{pid}:{uuid.uuid4().hex[:8]}"
+    now = now_ms()
+    c.execute("""
+      INSERT OR REPLACE INTO agents (id, harness, role, cwd, host, pid, status, started_at, last_heartbeat_at, lease_ttl_ms)
+      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, 120000)
+    """, (agent_id, harness, role, os.getcwd(), host, pid, now, now))
+    return agent_id
+
+
+def cmd_init(args):
+    c = get_db()
+    init_db(c)
+    c.close()
+    print(f"Initialized Agent Mesh database at {DB_PATH}")
+
+
+def cmd_register(args):
+    c = get_db()
+    init_db(c)
+    agent_id = get_or_create_agent_id(c, harness=args.harness, role=args.role)
+    c.close()
+    if args.export:
+        print(f"export MESH_AGENT_ID='{agent_id}'")
+    else:
+        print(agent_id)
+
+
+def cmd_beat(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    agent_id = args.agent_id or get_or_create_agent_id(c)
+    c.execute("UPDATE agents SET last_heartbeat_at=?, status='active' WHERE id=?", (now, agent_id))
+    # Automatically release or flag expired claims
+    c.execute("""
+      UPDATE claims SET state='released'
+      WHERE owner_id=? AND expires_at < ? AND state='held'
+    """, (agent_id, now))
+    c.close()
+    print(f"Beat OK for {agent_id} at {now}")
+
+
+def cmd_claim(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    agent_id = args.agent_id or get_or_create_agent_id(c)
+    ttl_ms = int(args.ttl_sec * 1000)
+    expires_at = now + ttl_ms
+
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        cur = c.execute("""
+          INSERT INTO claims(resource, owner_id, claimed_at, expires_at, fence, state, note)
+          VALUES(?, ?, ?, ?, 1, 'held', ?)
+          ON CONFLICT(resource) DO UPDATE SET
+            owner_id = excluded.owner_id,
+            claimed_at = excluded.claimed_at,
+            expires_at = excluded.expires_at,
+            fence = CASE WHEN claims.owner_id = excluded.owner_id THEN claims.fence ELSE claims.fence + 1 END,
+            state = 'held',
+            note = excluded.note
+          WHERE claims.expires_at < ? OR claims.state <> 'held' OR claims.owner_id = excluded.owner_id
+          RETURNING fence;
+        """, (args.resource, agent_id, now, expires_at, args.note, now))
+        row = cur.fetchone()
+        c.execute("COMMIT")
+    except sqlite3.OperationalError as e:
+        try:
+            c.execute("ROLLBACK")
+        except Exception:
+            pass
+        c.close()
+        print(f"BUSY: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    if row is None:
+        holder = c.execute("SELECT owner_id, expires_at FROM claims WHERE resource=?", (args.resource,)).fetchone()
+        c.close()
+        h_id = holder["owner_id"] if holder else "unknown"
+        exp = holder["expires_at"] if holder else 0
+        rem = max(0, int((exp - now) / 1000))
+        print(f"LOST: resource '{args.resource}' currently held by {h_id} (expires in {rem}s)")
+        sys.exit(1)
+
+    fence = row["fence"]
+    # Log claim event
+    c.execute("INSERT INTO events(agent_id, resource, verb, ok, created_at) VALUES(?, ?, 'claim', 1, ?)",
+              (agent_id, args.resource, now))
+    c.close()
+    print(f"WON: claimed '{args.resource}' fence={fence} expires_in={args.ttl_sec}s")
+
+
+def cmd_release(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    agent_id = args.agent_id or get_or_create_agent_id(c)
+    cur = c.execute("UPDATE claims SET state='released' WHERE resource=? AND (owner_id=? OR ?=1)",
+                    (args.resource, agent_id, 1 if args.force else 0))
+    if cur.rowcount > 0:
+        c.execute("INSERT INTO events(agent_id, resource, verb, ok, created_at) VALUES(?, ?, 'release', 1, ?)",
+                  (agent_id, args.resource, now))
+        print(f"Released '{args.resource}'")
+    else:
+        print(f"No active claim found for '{args.resource}' by {agent_id}")
+    c.close()
+
+
+def cmd_status(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+
+    agents = c.execute("SELECT * FROM agents ORDER BY last_heartbeat_at DESC").fetchall()
+    claims = c.execute("SELECT * FROM claims WHERE state='held' ORDER BY expires_at ASC").fetchall()
+    tasks = c.execute("SELECT * FROM tasks ORDER BY created_at ASC").fetchall()
+    ideas = c.execute("SELECT * FROM ideas ORDER BY created_at DESC").fetchall()
+    unacked = c.execute("SELECT COUNT(*) as count FROM messages WHERE acked_at IS NULL").fetchone()["count"]
+
+    if args.json:
+        data = {
+            "agents": [dict(a) for a in agents],
+            "claims": [dict(cl) for cl in claims],
+            "tasks": [dict(t) for t in tasks],
+            "ideas": [dict(i) for i in ideas],
+            "unacked_messages": unacked,
+            "now_ms": now
+        }
+        print(json.dumps(data, indent=2))
+        c.close()
+        return
+
+    print("================================ AGENT MESH STATUS ================================")
+    live_agents = 0
+    print("\n--- AGENTS ---")
+    for a in agents:
+        age_s = int((now - a["last_heartbeat_at"]) / 1000)
+        is_live = (now - a["last_heartbeat_at"]) < a["lease_ttl_ms"] and a["status"] == "active"
+        if is_live:
+            live_agents += 1
+            st = "ACTIVE"
+        else:
+            st = "DEAD/STALE"
+        print(f"  {a['id']:<36} {a['harness']:<8} {a['role']:<10} {st:<10} beat {age_s}s ago ({a['cwd']})")
+
+    print(f"\n--- CLAIMS ({len(claims)} active) ---")
+    for cl in claims:
+        rem_s = int((cl["expires_at"] - now) / 1000)
+        st = f"expires in {rem_s}s" if rem_s > 0 else "EXPIRED (stealable)"
+        print(f"  {cl['resource']:<32} owner={cl['owner_id'][:28]}... fence={cl['fence']} {st}")
+
+    print(f"\n--- TASKS ({len(tasks)} total) ---")
+    for t in tasks:
+        print(f"  [{t['id']}] {t['status'].upper():<12} owner={t['owner_id'] or 'none'} | {t['title']}")
+
+    print(f"\n--- INBOX & IDEAS ---")
+    print(f"  Unacked messages: {unacked}")
+    print(f"  Ideas backlog:    {len([i for i in ideas if i['status'] == 'backlog'])} items")
+    print("====================================================================================")
+    c.close()
+
+
+def cmd_gc(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    # Mark dead agents
+    cur1 = c.execute("""
+      UPDATE agents SET status='dead'
+      WHERE status='active' AND (last_heartbeat_at + lease_ttl_ms) < ?
+    """, (now,))
+    dead_count = cur1.rowcount
+
+    # Expire claims
+    cur2 = c.execute("""
+      UPDATE claims SET state='released'
+      WHERE state='held' AND expires_at < ?
+    """, (now,))
+    expired_count = cur2.rowcount
+
+    c.close()
+    print(f"GC complete: {dead_count} agents marked dead, {expired_count} claims marked released")
+
+
+def cmd_doctor(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    errors = []
+
+    integrity = c.execute("PRAGMA integrity_check;").fetchone()[0]
+    if integrity != "ok":
+        errors.append(f"DB integrity check failed: {integrity}")
+
+    stale_active_claims = c.execute("""
+      SELECT COUNT(*) as count FROM claims c
+      JOIN agents a ON c.owner_id = a.id
+      WHERE c.state='held' AND a.status='dead'
+    """).fetchone()["count"]
+    if stale_active_claims > 0:
+        errors.append(f"{stale_active_claims} held claims belong to dead agents (run `mesh gc`)")
+
+    c.close()
+    if errors:
+        print("FAIL: mesh doctor detected issues:")
+        for e in errors:
+            print(f"  - {e}")
+        sys.exit(1)
+    else:
+        print("PASS: mesh doctor verified healthy (WAL mode, integrity ok, zero dead lockouts)")
+
+
+def cmd_task_create(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    c.execute("""
+      INSERT OR REPLACE INTO tasks(id, plan_id, title, description, status, created_at, updated_at)
+      VALUES(?, ?, ?, ?, 'pending', ?, ?)
+    """, (args.id, args.plan_id, args.title, args.description or "", now, now))
+    c.close()
+    print(f"Created task [{args.id}] '{args.title}'")
+
+
+def cmd_task_claim(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    agent_id = args.agent_id or get_or_create_agent_id(c)
+    ttl_ms = int(args.ttl_sec * 1000)
+    expires_at = now + ttl_ms
+
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        cur = c.execute("""
+          UPDATE tasks
+          SET status='in_progress', owner_id=?, claimed_at=?, expires_at=?, updated_at=?
+          WHERE id=? AND (status='pending' OR status='failed' OR (status='in_progress' AND expires_at < ?))
+        """, (agent_id, now, expires_at, now, args.id, now))
+        rowcount = cur.rowcount
+        c.execute("COMMIT")
+    except Exception as e:
+        c.execute("ROLLBACK")
+        c.close()
+        print(f"Error claiming task: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    c.close()
+    if rowcount > 0:
+        print(f"WON: task [{args.id}] claimed by {agent_id} for {args.ttl_sec}s")
+    else:
+        print(f"LOST: task [{args.id}] is already claimed or not pending", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_task_done(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    agent_id = args.agent_id or get_or_create_agent_id(c)
+    cur = c.execute("""
+      UPDATE tasks
+      SET status='done', result_json=?, updated_at=?
+      WHERE id=? AND (owner_id=? OR ?=1)
+    """, (args.result or "{}", now, args.id, agent_id, 1 if args.force else 0))
+    c.close()
+    if cur.rowcount > 0:
+        print(f"Task [{args.id}] marked DONE")
+    else:
+        print(f"Failed to mark task [{args.id}] done (not owner or not found)", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_idea_add(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    agent_id = args.agent_id or get_or_create_agent_id(c)
+    count = c.execute("SELECT COUNT(*) as c FROM ideas").fetchone()["c"]
+    idea_id = f"IDEA-{count + 1:03d}"
+    c.execute("""
+      INSERT INTO ideas(id, title, origin_agent, origin_resource, priority, blast_radius, status, notes, created_at, updated_at)
+      VALUES(?, ?, ?, ?, ?, ?, 'backlog', ?, ?, ?)
+    """, (idea_id, args.title, agent_id, args.resource, args.priority, args.blast_radius, args.notes or "", now, now))
+    c.close()
+    print(f"Added [{idea_id}] '{args.title}' (priority={args.priority}, blast={args.blast_radius})")
+
+
+def cmd_idea_list(args):
+    c = get_db()
+    init_db(c)
+    ideas = c.execute("SELECT * FROM ideas ORDER BY created_at ASC").fetchall()
+    if args.json:
+        print(json.dumps([dict(i) for i in ideas], indent=2))
+    else:
+        print(f"--- IDEAS BACKLOG ({len(ideas)} items) ---")
+        for i in ideas:
+            print(f"  [{i['id']}] {i['priority'].upper():<6} {i['blast_radius'] or 'R2':<4} {i['status'].upper():<8} | {i['title']}")
+    c.close()
+
+
+def cmd_send(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    from_agent = args.from_agent or get_or_create_agent_id(c)
+    c.execute("""
+      INSERT INTO messages(from_agent, to_agent, topic, kind, corr_id, body_json, created_at)
+      VALUES(?, ?, ?, ?, ?, ?, ?)
+    """, (from_agent, args.to, args.topic, args.kind, args.corr_id, args.body, now))
+    msg_id = c.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
+    c.close()
+    print(f"Sent message #{msg_id} to {args.to or 'ALL'} (kind={args.kind})")
+
+
+def cmd_inbox(args):
+    c = get_db()
+    init_db(c)
+    agent_id = args.agent_id or get_or_create_agent_id(c)
+    query = """
+      SELECT * FROM messages
+      WHERE (to_agent IS NULL OR to_agent = ?)
+    """
+    if args.unacked_only:
+        query += " AND acked_at IS NULL"
+    query += " ORDER BY id ASC"
+
+    msgs = c.execute(query, (agent_id,)).fetchall()
+    if args.json:
+        print(json.dumps([dict(m) for m in msgs], indent=2))
+    else:
+        print(f"--- INBOX for {agent_id} ({len(msgs)} messages) ---")
+        for m in msgs:
+            st = "UNACKED" if m["acked_at"] is None else "ACKED"
+            print(f"  #{m['id']} [{m['kind'].upper()}] from {m['from_agent']} ({st}): {m['body_json']}")
+    c.close()
+
+
+def cmd_ack(args):
+    c = get_db()
+    init_db(c)
+    now = now_ms()
+    c.execute("UPDATE messages SET acked_at=? WHERE id=?", (now, args.message_id))
+    c.close()
+    print(f"Acked message #{args.message_id}")
+
+
+def cmd_mcp(args):
+    """
+    Stdio JSON-RPC 2.0 MCP server for Antigravity, Claude Code, and other MCP clients.
+    """
+    c = get_db()
+    init_db(c)
+    agent_id = get_or_create_agent_id(c, harness="mcp-client", role="worker")
+
+    TOOLS = [
+        {
+            "name": "mesh_status",
+            "description": "Returns live status of active agents, claims, tasks, and ideas in the mesh.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "json_format": {"type": "boolean", "default": True}
+                }
+            }
+        },
+        {
+            "name": "mesh_claim",
+            "description": "Atomically acquires or refreshes a time-to-live lease on any resource (e.g. task:T-1, handoff:/tmp/x.md). Returns {ok, fence, owner}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "resource": {"type": "string", "description": "Unique resource key to claim"},
+                    "ttl_sec": {"type": "integer", "default": 120, "description": "Lease duration in seconds"},
+                    "note": {"type": "string", "default": ""}
+                },
+                "required": ["resource"]
+            }
+        },
+        {
+            "name": "mesh_release",
+            "description": "Releases a held lease so other agents can claim it immediately.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "resource": {"type": "string", "description": "Resource key to release"}
+                },
+                "required": ["resource"]
+            }
+        },
+        {
+            "name": "mesh_next",
+            "description": "Authoritative check for the agent's next action. Returns {action: 'continue'|'stop', task, prompt} to eliminate guesswork and mid-session stalls.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "mesh_task_claim",
+            "description": "Atomically claims the next pending task or a specific task ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Specific task ID to claim, or omit for next available pending task"},
+                    "ttl_sec": {"type": "integer", "default": 300}
+                }
+            }
+        },
+        {
+            "name": "mesh_task_done",
+            "description": "Marks a claimed task as completed with verification results.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "result_summary": {"type": "string", "description": "Brief summary of changes and verification proof"}
+                },
+                "required": ["task_id"]
+            }
+        },
+        {
+            "name": "mesh_idea_add",
+            "description": "Files an off-goal discovery, future optimization, or bug into the persistent backlog (Rule 4).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "priority": {"type": "string", "enum": ["low", "normal", "high"], "default": "normal"},
+                    "blast_radius": {"type": "string", "enum": ["R0", "R1", "R2"], "default": "R2"},
+                    "notes": {"type": "string", "default": ""}
+                },
+                "required": ["title"]
+            }
+        },
+        {
+            "name": "mesh_send",
+            "description": "Sends a durable cross-session message to another agent or broadcast.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Recipient agent ID, or omit for broadcast"},
+                    "kind": {"type": "string", "enum": ["request", "reply", "status", "handoff", "alert"]},
+                    "body": {"type": "string", "description": "Message content or JSON string"}
+                },
+                "required": ["kind", "body"]
+            }
+        },
+        {
+            "name": "mesh_inbox",
+            "description": "Reads messages sent to this agent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "unacked_only": {"type": "boolean", "default": True}
+                }
+            }
+        }
+    ]
+
+    def send_resp(resp):
+        payload = json.dumps(resp)
+        sys.stdout.write(payload + "\n")
+        sys.stdout.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except Exception:
+            continue
+
+        req_id = req.get("id")
+        method = req.get("method")
+        params = req.get("params", {})
+
+        if method == "initialize":
+            send_resp({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "mesh", "version": "1.0.0"}
+                }
+            })
+        elif method == "notifications/initialized":
+            pass
+        elif method == "ping":
+            send_resp({"jsonrpc": "2.0", "id": req_id, "result": {}})
+        elif method == "tools/list":
+            send_resp({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"tools": TOOLS}
+            })
+        elif method == "tools/call":
+            tool_name = params.get("name")
+            args_in = params.get("arguments", {})
+            res_text = ""
+            now = now_ms()
+
+            if tool_name == "mesh_status":
+                claims = c.execute("SELECT * FROM claims WHERE state='held'").fetchall()
+                tasks = c.execute("SELECT * FROM tasks WHERE status IN ('pending','in_progress')").fetchall()
+                ideas = c.execute("SELECT COUNT(*) as cnt FROM ideas WHERE status='backlog'").fetchone()["cnt"]
+                res_text = json.dumps({
+                    "active_claims": [dict(cl) for cl in claims],
+                    "pending_tasks": [dict(t) for t in tasks],
+                    "backlog_ideas": ideas
+                })
+
+            elif tool_name == "mesh_claim":
+                res_key = args_in["resource"]
+                ttl = int(args_in.get("ttl_sec", 120)) * 1000
+                note = args_in.get("note", "")
+                try:
+                    c.execute("BEGIN IMMEDIATE")
+                    cur = c.execute("""
+                      INSERT INTO claims(resource, owner_id, claimed_at, expires_at, fence, state, note)
+                      VALUES(?, ?, ?, ?, 1, 'held', ?)
+                      ON CONFLICT(resource) DO UPDATE SET
+                        owner_id = excluded.owner_id,
+                        claimed_at = excluded.claimed_at,
+                        expires_at = excluded.expires_at,
+                        fence = CASE WHEN claims.owner_id = excluded.owner_id THEN claims.fence ELSE claims.fence + 1 END,
+                        state = 'held',
+                        note = excluded.note
+                      WHERE claims.expires_at < ? OR claims.state <> 'held' OR claims.owner_id = excluded.owner_id
+                      RETURNING fence;
+                    """, (res_key, agent_id, now, now + ttl, note, now))
+                    row = cur.fetchone()
+                    c.execute("COMMIT")
+                    if row:
+                        res_text = json.dumps({"ok": True, "fence": row["fence"], "owner": agent_id, "resource": res_key})
+                    else:
+                        holder = c.execute("SELECT owner_id, expires_at FROM claims WHERE resource=?", (res_key,)).fetchone()
+                        res_text = json.dumps({"ok": False, "holder": holder["owner_id"] if holder else "unknown", "resource": res_key})
+                except Exception as e:
+                    try: c.execute("ROLLBACK")
+                    except Exception: pass
+                    res_text = json.dumps({"ok": False, "error": str(e)})
+
+            elif tool_name == "mesh_release":
+                res_key = args_in["resource"]
+                c.execute("UPDATE claims SET state='released' WHERE resource=? AND owner_id=?", (res_key, agent_id))
+                res_text = json.dumps({"ok": True, "released": res_key})
+
+            elif tool_name == "mesh_next":
+                task = c.execute("""
+                  SELECT * FROM tasks
+                  WHERE owner_id=? AND status='in_progress' AND expires_at > ?
+                  ORDER BY updated_at DESC LIMIT 1
+                """, (agent_id, now)).fetchone()
+
+                if task:
+                    res_text = json.dumps({
+                        "action": "continue",
+                        "task_id": task["id"],
+                        "title": task["title"],
+                        "prompt": f"You are currently working on task [{task['id']}]: '{task['title']}'. Complete verification and run mesh_task_done."
+                    })
+                else:
+                    pending = c.execute("SELECT * FROM tasks WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
+                    if pending:
+                        res_text = json.dumps({
+                            "action": "claim_and_continue",
+                            "task_id": pending["id"],
+                            "title": pending["title"],
+                            "prompt": f"Pending task available [{pending['id']}]: '{pending['title']}'. Claim it with mesh_task_claim and proceed."
+                        })
+                    else:
+                        res_text = json.dumps({
+                            "action": "stop",
+                            "reason": "All tasks completed and no active claims."
+                        })
+
+            elif tool_name == "mesh_task_claim":
+                tid = args_in.get("task_id")
+                ttl = int(args_in.get("ttl_sec", 300)) * 1000
+                try:
+                    c.execute("BEGIN IMMEDIATE")
+                    if tid:
+                        cur = c.execute("""
+                          UPDATE tasks
+                          SET status='in_progress', owner_id=?, claimed_at=?, expires_at=?, updated_at=?
+                          WHERE id=? AND (status='pending' OR (status='in_progress' AND expires_at < ?))
+                        """, (agent_id, now, now + ttl, now, tid, now))
+                    else:
+                        cand = c.execute("SELECT id FROM tasks WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
+                        if cand:
+                            tid = cand["id"]
+                            cur = c.execute("""
+                              UPDATE tasks
+                              SET status='in_progress', owner_id=?, claimed_at=?, expires_at=?, updated_at=?
+                              WHERE id=?
+                            """, (agent_id, now, now + ttl, now, tid))
+                        else:
+                            cur = None
+                    c.execute("COMMIT")
+                    if cur and cur.rowcount > 0:
+                        res_text = json.dumps({"ok": True, "task_id": tid, "owner": agent_id})
+                    else:
+                        res_text = json.dumps({"ok": False, "reason": "No pending task or task already claimed"})
+                except Exception as e:
+                    try: c.execute("ROLLBACK")
+                    except Exception: pass
+                    res_text = json.dumps({"ok": False, "error": str(e)})
+
+            elif tool_name == "mesh_task_done":
+                tid = args_in["task_id"]
+                res_sum = args_in.get("result_summary", "{}")
+                cur = c.execute("""
+                  UPDATE tasks
+                  SET status='done', result_json=?, updated_at=?
+                  WHERE id=? AND owner_id=?
+                """, (json.dumps({"summary": res_sum}), now, tid, agent_id))
+                res_text = json.dumps({"ok": cur.rowcount > 0, "task_id": tid})
+
+            elif tool_name == "mesh_idea_add":
+                title = args_in["title"]
+                pri = args_in.get("priority", "normal")
+                blast = args_in.get("blast_radius", "R2")
+                notes = args_in.get("notes", "")
+                cnt = c.execute("SELECT COUNT(*) as c FROM ideas").fetchone()["c"]
+                idea_id = f"IDEA-{cnt + 1:03d}"
+                c.execute("""
+                  INSERT INTO ideas(id, title, origin_agent, priority, blast_radius, status, notes, created_at, updated_at)
+                  VALUES(?, ?, ?, ?, ?, 'backlog', ?, ?, ?)
+                """, (idea_id, title, agent_id, pri, blast, notes, now, now))
+                res_text = json.dumps({"ok": True, "idea_id": idea_id, "title": title})
+
+            elif tool_name == "mesh_send":
+                to_ag = args_in.get("to")
+                kind = args_in["kind"]
+                body = args_in["body"]
+                c.execute("""
+                  INSERT INTO messages(from_agent, to_agent, kind, body_json, created_at)
+                  VALUES(?, ?, ?, ?, ?)
+                """, (agent_id, to_ag, kind, body if isinstance(body, str) else json.dumps(body), now))
+                mid = c.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
+                res_text = json.dumps({"ok": True, "message_id": mid})
+
+            elif tool_name == "mesh_inbox":
+                unacked = args_in.get("unacked_only", True)
+                q = "SELECT * FROM messages WHERE (to_agent IS NULL OR to_agent=?)"
+                if unacked:
+                    q += " AND acked_at IS NULL"
+                q += " ORDER BY id ASC"
+                msgs = c.execute(q, (agent_id,)).fetchall()
+                res_text = json.dumps([dict(m) for m in msgs])
+
+            send_resp({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": res_text}]
+                }
+            })
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Agent Mesh — Durable Cross-Session Agent Coordination")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_init = sub.add_parser("init", help="Initialize mesh database")
+    p_init.set_defaults(func=cmd_init)
+
+    p_mcp = sub.add_parser("mcp", help="Run as stdio JSON-RPC MCP server")
+    p_mcp.set_defaults(func=cmd_mcp)
+
+    p_reg = sub.add_parser("register", help="Register current agent session")
+    p_reg.add_argument("--harness", default="auto")
+    p_reg.add_argument("--role", default="worker")
+    p_reg.add_argument("--export", action="store_true", help="Print export MESH_AGENT_ID=...")
+    p_reg.set_defaults(func=cmd_register)
+
+    p_beat = sub.add_parser("beat", help="Send heartbeat")
+    p_beat.add_argument("--agent-id", default=None)
+    p_beat.set_defaults(func=cmd_beat)
+
+    p_claim = sub.add_parser("claim", help="Atomically acquire or refresh resource lease")
+    p_claim.add_argument("resource", help="Resource key (e.g. handoff:/path.md or task:T-1)")
+    p_claim.add_argument("--ttl-sec", type=int, default=120, help="Lease time-to-live in seconds (default: 120)")
+    p_claim.add_argument("--agent-id", default=None)
+    p_claim.add_argument("--note", default=None)
+    p_claim.set_defaults(func=cmd_claim)
+
+    p_rel = sub.add_parser("release", help="Release held resource lease")
+    p_rel.add_argument("resource")
+    p_rel.add_argument("--agent-id", default=None)
+    p_rel.add_argument("--force", action="store_true")
+    p_rel.set_defaults(func=cmd_release)
+
+    p_stat = sub.add_parser("status", help="Show live mesh status dashboard")
+    p_stat.add_argument("--json", action="store_true")
+    p_stat.set_defaults(func=cmd_status)
+
+    p_gc = sub.add_parser("gc", help="Clean up stale dead agents and expired claims")
+    p_gc.set_defaults(func=cmd_gc)
+
+    p_doc = sub.add_parser("doctor", help="Check database health and readiness")
+    p_doc.set_defaults(func=cmd_doctor)
+
+    # Task commands
+    p_tc = sub.add_parser("task-create", help="Create a task")
+    p_tc.add_argument("id")
+    p_tc.add_argument("title")
+    p_tc.add_argument("--plan-id", default=None)
+    p_tc.add_argument("--description", default="")
+    p_tc.set_defaults(func=cmd_task_create)
+
+    p_tclaim = sub.add_parser("task-claim", help="Claim a task with lease")
+    p_tclaim.add_argument("id")
+    p_tclaim.add_argument("--ttl-sec", type=int, default=300)
+    p_tclaim.add_argument("--agent-id", default=None)
+    p_tclaim.set_defaults(func=cmd_task_claim)
+
+    p_tdone = sub.add_parser("task-done", help="Mark a task as done")
+    p_tdone.add_argument("id")
+    p_tdone.add_argument("--result", default="{}")
+    p_tdone.add_argument("--agent-id", default=None)
+    p_tdone.add_argument("--force", action="store_true")
+    p_tdone.set_defaults(func=cmd_task_done)
+
+    # Ideas commands
+    p_ia = sub.add_parser("idea-add", help="Add an idea to the backlog")
+    p_ia.add_argument("title")
+    p_ia.add_argument("--priority", default="normal", choices=["low", "normal", "high"])
+    p_ia.add_argument("--blast-radius", default="R2", choices=["R0", "R1", "R2"])
+    p_ia.add_argument("--resource", default=None)
+    p_ia.add_argument("--notes", default="")
+    p_ia.add_argument("--agent-id", default=None)
+    p_ia.set_defaults(func=cmd_idea_add)
+
+    p_il = sub.add_parser("idea-list", help="List ideas in the backlog")
+    p_il.add_argument("--json", action="store_true")
+    p_il.set_defaults(func=cmd_idea_list)
+
+    # Message commands
+    p_send = sub.add_parser("send", help="Send a cross-session message")
+    p_send.add_argument("to", nargs="?", default=None, help="Recipient agent ID or omit for broadcast")
+    p_send.add_argument("kind", choices=["request", "reply", "status", "handoff", "alert"])
+    p_send.add_argument("body", help="Message body JSON or text")
+    p_send.add_argument("--topic", default="direct")
+    p_send.add_argument("--corr-id", default=None)
+    p_send.add_argument("--from-agent", default=None)
+    p_send.set_defaults(func=cmd_send)
+
+    p_inbox = sub.add_parser("inbox", help="View messages in inbox")
+    p_inbox.add_argument("--agent-id", default=None)
+    p_inbox.add_argument("--unacked-only", action="store_true")
+    p_inbox.add_argument("--json", action="store_true")
+    p_inbox.set_defaults(func=cmd_inbox)
+
+    p_ack = sub.add_parser("ack", help="Acknowledge a message")
+    p_ack.add_argument("message_id", type=int)
+    p_ack.set_defaults(func=cmd_ack)
+
+    parsed = parser.parse_args()
+    parsed.func(parsed)
+
+
+if __name__ == "__main__":
+    main()
