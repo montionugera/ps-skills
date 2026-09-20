@@ -98,6 +98,8 @@ for h in "$REPO"/skills/*/hooks/*; do
 done
 link "$REPO/engine/ps-release-workflow" "$CLAUDE_HOME/ps-release-workflow"
 link "$REPO/bin/ps-skills-sync" "$BIN_HOME/ps-skills-sync"
+link "$REPO/bin/mesh" "$BIN_HOME/mesh"
+link "$REPO/bin/mesh-run" "$BIN_HOME/mesh-run"
 link "$REPO/bin/dispatch-agy-worker" "$BIN_HOME/dispatch-agy-worker"
 link "$REPO/bin/dispatch-codex-worker" "$BIN_HOME/dispatch-codex-worker"
 link "$REPO/bin/dispatch-cursor-worker" "$BIN_HOME/dispatch-cursor-worker"

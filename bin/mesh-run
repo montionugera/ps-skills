@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""
+mesh-run — Mechanical Turn-Completion Supervisor for Antigravity CLI
+Uses Antigravity's stream-json I/O to observe turn boundaries, mechanically
+preventing mid-session stalls and auto-continuing active tasks without human intervention.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+MAX_CONSECUTIVE_STALLS = 3
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Mechanical Turn-Completion Supervisor for Antigravity")
+    parser.add_argument("prompt", help="Initial task prompt for the agent")
+    parser.add_argument("--cwd", default=os.getcwd(), help="Working directory")
+    parser.add_argument("--model", default=None, help="Model override")
+    parser.add_argument("--task-id", default=None, help="Pre-existing task ID to attach to")
+    parser.add_argument("--ttl-sec", type=int, default=300, help="Initial claim lease in seconds")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Print debug stream")
+    args, extra_args = parser.parse_known_args()
+
+    # 1. Register agent in mesh
+    reg_cmd = ["mesh", "register", "--harness", "agy", "--role", "worker"]
+    res = subprocess.run(reg_cmd, capture_output=True, text=True, check=True)
+    agent_id = res.stdout.strip()
+    print(f"[mesh-run] Registered supervisor agent: {agent_id}")
+
+    # 2. If task-id specified, claim it
+    if args.task_id:
+        c_cmd = ["mesh", "task-claim", args.task_id, "--agent-id", agent_id, "--ttl-sec", str(args.ttl_sec)]
+        subprocess.run(c_cmd, capture_output=True, text=True)
+
+    # 3. Build agy command with stream-json
+    agy_cmd = [
+        "agy",
+        "-p",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--dangerously-skip-permissions"
+    ]
+    if args.model:
+        agy_cmd.extend(["--model", args.model])
+    agy_cmd.extend(extra_args)
+
+    print(f"[mesh-run] Spawning: {' '.join(agy_cmd)} in {args.cwd}")
+    env = os.environ.copy()
+    env["MESH_AGENT_ID"] = agent_id
+
+    proc = subprocess.Popen(
+        agy_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=args.cwd,
+        env=env,
+        text=True,
+        bufsize=1
+    )
+
+    # 4. Send initial NDJSON user prompt
+    init_msg = json.dumps({"role": "user", "content": args.prompt}) + "\n"
+    proc.stdin.write(init_msg)
+    proc.stdin.flush()
+
+    had_tool_call_in_turn = False
+    consecutive_stalls = 0
+
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+                continue
+
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                event = json.loads(line)
+            except Exception:
+                print(line)
+                continue
+
+            msg_type = event.get("type") or event.get("role")
+            content = event.get("content") or ""
+
+            # Check if this message/turn triggered a tool call
+            if "tool_call" in line or "call_tool" in line or event.get("tool_calls"):
+                had_tool_call_in_turn = True
+                consecutive_stalls = 0
+
+            # Print visible text
+            if isinstance(content, str) and content:
+                print(content, end="", flush=True)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            print(block.get("text", ""), end="", flush=True)
+                        elif block.get("type") == "tool_use":
+                            had_tool_call_in_turn = True
+                            consecutive_stalls = 0
+
+            # Check for turn boundary
+            # In stream-json, an assistant turn completes when output yields back to user
+            if event.get("stop_reason") or event.get("turn_complete") or event.get("status") == "DONE":
+                print()  # Newline after turn
+                # Refresh heartbeat
+                subprocess.run(["mesh", "beat", "--agent-id", agent_id], capture_output=True)
+
+                if had_tool_call_in_turn:
+                    # Normal healthy turn with active tool work
+                    had_tool_call_in_turn = False
+                    continue
+
+                # Turn ended without making a tool call! Check mesh_next
+                # Check status via mesh status --json
+                stat_res = subprocess.run(["mesh", "status", "--json"], capture_output=True, text=True)
+                stat = json.loads(stat_res.stdout) if stat_res.returncode == 0 else {}
+                my_tasks = [t for t in stat.get("tasks", []) if t.get("owner_id") == agent_id and t.get("status") == "in_progress"]
+                pending_tasks = [t for t in stat.get("tasks", []) if t.get("status") == "pending"]
+
+                if my_tasks:
+                    curr_task = my_tasks[0]
+                    consecutive_stalls += 1
+                    if consecutive_stalls > MAX_CONSECUTIVE_STALLS:
+                        print(f"\n[mesh-run] ❌ Max stalls ({MAX_CONSECUTIVE_STALLS}) exceeded on task [{curr_task['id']}]. Escalating alert.")
+                        subprocess.run(["mesh", "send", "kind=alert", f"body=Stall loop on task {curr_task['id']}"], capture_output=True)
+                        break
+
+                    reinject_prompt = (
+                        f"[SUPERVISOR NOTE]: You are currently working on task [{curr_task['id']}]: '{curr_task['title']}'. "
+                        "Do NOT pause to ask questions or summarize. Execute the next implementation or verification command now."
+                    )
+                    print(f"\n[mesh-run] ⚡ Stall prevented! Auto-continuing task [{curr_task['id']}]...")
+                    next_msg = json.dumps({"role": "user", "content": reinject_prompt}) + "\n"
+                    proc.stdin.write(next_msg)
+                    proc.stdin.flush()
+                    had_tool_call_in_turn = False
+
+                elif pending_tasks:
+                    next_t = pending_tasks[0]
+                    reinject_prompt = f"Pending task available: [{next_t['id']}] '{next_t['title']}'. Claim it and begin execution."
+                    print(f"\n[mesh-run] ⚡ Auto-advancing to pending task [{next_t['id']}]...")
+                    next_msg = json.dumps({"role": "user", "content": reinject_prompt}) + "\n"
+                    proc.stdin.write(next_msg)
+                    proc.stdin.flush()
+                    had_tool_call_in_turn = False
+                else:
+                    # No active tasks held, no pending tasks -> genuinely complete!
+                    print("\n[mesh-run] ✅ All tasks completed. Exiting supervisor cleanly.")
+                    break
+
+    except KeyboardInterrupt:
+        print("\n[mesh-run] Interrupted by user.")
+    finally:
+        # Release claims and mark agent draining/done
+        subprocess.run(["mesh", "gc"], capture_output=True)
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+
+    return proc.returncode or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
