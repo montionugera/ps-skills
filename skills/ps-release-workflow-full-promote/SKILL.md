@@ -76,6 +76,9 @@ psrw new-release
 
 ## After this skill
 
-Report one consolidated summary: PR #, merge SHA, prod deploy run result,
-cleanup output (features promoted / worktrees pruned), and the new release
-version. Hint the next step: claim a feature in the new release.
+- If running as a standalone single-release turnover: report one consolidated summary: PR #, merge SHA, prod deploy run result, cleanup output (features promoted / worktrees pruned), and the new release version.
+- **Chained Execution Mode ("and chain", multi-wave / multi-release roadmap):**
+  - Do NOT stop or yield the turn.
+  - NEVER say polite stalls like *"we can trigger the next wave whenever you are ready"* or *"let me know when to proceed"*.
+  - Immediately proceed to claim the next feature (`psrw claim <F-NNN>`) or refine the next idea and keep executing.
+
