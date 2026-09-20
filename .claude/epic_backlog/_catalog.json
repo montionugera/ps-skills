@@ -3,7 +3,7 @@
     "id": "E-001",
     "title": "Test and doc hygiene deferred from the epic-run review",
     "created_at": "2026-09-19T07:25:43.276542+00:00",
-    "status": "verified",
+    "status": "promoted",
     "release_version": "1.1",
     "verified_sha": "13d4f4376f3cc4505f5ea3fd96444cdc41204bc4",
     "verified_at": "2026-09-19T10:31:19.749215+00:00",
