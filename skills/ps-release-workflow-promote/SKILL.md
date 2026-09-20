@@ -39,9 +39,11 @@ by itself — cleanup is.
   explicit override. Until cleanup runs, the next `psrw new-release` is wedged.
 
 ## Then
-
+ 
 Without `--babysit`: a human reviews and squash-merges the PR (that merge deploys prod),
-then run `psrw promote --cleanup-only <version>`. With `--babysit`: nothing left.
+then run `psrw promote --cleanup-only <version>`. With `--babysit`: release is fully promoted.
+
+**If in chained mode ("and chain", multi-wave / multi-release directive)**: do NOT pause or say *"whenever you are ready"*; immediately open the next release or claim the next feature and continue executing.
 
 ## Refuses if
 

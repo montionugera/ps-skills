@@ -36,6 +36,7 @@ FOCUS_FLAG="--focus"
 USE_AGENT_MANAGER=false
 CLOSE_SOURCE=false
 CLOSE_GRACE_SECONDS=20
+YOLO=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -77,6 +78,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --close-source)
       CLOSE_SOURCE=true
+      shift
+      ;;
+    --yolo)
+      YOLO=true
+      shift
+      ;;
+    --no-yolo)
+      YOLO=false
       shift
       ;;
     -*)
@@ -299,6 +308,11 @@ if [[ "$USE_AGENT_MANAGER" == "true" ]]; then
 fi
 
 echo "⚡ Launching $AGENT_KIND interactively in pane $ROOT_PANE..."
+YOLO_FLAG=""
+if [[ "$YOLO" == "true" ]]; then
+  YOLO_FLAG="--dangerously-skip-permissions "
+fi
+
 if [[ "$AGENT_KIND" == "opencode" ]]; then
   herdr pane run "$ROOT_PANE" "opencode --prompt \"\$(cat '$PROMPT_FILE')\""
 elif [[ "$AGENT_KIND" == "claude" ]]; then
@@ -308,12 +322,14 @@ elif [[ "$AGENT_KIND" == "claude" ]]; then
   # Passing the prompt positionally starts a normal interactive session seeded
   # with it, so the handoff can actually be worked in that tab.
   echo "🧠 Claude model: ${CLAUDE_MODEL:-default}"
-  herdr pane run "$ROOT_PANE" "claude ${CLAUDE_MODEL_FLAG}\"\$(cat '$PROMPT_FILE')\""
+  herdr pane run "$ROOT_PANE" "claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}\"\$(cat '$PROMPT_FILE')\""
+elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
+  herdr pane run "$ROOT_PANE" "agy ${YOLO_FLAG}-i \"\$(cat '$PROMPT_FILE')\""
 else
   herdr pane run "$ROOT_PANE" "$AGENT_KIND"
 fi
 echo "✨ Agent launched INTERACTIVELY in Herdr tab $TAB_ID with handoff context."
-if [[ "$AGENT_KIND" == "claude" || "$AGENT_KIND" == "opencode" ]]; then
+if [[ "$AGENT_KIND" == "claude" || "$AGENT_KIND" == "opencode" || "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
   finish_handoff
   exit $?
 fi

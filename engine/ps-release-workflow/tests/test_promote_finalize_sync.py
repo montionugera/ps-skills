@@ -14,17 +14,12 @@ from pathlib import Path
 import pytest
 
 from scripts.promote_release import cleanup, _finalize_release_state
+from tests._helpers import git as _git
 
 
 def _gh_no_pr(cmd, **kwargs):
     """Stub gh runner: no PR exists for any branch (B3 check passes)."""
     return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no pull requests found")
-
-
-def _git(cwd: Path, *args: str) -> str:
-    cp = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-    assert cp.returncode == 0, f"git {' '.join(args)} failed: {cp.stderr}"
-    return cp.stdout.strip()
 
 
 def _release_json(in_progress: bool) -> str:

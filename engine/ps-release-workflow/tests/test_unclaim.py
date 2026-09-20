@@ -6,10 +6,16 @@ from pathlib import Path
 
 import pytest
 
+from lib.backlog_paths import get_backlog_catalog_path, get_release_worktree
+from lib.catalog import update_entry
+from lib.git_ops import commit_all
+from lib.state import file_lock, mutate_state
+from scripts.epic import epic_fanout, epic_open
 from scripts.init_work_new_release import new_release
 from scripts.new_idea import new_idea
 from scripts.promote_idea_to_refined import promote_idea_to_refined
 from scripts.init_work_refined_backlog import claim_feature
+from scripts.ship_current_work_to_release import ship_current_work
 from scripts.unclaim import (
     DirtyWorktreeError,
     FeatureNotFoundError,
@@ -41,6 +47,123 @@ def _branch_exists(repo: Path, name: str) -> bool:
         ["git", "rev-parse", "--verify", name], cwd=repo, capture_output=True
     )
     return cp.returncode == 0
+
+
+# ── Step 5: demote a 'verified' epic on unclaim ────────────────────────────────
+
+
+def _scaffold_precheck(repo: Path, body: str = "#!/bin/sh\nexit 0\n") -> None:
+    d = repo / "scripts"
+    d.mkdir(exist_ok=True)
+    f = d / "precheck.sh"
+    f.write_text(body)
+    f.chmod(0o755)
+    subprocess.run(["git", "add", "scripts/precheck.sh"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "scaffold precheck"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=repo, check=True, capture_output=True)
+
+
+def _ship_completed_epic_feature(repo: Path, owner: str) -> tuple[str, dict]:
+    """Open a 1-slice epic, promote/claim/ship it — completes it, and (the
+    missing epic-check.sh warns but still marks it) verifies it at ship time
+    (G-E2). Returns (epic_id, feature_dict)."""
+    _scaffold_precheck(repo)
+    new_release(repo, version="1.1")
+    epic = epic_open(repo, "Cap the risk")
+    epic_id = epic["epic"]["id"]
+    fan = epic_fanout(repo, epic_id, ["cap it"])
+    idea_id = fan["ideas"][0]["id"]
+    feat = promote_idea_to_refined(repo, idea_id)
+    claim = claim_feature(repo, feat["id"], owner=owner)
+    wt = Path(claim["worktree"])
+    (wt / "feature.txt").write_text("x")
+    subprocess.run(["git", "add", "."], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-m", "feat"], cwd=wt, check=True, capture_output=True)
+    ship_current_work(wt)
+    return epic_id, feat
+
+
+def _reclaim_shipped_feature(repo: Path, feature_id: str, owner: str) -> None:
+    """Simulate a shipped feature being reclaimed for follow-up work: catalog
+    status back to 'claimed', ledger row re-added. Bypasses claim_feature()
+    because ship_current_work never drops the original claims.json row (a
+    pre-existing gap outside Task 4's scope) — this only needs to reach the
+    STATE unclaim.py must handle (a claimed feature whose epic is already
+    'verified'), not exercise a real reclaim path."""
+    wt = get_release_worktree(repo)
+    refined_cat = get_backlog_catalog_path(repo, "refined")
+
+    def reclaim(e: dict) -> None:
+        e["status"] = "claimed"
+        e["claimed_by"] = owner
+
+    with file_lock(wt):
+        update_entry(refined_cat, feature_id, reclaim)
+        commit_all(wt, f"chore(test): reclaim {feature_id}")
+
+    claims_file = repo / ".claude" / "state" / "claims.json"
+
+    def add_claim(claims: dict) -> dict:
+        claims[feature_id] = {
+            "owner": owner, "worktree": "", "claimed_at": "2026-01-01T00:00:00+00:00",
+        }
+        return claims
+
+    mutate_state(claims_file, add_claim, default={})
+
+
+def _epic_catalog_entry(repo: Path, epic_id: str) -> dict:
+    cat = repo / ".claude" / "worktrees" / "_release" / ".claude" / "epic_backlog" / "_catalog.json"
+    return next(e for e in json.loads(cat.read_text()) if e["id"] == epic_id)
+
+
+def test_unclaim_demotes_a_verified_epic_to_open(tmp_repo_with_release: Path, fixed_owner: str):
+    repo = tmp_repo_with_release
+    epic_id, feat = _ship_completed_epic_feature(repo, fixed_owner)
+    assert _epic_catalog_entry(repo, epic_id)["status"] == "verified"  # sanity: G-E2 completed it
+
+    _reclaim_shipped_feature(repo, feat["id"], fixed_owner)
+
+    unclaim_feature(repo, feat["id"])
+
+    epic_after = _epic_catalog_entry(repo, epic_id)
+    assert epic_after["status"] == "open"
+    assert epic_after["verified_sha"] is None
+    assert epic_after["verified_at"] is None
+    assert epic_after["release_version"] is None
+
+    entry = _release_catalog_entry(repo, feat["id"])
+    assert entry["status"] == "open"
+    assert entry["claimed_by"] is None
+
+
+def test_unclaim_leaves_a_non_verified_epic_untouched(tmp_repo_with_release: Path, fixed_owner: str):
+    """Only 'verified' is demoted — never 'verifying' (would collide with the
+    ship-time CAS and strand the epic) and never 'failed_verification'
+    (nothing to undo; a fresh ship's CAS already owns re-verifying it)."""
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    epic = epic_open(repo, "Cap the risk")
+    epic_id = epic["epic"]["id"]
+    fan = epic_fanout(repo, epic_id, ["cap it"])
+    feat = promote_idea_to_refined(repo, fan["ideas"][0]["id"])
+    claim_feature(repo, feat["id"], owner=fixed_owner)
+
+    wt = get_release_worktree(repo)
+    epic_cat = get_backlog_catalog_path(repo, "epic")
+
+    def force_failed(e: dict) -> None:
+        e["status"] = "failed_verification"
+        e["verified_sha"] = None
+
+    with file_lock(wt):
+        update_entry(epic_cat, epic_id, force_failed)
+        commit_all(wt, "test: force failed_verification")
+
+    unclaim_feature(repo, feat["id"])
+
+    epic_after = _epic_catalog_entry(repo, epic_id)
+    assert epic_after["status"] == "failed_verification"  # untouched
 
 
 def test_unclaim_happy_path(tmp_repo_with_release: Path):
