@@ -1046,6 +1046,27 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertIn("Context: 3 document(s) referenced", rep)
         self.assertIn("Files Modified: 2 (2 files)", rep)
 
+    def test_deep_design_capability_rejects_forbidden_model(self):
+        worker_bin = BIN_DIR / "dispatch-worker"
+        proc = subprocess.run(
+            [sys.executable, str(worker_bin), "--capability", "deep-design-v1", "--model", "gpt-5.6-terra", "--task", "x"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("strictly forbids model 'gpt-5.6-terra'", proc.stderr)
+
+    def test_deep_design_capability_dry_run_success(self):
+        worker_bin = BIN_DIR / "dispatch-worker"
+        proc = subprocess.run(
+            [sys.executable, str(worker_bin), "--capability", "deep-design-v1", "--dry-run", "--task", "x"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("DRY_RUN", proc.stdout)
+        self.assertIn("gpt-5.6-sol", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

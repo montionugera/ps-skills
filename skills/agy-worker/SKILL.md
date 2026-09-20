@@ -56,9 +56,15 @@ dispatch-worker --batch-file tasks.json --max-parallel 4 --cwd "$REPO_DIR"
 # Fire off in background immediately (returns job ID, exits 0)
 dispatch-worker --task "Heavy refactor in src/engine" --detach --cwd "$REPO_DIR"
 
-# --- Heavy Thinking & Architecture Mode (High Quota Guard: 5h > 80%, Weekly > 20%) ---
-# Offload deep reasoning, RFC generation, or code reviews to gpt-5.6-sol
-dispatch-worker --think --task "Review architecture for multi-tenant auth" \
+# --- Heavy Thinking & Architecture Mode (Capability deep-design-v1) ---
+# Offload deep reasoning, RFC generation, or code reviews to Fable or GPT-5.6-Sol.
+# Fails closed (exit code 12) if thinker is unavailable or an unapproved model is specified.
+dispatch-thinker --task "Synthesize multi-wave portal architecture" \
+  --context docs/specs/hub.md \
+  --output-file /tmp/portal-synthesis.md
+
+# Or via dispatch-worker directly
+dispatch-worker --capability deep-design-v1 --task "Review architecture for multi-tenant auth" \
   --context docs/superpowers/specs/auth-spec.md logs/auth.log \
   --output-file docs/reviews/phase-1-review.md
 
@@ -80,10 +86,11 @@ dispatch-worker --tail dw-1789785000-a1b2 -f    # Follow live output stream
 
 | Exit Code | Meaning | Action for Orchestrator |
 | :--- | :--- | :--- |
-| `0` | **Success** | Review git diff and advance to Review Gate |
+| `0` | **Success** | Review git diff / attestation and advance to Review Gate |
 | `1` | **Execution Failed** | Re-dispatch or diagnose failure |
 | `2` | **Invalid Arguments** | Fix parameters |
 | `10` | **`FALLBACK_INTERNAL`** | External quota below threshold; dispatch internal Claude Sonnet agent |
+| `12` | **`THINKER_UNAVAILABLE`** | deep-design-v1 capability unavailable or forbidden model; fail closed (do NOT fallback to inline runner) |
 
 ---
 

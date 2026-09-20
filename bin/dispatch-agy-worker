@@ -15,6 +15,7 @@ import argparse
 import concurrent.futures
 from contextlib import nullcontext
 import datetime
+import hashlib
 import json
 import os
 import shutil
@@ -1222,6 +1223,9 @@ def main():
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
     parser.add_argument("--think", action="store_true", help="Heavy thinking mode: defaults to gpt-5.6-sol and enforces 5h > 80%%, weekly > 20%% quota")
+    parser.add_argument("--capability", type=str, default=None, choices=["deep-design-v1"],
+                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Fable or GPT-5.6-Sol and fails closed with exit code 12)")
+    parser.add_argument("--attestation-file", type=str, default=None, help="Explicit path to write Thinker attestation JSON (.thinker.json)")
     parser.add_argument("--context", nargs="+", dest="context_files", help="Paths to context/reference files or directories")
     parser.add_argument("--output-file", type=str, default=None, help="File path where worker must write primary deliverable")
     parser.add_argument("--isolated", action="store_true", help="Execute inside a temporary isolated git worktree")
@@ -1318,7 +1322,16 @@ def main():
     chosen_agent = args.agent
     chosen_model = args.model
 
-    # If --think is set, adjust thresholds if user didn't explicitly override them
+    # If --capability deep-design-v1 or --think is set, adjust thresholds and models
+    is_deep_design = (args.capability == "deep-design-v1")
+    if is_deep_design:
+        args.think = True
+        # Capability deep-design-v1 strictly restricts allowed models to Fable or GPT-5.6-Sol
+        ALLOWED_DEEP_DESIGN_MODELS = ["claude-fable", "fable", "gpt-5.6-sol", "sol"]
+        if chosen_model and chosen_model.lower() not in ALLOWED_DEEP_DESIGN_MODELS:
+            print(f"FAILED: capability 'deep-design-v1' strictly forbids model '{chosen_model}'. Allowed models: {ALLOWED_DEEP_DESIGN_MODELS}", file=sys.stderr)
+            sys.exit(12)  # Fail-closed: THINKER_UNAVAILABLE / FORBIDDEN_MODEL
+
     min_5h = args.min_5h
     min_weekly = args.min_weekly
     if args.think:
@@ -1394,6 +1407,9 @@ def main():
             sys.exit(2)
 
     if not eligible:
+        if is_deep_design:
+            print(f"FAILED: Thinker unavailable for 'deep-design-v1' ({msg}). Refusing fallback to execution model.", file=sys.stderr)
+            sys.exit(12)  # Fail closed: THINKER_UNAVAILABLE
         print(f"FALLBACK_INTERNAL: Quota insufficient ({msg}).")
         sys.exit(10)  # exit code 10 signals fallback to Claude internal subagent
 
@@ -1531,6 +1547,46 @@ def main():
         artifact=args.output_file, context_count=len(args.context_files or [])
     )
     print(report)
+
+    # Write Thinker attestation if requested or if deep-design-v1 capability succeeded
+    if exit_code == 0 and (args.attestation_file or is_deep_design):
+        attestation_target = args.attestation_file or (
+            os.path.join(cwd, ".thinker.json") if not args.output_file else os.path.splitext(args.output_file)[0] + ".thinker.json"
+        )
+        try:
+            p_hash = hashlib.sha256(args.task.encode("utf-8")).hexdigest() if args.task else ""
+            out_hash = ""
+            if args.output_file and os.path.isfile(args.output_file):
+                out_hash = hashlib.sha256(open(args.output_file, "rb").read()).hexdigest()
+            elif stdout:
+                out_hash = hashlib.sha256(stdout.encode("utf-8")).hexdigest()
+
+            context_hashes = {}
+            if args.context_files:
+                for cf in args.context_files:
+                    if os.path.isfile(cf):
+                        try:
+                            context_hashes[cf] = hashlib.sha256(open(cf, "rb").read()).hexdigest()
+                        except Exception:
+                            pass
+
+            attestation_data = {
+                "capability": args.capability or "deep-design-v1",
+                "model": chosen_model,
+                "agent": chosen_agent,
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "prompt_sha256": p_hash,
+                "output_sha256": out_hash,
+                "context_sha256": context_hashes,
+                "exit_code": exit_code,
+                "status": "ATTESTED",
+            }
+            os.makedirs(os.path.dirname(os.path.abspath(attestation_target)), exist_ok=True)
+            with open(attestation_target, "w", encoding="utf-8") as af:
+                json.dump(attestation_data, af, indent=2)
+            print(f"Thinker attestation written to {attestation_target}")
+        except Exception as e:
+            print(f"Warning: Failed to write thinker attestation: {e}", file=sys.stderr)
 
     sys.exit(exit_code)
 

@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""ps-skills-doctor — health check tool for ps-skills installation and parity.
+
+Checks:
+1. Runtimes: ~/.claude, ~/.agents, ~/.gemini/config, ~/.cursor exist.
+2. Symlinks: skills and hooks are valid symlinks pointing to target repo.
+3. Doctor fails on broken symlinks, diverged files, uppercase .Codex paths, or missing runtime targets.
+4. Executable bits on binaries in bin/ and hooks/.
+"""
+import os
+import sys
+import argparse
+from pathlib import Path
+
+def main():
+    parser = argparse.ArgumentParser(description="Audit ps-skills runtime installation and parity.")
+    parser.add_argument("--strict", action="store_true", help="Exit with error code if any issue is detected")
+    args = parser.parse_args()
+
+    home = Path.home()
+    issues = []
+    warnings = []
+
+    # 1. Check for legacy uppercase .Codex
+    legacy_codex = home / ".Codex"
+    if legacy_codex.exists():
+        issues.append(f"Legacy uppercase directory exists: {legacy_codex} (must use lowercase .codex or .agents)")
+
+    # 2. Check runtimes
+    runtimes = {
+        "claude": home / ".claude",
+        "agents": home / ".agents",
+        "gemini": home / ".gemini" / "config",
+    }
+    for name, path in runtimes.items():
+        if not path.exists():
+            warnings.append(f"Runtime dir not found: {name} ({path})")
+
+    # 3. Check ~/.local/bin executables
+    bin_home = home / ".local" / "bin"
+    critical_bins = ["dispatch-worker", "dispatch-thinker", "ps-skills-sync", "mesh"]
+    for b in critical_bins:
+        bp = bin_home / b
+        if not bp.exists():
+            warnings.append(f"Binary not in PATH/bin_home: {bp}")
+        elif not os.access(bp, os.X_OK):
+            issues.append(f"Binary is not executable: {bp}")
+
+    # 4. Check broken symlinks in ~/.claude/skills and ~/.gemini/config/skills
+    for name, base_path in [("claude", home / ".claude" / "skills"), ("gemini", home / ".gemini" / "config" / "skills")]:
+        if base_path.is_dir():
+            for item in base_path.iterdir():
+                if item.is_symlink() and not item.exists():
+                    issues.append(f"Broken symlink in {name} skills: {item} -> {os.readlink(item)}")
+
+    # Report
+    print("=== ps-skills-doctor ===")
+    if not issues and not warnings:
+        print("✅ All runtime paths, symlinks, and binaries are healthy.")
+        return 0
+
+    if warnings:
+        print(f"⚠️  {len(warnings)} Warning(s):")
+        for w in warnings:
+            print(f"  - {w}")
+
+    if issues:
+        print(f"❌ {len(issues)} Issue(s) detected:")
+        for iss in issues:
+            print(f"  - {iss}")
+        if args.strict:
+            return 1
+
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -20,6 +20,7 @@ from lib.backlog_paths import (
     NoReleaseInProgressError,
     get_backlog_catalog_path,
     get_release_worktree,
+    read_release_state,
 )
 from lib.catalog import CatalogEntryNotFoundError, find_entry, list_entries, update_entry
 from lib.git_ops import (
@@ -45,6 +46,9 @@ class FeatureNotFoundError(Exception): pass
 class NotClaimedError(Exception): pass
 
 
+class FeatureNotReadyError(Exception): pass
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -58,7 +62,8 @@ def _drop_claim(claims_file: Path, feature_id: str) -> None:
 
 
 def claim_feature(
-    repo: Path, feature_id: Optional[str], *, owner: str, select_next: bool = False
+    repo: Path, feature_id: Optional[str], *, owner: str, select_next: bool = False,
+    skip_readiness: bool = False
 ) -> dict:
     repo = Path(repo)
     if not is_ps_release_workflow_repo(repo):
@@ -88,6 +93,21 @@ def claim_feature(
     feat = find_entry(refined_cat, feature_id)
     if feat is None:
         raise FeatureNotFoundError(feature_id)
+
+    # Wave 0 Readiness Enforcement: Feature spec must not be an unrefined skeleton
+    # Enforced when repo opts into quality_profile (e.g. web-ui) or enforce_readiness=True,
+    # unless skip_readiness is explicitly passed.
+    state = read_release_state(repo) or {}
+    enforce = state.get("enforce_readiness") or bool(state.get("quality_profile"))
+    if enforce and not skip_readiness:
+        from lib.readiness import check_spec_readiness
+        feat_folder = wt / ".claude" / "refined_backlog" / f"{feature_id}-{slugify(feat['title'])}"
+        spec_path = feat_folder / "spec.md"
+        res = check_spec_readiness(spec_path)
+        if not res.is_ready:
+            raise FeatureNotReadyError(
+                f"Feature {feature_id} is not ready to be claimed:\n" + "\n".join(f"  - {r}" for r in res.reasons)
+            )
 
     slug = slugify(feat["title"])
     worktree_path = repo / ".claude" / "worktrees" / f"{feature_id}-{slug}"
@@ -311,6 +331,7 @@ def main() -> int:
         "in the catalog — e.g. a fresh session resuming in-flight work",
     )
     p.add_argument("--owner", default=None)
+    p.add_argument("--skip-readiness", action="store_true", help="bypass spec readiness check (for legacy features only)")
     args = p.parse_args()
 
     if args.resume and args.select_next:
@@ -327,13 +348,15 @@ def main() -> int:
             result = resume_feature(repo, args.feature_id, owner=owner)
         else:
             result = claim_feature(
-                repo, args.feature_id, owner=owner, select_next=args.select_next
+                repo, args.feature_id, owner=owner, select_next=args.select_next,
+                skip_readiness=args.skip_readiness
             )
     except (
         AlreadyClaimedError,
         NoFreeFeatureError,
         NoReleaseInProgressError,
         FeatureNotFoundError,
+        FeatureNotReadyError,
         NotClaimedError,
         CatalogEntryNotFoundError,
         GitError,

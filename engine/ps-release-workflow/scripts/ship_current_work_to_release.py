@@ -25,12 +25,14 @@ from lib.epic_gate import run_and_record
 from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
 from lib.hooks import HookPathError, resolve_hook
 from lib.repo import is_ps_release_workflow_repo
+from lib.slug import slugify
 from lib.state import file_lock
 
 
 class DirtyTreeError(Exception): pass
 class GateFailedError(Exception): pass
 class NotInFeatureWorktreeError(Exception): pass
+class FeatureNotReadyError(Exception): pass
 
 
 def _run_precheck(tree: Path) -> int | None:
@@ -72,7 +74,7 @@ def _find_marker(worktree: Path) -> dict:
     raise NotInFeatureWorktreeError(f"{worktree} has no working-feature.json marker")
 
 
-def ship_current_work(worktree: Path) -> dict:
+def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
     worktree = Path(worktree).resolve()
     marker = _find_marker(worktree)
     feature_id = marker["feature"]
@@ -98,6 +100,22 @@ def ship_current_work(worktree: Path) -> dict:
 
     # The _release worktree (release/<v>) — also enforces the in-progress guard.
     rel_wt = get_release_worktree(repo)
+
+    # Wave 0 Readiness Defense-in-depth: Ensure spec is not an unrefined skeleton before shipping.
+    enforce = state.get("enforce_readiness") or bool(state.get("quality_profile"))
+    if enforce and not skip_readiness:
+        refined_cat = get_backlog_catalog_path(repo, "refined")
+        feat_entry = find_entry(refined_cat, feature_id)
+        if feat_entry:
+            from lib.readiness import check_spec_readiness
+            feat_folder = rel_wt / ".claude" / "refined_backlog" / f"{feature_id}-{slugify(feat_entry['title'])}"
+            spec_path = feat_folder / "spec.md"
+            res = check_spec_readiness(spec_path)
+            if not res.is_ready:
+                raise FeatureNotReadyError(
+                    f"Feature {feature_id} cannot be shipped: spec is not ready:\n"
+                    + "\n".join(f"  - {r}" for r in res.reasons)
+                )
 
     # Run Gate 1 from the FEATURE worktree — it verifies the code being shipped
     # (audit A5: resolving from `repo` ran the main checkout's precheck against
@@ -205,14 +223,16 @@ def main() -> int:
                    help="skip the post-merge local deploy (use when other sessions "
                         "are shipping to the same release right now — batch the "
                         "deploy once after the burst instead of racing rebuilds)")
+    p.add_argument("--skip-readiness", action="store_true",
+                   help="skip spec readiness check (for legacy migrations only)")
     args = p.parse_args()
 
     cwd = Path.cwd()
     try:
-        result = ship_current_work(cwd)
+        result = ship_current_work(cwd, skip_readiness=args.skip_readiness)
     except (DirtyTreeError, GateFailedError, NotInFeatureWorktreeError,
             NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,
-            RuntimeError) as e:
+            FeatureNotReadyError, RuntimeError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result))
