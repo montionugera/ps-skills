@@ -25,7 +25,21 @@ set -euo pipefail
 #                          script cannot see those, the caller must check.
 
 HANDOFF_PATH=""
-AGENT_KIND="opencode"
+# Auto-detect current calling agent by environment, or fall back to sensible default:
+DETECTED_KIND="opencode"
+if [[ -n "${ANTIGRAVITY_AGENT:-}" || -n "${ANTIGRAVITY_APP_DATA_DIR:-}" || -n "${ANTIGRAVITY_AGENTAPI_EXE:-}" || -n "${GEMINI_AI_STUDIO_API_KEY:-}" ]]; then
+  DETECTED_KIND="agy"
+elif [[ -n "${CODEX_HOME:-}" || -n "${CODEX_CLI_PATH:-}" || -n "${CODEX_SANDBOX:-}" ]]; then
+  DETECTED_KIND="codex"
+elif [[ -n "${CLAUDE_CODE_ENTRYPOINT:-}" || -n "${CLAUDE_CODE_MAX_RETRIES:-}" || -n "${CLAUDE_SESSION_ID:-}" ]]; then
+  DETECTED_KIND="claude"
+elif [[ -n "${OPENCODE_SESSION_ID:-}" ]]; then
+  DETECTED_KIND="opencode"
+elif [[ -n "${CURSOR_AGENT:-}" ]]; then
+  DETECTED_KIND="cursor"
+fi
+
+AGENT_KIND="${HERDR_HANDOFF_AGENT_KIND:-$DETECTED_KIND}"
 TAB_LABEL=""
 TARGET_CWD="$PWD"
 CUSTOM_PROMPT=""
@@ -43,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --kind)
       AGENT_KIND="$2"
       shift 2
+
       ;;
     --label)
       TAB_LABEL="$2"
