@@ -129,10 +129,11 @@ All handoffs launch with permission-skipping enabled by default (`--dangerously-
 - Unsure → `plan`. `--model <name>` overrides both.
 
 ### Supported Agent Kinds (`--kind`):
-- `opencode` *(Default if user is in OpenCode or requested opencode)*
-- `claude` *(Default if user is in Claude Code or requested claude)*
-- `gemini` / `agy`
+- **Auto-detected by default** from the current session's environment (`agy`/`gemini` when in Antigravity, `codex` when in Codex, `claude` when in Claude Code, `opencode` when in OpenCode, `cursor` when in Cursor). Can be explicitly overridden with `--kind <name>` or `$HERDR_HANDOFF_AGENT_KIND`.
+- `agy` / `gemini`
+- `claude`
 - `codex`
+- `opencode`
 - `cursor`
 
 ### Behavior:
