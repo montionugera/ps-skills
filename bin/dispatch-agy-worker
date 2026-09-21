@@ -707,7 +707,7 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn, merge_lock=None):
                     if src_path.is_file():
                         dst_path.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(src_path, dst_path)
-            else:
+            elif not keep_worktree:
                 # Worker failed or timed out: salvage any partial work before removing worktree
                 try:
                     base_head_rev = subprocess.run(
@@ -1016,7 +1016,12 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir)
         return execute_worker_process(cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent)
 
+    def _own_exit(code):
+        # VERIFY_FAILED_EXIT_CODE is reserved for the dispatcher's verdict, never the worker's own exit status.
+        return 1 if code == VERIFY_FAILED_EXIT_CODE else code
+
     exit_code, stdout, stderr, is_timeout = _invoke_worker(task_text)
+    exit_code = _own_exit(exit_code)
 
     if exit_code == 0 and verify_cmd:
         for attempt in (1, 2):
@@ -1034,6 +1039,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
                     f"Last lines of the verify output:\n{verify_tail}"
                 )
                 exit_code, stdout, stderr, is_timeout = _invoke_worker(retry_prompt)
+                exit_code = _own_exit(exit_code)
                 if exit_code != 0:
                     break
         if exit_code == 0 and info["verified"] is not True:
@@ -1128,6 +1134,14 @@ def extract_tasks_from_plan(plan_path, target_phase=None):
                 extracted.append({"task": task_text, "context_files": [str(p)]})
 
     return extracted
+
+
+def batch_overall_exit(results):
+    """0 when every task succeeded; VERIFY_FAILED_EXIT_CODE when verify failures are the only failures; else 1."""
+    failures = [r.get("exit_code") for r in results if r.get("exit_code") != 0]
+    if not failures:
+        return 0
+    return VERIFY_FAILED_EXIT_CODE if all(ec == VERIFY_FAILED_EXIT_CODE for ec in failures) else 1
 
 
 def format_batch_report(results):
@@ -1336,14 +1350,11 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
         t_verify_info = {}
 
         def _execute(target_dir):
-            try:
-                return run_single_task(
-                    t_task, target_dir, t_agent, t_model, t_timeout,
-                    context_files=t_context_files, output_file=t_output_file, is_thinking=t_is_thinking,
-                    verify_opts=verify_opts_from(item), verify_info=t_verify_info,
-                )
-            except TypeError:
-                return run_single_task(t_task, target_dir, t_agent, t_model, t_timeout)
+            return run_single_task(
+                t_task, target_dir, t_agent, t_model, t_timeout,
+                context_files=t_context_files, output_file=t_output_file, is_thinking=t_is_thinking,
+                verify_opts=verify_opts_from(item), verify_info=t_verify_info,
+            )
 
         try:
             exit_code, stdout, stderr, files_changed, diff_summary = execute_in_isolated_worktree(
@@ -1505,15 +1516,15 @@ def main():
                 res.get("diff_summary", ""),
                 res.get("tail_output", ""),
                 artifact=res.get("output_file"),
-                context_count=len(res.get("context_files") or [])
+                context_count=len(res.get("context_files") or []),
+                verify_info=res,
             )
             print(rep)
             sys.exit(ec if ec is not None else 1)
         else:
             results_list = [completed_results.get(jid, {"task": jid, "agent": args.agent, "exit_code": 1, "files_changed": 0, "diff_summary": "error"}) for jid in target_ids]
             print(format_batch_report(results_list))
-            overall_ec = 0 if all(r.get("exit_code") == 0 for r in results_list) else 1
-            sys.exit(overall_ec)
+            sys.exit(batch_overall_exit(results_list))
 
     # 4. Quota check / evaluation
     effective_on_demand = args.allow_on_demand or (args.mode == "on_demand")
@@ -1736,8 +1747,7 @@ def main():
         )
         report = format_batch_report(results)
         print(report)
-        overall_exit = 0 if all(r.get("exit_code") == 0 for r in results) else 1
-        sys.exit(overall_exit)
+        sys.exit(batch_overall_exit(results))
 
     # Synchronous Single Task Execution
     print(f"Dispatching to {chosen_agent.upper()}{model_info} in {cwd} ({msg})...")

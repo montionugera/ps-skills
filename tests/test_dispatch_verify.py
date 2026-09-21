@@ -225,6 +225,37 @@ class TestRunSingleTaskVerify(VerifyTestBase):
         self.assertEqual(info["verified"], "skipped")
 
 
+class TestReviewFindings(VerifyTestBase):
+    def test_worker_own_exit_13_is_not_reported_as_verify_failure(self):
+        with self._fake_worker(f"exit {dispatch_mod.VERIFY_FAILED_EXIT_CODE}"):
+            (exit_code, *_), info = self._run(verify_cmd="true")
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(info["verified"], "skipped")
+        self.assertEqual(info["verify_attempts"], 0)
+
+    def test_batch_does_not_redispatch_without_verify_on_internal_typeerror(self):
+        calls = []
+
+        def _boom(*args, **kwargs):
+            calls.append(kwargs)
+            raise TypeError("bug inside run_single_task")
+
+        with mock.patch.object(dispatch_mod, "run_single_task", side_effect=_boom):
+            results = dispatch_mod.execute_batch_parallel(
+                [{"task": "t1", "verify_cmd": "true"}], base_repo_dir=str(self.repo_dir),
+                chosen_agent="agy", chosen_model=None, timeout_seconds=30, max_parallel=1,
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertIn("verify_opts", calls[0])
+        self.assertNotEqual(results[0]["exit_code"], 0)
+
+    def test_batch_overall_exit_code(self):
+        vf = dispatch_mod.VERIFY_FAILED_EXIT_CODE
+        self.assertEqual(dispatch_mod.batch_overall_exit([{"exit_code": 0}, {"exit_code": 0}]), 0)
+        self.assertEqual(dispatch_mod.batch_overall_exit([{"exit_code": 0}, {"exit_code": vf}]), vf)
+        self.assertEqual(dispatch_mod.batch_overall_exit([{"exit_code": 1}, {"exit_code": vf}]), 1)
+
+
 class TestVerifyBlocksMerge(VerifyTestBase):
     COMMIT_WORKER = (
         "echo new > worker_file.txt && git add worker_file.txt && "
@@ -267,6 +298,8 @@ class TestVerifyBlocksMerge(VerifyTestBase):
             self.assertTrue(kept and os.path.isdir(kept))
             self.assertTrue((Path(kept) / "worker_file.txt").exists())
             self.assertIn(kept, stderr)
+            # The kept worktree IS the preserved work: no extra salvage branch/patch clutter
+            self.assertNotIn("[Salvage]", stderr)
         finally:
             if kept:
                 subprocess.run(["git", "worktree", "remove", "--force", kept], cwd=self.repo_dir, capture_output=True)
