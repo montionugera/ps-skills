@@ -25,6 +25,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **ps-release-workflow-unclaim** | Abandon a claimed feature: remove its worktree and clear the claim (keeps the branch). |
 | **handoff** | Compact the session into an action-first handoff doc and spawn a fresh agent tab in Herdr; ships an optional Stop hook (`hooks/auto-handoff-stop.py`) that triggers it when context grows large. |
 | **agy-worker** | Offloads coding tasks to Antigravity CLI (`agy`) or Codex (`gpt-5.6-terra`) with proactive quota checking (`>30%` 5h, `>10%` weekly), auto-routing, fallback to Claude Sonnet, and standard ≤15-line reports. Binaries: `dispatch-agy-worker`, `dispatch-codex-worker`, `dispatch-worker`. |
+| **url-state-resilience** | Enforces URL-as-State, deep-linking, and reload resilience across web dashboards and SPAs; provides `check-url-state.sh` linter and `url-state-guard.py` hook for non-regression. |
 
 The thirteen `ps-release-workflow-*` skills are thin wrappers over a shared Python engine
 ([`engine/ps-release-workflow`](engine/ps-release-workflow)) — they call its scripts at runtime, so the
