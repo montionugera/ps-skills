@@ -156,8 +156,10 @@ class TestRunSingleTaskVerify(VerifyTestBase):
         self.assertEqual(info["verify_cmd"], "true")
 
     def test_verify_failure_retries_exactly_once_then_fails(self):
+        gate = self.tmp / "gate.sh"  # marker lives in the script body, not in the command text
+        _write_executable(gate, "#!/bin/sh\necho BOOM-MARKER\nexit 1\n")
         with self._fake_worker():
-            (exit_code, _out, stderr, *_), info = self._run(verify_cmd="echo BOOM-MARKER; false")
+            (exit_code, _out, stderr, *_), info = self._run(verify_cmd=str(gate))
         self.assertEqual(exit_code, dispatch_mod.VERIFY_FAILED_EXIT_CODE)
         self.assertEqual(self._worker_call_count(), 2)
         self.assertIs(info["verified"], False)
@@ -226,7 +228,7 @@ class TestRunSingleTaskVerify(VerifyTestBase):
 class TestVerifyBlocksMerge(VerifyTestBase):
     COMMIT_WORKER = (
         "echo new > worker_file.txt && git add worker_file.txt && "
-        "git commit -q -m 'worker commit'"
+        "git commit -q -m 'worker commit'; true"  # `; true`: the retry run has nothing new to commit
     )
 
     def _dispatch_isolated(self, **verify_opts):
