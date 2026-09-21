@@ -90,7 +90,24 @@ dispatch-worker --tail dw-1789785000-a1b2 -f    # Follow live output stream
 | `1` | **Execution Failed** | Re-dispatch or diagnose failure |
 | `2` | **Invalid Arguments** | Fix parameters |
 | `10` | **`FALLBACK_INTERNAL`** | External quota below threshold; dispatch internal Claude Sonnet agent |
+| `13` | **`VERIFY_FAILED`** | Worker exited 0 but the verify command failed twice (one automatic fix-up retry). Nothing was merged; the worktree path is in the report. Inspect it, do NOT re-dispatch blindly |
 | `12` | **`THINKER_UNAVAILABLE`** | deep-design-v1 capability unavailable or forbidden model; fail closed (do NOT fallback to inline runner) |
+
+### Verify Before Merge
+
+Exit code `0` from the worker is not acceptance. After the worker exits `0` and **before any merge**, the dispatcher runs a verify command inside the worker's worktree:
+
+```bash
+dispatch-worker --isolated --task "..." \
+  --verify-cmd "./scripts/precheck.sh" \          # default when that script exists and is executable
+  --verify-timeout 600 \                          # seconds; a timeout counts as failure
+  --acceptance-file path/to/acceptance.md          # or --acceptance "<text>"; becomes the prompt's "Acceptance criteria" section
+```
+
+- No `--verify-cmd` and no executable `scripts/precheck.sh`: the run proceeds with a one-line `UNVERIFIED` warning. `--no-verify` opts out explicitly.
+- On verify failure the same worker is re-invoked **once** with the last 40 lines of verify output, then verified again. A second failure is final: exit `13`, nothing merged, worktree left in place.
+- Every result carries the outcome: report line `Verified: true|false|skipped (<cmd>)`, and `verified` / `verify_cmd` in detached job state and batch results.
+- Always pass acceptance criteria. Omitting them only prints a warning, but the worker then has nothing but the task text to judge "done" by.
 
 ---
 
