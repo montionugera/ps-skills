@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_CLAUDE_INSTALLED = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
+DEFAULT_CLAUDE_SETTINGS = os.path.expanduser("~/.claude/settings.json")
 DEFAULT_GEMINI_PLUGINS = os.path.expanduser("~/.gemini/config/plugins")
 
 
@@ -36,12 +37,18 @@ class PluginBridge:
     def __init__(
         self,
         installed_json: str = DEFAULT_CLAUDE_INSTALLED,
+        claude_settings: str = DEFAULT_CLAUDE_SETTINGS,
         gemini_plugins_dir: str = DEFAULT_GEMINI_PLUGINS,
         dry_run: bool = False,
+        all_plugins: bool = False,
+        exclude: Optional[List[str]] = None,
     ):
         self.installed_json = Path(installed_json)
+        self.claude_settings = Path(claude_settings)
         self.gemini_plugins_dir = Path(gemini_plugins_dir)
         self.dry_run = dry_run
+        self.all_plugins = all_plugins
+        self.exclude = set(exclude or [])
         self.agy_bin = shutil.which("agy")
 
     def load_installed_plugins(self) -> Dict[str, Any]:
@@ -51,10 +58,39 @@ class PluginBridge:
         with open(self.installed_json, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    def load_enabled_plugins(self) -> Dict[str, bool]:
+        """Loads enabledPlugins mapping from Claude settings.json."""
+        if not self.claude_settings.is_file():
+            return {}
+        try:
+            with open(self.claude_settings, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("enabledPlugins", {})
+        except Exception:
+            return {}
+
+    def is_plugin_enabled(self, entry: Dict[str, Any], enabled_map: Dict[str, bool]) -> bool:
+        """Determines whether a plugin is enabled in Claude."""
+        if self.all_plugins:
+            return True
+        key = entry.get("key", "")
+        name = entry.get("name", "")
+        if name in self.exclude or key in self.exclude:
+            return False
+        # If explicitly set to False in settings, it is disabled
+        if enabled_map.get(key) is False or enabled_map.get(name) is False:
+            return False
+        # If explicitly set to True in settings, it is enabled
+        if enabled_map.get(key) is True or enabled_map.get(name) is True:
+            return True
+        # If not mentioned in enabledPlugins, default to True
+        return True
+
     def get_plugin_entries(self) -> List[Dict[str, Any]]:
         """Extracts normalized plugin details from installed_plugins.json."""
         data = self.load_installed_plugins()
         plugins_data = data.get("plugins", {})
+        enabled_map = self.load_enabled_plugins()
         entries = []
 
         for key, val in plugins_data.items():
@@ -63,13 +99,19 @@ class PluginBridge:
             install_path = item.get("installPath")
             version = item.get("version", "unknown")
 
-            entries.append({
+            ipath = Path(install_path) if install_path else None
+            skills_count = self.get_plugin_skills_count(ipath) if ipath and ipath.is_dir() else 0
+
+            entry = {
                 "key": key,
                 "name": name,
                 "version": version,
                 "install_path": install_path,
                 "target_path": self.gemini_plugins_dir / name,
-            })
+                "skills_count": skills_count,
+            }
+            entry["enabled"] = self.is_plugin_enabled(entry, enabled_map)
+            entries.append(entry)
 
         return entries
 
@@ -113,16 +155,22 @@ class PluginBridge:
         entries = self.get_plugin_entries()
         print(f"Claude Plugins ({len(entries)} installed):")
         print(f"Config source: {self.installed_json}")
+        print(f"Settings source: {self.claude_settings}")
         print(f"Gemini target: {self.gemini_plugins_dir}\n")
+
+        total_bridged_skills = 0
 
         for entry in entries:
             name = entry["name"]
             version = entry["version"]
             ipath = entry["install_path"]
             target = entry["target_path"]
+            enabled = entry["enabled"]
+            skills_count = entry["skills_count"]
 
-            print(f"• {name} (v{version})")
-            print(f"  Source: {ipath}")
+            status_enabled = "✔ enabled" if enabled else "⏸ disabled in Claude"
+            print(f"• {name} (v{version}) [{status_enabled}]")
+            print(f"  Source: {ipath} ({skills_count} skill{'s' if skills_count != 1 else ''})")
 
             if not ipath or not Path(ipath).is_dir():
                 print("  Status: ❌ Source path missing on disk\n")
@@ -134,23 +182,39 @@ class PluginBridge:
                 dest = os.readlink(target)
                 is_correct = os.path.abspath(dest) == os.path.abspath(ipath)
                 target_pj = target / "plugin.json"
-                skills_count = self.get_plugin_skills_count(target)
+                skills_count_target = self.get_plugin_skills_count(target)
                 has_pj = target_pj.is_file() or target_pj.is_symlink()
 
                 status_icon = "✔" if (is_correct and has_pj) else "⚠"
-                print(f"  Status: {status_icon} Symlinked -> {dest}")
-                print(f"          plugin.json: {'✔' if has_pj else '❌ missing'}, skills: {skills_count}")
+                warning_note = ""
+                if not enabled:
+                    warning_note = " (⚠️  bridged but disabled in Claude; bloats Antigravity context budget!)"
+                print(f"  Status: {status_icon} Symlinked -> {dest}{warning_note}")
+                print(f"          plugin.json: {'✔' if has_pj else '❌ missing'}, skills: {skills_count_target}")
+                total_bridged_skills += skills_count_target
                 if has_pj and self.agy_bin:
                     valid, msg = self.validate_with_agy(target)
                     print(f"          Antigravity: {'✔' if valid else '❌'} {msg}")
                 print()
             else:
                 target_pj = target / "plugin.json"
-                skills_count = self.get_plugin_skills_count(target)
+                skills_count_target = self.get_plugin_skills_count(target)
                 has_pj = target_pj.is_file() or target_pj.is_symlink()
-                print(f"  Status: 📁 Directory in ~/.gemini/config/plugins/{name}")
-                print(f"          plugin.json: {'✔' if has_pj else '❌ missing'}, skills: {skills_count}")
+                warning_note = ""
+                if not enabled:
+                    warning_note = " (⚠️  bridged but disabled in Claude; bloats Antigravity context budget!)"
+                print(f"  Status: 📁 Directory in ~/.gemini/config/plugins/{name}{warning_note}")
+                print(f"          plugin.json: {'✔' if has_pj else '❌ missing'}, skills: {skills_count_target}")
+                total_bridged_skills += skills_count_target
                 print()
+
+        print(f"Total skills in bridged plugins: {total_bridged_skills}")
+        if total_bridged_skills > 50:
+            print(
+                "⚠️  Warning: Total plugin skills exceed recommended budget for Antigravity (~50-80).\n"
+                "   Antigravity truncates skills alphabetically when prompt context budget is exceeded.\n"
+                "   Run 'ps-plugin-bridge --sync' to prune disabled plugins (e.g. ecc) from Antigravity.\n"
+            )
 
     def sync_plugins(self) -> int:
         """Bridges Claude plugins to Antigravity."""
@@ -168,6 +232,8 @@ class PluginBridge:
             name = entry["name"]
             ipath_str = entry["install_path"]
             target = entry["target_path"]
+            enabled = entry["enabled"]
+            skills_count = entry["skills_count"]
 
             if not ipath_str:
                 print(f"⚠️  [{name}] No installPath defined. Skipping.")
@@ -178,7 +244,22 @@ class PluginBridge:
                 print(f"⚠️  [{name}] Install path does not exist: {ipath}. Skipping.")
                 continue
 
-            print(f"==> [{name}] (v{entry['version']})")
+            # If plugin is disabled in Claude and not forced via all_plugins:
+            if not enabled:
+                print(f"==> [{name}] (v{entry['version']}) [disabled in Claude]")
+                if target.is_symlink() or target.exists():
+                    action_count += 1
+                    print(f"    Pruning disabled plugin from Antigravity: {target} (reclaims {skills_count} skills)")
+                    if not self.dry_run:
+                        if target.is_symlink() or target.is_file():
+                            target.unlink()
+                        else:
+                            shutil.rmtree(target)
+                else:
+                    print(f"    Skipped (disabled in Claude, saving {skills_count} skills from context budget)")
+                continue
+
+            print(f"==> [{name}] (v{entry['version']}) [enabled]")
 
             # 1. Determine if target will be symlink or existing directory
             will_be_symlink = False
@@ -294,6 +375,17 @@ def main():
         "--dry-run", "-n", action="store_true", help="Simulate actions without writing to disk"
     )
     parser.add_argument(
+        "--all", "-a", action="store_true", help="Bridge all installed plugins regardless of Claude enabledPlugins status"
+    )
+    parser.add_argument(
+        "--exclude", "-e", nargs="+", default=[], help="Exclude specific plugin names from being bridged"
+    )
+    parser.add_argument(
+        "--claude-settings",
+        default=DEFAULT_CLAUDE_SETTINGS,
+        help=f"Path to Claude settings.json (default: {DEFAULT_CLAUDE_SETTINGS})",
+    )
+    parser.add_argument(
         "--installed-json",
         default=DEFAULT_CLAUDE_INSTALLED,
         help=f"Path to installed_plugins.json (default: {DEFAULT_CLAUDE_INSTALLED})",
@@ -308,8 +400,11 @@ def main():
 
     bridge = PluginBridge(
         installed_json=args.installed_json,
+        claude_settings=args.claude_settings,
         gemini_plugins_dir=args.gemini_plugins_dir,
         dry_run=args.dry_run,
+        all_plugins=args.all,
+        exclude=args.exclude,
     )
 
     if args.list:

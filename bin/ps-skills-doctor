@@ -13,18 +13,28 @@ import argparse
 from pathlib import Path
 
 def main():
-    parser = argparse.ArgumentParser(description="Audit ps-skills runtime installation and parity.")
+    parser = argparse.ArgumentParser(description="Audit ps-skills runtime installation, parity, and Antigravity context health.")
     parser.add_argument("--strict", action="store_true", help="Exit with error code if any issue is detected")
+    parser.add_argument("--fix", action="store_true", help="Automatically repair broken symlinks and missing binary links")
     args = parser.parse_args()
 
     home = Path.home()
     issues = []
     warnings = []
+    fixed = []
 
-    # 1. Check for legacy uppercase .Codex
-    legacy_codex = home / ".Codex"
-    if legacy_codex.exists():
-        issues.append(f"Legacy uppercase directory exists: {legacy_codex} (must use lowercase .codex or .agents)")
+    # 1. Check for legacy uppercase .Codex (safe for case-insensitive filesystems like APFS)
+    is_uppercase_codex = False
+    try:
+        for child in home.iterdir():
+            if child.name == ".Codex":
+                is_uppercase_codex = True
+                break
+    except Exception:
+        pass
+
+    if is_uppercase_codex:
+        issues.append(f"Legacy uppercase directory exists: {home / '.Codex'} (must use lowercase .codex or .agents)")
 
     # 2. Check runtimes
     runtimes = {
@@ -38,7 +48,7 @@ def main():
 
     # 3. Check ~/.local/bin executables
     bin_home = home / ".local" / "bin"
-    critical_bins = ["dispatch-worker", "dispatch-thinker", "ps-skills-sync", "mesh"]
+    critical_bins = ["dispatch-worker", "dispatch-thinker", "ps-skills-sync", "mesh", "ps-plugin-bridge", "ps-skills-doctor"]
     for b in critical_bins:
         bp = bin_home / b
         if not bp.exists():
@@ -46,17 +56,87 @@ def main():
         elif not os.access(bp, os.X_OK):
             issues.append(f"Binary is not executable: {bp}")
 
-    # 4. Check broken symlinks in ~/.claude/skills and ~/.gemini/config/skills
-    for name, base_path in [("claude", home / ".claude" / "skills"), ("gemini", home / ".gemini" / "config" / "skills")]:
+    # Check ~/.gemini/antigravity-cli/bin executables
+    agy_bin = home / ".gemini" / "antigravity-cli" / "bin"
+    if agy_bin.is_dir():
+        for b in ["dispatch-thinker", "dispatch-worker", "dispatch-agy-worker", "ps-skills-doctor", "ps-plugin-bridge"]:
+            target_b = agy_bin / b
+            src_b = bin_home / b
+            if not target_b.exists():
+                if args.fix and src_b.exists():
+                    try:
+                        target_b.symlink_to(src_b)
+                        fixed.append(f"Linked agy CLI binary: {target_b} -> {src_b}")
+                    except Exception as e:
+                        issues.append(f"Failed to link {target_b}: {e}")
+                else:
+                    warnings.append(f"Binary not linked in agy CLI bin: {target_b} (run with --fix)")
+
+    # 4. Check broken symlinks in ~/.claude/skills, ~/.gemini/config/skills, and ~/.agents/skills
+    for name, base_path in [
+        ("claude", home / ".claude" / "skills"),
+        ("gemini", home / ".gemini" / "config" / "skills"),
+        ("agents", home / ".agents" / "skills"),
+    ]:
         if base_path.is_dir():
-            for item in base_path.iterdir():
+            for item in sorted(base_path.iterdir()):
                 if item.is_symlink() and not item.exists():
-                    issues.append(f"Broken symlink in {name} skills: {item} -> {os.readlink(item)}")
+                    target = os.readlink(item)
+                    if args.fix:
+                        try:
+                            item.unlink()
+                            fixed.append(f"Removed broken symlink in {name} skills: {item.name} -> {target}")
+                        except Exception as e:
+                            issues.append(f"Failed to remove broken symlink {item}: {e}")
+                    else:
+                        issues.append(f"Broken symlink in {name} skills: {item} -> {target}")
+
+    # 5. Antigravity Skill Context Budget Audit
+    gemini_skills_dir = home / ".gemini" / "config" / "skills"
+    gemini_plugins_dir = home / ".gemini" / "config" / "plugins"
+    gemini_standalone_skills = 0
+    if gemini_skills_dir.is_dir():
+        gemini_standalone_skills = sum(
+            1 for s in gemini_skills_dir.iterdir() if s.exists() and (s.is_dir() or s.is_symlink())
+        )
+
+    plugin_skills = {}
+    if gemini_plugins_dir.is_dir():
+        for p in sorted(gemini_plugins_dir.iterdir()):
+            if not p.exists():
+                continue
+            skills_dir = p / "skills"
+            count = 0
+            if skills_dir.is_dir():
+                for s in skills_dir.iterdir():
+                    if (s / "SKILL.md").is_file():
+                        count += 1
+                    elif s.is_dir():
+                        for sub in s.iterdir():
+                            if (sub / "SKILL.md").is_file():
+                                count += 1
+            if count > 0:
+                plugin_skills[p.name] = count
+
+    total_gemini_skills = gemini_standalone_skills + sum(plugin_skills.values())
+    if total_gemini_skills > 85:
+        top_culprits = ", ".join(f"{k} ({v})" for k, v in sorted(plugin_skills.items(), key=lambda x: -x[1])[:3])
+        warnings.append(
+            f"Antigravity context budget alert: {total_gemini_skills} total skills in ~/.gemini/config/.\n"
+            f"    Antigravity truncates prompt skills alphabetically if budget exceeded (~80-100 skills),\n"
+            f"    causing 'ps-*' and later skills to be dropped. Top plugins: {top_culprits}.\n"
+            f"    Fix: run 'ps-plugin-bridge --sync' to prune disabled plugins."
+        )
 
     # Report
     print("=== ps-skills-doctor ===")
+    if fixed:
+        print(f"🔧 {len(fixed)} Item(s) repaired:")
+        for f in fixed:
+            print(f"  + {f}")
+
     if not issues and not warnings:
-        print("✅ All runtime paths, symlinks, and binaries are healthy.")
+        print(f"✅ All runtime paths, symlinks, binaries, and Antigravity context budget ({total_gemini_skills} skills) are healthy.")
         return 0
 
     if warnings:
@@ -68,6 +148,8 @@ def main():
         print(f"❌ {len(issues)} Issue(s) detected:")
         for iss in issues:
             print(f"  - {iss}")
+        if not args.fix:
+            print("\nTip: Run 'ps-skills-doctor --fix' to automatically repair fixable issues.")
         if args.strict:
             return 1
 

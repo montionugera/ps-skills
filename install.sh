@@ -58,7 +58,7 @@ mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$AGENTS_HOME/skills" "$GEMI
 replace_destination() {  # dest
   local dest="$1"
   case "$dest" in
-    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge") ;;
+    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
     *) echo "refuse unsafe destination: $dest" >&2; return 1 ;;
   esac
   rm -rf -- "$dest"
@@ -161,6 +161,31 @@ reconcile_parity() {
       echo "symlink (parity): $dest -> $item"
     fi
   done
+
+  # Prune broken symlinks in GEMINI_HOME/skills
+  for item in "$GEMINI_HOME/skills"/*; do
+    if [[ -L "$item" && ! -e "$item" ]]; then
+      echo "prune broken symlink in gemini: $item"
+      rm -f "$item"
+    fi
+  done
+
+  # Link critical binaries to Antigravity CLI bin if present
+  local agy_bin="$HOME/.gemini/antigravity-cli/bin"
+  if [[ -d "$agy_bin" ]]; then
+    for b in dispatch-worker dispatch-thinker dispatch-agy-worker dispatch-codex-worker dispatch-cursor-worker ps-skills-sync ps-skills-doctor ps-plugin-bridge mesh mesh-run; do
+      if [[ -f "$REPO/bin/$b" ]]; then
+        link "$REPO/bin/$b" "$agy_bin/$b"
+      fi
+    done
+  fi
+
+  # Synchronize and prune Antigravity plugins to protect context budget
+  if [[ -x "$REPO/bin/ps-plugin-bridge" ]]; then
+    echo
+    echo "Synchronizing Antigravity plugins (ps-plugin-bridge --sync)..."
+    "$REPO/bin/ps-plugin-bridge" --sync || echo "ps-plugin-bridge warning: plugin sync had errors"
+  fi
 }
 
 if [[ "$PARITY" == "true" ]]; then
@@ -411,5 +436,11 @@ configure_dispatch
 echo
 echo "Installed into $CLAUDE_HOME, $AGENTS_HOME, $GEMINI_HOME, and $CURSOR_HOME. Restart Claude Code, Codex, Cursor, and Antigravity to pick up new skills."
 echo "ps-commu-explain is self-contained; ps-release-workflow-* use $CLAUDE_HOME/ps-release-workflow."
+
+if [[ -x "$REPO/bin/ps-skills-doctor" ]]; then
+  echo
+  "$REPO/bin/ps-skills-doctor" || true
+fi
+
 
 

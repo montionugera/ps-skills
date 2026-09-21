@@ -93,14 +93,23 @@ export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE="subscription_quota_remaining"
 export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3.8-flash > agy > codex"
 ```
 
-## Plugin Bridge (`ps-plugin-bridge`)
+## Plugin Bridge & Antigravity (agy) Context Budget (`ps-plugin-bridge`)
 
-Bridge Claude plugins (e.g. `superpowers`, `ecc`, `frontend-design`, `claude-obsidian`) directly into Google Antigravity CLI (`~/.gemini/config/plugins`):
+Bridge Claude plugins (e.g. `superpowers`, `frontend-design`) directly into Google Antigravity CLI (`~/.gemini/config/plugins`):
 
 ```bash
-ps-plugin-bridge --sync   # bridge and validate all installed Claude plugins into Antigravity
-ps-plugin-bridge --list   # inspect bridged plugins and validation status
+ps-plugin-bridge --sync   # bridge enabled Claude plugins and prune disabled ones (protects agy context budget)
+ps-plugin-bridge --list   # inspect bridged plugins, skill counts, and context budget status
+ps-skills-doctor --fix    # audit runtime health, repair broken symlinks, and link agy binaries
 ```
+
+### Why Antigravity (agy) Can Struggle to Detect Skills
+
+Antigravity CLI indexes all skills from `~/.gemini/config/skills/` and all sub-plugins in `~/.gemini/config/plugins/*/skills/`. However, Antigravity enforces a **strict context budget** for skills in its prompt:
+- If total discovered skills exceed ~80–100, Antigravity **alphabetically truncates** the skill list.
+- Because `ps-*` and `subagent-*` start late in the alphabet, mega-plugins (such as `ecc` with 270+ skills) cause `ps-release-workflow-*` and personal skills to be silently excluded from Antigravity sessions.
+- `ps-plugin-bridge --sync` automatically reads `~/.claude/settings.json`'s `enabledPlugins` and **prunes disabled plugins** from Antigravity so your skill roster remains compact, healthy, and fully visible to agy.
+
 
 ## Keeping in sync
 
