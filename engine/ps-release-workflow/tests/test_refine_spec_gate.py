@@ -226,3 +226,19 @@ def test_epic_run_skill_refines_through_psrw_and_never_uses_the_escape_hatch():
     assert "psrw refine I-NNN" in skill
     assert skill.count("--allow-empty-spec") == 1
     assert "never `--allow-empty-spec`" in skill
+
+
+# --- review fix: markdown inside a code fence is an example, not the spec ---
+
+def test_acceptance_section_inside_a_code_fence_does_not_count():
+    text = FILLED_SPEC.split("## Acceptance criteria")[0] + (
+        "## Sketch\n\n```markdown\n## Acceptance criteria\n\n- [ ] an example item\n```\n")
+    assert any("Acceptance criteria" in p for p in spec_readiness_problems(text))
+
+
+def test_checklist_item_inside_a_code_fence_does_not_count():
+    text = FILLED_SPEC.replace(
+        "- [ ] An order with a fee above the cap is rejected with a 422.",
+        "~~~\n- [ ] an example item\n~~~",
+    )
+    assert any("- [ ]" in p for p in spec_readiness_problems(text))

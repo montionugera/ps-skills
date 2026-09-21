@@ -26,6 +26,7 @@ DEFAULT_SOURCE = "~/.claude/CLAUDE.md"
 DEFAULT_TARGET = "~/.gemini/GEMINI.md"
 LOCAL_NAME = "GEMINI.local.md"
 MAX_IMPORT_DEPTH = 5
+DEFAULT_MODE = 0o644  # for a target that does not exist yet
 
 _IMPORT_RE = re.compile(r"^@(\S+)$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
@@ -110,6 +111,17 @@ def check(generated: str, target: Path, max_diff_lines: int) -> int:
     return 1
 
 
+def _free_backup_path(target: Path) -> Path:
+    """<target>.bak-<timestamp>, suffixed -1, -2, ... so a second write in the same
+    second can never overwrite an earlier backup."""
+    base = f"{target.name}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    candidate, n = target.with_name(base), 0
+    while candidate.exists() or candidate.is_symlink():
+        n += 1
+        candidate = target.with_name(f"{base}-{n}")
+    return candidate
+
+
 def write(generated: str, source: Path, target: Path) -> int:
     if target.is_symlink() or (target.exists() and target.resolve() == source.resolve()):
         raise SyncError(
@@ -118,9 +130,10 @@ def write(generated: str, source: Path, target: Path) -> int:
     if target.is_file() and target.read_text(encoding="utf-8") == generated:
         print(f"already in sync: {target}")
         return 0
+    mode = DEFAULT_MODE
     if target.exists():
-        backup = target.with_name(
-            f"{target.name}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+        mode = target.stat().st_mode & 0o777
+        backup = _free_backup_path(target)
         shutil.copy2(target, backup)
         print(f"backed up: {backup}")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -128,6 +141,7 @@ def write(generated: str, source: Path, target: Path) -> int:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(generated)
+        os.chmod(tmp, mode)  # mkstemp makes 0600; keep the target's own mode
         os.replace(tmp, target)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

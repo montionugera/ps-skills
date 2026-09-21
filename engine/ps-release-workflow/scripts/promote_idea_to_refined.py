@@ -114,14 +114,21 @@ def _is_untouched_skeleton(text: str, skeleton: str) -> bool:
 
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.*)$")
 _CHECKLIST_ITEM_RE = re.compile(r"^\s*[-*] \[[ xX]\]\s+\S")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
 
 def _has_acceptance_checklist(text: str, placeholders: list[str]) -> tuple[bool, bool]:
     """(heading present, real checklist item under it). The section ends at the
     next heading of any level, so a checklist elsewhere in the spec does not count;
-    neither does an item that is still the skeleton's placeholder."""
-    heading = item = in_section = False
+    neither does an item that is still the skeleton's placeholder, nor anything
+    inside a code fence (that is example markdown, not the spec)."""
+    heading = item = in_section = in_fence = False
     for line in text.splitlines():
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
         m = _HEADING_RE.match(line)
         if m:
             in_section = "acceptance criteria" in m.group(1).lower()

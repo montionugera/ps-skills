@@ -143,6 +143,46 @@ class TestWrite(SyncAgentRulesCase):
         self.assertFalse(self.target.exists())
 
 
+class TestWriteSafety(SyncAgentRulesCase):
+    """Review fixes: a backup is never clobbered and the file mode is never tightened."""
+
+    def _load(self):
+        from importlib.machinery import SourceFileLoader
+        from importlib.util import module_from_spec, spec_from_loader
+        loader = SourceFileLoader("sync_agent_rules", str(SCRIPT))
+        mod = module_from_spec(spec_from_loader("sync_agent_rules", loader))
+        loader.exec_module(mod)
+        return mod
+
+    def test_two_writes_in_the_same_second_keep_both_backups(self):
+        import datetime as real_datetime
+        mod = self._load()
+
+        class FrozenClock(real_datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 9, 21, 12, 0, 0)
+
+        mod.datetime = FrozenClock
+        self.target.write_text("state one\n")
+        mod.write("state two\n", self.source, self.target)
+        mod.write("state three\n", self.source, self.target)
+        contents = sorted(b.read_text() for b in self.backups())
+        self.assertEqual(contents, ["state one\n", "state two\n"])
+
+    def test_write_preserves_the_target_file_mode(self):
+        for mode in (0o644, 0o600):
+            with self.subTest(mode=oct(mode)):
+                self.target.write_text("hand copy\n")
+                self.target.chmod(mode)
+                self.assertEqual(self.run_tool("--write").returncode, 0)
+                self.assertEqual(self.target.stat().st_mode & 0o777, mode)
+
+    def test_a_new_target_is_world_readable_like_any_rules_file(self):
+        self.assertEqual(self.run_tool("--write").returncode, 0)
+        self.assertEqual(self.target.stat().st_mode & 0o777, 0o644)
+
+
 class TestCheck(SyncAgentRulesCase):
     def test_check_passes_after_write(self):
         self.run_tool("--write")

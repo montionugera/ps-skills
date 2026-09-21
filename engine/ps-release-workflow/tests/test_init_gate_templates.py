@@ -153,3 +153,17 @@ def test_gate2_stops_a_slot_at_its_first_failing_command(initialized: Path):
     proc = _run(script, DATABASE_URL="postgres://real/db")
     assert proc.returncode != 0
     assert "FAILED: data_reconciliation" in proc.stdout
+
+
+# --- review fix: "unfilled" is detected from the slot source, never from an exit code ---
+
+@pytest.mark.parametrize("name", ["precheck.sh", "integration.sh"])
+def test_a_filled_slot_exiting_64_is_a_failure_not_unfilled(initialized: Path, name: str):
+    script = initialized / "scripts" / name
+    slot = "unit_tests" if name == "precheck.sh" else "browser_smoke"
+    _fill(script, slot, "echo REAL_FAILURE; exit 64")
+    proc = _run(script, DATABASE_URL="postgres://real/db")
+    assert proc.returncode != 0
+    assert "REAL_FAILURE" in proc.stdout
+    assert f"FAILED: {slot}" in proc.stdout
+    assert f"UNFILLED GATE SLOT: {slot}" not in proc.stdout

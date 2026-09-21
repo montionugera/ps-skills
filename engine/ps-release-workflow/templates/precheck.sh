@@ -16,12 +16,15 @@ UNFILLED_IS_FAILURE=0
 # ---- slot runner (leave as is) ----------------------------------------------
 FAILED=0
 UNFILLED=0
-UNFILLED_RC=64
 
-unfilled() { echo "UNFILLED GATE SLOT: $SLOT"; return "$UNFILLED_RC"; }
+unfilled() { return 1; }   # placeholder body; run_slot detects it from the source
+
+slot_body() { sed -n "/^slot_$1() {/,/^}/p" "$SELF"; }
+
+is_unfilled() { slot_body "$1" | grep -Eq '^[[:space:]]*unfilled[[:space:]]*$'; }
 
 na_reason() {  # prints the reason when slot $1 carries a real "# n/a: ..." marker
-  sed -n "/^slot_$1() {/,/^}/p" "$SELF" \
+  slot_body "$1" \
     | sed -n 's/^[[:space:]]*# n\/a: \([^<[:space:]].*\)$/\1/p' | head -n 1
 }
 
@@ -32,6 +35,17 @@ run_slot() {
     echo "-- $SLOT: n/a ($reason)"
     return 0
   fi
+  # Unfilled is decided from the slot's SOURCE (it still holds the `unfilled`
+  # line), never from an exit code a real tool could also return.
+  if is_unfilled "$SLOT"; then
+    echo "UNFILLED GATE SLOT: $SLOT"
+    UNFILLED=$((UNFILLED + 1))
+    if [ "$UNFILLED_IS_FAILURE" -ne 0 ]; then
+      echo "FAILED: $SLOT"
+      FAILED=$((FAILED + 1))
+    fi
+    return 0
+  fi
   echo "== $SLOT"
   # Subshell with its own `set -e`, called outside any `if`, so the slot stops at
   # its FIRST failing command instead of reporting only the last one.
@@ -39,10 +53,6 @@ run_slot() {
   ( set -e; "slot_$SLOT" )
   rc=$?
   set -e
-  if [ "$rc" -eq "$UNFILLED_RC" ]; then
-    UNFILLED=$((UNFILLED + 1))
-    [ "$UNFILLED_IS_FAILURE" -eq 0 ] && return 0
-  fi
   if [ "$rc" -ne 0 ]; then
     echo "FAILED: $SLOT"
     FAILED=$((FAILED + 1))
