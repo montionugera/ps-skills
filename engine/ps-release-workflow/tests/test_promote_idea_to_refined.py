@@ -19,7 +19,7 @@ def test_creates_refined_folder(tmp_repo_with_release: Path):
     new_release(tmp_repo_with_release, version="1.1")
     wt = tmp_repo_with_release / ".claude" / "worktrees" / "_release"
     idea = new_idea(tmp_repo_with_release, title="Add fee cap")
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     folder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     assert folder.is_dir()
     assert (folder / "spec.md").exists()
@@ -34,7 +34,7 @@ def test_marks_idea_promoted(tmp_repo_with_release: Path):
     new_release(tmp_repo_with_release, version="1.1")
     wt = tmp_repo_with_release / ".claude" / "worktrees" / "_release"
     idea = new_idea(tmp_repo_with_release, title="X")
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     cat = json.loads((wt / ".claude" / "idea_backlog" / "_catalog.json").read_text())
     assert cat[0]["promoted_to"] == feat["id"]
 
@@ -43,7 +43,7 @@ def test_refined_status_is_open(tmp_repo_with_release: Path):
     new_release(tmp_repo_with_release, version="1.1")
     wt = tmp_repo_with_release / ".claude" / "worktrees" / "_release"
     idea = new_idea(tmp_repo_with_release, title="X")
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     refined_cat = json.loads(
         (wt / ".claude" / "refined_backlog" / "_catalog.json").read_text()
     )
@@ -54,20 +54,20 @@ def test_refined_status_is_open(tmp_repo_with_release: Path):
 def test_unknown_idea_raises(tmp_repo_with_release: Path):
     new_release(tmp_repo_with_release, version="1.1")
     with pytest.raises(IdeaNotFoundError):
-        promote_idea_to_refined(tmp_repo_with_release, idea_id="I-999")
+        promote_idea_to_refined(tmp_repo_with_release, idea_id="I-999", allow_empty_spec=True)
 
 
 def test_already_promoted_raises(tmp_repo_with_release: Path):
     new_release(tmp_repo_with_release, version="1.1")
     idea = new_idea(tmp_repo_with_release, title="X")
-    promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     with pytest.raises(AlreadyPromotedError):
-        promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+        promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
 
 
 def test_refuses_when_no_release_in_progress(tmp_repo_with_release: Path):
     with pytest.raises(NoReleaseInProgressError):
-        promote_idea_to_refined(tmp_repo_with_release, idea_id="I-001")
+        promote_idea_to_refined(tmp_repo_with_release, idea_id="I-001", allow_empty_spec=True)
 
 
 def test_mark_promoted_failure_leaves_no_orphan_refined_entry(
@@ -89,7 +89,7 @@ def test_mark_promoted_failure_leaves_no_orphan_refined_entry(
 
     monkeypatch.setattr(promote_mod, "mark_promoted", boom)
     with pytest.raises(CatalogEntryNotFoundError):
-        promote_idea_to_refined(repo, idea_id=idea["id"])
+        promote_idea_to_refined(repo, idea_id=idea["id"], allow_empty_spec=True)
     monkeypatch.undo()
 
     refined_cat = json.loads(
@@ -100,7 +100,7 @@ def test_mark_promoted_failure_leaves_no_orphan_refined_entry(
         "the refined folder must be rolled back"
 
     # Retry must mint F-001 again — not an orphan-skipping F-002.
-    feat = promote_idea_to_refined(repo, idea_id=idea["id"])
+    feat = promote_idea_to_refined(repo, idea_id=idea["id"], allow_empty_spec=True)
     assert feat["id"] == "F-001"
 
 
@@ -188,7 +188,7 @@ def test_carries_filled_research_forward_byte_for_byte(tmp_repo_with_release: Pa
     ifolder = _idea_folder(wt, idea["id"], "add-fee-cap")
     (ifolder / "research.md").write_text(FILLED_RESEARCH)
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
 
     assert (ffolder / "research.md").read_text() == FILLED_RESEARCH
@@ -207,7 +207,7 @@ def test_carries_filled_spec_body_and_rewrites_frontmatter(tmp_repo_with_release
         + FILLED_SPEC_BODY
     )
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     text = (ffolder / "spec.md").read_text()
 
@@ -232,7 +232,7 @@ def test_untouched_idea_spec_is_replaced_by_the_f_skeleton(tmp_repo_with_release
     wt = tmp_repo_with_release / ".claude" / "worktrees" / "_release"
     idea = new_idea(tmp_repo_with_release, title="Add fee cap")
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     spec = (ffolder / "spec.md").read_text()
     assert "— design" in spec
@@ -250,7 +250,7 @@ def test_legacy_idea_plan_with_content_is_preserved(tmp_repo_with_release: Path)
     body = "# Add fee cap Implementation Plan\n\n## Task 1\n\nClamp in the service.\n"
     (ifolder / "plan.md").write_text(body)
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     assert (ffolder / "plan.md").read_text() == body
 
@@ -266,7 +266,7 @@ def test_legacy_idea_plan_skeleton_is_replaced(tmp_repo_with_release: Path):
         "Empty until promoted to F-NNN and filled via `/superpowers:writing-plans`.\n"
     )
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     assert "Implementation Plan" in (ffolder / "plan.md").read_text()
 
@@ -279,7 +279,7 @@ def test_carried_files_are_committed(tmp_repo_with_release: Path):
     idea = new_idea(tmp_repo_with_release, title="Add fee cap")
     ifolder = _idea_folder(wt, idea["id"], "add-fee-cap")
     (ifolder / "research.md").write_text(FILLED_RESEARCH)
-    promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     status = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"],
                             capture_output=True, text=True)
     assert status.stdout.strip() == ""
@@ -293,7 +293,7 @@ def test_promote_works_when_idea_folder_is_missing(tmp_repo_with_release: Path):
     idea = new_idea(tmp_repo_with_release, title="Add fee cap")
     _shutil.rmtree(_idea_folder(wt, idea["id"], "add-fee-cap"))
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     assert sorted(f.name for f in ffolder.iterdir()) == ["plan.md", "spec.md"]
 
@@ -309,7 +309,7 @@ def test_undecodable_spec_and_plan_are_never_overwritten(tmp_repo_with_release: 
     (ifolder / "spec.md").write_bytes(blob)
     (ifolder / "plan.md").write_bytes(blob)
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     assert (ffolder / "spec.md").read_bytes() == blob
     assert (ffolder / "plan.md").read_bytes() == blob
@@ -335,7 +335,7 @@ def test_multiline_frontmatter_values_survive_the_identity_rewrite(tmp_repo_with
         "---\n\n" + FILLED_SPEC_BODY
     )
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     fm = (ffolder / "spec.md").read_text().split("---")[1]
     assert "  - fees" in fm
@@ -356,7 +356,7 @@ def test_frontmatter_closing_at_eof_without_newline_does_not_crash(tmp_repo_with
         f'---\ntitle: "Add fee cap"\nid: {idea["id"]}\nstatus: idea\nowner: pasit\n---'
     )
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     text = (ffolder / "spec.md").read_text()
     assert f"id: {feat['id']}" in text
@@ -382,7 +382,7 @@ def test_leading_rule_that_is_not_frontmatter_is_never_rewritten(tmp_repo_with_r
     )
     (ifolder / "spec.md").write_text(original)
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     text = (ffolder / "spec.md").read_text()
     # Not one character of the original is lost.
@@ -404,7 +404,7 @@ def test_leading_rule_over_prose_is_preserved(tmp_repo_with_release: Path):
     original = "---\nWe are still unsure about the cap.\n---\n\n" + FILLED_SPEC_BODY
     (ifolder / "spec.md").write_text(original)
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     text = (ffolder / "spec.md").read_text()
     assert original in text
@@ -423,7 +423,7 @@ def test_skeleton_plus_one_appended_line_counts_as_content(tmp_repo_with_release
     research_plus = (ifolder / "research.md").read_text() + "\nSee QUANT-441.\n"
     (ifolder / "research.md").write_text(research_plus)
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
 
     spec = (ffolder / "spec.md").read_text()
@@ -445,7 +445,7 @@ def test_spec_with_only_frontmatter_edited_counts_as_content(tmp_repo_with_relea
     )
     (ifolder / "spec.md").write_text(edited)
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     spec = (ffolder / "spec.md").read_text()
     assert "owner: pasit" in spec
@@ -463,7 +463,7 @@ def test_undecodable_research_is_never_deleted(tmp_repo_with_release: Path):
     blob = b"# Add fee cap \x92 research\n\nThe broker\x92s cap.\n"
     (ifolder / "research.md").write_bytes(blob)
 
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea_id=idea["id"], allow_empty_spec=True)
     ffolder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-add-fee-cap"
     assert (ffolder / "research.md").read_bytes() == blob
 
@@ -472,7 +472,7 @@ def test_refine_carries_the_epic_tag_forward(tmp_repo_in_release, fixed_owner):
     repo = tmp_repo_in_release
     idea_cat = get_backlog_catalog_path(repo, "idea")
     add_idea_entry(idea_cat, "slice a", epic="E-001")
-    result = promote_idea_to_refined(repo, "I-001")
+    result = promote_idea_to_refined(repo, "I-001", allow_empty_spec=True)
     refined = json.loads(get_backlog_catalog_path(repo, "refined").read_text())
     assert refined[0]["epic"] == "E-001"
     assert refined[0]["id"] == result["id"]

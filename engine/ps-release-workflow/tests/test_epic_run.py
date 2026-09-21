@@ -53,7 +53,7 @@ def test_plan_only_lists_allowlisted_slices(epic_repo):
 
 def test_plan_reports_every_state_and_action(epic_repo):
     repo = epic_repo
-    feature = promote_idea_to_refined(repo, "I-001")["id"]
+    feature = promote_idea_to_refined(repo, "I-001", allow_empty_spec=True)["id"]
     out = epic_plan(repo, "E-001", "I-001,I-002")
     assert [(s["state"], s["action"]) for s in out["slices"]] == [
         ("refined", "claim"), ("idea", "refine")]
@@ -112,14 +112,14 @@ def test_plan_refuses_a_settled_or_in_flight_epic(epic_repo, state):
 
 
 def test_plan_refuses_a_slice_that_is_already_promoted(epic_repo):
-    feature = promote_idea_to_refined(epic_repo, "I-001")["id"]
+    feature = promote_idea_to_refined(epic_repo, "I-001", allow_empty_spec=True)["id"]
     mark_promoted_to_main(get_backlog_catalog_path(epic_repo, "refined"), feature)
     message = _plan_error(epic_repo, "E-001", "I-001")
     assert "I-001" in message and "already promoted" in message
 
 
 def test_plan_refuses_a_slice_shipped_on_another_release(epic_repo):
-    feature = promote_idea_to_refined(epic_repo, "I-001")["id"]
+    feature = promote_idea_to_refined(epic_repo, "I-001", allow_empty_spec=True)["id"]
     mark_shipped(get_backlog_catalog_path(epic_repo, "refined"), feature, "0.9")
     assert "0.9" in _plan_error(epic_repo, "E-001", "I-001")
 
@@ -140,7 +140,7 @@ def test_plan_refuses_an_untouched_new_idea_skeleton_spec(epic_repo, idea_spec):
 
 
 def test_plan_ignores_the_spec_of_an_already_shipped_slice(epic_repo, idea_spec):
-    feature = promote_idea_to_refined(epic_repo, "I-001")["id"]
+    feature = promote_idea_to_refined(epic_repo, "I-001", allow_empty_spec=True)["id"]
     mark_shipped(get_backlog_catalog_path(epic_repo, "refined"), feature, "1.1")
     idea_spec(epic_repo, "I-001").write_text(
         IDEA_SPEC_TEMPLATE.format(title="alpha", id="I-001"))   # skeleton again
@@ -214,7 +214,7 @@ def test_cli_plan_refusal_is_one_error_line_not_a_traceback(epic_repo, monkeypat
 @pytest.fixture
 def slice_worktree(epic_repo):
     """(repo, feature worktree, F-id) for slice I-001, refined then claimed."""
-    feature = promote_idea_to_refined(epic_repo, "I-001")["id"]
+    feature = promote_idea_to_refined(epic_repo, "I-001", allow_empty_spec=True)["id"]
     claimed = claim_feature(epic_repo, feature, owner="chain-owner")
     return epic_repo, Path(claimed["worktree"]), feature
 

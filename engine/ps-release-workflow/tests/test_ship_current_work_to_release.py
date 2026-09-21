@@ -37,7 +37,7 @@ def _make_repo_with_open_release_and_claim(tmp_repo_with_release: Path, fixed_ow
         _scaffold_precheck(tmp_repo_with_release)
     new_release(tmp_repo_with_release, version="1.1")
     idea = new_idea(tmp_repo_with_release, title="Add fee cap")
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"], allow_empty_spec=True)
     claim = claim_feature(tmp_repo_with_release, feat["id"], owner=fixed_owner)
     return feat, claim
 
@@ -166,7 +166,7 @@ def test_two_features_ship_into_same_release(tmp_repo_with_release: Path, fixed_
 
     # Feature A.
     idea_a = new_idea(tmp_repo_with_release, title="Feature A")
-    feat_a = promote_idea_to_refined(tmp_repo_with_release, idea_a["id"])
+    feat_a = promote_idea_to_refined(tmp_repo_with_release, idea_a["id"], allow_empty_spec=True)
     claim_a = claim_feature(tmp_repo_with_release, feat_a["id"], owner=fixed_owner)
     wt_a = Path(claim_a["worktree"])
     (wt_a / "feature_a.txt").write_text("A")
@@ -176,7 +176,7 @@ def test_two_features_ship_into_same_release(tmp_repo_with_release: Path, fixed_
 
     # Feature B.
     idea_b = new_idea(tmp_repo_with_release, title="Feature B")
-    feat_b = promote_idea_to_refined(tmp_repo_with_release, idea_b["id"])
+    feat_b = promote_idea_to_refined(tmp_repo_with_release, idea_b["id"], allow_empty_spec=True)
     claim_b = claim_feature(tmp_repo_with_release, feat_b["id"], owner=fixed_owner)
     wt_b = Path(claim_b["worktree"])
     (wt_b / "feature_b.txt").write_text("B")
@@ -555,7 +555,7 @@ def _ship_single_slice_epic_feature(repo: Path, fixed_owner: str, epic_check_bod
     epic_id = epic["epic"]["id"]
     fan = epic_fanout(repo, epic_id, ["cap it"])
     idea_id = fan["ideas"][0]["id"]
-    feat = promote_idea_to_refined(repo, idea_id)
+    feat = promote_idea_to_refined(repo, idea_id, allow_empty_spec=True)
     claim = claim_feature(repo, feat["id"], owner=fixed_owner)
     wt = Path(claim["worktree"])
     _commit_feature_file(wt)

@@ -10,6 +10,7 @@ from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,7 +26,10 @@ from lib.slug import slugify
 from lib.state import file_lock
 
 
-SPEC_TEMPLATE = """\
+# The skeleton as stamped before the Acceptance criteria section existed. Kept as
+# the shared prefix (not a second copy) so ideas captured earlier are still
+# recognised as untouched skeletons.
+LEGACY_SPEC_TEMPLATE = """\
 ---
 title: "{title}"
 id: {id}
@@ -46,6 +50,28 @@ status: idea
 
 (rough shape; not a design yet)
 """
+
+SPEC_TEMPLATE = LEGACY_SPEC_TEMPLATE + """
+## Acceptance criteria
+
+- [ ] (one observable, testable outcome per item; refine refuses a spec without any)
+"""
+
+# A placeholder is a whole template line in parentheses, optionally behind a
+# checklist marker. Derived from SPEC_TEMPLATE so the refine gate can never drift
+# from the skeleton this script actually stamps.
+_PLACEHOLDER_LINE_RE = re.compile(r"^(?:[-*] \[ \] )?(\(.+\))$")
+
+
+def idea_spec_placeholders() -> list[str]:
+    """Every fill-me-in line of the idea spec skeleton, read from SPEC_TEMPLATE."""
+    found = []
+    for line in SPEC_TEMPLATE.splitlines():
+        m = _PLACEHOLDER_LINE_RE.match(line.strip())
+        if m:
+            found.append(m.group(1))
+    return found
+
 
 RESEARCH_TEMPLATE = """\
 # {title} — research notes

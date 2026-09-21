@@ -27,7 +27,7 @@ from scripts.unclaim import (
 def _setup_claimed_feature(repo: Path, owner: str = "session-a") -> tuple[dict, dict]:
     new_release(repo, version="1.1")
     idea = new_idea(repo, title="X")
-    feat = promote_idea_to_refined(repo, idea["id"])
+    feat = promote_idea_to_refined(repo, idea["id"], allow_empty_spec=True)
     claimed = claim_feature(repo, feat["id"], owner=owner)
     return feat, claimed
 
@@ -73,7 +73,7 @@ def _ship_completed_epic_feature(repo: Path, owner: str) -> tuple[str, dict]:
     epic_id = epic["epic"]["id"]
     fan = epic_fanout(repo, epic_id, ["cap it"])
     idea_id = fan["ideas"][0]["id"]
-    feat = promote_idea_to_refined(repo, idea_id)
+    feat = promote_idea_to_refined(repo, idea_id, allow_empty_spec=True)
     claim = claim_feature(repo, feat["id"], owner=owner)
     wt = Path(claim["worktree"])
     (wt / "feature.txt").write_text("x")
@@ -146,7 +146,7 @@ def test_unclaim_leaves_a_non_verified_epic_untouched(tmp_repo_with_release: Pat
     epic = epic_open(repo, "Cap the risk")
     epic_id = epic["epic"]["id"]
     fan = epic_fanout(repo, epic_id, ["cap it"])
-    feat = promote_idea_to_refined(repo, fan["ideas"][0]["id"])
+    feat = promote_idea_to_refined(repo, fan["ideas"][0]["id"], allow_empty_spec=True)
     claim_feature(repo, feat["id"], owner=fixed_owner)
 
     wt = get_release_worktree(repo)
@@ -237,7 +237,7 @@ def test_unclaim_refuses_feature_not_claimed(tmp_repo_with_release: Path):
     repo = tmp_repo_with_release
     new_release(repo, version="1.1")
     idea = new_idea(repo, title="X")
-    feat = promote_idea_to_refined(repo, idea["id"])  # status: open
+    feat = promote_idea_to_refined(repo, idea["id"], allow_empty_spec=True)  # status: open
 
     with pytest.raises(NotClaimedError):
         unclaim_feature(repo, feat["id"])

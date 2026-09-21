@@ -24,7 +24,7 @@ from scripts.init_work_refined_backlog import (
 def _setup_feature(repo: Path, title: str = "X") -> dict:
     """Open a release (so the _release worktree exists), capture+promote one idea."""
     idea = new_idea(repo, title=title)
-    return promote_idea_to_refined(repo, idea["id"])
+    return promote_idea_to_refined(repo, idea["id"], allow_empty_spec=True)
 
 
 def test_claim_creates_worktree_with_marker(tmp_repo_with_release: Path, fixed_owner: str):
@@ -89,7 +89,7 @@ def test_claim_next_picks_first_unclaimed(tmp_repo_with_release: Path, fixed_own
     new_release(tmp_repo_with_release, version="1.1")
     for t in ["A", "B", "C"]:
         idea = new_idea(tmp_repo_with_release, title=t)
-        promote_idea_to_refined(tmp_repo_with_release, idea["id"])
+        promote_idea_to_refined(tmp_repo_with_release, idea["id"], allow_empty_spec=True)
     claim_feature(tmp_repo_with_release, "F-001", owner=fixed_owner)
     result = claim_feature(tmp_repo_with_release, None, owner="other", select_next=True)
     assert result["feature"] == "F-002"

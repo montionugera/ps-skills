@@ -33,12 +33,15 @@ from lib.git_ops import commit_all
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
 from lib.slug import slugify
 from lib.state import file_lock, mutate_state
+from scripts import new_idea as _new_idea
+from scripts.new_idea import LEGACY_SPEC_TEMPLATE as LEGACY_IDEA_SPEC_TEMPLATE
 from scripts.new_idea import RESEARCH_TEMPLATE as IDEA_RESEARCH_TEMPLATE
 from scripts.new_idea import SPEC_TEMPLATE as IDEA_SPEC_TEMPLATE
 
 
 class IdeaNotFoundError(Exception): pass
 class AlreadyPromotedError(Exception): pass
+class SpecNotReadyError(Exception): pass
 
 
 SPEC_TEMPLATE = """\
@@ -107,6 +110,70 @@ def _is_untouched_skeleton(text: str, skeleton: str) -> bool:
     keeping a skeleton by mistake is harmless and destroying content is not.
     """
     return _normalized(text) == _normalized(skeleton)
+
+
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.*)$")
+_CHECKLIST_ITEM_RE = re.compile(r"^\s*[-*] \[[ xX]\]\s+\S")
+
+
+def _has_acceptance_checklist(text: str, placeholders: list[str]) -> tuple[bool, bool]:
+    """(heading present, real checklist item under it). The section ends at the
+    next heading of any level, so a checklist elsewhere in the spec does not count;
+    neither does an item that is still the skeleton's placeholder."""
+    heading = item = in_section = False
+    for line in text.splitlines():
+        m = _HEADING_RE.match(line)
+        if m:
+            in_section = "acceptance criteria" in m.group(1).lower()
+            heading = heading or in_section
+        elif (in_section and _CHECKLIST_ITEM_RE.match(line)
+              and not any(ph in line for ph in placeholders)):
+            item = True
+    return heading, item
+
+
+def spec_readiness_problems(text: str) -> list[str]:
+    """Why this idea spec is not ready to refine; empty when it is.
+
+    Two mechanical checks: no line of the idea skeleton is still unfilled (the
+    placeholders are read from new_idea.SPEC_TEMPLATE, never copied here), and
+    there is an "Acceptance criteria" heading with at least one `- [ ]` item.
+    """
+    placeholders = _new_idea.idea_spec_placeholders()
+    problems = [
+        f"unfilled template placeholder: {placeholder}"
+        for placeholder in placeholders
+        if placeholder in text
+    ]
+    heading, item = _has_acceptance_checklist(text, placeholders)
+    if not heading:
+        problems.append('no "Acceptance criteria" heading')
+    elif not item:
+        problems.append('"Acceptance criteria" has no checklist item (- [ ] ...)')
+    return problems
+
+
+def _check_spec_ready(spec: Path, idea_id: str, *, allow_empty_spec: bool) -> None:
+    """Refuse (or, with the escape hatch, warn about) an unready idea spec."""
+    text = _read_text(spec)
+    if text is None:
+        problems = [f"spec.md is missing or not readable as text: {spec}"]
+    else:
+        problems = spec_readiness_problems(text)
+    if not problems:
+        return
+    listing = "\n".join(f"  - {p}" for p in problems)
+    if allow_empty_spec:
+        print(
+            f"WARNING: refining {idea_id} with an unready spec "
+            f"(--allow-empty-spec):\n{listing}",
+            file=sys.stderr,
+        )
+        return
+    raise SpecNotReadyError(
+        f"{idea_id} spec is not ready to refine ({spec}):\n{listing}\n"
+        f"Fill the spec in first, or pass --allow-empty-spec to refine anyway."
+    )
 
 
 def _read_text(path: Path) -> str | None:
@@ -206,8 +273,9 @@ def _carry_forward(idea_folder: Path, folder: Path, *, title: str,
     if not spec.exists():
         spec.write_text(SPEC_TEMPLATE.format(title=title, id=feat_id, from_idea=idea_id))
     elif carried_spec is not None:
-        if _is_untouched_skeleton(
-            carried_spec, IDEA_SPEC_TEMPLATE.format(title=title, id=idea_id)
+        if any(
+            _is_untouched_skeleton(carried_spec, skeleton.format(title=title, id=idea_id))
+            for skeleton in (IDEA_SPEC_TEMPLATE, LEGACY_IDEA_SPEC_TEMPLATE)
         ):
             spec.write_text(
                 SPEC_TEMPLATE.format(title=title, id=feat_id, from_idea=idea_id)
@@ -235,7 +303,8 @@ def _carry_forward(idea_folder: Path, folder: Path, *, title: str,
         research.unlink()
 
 
-def promote_idea_to_refined(repo: Path, idea_id: str) -> dict:
+def promote_idea_to_refined(repo: Path, idea_id: str, *,
+                            allow_empty_spec: bool = False) -> dict:
     repo = Path(repo)
     if not is_ps_release_workflow_repo(repo):
         raise RuntimeError(f"{repo} not opted into ps-release-workflow")
@@ -249,6 +318,11 @@ def promote_idea_to_refined(repo: Path, idea_id: str) -> dict:
         raise IdeaNotFoundError(idea_id)
     if idea.get("promoted_to"):
         raise AlreadyPromotedError(f"{idea_id} already promoted to {idea['promoted_to']}")
+
+    # The spec gate runs BEFORE anything is minted, so a refusal leaves no state
+    # to roll back. It lives here, not in main(), so every caller passes through it.
+    idea_folder = wt / ".claude" / "idea_backlog" / f"{idea_id}-{slugify(idea['title'])}"
+    _check_spec_ready(idea_folder / "spec.md", idea_id, allow_empty_spec=allow_empty_spec)
 
     ref_cat = get_backlog_catalog_path(repo, "refined")
 
@@ -267,9 +341,6 @@ def promote_idea_to_refined(repo: Path, idea_id: str) -> dict:
         folder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-{slugify(idea['title'])}"
         try:
             folder.mkdir(parents=True)
-            idea_folder = (
-                wt / ".claude" / "idea_backlog" / f"{idea_id}-{slugify(idea['title'])}"
-            )
             _carry_forward(
                 idea_folder, folder,
                 title=idea["title"], idea_id=idea_id, feat_id=feat["id"],
@@ -300,12 +371,19 @@ def main() -> int:
         description="Promote a captured idea (I-NNN) into a refined feature (F-NNN).",
     )
     p.add_argument("idea_id", metavar="I-NNN", help="the idea id to promote")
+    p.add_argument(
+        "--allow-empty-spec", action="store_true",
+        help="refine even if spec.md still has template placeholders or no "
+             "acceptance-criteria checklist (prints a warning)",
+    )
     args = p.parse_args()
     idea_id = args.idea_id
     repo = find_repo_root(Path.cwd())
     try:
-        feat = promote_idea_to_refined(repo, idea_id)
-    except (IdeaNotFoundError, AlreadyPromotedError, CatalogEntryNotFoundError,
+        feat = promote_idea_to_refined(
+            repo, idea_id, allow_empty_spec=args.allow_empty_spec)
+    except (IdeaNotFoundError, AlreadyPromotedError, SpecNotReadyError,
+            CatalogEntryNotFoundError,
             RuntimeError, NoReleaseInProgressError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

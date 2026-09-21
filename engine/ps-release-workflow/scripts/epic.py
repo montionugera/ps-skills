@@ -20,6 +20,7 @@ from lib.hooks import HookPathError, resolve_hook
 from lib.repo import find_repo_root
 from lib.slug import SlugError, slugify
 from lib.state import file_lock, mutate_state
+from scripts.new_idea import LEGACY_SPEC_TEMPLATE as LEGACY_IDEA_SPEC_TEMPLATE
 from scripts.new_idea import SPEC_TEMPLATE as IDEA_SPEC_TEMPLATE
 from scripts.promote_idea_to_refined import _is_untouched_skeleton
 from scripts.ship_current_work_to_release import (
@@ -257,6 +258,7 @@ def _slice_spec_is_skeleton(rel_wt: Path, idea: dict) -> bool:
     skeletons = (
         _fanout_idea_spec(idea["title"], idea["id"]),
         IDEA_SPEC_TEMPLATE.format(title=idea["title"], id=idea["id"]),
+        LEGACY_IDEA_SPEC_TEMPLATE.format(title=idea["title"], id=idea["id"]),
     )
     return any(_is_untouched_skeleton(text, skeleton) for skeleton in skeletons)
 
