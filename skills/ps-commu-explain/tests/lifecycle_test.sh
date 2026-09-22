@@ -97,16 +97,29 @@ test_sweep_spares_live() {              # >3d old but live marker-verified serve
   (( alive ))
 }
 
+test_init_writes_workspace_files() {  # Task 4: 00-brief/01-facts/02-storyboard skeletons
+  "$S/init.sh" t-wsfiles --tier html >/dev/null
+  [[ -f /tmp/ps-commu/t-wsfiles/00-brief.md ]] &&
+  [[ -f /tmp/ps-commu/t-wsfiles/01-facts.md ]] &&
+  [[ -f /tmp/ps-commu/t-wsfiles/02-storyboard.md ]]
+}
+
 check init_creates     test_init_creates
 check init_bad_slug    test_init_bad_slug
 check sweep_old_dead   test_sweep_old_dead
 check sweep_spares_live test_sweep_spares_live
+check init_writes_workspace_files test_init_writes_workspace_files
 
 # --- serve.sh / stop.sh ---
+# NOTE on --tier html + --no-lint below: serve.sh now runs scripts/lint.sh
+# before serving (Task 4). These tests exercise HTTP/process mechanics only —
+# they overwrite app/index.html directly and never author 00-brief.md /
+# 01-facts.md / 02-storyboard.md — so they use --tier html (accurate for what
+# they test) and --no-lint (the authoring chain is out of scope for them).
 test_serve_html() {
-  "$S/init.sh" t-serve >/dev/null
+  "$S/init.sh" t-serve --tier html >/dev/null
   echo '<h1>hello t-serve</h1>' > /tmp/ps-commu/t-serve/app/index.html
-  "$S/serve.sh" t-serve >/dev/null
+  "$S/serve.sh" t-serve --no-lint >/dev/null
   local port; port="$(meta_get t-serve port)"
   curl -sf "http://127.0.0.1:$port/" | grep -q 'hello t-serve'
 }
@@ -120,17 +133,17 @@ test_bind_localhost_only() { # D9: listening on 127.0.0.1, not *
   ! lsof -nP -iTCP:"$port" -sTCP:LISTEN | grep -q '\*:'
 }
 test_port_retry() {          # D3: occupied candidate port → next one taken
-  "$S/init.sh" t-retry >/dev/null
+  "$S/init.sh" t-retry --tier html >/dev/null
   meta_set t-retry port "$(meta_get t-serve port)"   # force collision
   echo ok > /tmp/ps-commu/t-retry/app/index.html
-  "$S/serve.sh" t-retry >/dev/null
+  "$S/serve.sh" t-retry --no-lint >/dev/null
   [[ "$(meta_get t-retry port)" != "$(meta_get t-serve port)" ]] &&
   curl -sf "http://127.0.0.1:$(meta_get t-retry port)/" >/dev/null
 }
 test_watchdog_fires() {      # D6 with marker check
-  "$S/init.sh" t-watch >/dev/null
+  "$S/init.sh" t-watch --tier html >/dev/null
   echo ok > /tmp/ps-commu/t-watch/app/index.html
-  "$S/serve.sh" t-watch --keep-alive 3s >/dev/null
+  "$S/serve.sh" t-watch --no-lint --keep-alive 3s >/dev/null
   local pid; pid="$(meta_get t-watch pid)"
   kill -0 "$pid" 2>/dev/null || return 1   # alive now
   for _ in $(seq 1 16); do
@@ -153,6 +166,13 @@ test_stop_refuses_foreign_pid() {  # PID-reuse safety: markerless pid never kill
   kill "$p" 2>/dev/null
   (( alive ))
 }
+test_serve_refuses_unlinted() {  # Task 4: serve.sh refuses to serve a workspace whose
+  "$S/init.sh" t-lintgate --tier html >/dev/null      # authoring docs fail scripts/lint.sh
+  echo ok > /tmp/ps-commu/t-lintgate/app/index.html
+  local out rc
+  out="$("$S/serve.sh" t-lintgate 2>&1)"; rc=$?
+  (( rc != 0 )) && grep -q '00-brief.md' <<<"$out"
+}
 
 # NOTE: marker_visible, bind_localhost_only, port_retry and stop all depend on
 # serve_html having started the t-serve server. Keep registration order.
@@ -163,6 +183,76 @@ check port_retry          test_port_retry
 check watchdog_fires      test_watchdog_fires
 check stop                test_stop
 check stop_refuses_foreign_pid test_stop_refuses_foreign_pid
+check serve_refuses_unlinted   test_serve_refuses_unlinted
+
+# --- lint.sh (authoring-chain gate) ---
+_lint_valid_brief_facts_storyboard() {  # slug — writes a fully-filled valid chain
+  local ws="/tmp/ps-commu/$1"
+  cat > "$ws/00-brief.md" <<'EOF'
+# Brief
+
+Q1: What is X?
+Q2: Why does X matter?
+Q3: How do I use X?
+
+Section budget: 5
+EOF
+  cat > "$ws/01-facts.md" <<'EOF'
+# Facts
+
+| id | statement | source |
+| --- | --- | --- |
+| F1 | X does the thing | user said |
+EOF
+  cat > "$ws/02-storyboard.md" <<'EOF'
+# Storyboard
+
+| section | question | facts |
+| --- | --- | --- |
+| 1 | Q1 | F1 |
+| 2 | Q2 | F1 |
+| 3 | Q3 | F1 |
+EOF
+}
+test_lint_passes_starter() {   # a fully-filled, valid authoring chain lints clean
+  "$S/init.sh" t-lint-ok --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-ok
+  "$S/lint.sh" t-lint-ok
+}
+test_lint_fails_unlabeled_edge() {  # content.md: bare --> flowchart edge with no label
+  "$S/init.sh" t-lint-edge --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-edge
+  mkdir -p /tmp/ps-commu/t-lint-edge/app
+  cat > /tmp/ps-commu/t-lint-edge/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A --> B
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-edge 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -qi 'no label' <<<"$out"
+}
+test_lint_fails_uncited_fact() {  # storyboard row citing no existing F<n>
+  "$S/init.sh" t-lint-fact --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-fact
+  cat > /tmp/ps-commu/t-lint-fact/02-storyboard.md <<'EOF'
+# Storyboard
+
+| section | question | facts |
+| --- | --- | --- |
+| 1 | Q1 |  |
+| 2 | Q2 | F1 |
+| 3 | Q3 | F1 |
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-fact 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -qi 'cites no existing' <<<"$out"
+}
+
+check lint_passes_starter       test_lint_passes_starter
+check lint_fails_unlabeled_edge test_lint_fails_unlabeled_edge
+check lint_fails_uncited_fact   test_lint_fails_uncited_fact
 
 # --- verify.sh (render gate; needs Google Chrome — SKIPs visibly without it) ---
 # A verify run is ~45s on macOS (Chrome start + CDN load + Mermaid render).
@@ -170,8 +260,14 @@ verify_run() {           # args... → verify.sh output on stdout; rc 2 = cannot
   if command -v timeout >/dev/null; then timeout 150 "$S/verify.sh" "$@"; else "$S/verify.sh" "$@"; fi
 }
 test_verify_passes_template() {
+  # --no-lint: deliberate deviation from --no-lint's "html/react dev loop
+  # only" framing in serve.sh's usage text. This tier must stay infographic
+  # (needs the real cherry-markdown + Mermaid template), but the stock
+  # template-infographic/content.md still contains forbidden classes
+  # (stat-grid, stat-tile, cat-*) that scripts/lint.sh correctly rejects —
+  # making that template lint-clean is Task 6/7 scope, not this batch's.
   "$S/init.sh" t-verify >/dev/null
-  "$S/serve.sh" t-verify >/dev/null
+  "$S/serve.sh" t-verify --no-lint >/dev/null
   local out rc; out="$(verify_run t-verify)"; rc=$?
   echo "$out"
   (( rc == 2 )) && return 2
@@ -210,9 +306,9 @@ check verify_help                     test_verify_help
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.
 test_list_shows_running_and_stopped() {
-  "$S/init.sh" t-list >/dev/null
+  "$S/init.sh" t-list --tier html >/dev/null
   echo ok > /tmp/ps-commu/t-list/app/index.html
-  "$S/serve.sh" t-list >/dev/null
+  "$S/serve.sh" t-list --no-lint >/dev/null
   local out; out="$("$S/list.sh")"
   echo "$out" | grep -E 't-list .*running .*http://localhost:' >/dev/null &&
   { "$S/stop.sh" t-list >/dev/null; "$S/list.sh" | grep -E 't-list .*stopped' >/dev/null; }
@@ -232,9 +328,9 @@ test_clean_removes_dangling_link() {
   [[ ! -L /tmp/ps-commu/t-dangle ]]
 }
 test_clean_wipes_and_kills() {
-  "$S/init.sh" t-clean >/dev/null
+  "$S/init.sh" t-clean --tier html >/dev/null
   echo ok > /tmp/ps-commu/t-clean/app/index.html
-  "$S/serve.sh" t-clean >/dev/null
+  "$S/serve.sh" t-clean --no-lint >/dev/null
   local pid; pid="$(meta_get t-clean pid)"
   "$S/clean.sh" >/dev/null
   ! kill -0 "$pid" 2>/dev/null && [[ ! -d /tmp/ps-commu/t-clean ]]

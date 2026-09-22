@@ -7,6 +7,10 @@
 #                        author app/content.md
 #           html         classic bespoke hand-written HTML; edit app/index.html
 #           react        interactive React+TS tier
+# Also scaffolds the authoring-chain docs (00-brief.md, 01-facts.md,
+# 02-storyboard.md) from assets/workspace/ into the workspace root, sibling
+# to app/ — never served. scripts/lint.sh gates them; serve.sh runs it
+# before serving (see serve.sh --no-lint).
 # Sweep rule (spec D5): delete workspaces >3 days old AND with no live
 # marker-verified server. Port pick here is advisory; serve.sh binding is
 # authoritative (spec D3).
@@ -60,6 +64,17 @@ if [[ -d "$tpl" && ! -e "$ws/app/index.html" ]]; then
   mkdir -p "$ws/app"
   cp -R "$tpl"/. "$ws/app"/
   echo "scaffolded app/ from template-$tier"
+fi
+
+# --- scaffold authoring-chain docs from assets/workspace/ (workspace root,
+# sibling to app/ — never served, so the reader-facing tree stays free of
+# authoring docs). Idempotent: never clobbers an existing file. ---
+wtpl="$(cd "$(dirname "$0")/.." && pwd)/assets/workspace"
+if [[ -d "$wtpl" ]]; then
+  for f in "$wtpl"/*; do
+    name="$(basename "$f")"
+    [[ -e "$ws/$name" ]] || cp "$f" "$ws/$name"
+  done
 fi
 
 # --- advisory free port ---
