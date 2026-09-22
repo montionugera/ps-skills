@@ -66,6 +66,6 @@
     "id": "I-011",
     "title": "Redesign ps-commu-explain: dedupe, engine fixes, evidence-first chain",
     "created_at": "2026-09-22T02:00:51.190871+00:00",
-    "promoted_to": null
+    "promoted_to": "F-011"
   }
 ]
