@@ -548,17 +548,15 @@ if content is not None:
             try:
                 pos = parse_statement(pos)
             except Bad as bad:
-                defects.append(
-                    f"app/content.md: flowchart diagram #{idx} line {line_of(start)} "
-                    f"not understood by lint: '{stmt_text(start, bad.pos)}' ({bad.why})"
-                )
+                report(start, f"not understood by lint: '{stmt_text(start, bad.pos)}' ({bad.why})")
                 pos = eol(bad.pos)  # resync at the end of the offending line
         for p, name in open_subgraphs:
             report(p, f"opens subgraph '{name}' that is never closed — only lowercase 'end' closes a "
                       f"subgraph ('End' is a node id; keywords are case-sensitive)")
         return nodes, unlabeled
 
-    CHECKED_HEADS = {'flowchart', 'graph', 'flowchart-elk', 'sequenceDiagram'}
+    FLOWCHART_HEADS = {'flowchart', 'graph', 'flowchart-elk'}
+    CHECKED_HEADS = FLOWCHART_HEADS | {'sequenceDiagram'}
     # Mermaid diagram types this lint has no rules for. A block headed by
     # one of these passes silently BY DESIGN (the brief names flowchart and
     # sequenceDiagram only). Any other first line is reported, so a typo
@@ -594,7 +592,7 @@ if content is not None:
 
     for idx, block_m in enumerate(re.finditer(r'```mermaid\s*\n(.*?)```', content, re.S), start=1):
         block, head = split_front_matter(block_m.group(1))
-        if head in ('flowchart', 'graph', 'flowchart-elk'):
+        if head in FLOWCHART_HEADS:
             nodes, unlabeled = parse_flowchart(block, idx)
             for src, op_text, dst in unlabeled:
                 defects.append(
