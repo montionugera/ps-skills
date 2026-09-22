@@ -3,8 +3,16 @@
    --hue-tint (wash). It defaults to the structural accent for everything —
    section heads, steps, chips, nav, links. Only the two reserved kinds may
    re-point it: .callout.pitfall and .callout.check. There is NO per-section /
-   per-tile rotation: section order is never colored. ---------------------- */
-.cherry-markdown.theme__explainer { --hue: var(--accent); --hue-weak: var(--accent-weak); --hue-tint: var(--accent-tint); }
+   per-tile rotation: section order is never colored.
+   Declared on :root (not scoped to .cherry-markdown.theme__explainer): the
+   sticky nav (`.explainer-nav` / `.nav-link`) is injected by cherry-setup.js's
+   buildNav() as a SIBLING of .cherry-markdown.theme__explainer, both direct
+   children of <body> — so a scoped declaration never inherits into the nav's
+   subtree, and every var(--hue*) there resolves to nothing (transparent nav
+   icons / active-rail). :root is an ancestor of both, so both see the same
+   default, and .callout.pitfall/.callout.check (which ARE inside the content
+   scope) still override locally exactly as before. ------------------------ */
+:root { --hue: var(--accent); --hue-weak: var(--accent-weak); --hue-tint: var(--accent-tint); }
 
 /* NOTE: no `html { scroll-behavior: smooth }` here. It made the nav's
    window.scrollTo() a compositor animation that never advances in a hidden or
@@ -682,12 +690,17 @@ body::before {
 }
 .step .step-title svg { width: 1em; height: 1em; color: var(--hue); }
 /* ordinal ramp — ONE hue, descending value. Never a hue rotation. Light number
-   text stays ≥3:1 (large bold) on every mix: 9.95 / 7.73 / 5.49 / 4.31 / 3.60. */
-.step:nth-child(1) .step-num { background: var(--accent-weak); }
-.step:nth-child(2) .step-num { background: var(--accent); }
-.step:nth-child(3) .step-num { background: color-mix(in srgb, var(--accent) 86%, var(--n-4)); }
-.step:nth-child(4) .step-num { background: color-mix(in srgb, var(--accent) 76%, var(--n-4)); }
-.step:nth-child(n+5) .step-num { background: color-mix(in srgb, var(--accent) 68%, var(--n-4)); }
+   text stays ≥3:1 (large bold) on every mix: 9.95 / 7.73 / 5.49 / 4.31 / 3.60.
+   :nth-of-type, NOT :nth-child: Cherry injects <br> as a direct child of
+   .steps between each .step (see the ".step > br { display:none }" rule
+   above) — those hidden <br> siblings still count for :nth-child, shifting
+   every step's ramp position by one in the rendered DOM. :nth-of-type only
+   counts same-tag (.step) siblings, so it ignores the interspersed <br>s. */
+.step:nth-of-type(1) .step-num { background: var(--accent-weak); }
+.step:nth-of-type(2) .step-num { background: var(--accent); }
+.step:nth-of-type(3) .step-num { background: color-mix(in srgb, var(--accent) 86%, var(--n-4)); }
+.step:nth-of-type(4) .step-num { background: color-mix(in srgb, var(--accent) 76%, var(--n-4)); }
+.step:nth-of-type(n+5) .step-num { background: color-mix(in srgb, var(--accent) 68%, var(--n-4)); }
 .step .step-body p { margin: 0; color: var(--text-2); }
 
 /* ============================================================================

@@ -12,6 +12,11 @@
 #     5  clicking the first sidebar nav item changes window.scrollY — SKIP:
 #        a DOM dump cannot dispatch clicks, and the DevTools-protocol route
 #        (Runtime.evaluate) hangs on this Chrome build once the page has loaded.
+#     6  served explainer.css does NOT declare `scroll-behavior` (static proxy
+#        for the click-to-jump root cause: `scroll-behavior: smooth` on <html>
+#        turns window.scrollTo into a compositor animation that silently
+#        no-ops in a hidden/headless tab — this is a real PASS/FAIL, not a
+#        SKIP, so defect 1 keeps a scripted gate even while assert 5 can't run)
 #   --url  page URL to load (default: http://127.0.0.1:<port> from meta.json;
 #          requires a live marker-verified server). A ?doc=X query selects
 #          which app/X markdown file the fence count is taken from.
@@ -67,28 +72,46 @@ import os, re, select, shutil, signal, subprocess, sys, tempfile, time
 from html.parser import HTMLParser
 chrome, url, fences = sys.argv[1], sys.argv[2], int(sys.argv[3])
 prof = tempfile.mkdtemp(prefix="ps-commu-verify-")
-cmd = [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
-       "--no-default-browser-check", "--disable-background-networking", "--disable-sync",
-       "--disable-component-update", "--disable-extensions", "--window-size=1280,900",
-       "--user-data-dir=" + prof, "--enable-logging=stderr", "--v=0",
-       "--virtual-time-budget=8000", "--run-all-compositor-stages-before-draw",
-       "--dump-dom", url]
-proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-# This Chrome build prints the DOM and then hangs on shutdown, so read stdout
-# until </html> (or 90s; ~45s is normal on macOS) and kill it ourselves instead of waiting for exit.
-out, err, end = b"", b"", time.time() + 90
-fds = [proc.stdout, proc.stderr]
-while fds and time.time() < end and b"</html>" not in out:
-    r, _, _ = select.select(fds, [], [], 0.5)
-    for f in r:
-        chunk = os.read(f.fileno(), 65536)
-        if not chunk: fds.remove(f); continue
-        if f is proc.stdout: out += chunk
-        else: err += chunk
-# Kill the whole process group: renderer/GPU children hold the stderr pipe, so a
-# plain kill()+read() would block forever. Never call a blocking read after this.
-os.killpg(proc.pid, signal.SIGKILL); proc.wait()
-shutil.rmtree(prof, ignore_errors=True)
+proc = None
+out, err = b"", b""
+try:
+    cmd = [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+           "--no-default-browser-check", "--disable-background-networking", "--disable-sync",
+           "--disable-component-update", "--disable-extensions", "--window-size=1280,900",
+           "--user-data-dir=" + prof, "--enable-logging=stderr", "--v=0",
+           "--virtual-time-budget=8000", "--run-all-compositor-stages-before-draw",
+           "--dump-dom", url]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    # This Chrome build prints the DOM and then hangs on shutdown, so read stdout
+    # until </html> (or 90s; ~45s is normal on macOS) and kill it ourselves instead of waiting for exit.
+    end = time.time() + 90
+    fds = [proc.stdout, proc.stderr]
+    while fds and time.time() < end and b"</html>" not in out:
+        r, _, _ = select.select(fds, [], [], 0.5)
+        for f in r:
+            chunk = os.read(f.fileno(), 65536)
+            if not chunk: fds.remove(f); continue
+            if f is proc.stdout: out += chunk
+            else: err += chunk
+finally:
+    # try/finally so the Chrome process group and the /tmp profile dir can
+    # never be orphaned: a JSON/dict error, an unexpected exception anywhere
+    # above, or an external SIGTERM (callers wrap this whole script in their
+    # own `timeout`, on top of the 90s internal budget) must still reach this
+    # cleanup. Kill the whole process group: renderer/GPU children hold the
+    # stderr pipe, so a plain kill()+read() would block forever — and never
+    # call a blocking read after this.
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if proc is not None:
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+    shutil.rmtree(prof, ignore_errors=True)
 dom, log = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 lines, failed = [], 0
 def report(status, n, text):
@@ -149,3 +172,34 @@ report("SKIP", 5, "nav click: --dump-dom cannot dispatch clicks and DevTools Run
 print("\n".join(lines))
 sys.exit(1 if failed else 0)
 PY
+py_status=$?
+
+# Assert 6: static regression gate for the nav click-to-jump root cause. Assert
+# 5 above is a permanent SKIP (--dump-dom cannot click, and the DevTools route
+# hangs on this Chrome build) — so without this, the original defect (dead
+# click-to-jump) has no scripted gate going forward, only one-time manual
+# verification. `scroll-behavior: smooth` on <html> is the documented root
+# cause (it turns window.scrollTo into a compositor animation that silently
+# no-ops in a hidden/headless tab); this greps the SERVED explainer.css for
+# it. Cheap, dependency-free, PASS/FAIL — never SKIP.
+# CSS comments are stripped first (python3, already a hard dependency of this
+# script) so a rule like "/* no scroll-behavior:smooth here, see ... */" that
+# EXPLAINS the fix in prose doesn't itself trip a false FAIL.
+explainer_css="$ws/app/explainer.css"
+if [[ ! -f "$explainer_css" ]]; then
+  echo "FAIL: 6 explainer.css not found at $explainer_css"
+  css_status=1
+elif python3 -c "
+import re, sys
+css = open(sys.argv[1]).read()
+css = re.sub(r'/\*.*?\*/', '', css, flags=re.S)
+sys.exit(0 if 'scroll-behavior' in css else 1)
+" "$explainer_css"; then
+  echo "FAIL: 6 explainer.css declares scroll-behavior (reintroduces the nav click-to-jump root cause)"
+  css_status=1
+else
+  echo "PASS: 6 explainer.css does not declare scroll-behavior (nav click-to-jump root-cause gate)"
+  css_status=0
+fi
+
+[[ "$py_status" -eq 0 && "$css_status" -eq 0 ]]
