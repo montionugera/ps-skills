@@ -1,28 +1,10 @@
-/* ============================================================================
-   explainer.css — COMPONENT LIBRARY  (Cream Infographic)
-   ----------------------------------------------------------------------------
-   On-theme component classes, scoped under .cherry-markdown.theme__explainer.
-   EVERY color / size / font value references a var(--token) from theme.css.
-   The only raw values permitted here are @media breakpoint px, 0, structural
-   1px hairlines, and geometry (transforms / % / fr) — never a color or type
-   size literal.
-
-   CATEGORY SYSTEM — a component tinted to a category color sets three vars on
-   itself: --cat (solid), --cat-weak (dim), --cat-tint (soft wash). Utility
-   classes .cat-coral / .cat-amber / .cat-teal / .cat-blue / .cat-violet /
-   .cat-magenta assign those from the palette. Components then read var(--cat*)
-   so one class recolors icon chip, accent bar, rail, number, etc. together.
-   ============================================================================ */
-
-/* ---- category color assignment ------------------------------------------- */
-.cat-coral   { --cat: var(--coral);   --cat-weak: var(--coral-weak);   --cat-tint: var(--coral-tint);   }
-.cat-amber   { --cat: var(--amber);   --cat-weak: var(--amber-weak);   --cat-tint: var(--amber-tint);   }
-.cat-teal    { --cat: var(--teal);    --cat-weak: var(--teal-weak);    --cat-tint: var(--teal-tint);    }
-.cat-blue    { --cat: var(--blue);    --cat-weak: var(--blue-weak);    --cat-tint: var(--blue-tint);    }
-.cat-violet  { --cat: var(--violet);  --cat-weak: var(--violet-weak);  --cat-tint: var(--violet-tint);  }
-.cat-magenta { --cat: var(--magenta); --cat-weak: var(--magenta-weak); --cat-tint: var(--magenta-tint); }
-/* sensible default so components used bare still have a category color */
-.cherry-markdown.theme__explainer { --cat: var(--coral); --cat-weak: var(--coral-weak); --cat-tint: var(--coral-tint); }
+/* ---- THE COLOR RULE (theme.css) --------------------------------------------
+   Components read ONE component-local hue: --hue (solid), --hue-weak (dim),
+   --hue-tint (wash). It defaults to the structural accent for everything —
+   section heads, steps, chips, nav, links. Only the two reserved kinds may
+   re-point it: .callout.pitfall and .callout.check. There is NO per-section /
+   per-tile rotation: section order is never colored. ---------------------- */
+.cherry-markdown.theme__explainer { --hue: var(--accent); --hue-weak: var(--accent-weak); --hue-tint: var(--accent-tint); }
 
 /* NOTE: no `html { scroll-behavior: smooth }` here. It made the nav's
    window.scrollTo() a compositor animation that never advances in a hidden or
@@ -125,7 +107,7 @@ body::before {
 .nav-brand > br { display: none; }
 
 /* icon chip — colored rounded square that carries a Lucide icon, tinted to
-   the nearest category (--cat). Used across headers, cards, callouts, steps. */
+   the nearest category (--hue). Used across headers, cards, callouts, steps. */
 .icon-chip {
   display: inline-flex;
   align-items: center;
@@ -133,9 +115,9 @@ body::before {
   width: var(--chip);
   height: var(--chip);
   border-radius: var(--radius-sm);
-  background: var(--cat-tint);
-  color: var(--cat);
-  border: 1px solid color-mix(in srgb, var(--cat) 22%, transparent);
+  background: var(--hue-tint);
+  color: var(--hue);
+  border: 1px solid color-mix(in srgb, var(--hue) 22%, transparent);
   flex: none;
 }
 .icon-chip.lg { width: var(--chip-lg); height: var(--chip-lg); border-radius: var(--radius); }
@@ -185,21 +167,21 @@ body::before {
 .cherry-markdown.theme__explainer h3 + p { color: var(--text); }
 
 .cherry-markdown.theme__explainer a {
-  color: var(--blue);
-  text-decoration-color: color-mix(in srgb, var(--blue) 40%, transparent);
+  color: var(--accent);
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
   text-underline-offset: 3px;
   transition: color var(--dur-1) var(--ease-standard),
               text-decoration-color var(--dur-1) var(--ease-standard);
 }
 .cherry-markdown.theme__explainer a:hover {
-  color: var(--blue-weak);
-  text-decoration-color: var(--blue);
+  color: var(--accent-weak);
+  text-decoration-color: var(--accent);
 }
 .cherry-markdown.theme__explainer strong { color: var(--text); font-weight: var(--w-semibold); }
 .cherry-markdown.theme__explainer em { color: var(--text); }
 .cherry-markdown.theme__explainer mark {
   background: var(--tint-mark);
-  color: var(--amber-weak);
+  color: var(--accent-weak);
   padding: var(--pad-mark);
   border-radius: var(--radius-sm);
   font-weight: var(--w-medium);
@@ -209,7 +191,7 @@ body::before {
 .cherry-markdown.theme__explainer ul,
 .cherry-markdown.theme__explainer ol { padding-left: var(--space-6); margin: 0 0 var(--space-4); color: var(--text-2); }
 .cherry-markdown.theme__explainer li { margin: var(--space-2) 0; }
-.cherry-markdown.theme__explainer li::marker { color: var(--cat); }
+.cherry-markdown.theme__explainer li::marker { color: var(--hue); }
 
 /* ============================================================================
    STICKY NAVIGATION — left sidebar (wide) → sticky top strip (narrow)
@@ -236,7 +218,6 @@ body::before {
   gap: var(--space-3);
   margin-bottom: var(--space-5);
 }
-.explainer-nav .nav-brand .icon-chip { --cat: var(--coral); --cat-tint: var(--coral-tint); }
 .explainer-nav .nav-brand .nav-title {
   font-family: var(--font-display);
   font-weight: var(--w-bold);
@@ -285,8 +266,8 @@ body::before {
   width: var(--chip-sm);
   height: var(--chip-sm);
   border-radius: var(--radius-sm);
-  background: var(--cat-tint);
-  color: var(--cat);
+  background: var(--hue-tint);
+  color: var(--hue);
   flex: none;
   transition: transform var(--dur-1) var(--ease-emphasized);
 }
@@ -294,7 +275,7 @@ body::before {
 .nav-link:hover { background: var(--surface-overlay); color: var(--text); }
 .nav-link:hover .nav-ico { transform: scale(1.08); }
 .nav-link.is-active {
-  background: var(--cat-tint);
+  background: var(--hue-tint);
   color: var(--text);
   font-weight: var(--w-semibold);
 }
@@ -304,7 +285,7 @@ body::before {
   left: -1px; top: 20%; bottom: 20%;
   width: 3px;
   border-radius: var(--radius-pill);
-  background: var(--cat);
+  background: var(--hue);
 }
 .nav-link.is-bookend { color: var(--text); }
 .nav-link.is-bookend .nav-label { font-weight: var(--w-semibold); }
@@ -353,8 +334,8 @@ body::before {
   padding: var(--space-6) var(--space-6) var(--space-6);
   position: relative;
   background:
-    radial-gradient(120% 140% at 100% 0%, var(--coral-tint), transparent 55%),
-    radial-gradient(110% 120% at 0% 100%, var(--amber-tint), transparent 55%),
+    radial-gradient(120% 140% at 100% 0%, var(--accent-tint), transparent 55%),
+    radial-gradient(110% 120% at 0% 100%, var(--n-1), transparent 55%),
     var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -370,7 +351,7 @@ body::before {
   font-weight: var(--w-medium);
   letter-spacing: var(--track-eyebrow);
   text-transform: uppercase;
-  color: var(--coral-weak);
+  color: var(--accent-weak);
   background: var(--n-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
@@ -378,7 +359,7 @@ body::before {
   margin: 0 0 var(--space-4);
   box-shadow: var(--shadow-1);
 }
-.hero .eyebrow svg { width: 1em; height: 1em; color: var(--coral); }
+.hero .eyebrow svg { width: 1em; height: 1em; color: var(--accent); }
 .hero .title {
   font-family: var(--font-display);
   font-size: var(--fs-display);
@@ -390,7 +371,7 @@ body::before {
   max-width: 18ch;
   text-wrap: balance;
 }
-.hero .title .hl { color: var(--coral); }
+.hero .title .hl { color: var(--accent); }
 .hero .lede {
   font-size: calc(var(--fs-body) * 1.18);
   font-weight: var(--w-regular);
@@ -410,13 +391,9 @@ body::before {
   border-top: 1px solid var(--border);
 }
 .hero .meta > div {
-  border-left: 3px solid var(--cat, var(--coral));
+  border-left: 3px solid var(--hue);
   padding-left: var(--space-4);
 }
-.hero .meta > div:nth-child(1) { border-left-color: var(--coral); }
-.hero .meta > div:nth-child(2) { border-left-color: var(--amber); }
-.hero .meta > div:nth-child(3) { border-left-color: var(--teal); }
-.hero .meta > div:nth-child(4) { border-left-color: var(--blue); }
 .hero .meta .k {
   font-family: var(--font-mono);
   font-size: var(--fs-caption);
@@ -449,7 +426,7 @@ body::before {
   font-weight: var(--w-medium);
   letter-spacing: var(--track-label);
   text-transform: uppercase;
-  color: var(--cat);
+  color: var(--hue);
   margin-bottom: var(--space-1);
 }
 .section-head .sh-title {
@@ -462,21 +439,19 @@ body::before {
 }
 .section-head.bookend {
   border-top: 0;
-  background: var(--cat-tint);
-  border: 1px solid color-mix(in srgb, var(--cat) 22%, transparent);
+  background: var(--hue-tint);
+  border: 1px solid color-mix(in srgb, var(--hue) 22%, transparent);
   border-radius: var(--radius);
   padding: var(--space-4) var(--space-5);
   box-shadow: var(--shadow-1);
 }
 
-/* ---- SEMANTIC HUE LOCK ----------------------------------------------------
-   Each category color owns a meaning AND a section:
-     coral=lead/overview/danger · amber=warning/action · teal=success/system ·
-     blue=info/data · violet=idea/authoring · magenta=metric/summary.
-   Component recoloring flows through --cat/.cat-* — never hardcode a hue. ---- */
+/* ---- RESERVED HUES ---------------------------------------------------------
+   pitfall = what goes wrong · check = what is verified. Used ONLY by the two
+   callout kinds below (and error surfaces). Everything else is accent. ---- */
 
 /* ============================================================================
-   CALLOUTS — warm colored panels, icon in a colored rounded chip; 7 kinds
+   CALLOUTS — warm panels, icon in a rounded chip; 3 kinds: note | pitfall | check
    ============================================================================ */
 .callout {
   position: relative;
@@ -484,9 +459,9 @@ body::before {
   gap: var(--space-4);
   margin: var(--space-5) 0;
   padding: var(--space-4) var(--space-5);
-  background: var(--cat-tint);
-  border: 1px solid color-mix(in srgb, var(--cat) 26%, transparent);
-  border-left: 4px solid var(--cat);
+  background: var(--hue-tint);
+  border: 1px solid color-mix(in srgb, var(--hue) 26%, transparent);
+  border-left: 4px solid var(--hue);
   border-radius: var(--radius);
   box-shadow: var(--shadow-1);
   transition: transform var(--dur-2) var(--ease-emphasized),
@@ -497,7 +472,7 @@ body::before {
 .callout > .co-body > :last-child { margin-bottom: 0; }
 .callout p { color: var(--text-2); }
 .callout p strong, .callout strong { color: var(--text); }
-/* icon chip — a Lucide icon injected by cherry-setup.js per kind, tinted --cat */
+/* icon chip — a Lucide icon injected by cherry-setup.js per kind, tinted --hue */
 .callout::before { content: none; }   /* replace old glyph pseudo with real chip */
 .callout > .co-ico {
   display: inline-flex;
@@ -507,8 +482,8 @@ body::before {
   height: var(--chip);
   border-radius: var(--radius-sm);
   background: var(--n-4);
-  color: var(--cat);
-  border: 1px solid color-mix(in srgb, var(--cat) 24%, transparent);
+  color: var(--hue);
+  border: 1px solid color-mix(in srgb, var(--hue) 24%, transparent);
   flex: none;
   box-shadow: var(--shadow-1);
 }
@@ -518,14 +493,9 @@ body::before {
   box-shadow: var(--shadow-2);
 }
 
-/* kind → category color + default icon name (icon rendered by JS via data-ico) */
-.callout.info    { --cat: var(--blue);    --cat-weak: var(--blue-weak);    --cat-tint: var(--blue-tint);    }
-.callout.warn    { --cat: var(--amber);   --cat-weak: var(--amber-weak);   --cat-tint: var(--amber-tint);   }
-.callout.success { --cat: var(--teal);    --cat-weak: var(--teal-weak);    --cat-tint: var(--teal-tint);    }
-.callout.danger  { --cat: var(--coral);   --cat-weak: var(--coral-weak);   --cat-tint: var(--coral-tint);   }
-.callout.idea    { --cat: var(--violet);  --cat-weak: var(--violet-weak);  --cat-tint: var(--violet-tint);  }
-.callout.metric  { --cat: var(--magenta); --cat-weak: var(--magenta-weak); --cat-tint: var(--magenta-tint); }
-.callout.action  { --cat: var(--amber);   --cat-weak: var(--amber-weak);   --cat-tint: var(--amber-tint);   }
+.callout.note    { --hue: var(--accent);  --hue-weak: var(--accent-weak);  --hue-tint: var(--accent-tint);  }
+.callout.pitfall { --hue: var(--pitfall); --hue-weak: var(--pitfall-weak); --hue-tint: var(--pitfall-tint); }
+.callout.check   { --hue: var(--check);   --hue-weak: var(--check-weak);   --hue-tint: var(--check-tint);   }
 
 /* ============================================================================
    KPI / STAT TILES — the infographic centerpiece
@@ -556,7 +526,7 @@ body::before {
   position: absolute;
   inset: 0 0 auto 0;
   height: 4px;
-  background: var(--cat, var(--coral));
+  background: var(--hue);
 }
 .metric-tile:hover,
 .stat-tile:hover {
@@ -569,14 +539,14 @@ body::before {
   justify-content: space-between;
   margin-bottom: var(--space-4);
 }
-.stat-tile .icon-chip { --cat-tint: var(--cat-tint); box-shadow: var(--shadow-1); }
+.stat-tile .icon-chip { --hue-tint: var(--hue-tint); box-shadow: var(--shadow-1); }
 .stat-tile .stat-delta {
   font-family: var(--font-mono);
   font-size: var(--fs-caption);
   font-weight: var(--w-medium);
   letter-spacing: var(--track-label);
-  color: var(--cat);
-  background: var(--cat-tint);
+  color: var(--hue);
+  background: var(--hue-tint);
   border-radius: var(--radius-pill);
   padding: var(--space-1) var(--space-3);
   display: inline-flex;
@@ -594,7 +564,7 @@ body::before {
   letter-spacing: var(--track-display);
   font-variant-numeric: tabular-nums;
 }
-.stat-value .unit { font-size: 0.5em; color: var(--cat); font-weight: var(--w-bold); margin-left: 0.15em; }
+.stat-value .unit { font-size: 0.5em; color: var(--hue); font-weight: var(--w-bold); margin-left: 0.15em; }
 .metric-label,
 .stat-label {
   font-family: var(--font-mono);
@@ -605,9 +575,9 @@ body::before {
   margin-top: var(--space-3);
 }
 .stat-sub { color: var(--text-2); font-size: var(--fs-sm); margin-top: var(--space-2); }
-/* legacy .alarm flag → amber category */
-.metric-tile.alarm { --cat: var(--amber); }
-.metric-tile.alarm .metric-value { color: var(--amber-weak); }
+/* .alarm flag → the reserved pitfall hue */
+.metric-tile.alarm { --hue: var(--pitfall); }
+.metric-tile.alarm .metric-value { color: var(--pitfall-weak); }
 
 /* ============================================================================
    FEATURE CARDS — icon chip + title + text, colored top accent, hover lift
@@ -634,7 +604,7 @@ body::before {
   position: absolute;
   inset: 0 0 auto 0;
   height: 4px;
-  background: var(--cat, var(--coral));
+  background: var(--hue);
 }
 .card:hover { transform: translateY(-4px); box-shadow: var(--shadow-2); }
 .card .icon-chip { margin-bottom: var(--space-4); box-shadow: var(--shadow-1); }
@@ -679,7 +649,7 @@ body::before {
   width: var(--chip-lg);
   height: var(--chip-lg);
   border-radius: var(--radius-pill);
-  background: var(--cat, var(--coral));
+  background: var(--hue);
   color: var(--n-4);
   font-family: var(--font-display);
   font-weight: var(--w-bold);
@@ -710,7 +680,14 @@ body::before {
   margin: 0 0 var(--space-1);
   line-height: var(--lh-snug);
 }
-.step .step-title svg { width: 1em; height: 1em; color: var(--cat); }
+.step .step-title svg { width: 1em; height: 1em; color: var(--hue); }
+/* ordinal ramp — ONE hue, descending value. Never a hue rotation. Light number
+   text stays ≥3:1 (large bold) on every mix: 9.95 / 7.73 / 5.49 / 4.31 / 3.60. */
+.step:nth-child(1) .step-num { background: var(--accent-weak); }
+.step:nth-child(2) .step-num { background: var(--accent); }
+.step:nth-child(3) .step-num { background: color-mix(in srgb, var(--accent) 86%, var(--n-4)); }
+.step:nth-child(4) .step-num { background: color-mix(in srgb, var(--accent) 76%, var(--n-4)); }
+.step:nth-child(n+5) .step-num { background: color-mix(in srgb, var(--accent) 68%, var(--n-4)); }
 .step .step-body p { margin: 0; color: var(--text-2); }
 
 /* ============================================================================
@@ -734,14 +711,14 @@ body::before {
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
-  background: var(--cat-tint);
-  border-bottom: 1px solid color-mix(in srgb, var(--cat) 24%, transparent);
+  background: var(--hue-tint);
+  border-bottom: 1px solid color-mix(in srgb, var(--hue) 24%, transparent);
   font-family: var(--font-display);
   font-weight: var(--w-semibold);
   letter-spacing: var(--track-h);
   color: var(--text);
 }
-.compare-panel .cmp-head .icon-chip { --cat-tint: var(--n-4); box-shadow: var(--shadow-1); }
+.compare-panel .cmp-head .icon-chip { --hue-tint: var(--n-4); box-shadow: var(--shadow-1); }
 .compare-panel .cmp-body { padding: var(--space-4) var(--space-5); }
 .compare-panel .cmp-body > :first-child { margin-top: 0; }
 .compare-panel .cmp-body > :last-child { margin-bottom: 0; }
@@ -761,16 +738,16 @@ body::before {
   font-weight: var(--w-medium);
   letter-spacing: var(--track-label);
   text-transform: uppercase;
-  color: var(--cat);
-  background: var(--cat-tint);
-  border: 1px solid color-mix(in srgb, var(--cat) 24%, transparent);
+  color: var(--hue);
+  background: var(--hue-tint);
+  border: 1px solid color-mix(in srgb, var(--hue) 24%, transparent);
   border-radius: var(--radius-pill);
   padding: 0.25em 0.7em 0.25em 0.55em;
 }
 .badge .dot {
   width: 0.5em; height: 0.5em; border-radius: var(--radius-pill);
-  background: var(--cat); flex: none;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cat) 20%, transparent);
+  background: var(--hue); flex: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hue) 20%, transparent);
 }
 
 .meter { margin: var(--space-3) 0; }
@@ -784,7 +761,7 @@ body::before {
   margin-bottom: var(--space-2);
 }
 .meter .meter-label .meter-val {
-  color: var(--cat);
+  color: var(--hue);
   font-weight: var(--w-medium);
   font-variant-numeric: tabular-nums;
 }
@@ -798,7 +775,7 @@ body::before {
 .meter .meter-fill {
   height: 100%;
   border-radius: var(--radius-pill);
-  background: linear-gradient(90deg, color-mix(in srgb, var(--cat) 72%, var(--n-4)), var(--cat));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--hue) 72%, var(--n-4)), var(--hue));
 }
 
 .legend {
@@ -821,8 +798,8 @@ body::before {
 }
 .legend .legend-swatch {
   width: 0.9rem; height: 0.9rem; border-radius: var(--radius-sm);
-  background: var(--cat); flex: none;
-  border: 1px solid color-mix(in srgb, var(--cat) 40%, transparent);
+  background: var(--hue); flex: none;
+  border: 1px solid color-mix(in srgb, var(--hue) 40%, transparent);
 }
 
 /* ---- schematic (mono box-drawing) — light code well ----------------------- */
@@ -834,7 +811,7 @@ body::before {
   overflow-x: auto;
   background: var(--surface-well);
   border: 1px solid var(--border);
-  border-left: 4px solid var(--teal);
+  border-left: 4px solid var(--accent);
   border-radius: var(--radius);
   padding: var(--space-5) var(--space-6);
   margin: var(--space-5) 0;
@@ -872,10 +849,10 @@ body::before {
               border-color var(--dur-1) var(--ease-standard),
               transform var(--dur-1) var(--ease-emphasized);
 }
-.topic-chip::before { content: "#"; color: var(--coral); margin-right: 0.15em; }
+.topic-chip::before { content: "#"; color: var(--accent); margin-right: 0.15em; }
 .topic-chip:hover {
   color: var(--text);
-  border-color: var(--coral);
+  border-color: var(--accent);
   transform: translateY(-2px);
 }
 
@@ -895,8 +872,8 @@ body::before {
 .pull-quote {
   margin: var(--space-6) 0;
   padding: var(--space-4) var(--space-5) var(--space-4) var(--space-6);
-  border-left: 4px solid var(--violet);
-  background: var(--violet-tint);
+  border-left: 4px solid var(--accent);
+  background: var(--accent-tint);
   border-radius: var(--radius);
   font-family: var(--font-display);
   font-size: var(--fs-h3);
@@ -952,7 +929,7 @@ body::before {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: var(--pad-code);
-  color: var(--coral-weak);
+  color: var(--accent-weak);
 }
 .cherry-markdown.theme__explainer pre {
   background: var(--surface-well) !important;
@@ -978,7 +955,7 @@ body::before {
   margin: var(--space-6) 0;
   padding: var(--space-6);
   background:
-    radial-gradient(120% 90% at 50% -10%, var(--amber-tint), transparent 60%),
+    radial-gradient(120% 90% at 50% -10%, var(--accent-tint), transparent 60%),
     var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -992,7 +969,7 @@ body::before {
   .mermaid-frame.is-pending { opacity: 0; }
 }
 .cherry-markdown.theme__explainer pre.mermaid-error {
-  border-left: 4px solid var(--danger);
+  border-left: 4px solid var(--pitfall);
 }
 
 /* ---- built-in nav: [toc] + detail/panel ----------------------------------- */
@@ -1017,7 +994,7 @@ body::before {
   color: var(--text-2);
   transition: color var(--dur-1) var(--ease-standard);
 }
-.cherry-markdown.theme__explainer .toc a:hover { color: var(--coral); }
+.cherry-markdown.theme__explainer .toc a:hover { color: var(--accent); }
 
 .cherry-markdown.theme__explainer details {
   background: var(--surface-raised);
@@ -1035,7 +1012,7 @@ body::before {
   color: var(--text-2);
   transition: color var(--dur-1) var(--ease-standard);
 }
-.cherry-markdown.theme__explainer summary:hover { color: var(--coral); }
+.cherry-markdown.theme__explainer summary:hover { color: var(--accent); }
 
 /* ---- gallery helper (used by components.md cheat-sheet) ------------------- */
 .gallery-item {
@@ -1062,7 +1039,7 @@ body::before {
 .cherry-markdown.theme__explainer a:focus-visible,
 .cherry-markdown.theme__explainer summary:focus-visible,
 .nav-link:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
@@ -1095,7 +1072,7 @@ body::before {
   padding: var(--space-7);
   background: var(--surface-raised);
   border: 1px solid var(--border);
-  border-left: 4px solid var(--danger);
+  border-left: 4px solid var(--pitfall);
   border-radius: var(--radius);
   font-family: var(--font-body);
   color: var(--text-2);
@@ -1106,7 +1083,7 @@ body::before {
   font-size: var(--fs-sm);
   letter-spacing: var(--track-eyebrow);
   text-transform: uppercase;
-  color: var(--danger);
+  color: var(--pitfall);
   margin: 0 0 var(--space-4);
 }
 .explainer-error h1 {
@@ -1119,10 +1096,10 @@ body::before {
 }
 .explainer-error code {
   font-family: var(--font-mono);
-  color: var(--magenta-weak);
-  background: var(--magenta-tint);
+  color: var(--pitfall-weak);
+  background: var(--pitfall-tint);
   border-radius: var(--radius-sm);
   padding: var(--pad-code);
 }
 .explainer-error ul { padding-left: var(--space-6); }
-.explainer-error a { color: var(--blue); }
+.explainer-error a { color: var(--accent); }
