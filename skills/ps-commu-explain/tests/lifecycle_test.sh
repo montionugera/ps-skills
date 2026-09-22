@@ -329,7 +329,121 @@ flowchart LR
   F --x|x-end ok| G
 ```
 EOF
-  "$S/lint.sh" t-lint-goodflow
+  # Assert rc==0 AND empty output, not just a zero exit code: fix round 1's
+  # version of this fixture (the "B --> |middle| C" line, a space before the
+  # pipe) passed VACUOUSLY — the pre-round-2 parser silently dropped that
+  # whole line from both checks (bail-out bug), so this test happened to
+  # still exit 0 without ever actually verifying that edge's label. Now that
+  # an unclassifiable statement is a reported defect (fail closed) rather
+  # than a silent skip, a regression back to that bug would make this FAIL
+  # (non-empty output), which is what makes this assertion non-vacuous.
+  local out rc; out="$("$S/lint.sh" t-lint-goodflow 2>&1)"; rc=$?
+  (( rc == 0 )) && [[ -z "$out" ]]
+}
+test_lint_fails_semicolon_edges() {  # regression: ";"-terminated edges must be fully
+  "$S/init.sh" t-lint-semi --tier html >/dev/null                  # checked, not dropped (Mermaid's
+  _lint_valid_brief_facts_storyboard t-lint-semi                    # own docs use this style)
+  mkdir -p /tmp/ps-commu/t-lint-semi/app
+  cat > /tmp/ps-commu/t-lint-semi/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A --> B;
+  B --> C;
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-semi 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  grep -q "'A --> B' has no label" <<<"$out" &&
+  grep -q "'B --> C' has no label" <<<"$out" &&
+  ! grep -qi 'not understood' <<<"$out"
+}
+test_lint_fails_inline_comment_edge() {  # regression: a trailing "%% note" on an edge
+  "$S/init.sh" t-lint-comment --tier html >/dev/null                # line must not hide that edge
+  _lint_valid_brief_facts_storyboard t-lint-comment                  # from the label check
+  mkdir -p /tmp/ps-commu/t-lint-comment/app
+  cat > /tmp/ps-commu/t-lint-comment/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A --> B %% some note
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-comment 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  grep -q "'A --> B' has no label" <<<"$out" &&
+  ! grep -qi 'not understood' <<<"$out"
+}
+test_lint_fails_fanout_edges() {  # regression: "A --> B & C" fan-out must check
+  "$S/init.sh" t-lint-fanout --tier html >/dev/null                 # BOTH targets, not bail out
+  _lint_valid_brief_facts_storyboard t-lint-fanout
+  mkdir -p /tmp/ps-commu/t-lint-fanout/app
+  cat > /tmp/ps-commu/t-lint-fanout/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A --> B & C
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-fanout 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  grep -q "'A --> B' has no label" <<<"$out" &&
+  grep -q "'A --> C' has no label" <<<"$out" &&
+  ! grep -qi 'not understood' <<<"$out"
+}
+# regression: proves a spaced "--> |x|" labeled edge is genuinely PARSED
+# (not silently dropped) alongside a real unlabeled edge in the same
+# diagram. If the spaced form were ever bailed-out again, that line would
+# surface as an EXTRA "not understood" defect, making the exact-one-defect
+# assertion below fail.
+test_lint_fails_only_expected_edge_with_spaced_pipe() {
+  "$S/init.sh" t-lint-spacedpipe --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-spacedpipe
+  mkdir -p /tmp/ps-commu/t-lint-spacedpipe/app
+  cat > /tmp/ps-commu/t-lint-spacedpipe/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A --> |mid| B
+  B --> C
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-spacedpipe 2>&1)"; rc=$?
+  local n; n="$(grep -c ':' <<<"$out")"
+  (( rc == 1 )) && (( n == 1 )) && grep -q "'B --> C' has no label" <<<"$out"
+}
+test_lint_passes_class_shorthand_not_counted_as_node() {  # regression: ":::hot" on 7
+  "$S/init.sh" t-lint-classshort --tier html >/dev/null             # real, distinct nodes must not
+  _lint_valid_brief_facts_storyboard t-lint-classshort                # add a phantom 8th "hot" node
+  mkdir -p /tmp/ps-commu/t-lint-classshort/app                        # and trip the >7 cap
+  cat > /tmp/ps-commu/t-lint-classshort/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A[a]:::hot
+  B[b]:::hot
+  C[c]:::hot
+  D[d]:::hot
+  E[e]:::hot
+  F[f]:::hot
+  G[g]:::hot
+  A -->|x| B
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-classshort 2>&1)"; rc=$?
+  (( rc == 0 )) && [[ -z "$out" ]]
+}
+test_lint_flags_unverifiable_q_coverage_when_brief_missing() {  # regression: an empty
+  "$S/init.sh" t-lint-nobrief --tier html >/dev/null              # q_ids (brief missing) must
+  _lint_valid_brief_facts_storyboard t-lint-nobrief                 # report "cannot verify", not
+  rm -f /tmp/ps-commu/t-lint-nobrief/00-brief.md                    # silently skip Q-coverage
+  local out rc; out="$("$S/lint.sh" t-lint-nobrief 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -qi 'cannot verify' <<<"$out"
 }
 
 check lint_passes_starter       test_lint_passes_starter
@@ -339,6 +453,12 @@ check lint_fails_chained_edge_tail  test_lint_fails_chained_edge_tail
 check lint_fails_node_cap_standalone test_lint_fails_node_cap_standalone
 check lint_fails_alt_arrow_unlabeled test_lint_fails_alt_arrow_unlabeled
 check lint_passes_labeled_chain_and_alt_arrows test_lint_passes_labeled_chain_and_alt_arrows
+check lint_fails_semicolon_edges  test_lint_fails_semicolon_edges
+check lint_fails_inline_comment_edge test_lint_fails_inline_comment_edge
+check lint_fails_fanout_edges     test_lint_fails_fanout_edges
+check lint_fails_only_expected_edge_with_spaced_pipe test_lint_fails_only_expected_edge_with_spaced_pipe
+check lint_passes_class_shorthand_not_counted_as_node test_lint_passes_class_shorthand_not_counted_as_node
+check lint_flags_unverifiable_q_coverage_when_brief_missing test_lint_flags_unverifiable_q_coverage_when_brief_missing
 
 # --- verify.sh (render gate; needs Google Chrome — SKIPs visibly without it) ---
 # A verify run is ~45s on macOS (Chrome start + CDN load + Mermaid render).
