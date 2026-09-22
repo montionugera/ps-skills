@@ -17,7 +17,8 @@
      (default #ffffff, one structural accent stroke), on the cream diagram frame.
    - Adds ONE custom syntax hook (`::: callout <kind>`) because a fenced callout
      shorthand is meaningfully terser than hand-writing <div class="callout ...">.
-     Everything else (tiles, schematic, rows, hero) maps cleanly to plain
+     Everything else (reader-questions, claim-card, before-after, worked-example,
+     wrong-without, receipts, schematic, rows) maps cleanly to plain
      HTML-in-markdown, so per YAGNI we add no further hooks.
 
    CHERRY GLOBAL SHAPE (0.8.58 UMD): `window.Cherry` is an ESM-interop *namespace*
@@ -253,10 +254,11 @@ function buildNav(preview) {
   nav.className = "explainer-nav";
   nav.setAttribute("aria-label", "Document sections");
 
-  // brand row (reads optional data-* on the hero)
-  const hero = preview.querySelector(".hero");
-  const brandTitle = (hero && hero.getAttribute("data-nav-title")) || "Explainer";
-  const brandSub = (hero && hero.getAttribute("data-nav-sub")) || "contents";
+  // brand row (reads optional data-* on the top-of-page reader-questions box —
+  // this replaced .hero as the page's top-level component in v3)
+  const brandSrc = preview.querySelector(".reader-questions");
+  const brandTitle = (brandSrc && brandSrc.getAttribute("data-nav-title")) || "Explainer";
+  const brandSub = (brandSrc && brandSrc.getAttribute("data-nav-sub")) || "contents";
   nav.innerHTML =
     '<div class="nav-brand">' +
     '<span class="icon-chip sm"><i data-lucide="sparkles"></i></span>' +
