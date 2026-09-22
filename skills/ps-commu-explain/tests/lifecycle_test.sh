@@ -542,6 +542,14 @@ EOF
 test_lint_combined_regression_matrix() {
   "$S/init.sh" t-lint-matrix --tier html >/dev/null
   _lint_valid_brief_facts_storyboard t-lint-matrix
+  # Fix round 4 additions: the brief is REMOVED so the q_ids "cannot verify
+  # Q-coverage" branch runs in the same lint pass as the diagram checks (it
+  # was previously only exercised in isolation); diagram #1 gains the
+  # --x/--o/x--x/o--o/<-->/~~~ link families that round 3's matrix missed;
+  # diagram #2 is a case-mismatched header ("Graph TD"), which Mermaid does
+  # not detect as a diagram at all and which must therefore be REPORTED, not
+  # silently left unchecked.
+  rm -f /tmp/ps-commu/t-lint-matrix/00-brief.md
   mkdir -p /tmp/ps-commu/t-lint-matrix/app
   cat > /tmp/ps-commu/t-lint-matrix/app/content.md <<'EOF'
 See F1 for details.
@@ -553,13 +561,24 @@ flowchart LR
   D ==> E %% inline comment here
   E --> F & G;
   Style[note %% not a comment] --> H
+  A --x B; C --o D
+  E x--x|both ends| F
+  F o--o G
+  G <--> H
+  A ~~~ H
   classDef hot fill:#f00
   class A hot
+```
+
+```mermaid
+Graph TD
+  X --> Y
 ```
 EOF
   local out rc; out="$("$S/lint.sh" t-lint-matrix 2>&1)"; rc=$?
   (( rc == 1 )) &&
   ! grep -qi 'not understood' <<<"$out" &&
+  grep -qi 'cannot verify Q-coverage' <<<"$out" &&
   ! grep -q "'A --> B' has no label" <<<"$out" &&
   grep -q "'B --> C' has no label" <<<"$out" &&
   grep -q "'C -.-> D' has no label" <<<"$out" &&
@@ -567,7 +586,424 @@ EOF
   grep -q "'E --> F' has no label" <<<"$out" &&
   grep -q "'E --> G' has no label" <<<"$out" &&
   grep -q "'Style --> H' has no label" <<<"$out" &&
-  grep -q '9 nodes (max 7)' <<<"$out"
+  grep -q "'A --x B' has no label" <<<"$out" &&
+  grep -q "'C --o D' has no label" <<<"$out" &&
+  ! grep -q "'E x--x F' has no label" <<<"$out" &&
+  grep -q "'F o--o G' has no label" <<<"$out" &&
+  grep -q "'G <--> H' has no label" <<<"$out" &&
+  ! grep -q "~~~" <<<"$out" &&
+  grep -q '9 nodes (max 7)' <<<"$out" &&
+  grep -q "diagram #2" <<<"$out" && grep -qi 'case-sensitive' <<<"$out"
+}
+# Fix round 4 (rereview-3 New-1): a bare --x/--o operator must not swallow a
+# following ";"-separated statement or a "%%" comment up to the NEXT dashed
+# operator on the line. Round 3 parsed "A --x B; C --> D" as ONE labeled edge
+# A..D and reported nothing.
+test_lint_fails_cross_circle_then_semicolon_stmt() {
+  "$S/init.sh" t-lint-xo --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-xo
+  mkdir -p /tmp/ps-commu/t-lint-xo/app
+  cat > /tmp/ps-commu/t-lint-xo/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A --x B; C --> D
+  E --o F; G --o H
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-xo 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  ! grep -qi 'not understood' <<<"$out" &&
+  grep -q "'A --x B' has no label" <<<"$out" &&
+  grep -q "'C --> D' has no label" <<<"$out" &&
+  grep -q "'E --o F' has no label" <<<"$out" &&
+  grep -q "'G --o H' has no label" <<<"$out" &&
+  grep -q '8 nodes (max 7)' <<<"$out"
+}
+# Fix round 4 (rereview-3 New-2, corrected against Mermaid's own grammar):
+# Mermaid's flowchart lexer is CASE-SENSITIVE (flow.jison has no
+# case-insensitive option; verified by running Mermaid 11.15's parser):
+# "Graph TD"/"Flowchart LR" are not detected as diagrams, "classdef"/
+# "linkstyle" are parse errors, "End" is an ordinary node id and does NOT
+# close a subgraph, and lowercase "end"/"style" cannot be node ids. The lint
+# must REPORT each of these (fail closed), never skip the block or count a
+# phantom, and never accept the lowercase form as a directive.
+test_lint_fails_case_mismatched_header_not_skipped() {
+  "$S/init.sh" t-lint-hdrcase --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-hdrcase
+  mkdir -p /tmp/ps-commu/t-lint-hdrcase/app
+  cat > /tmp/ps-commu/t-lint-hdrcase/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+Graph TD
+  A --> B
+```
+
+```mermaid
+Flowchart LR
+  C -->|x| D
+```
+
+```mermaid
+SequenceDiagram
+  A->>B: hi
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-hdrcase 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  grep -q "diagram #1" <<<"$out" && grep -q "diagram #2" <<<"$out" &&
+  grep -q "diagram #3" <<<"$out" &&
+  (( $(grep -ci 'case-sensitive' <<<"$out") == 3 ))
+}
+test_lint_fails_lowercase_keywords_and_End_node() {
+  "$S/init.sh" t-lint-kwcase --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-kwcase
+  mkdir -p /tmp/ps-commu/t-lint-kwcase/app
+  cat > /tmp/ps-commu/t-lint-kwcase/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  subgraph one
+    A -->|x| End
+  End
+  classdef hot fill:#f00
+  linkstyle 0 stroke:#f00
+```
+
+```mermaid
+flowchart LR
+  A -->|x| end
+  style --> B
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-kwcase 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  grep -q "diagram #1 .*subgraph.*never closed" <<<"$out" &&
+  grep -q "diagram #1 line 5 not understood by lint: 'classdef hot fill:#f00'" <<<"$out" &&
+  grep -q "diagram #1 line 6 not understood by lint: 'linkstyle 0 stroke:#f00'" <<<"$out" &&
+  grep -q "diagram #2 line 2 .*reserved word 'end'" <<<"$out" &&
+  grep -q "diagram #2 line 3 .*'style'" <<<"$out" &&
+  ! grep -q "'style --> B' has no label" <<<"$out" &&
+  ! grep -q "'A -->|x| End' has no label" <<<"$out"
+}
+# Fix round 4 (rereview-3 New-3, corrected against Mermaid): "--" inside a
+# style/classDef/linkStyle argument list is a Mermaid parse error (Mermaid
+# 11.15 rejects "style A fill:var(--a)" — its lexer reads "--" as a link),
+# so the lint reports it with an accurate reason; but single dashes in CSS
+# property names ("stroke-width") and "--" inside a quoted click URL are
+# legal and must lint clean.
+test_lint_flags_link_operator_in_style_args_only() {
+  "$S/init.sh" t-lint-cssvar --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-cssvar
+  mkdir -p /tmp/ps-commu/t-lint-cssvar/app
+  cat > /tmp/ps-commu/t-lint-cssvar/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A -->|x| B
+  style A fill:#f00,stroke:#333,stroke-width:2px
+  classDef k fill:#0f0,stroke-dasharray:5 5
+  linkStyle 0 stroke:#f00
+  click A "http://x/a--o-b" "tip"
+```
+
+```mermaid
+flowchart LR
+  A -->|x| B
+  style A fill:var(--a),stroke:var(--out)
+  classDef k fill:var(--a),color:var(--xy)
+  style A fill:#f00; B --> C
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-cssvar 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  ! grep -q "diagram #1" <<<"$out" &&
+  (( $(grep -c "diagram #2 line [345] .*link operator" <<<"$out") == 3 ))
+}
+# Fix round 4 (rereview-3 New-4): byte-identical defect lines are printed once.
+test_lint_dedupes_identical_defect_lines() {
+  "$S/init.sh" t-lint-dedupe --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-dedupe
+  mkdir -p /tmp/ps-commu/t-lint-dedupe/app
+  cat > /tmp/ps-commu/t-lint-dedupe/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A --> B
+  A --> B
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dedupe 2>&1)"; rc=$?
+  (( rc == 1 )) && (( $(grep -c "'A --> B' has no label" <<<"$out") == 1 ))
+}
+# Fix round 4: a block whose first line is a %%{init}%% directive or a %%
+# comment is still a flowchart and must be checked (the old first-line header
+# match silently left such blocks entirely unvalidated).
+test_lint_checks_block_behind_init_directive() {
+  "$S/init.sh" t-lint-init --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-init
+  mkdir -p /tmp/ps-commu/t-lint-init/app
+  cat > /tmp/ps-commu/t-lint-init/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+%%{init: {"theme": "dark"}}%%
+%% a leading comment
+flowchart LR
+  A --> B
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-init 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "'A --> B' has no label" <<<"$out" &&
+  ! grep -qi 'not understood' <<<"$out"
+}
+# Fix round 4 (oracle-backed): Mermaid only accepts %% comments on their own
+# line; a trailing "%% note" after a statement is a parse error. The lint
+# still validates the statement in front of it (so the edge defect is not
+# masked) AND names the comment problem.
+test_lint_flags_inline_comment_but_still_checks_edge() {
+  "$S/init.sh" t-lint-inlcmt --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-inlcmt
+  mkdir -p /tmp/ps-commu/t-lint-inlcmt/app
+  cat > /tmp/ps-commu/t-lint-inlcmt/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  %% own-line comments are fine
+  A --> B %% trailing comment
+    %% indented own-line comment is fine too
+  C -->|x| D
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-inlcmt 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "'A --> B' has no label" <<<"$out" &&
+  (( $(grep -ci 'own line' <<<"$out") == 1 )) &&
+  grep -q "line 3 .*own line" <<<"$out"
+}
+# Fix round 4 stress matrix (positive): every Mermaid flowchart link family,
+# every node shape, edge ids, @{shape} data, unicode/dotted/dashed ids,
+# a quoted label spanning lines, ";"-joined statements, a header on the same
+# line as a statement, subgraph+direction, and every directive — all legal
+# per Mermaid 11.15's own parser — lint CLEAN when every edge is labeled.
+test_lint_passes_full_mermaid_vocabulary() {
+  "$S/init.sh" t-lint-vocab --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-vocab
+  mkdir -p /tmp/ps-commu/t-lint-vocab/app
+  cat > /tmp/ps-commu/t-lint-vocab/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A -->|a| B ---|b| C -.->|c| D ==>|d| E --x|e| F --o|f| G
+  A x--x|g| B
+  A o--o|h| C
+  A <-->|i| D
+  A <-.->|j| E
+  A <==>|k| F
+  A -..->|l| G
+  A ---->|m| B
+  A ===|n| C
+  A -.-|o| D
+  A ~~~ E
+  A -- p --> F
+  A == q ==> G
+  A -. r .-> B
+  A -- s --x C
+  A -- t ---- D
+  A -- a-b --> E
+  A -->|"quoted | pipe"| F
+  A -->|has; semi and %% pct| G
+  A e1@-->|u| B
+```
+
+```mermaid
+graph TD;A-->|x|B
+  C>odd] -->|x| D[/trap/] -->|x| E[\inv\] -->|x| F[/lean\]
+  G(-ellipse-) -->|x| A([stadium]) -->|x| B[(cyl)] -->|x| C(((dc)))
+  D[[sub]] -->|x| E{{hex}} -->|x| F((c)) -->|x| G(r)
+  A{d} -->|x| B[s]:::hot -->|x| C@{ shape: circle, label: "a }b" }
+  D["x ] y"] -->|x| E["`**md** text`"] -->|x| F["multi
+  line"] -->|x| G[สวัสดี %% not; a comment]
+  classDef hot fill:#f00
+```
+
+```mermaid
+%%{init: {"theme": "dark"}}%%
+flowchart TB
+  accTitle: Title here
+  accDescr: Description here
+  subgraph grp["Group; title"]
+    direction LR
+    a.b -->|x| c-d; c-d -->|y| ก
+  end
+  subgraph plain
+    n1 & n2 -->|z| n3 & ก
+  end
+  n3 -->|w| a.b & c-d
+  n1:::hot -->|v| n2@{ shape: circle }
+  class n1,n2 hot; classDef hot fill:#f00
+  linkStyle default color:Sienna;
+  style n3 fill:#0f0,stroke-width:2px
+  click n1 "http://x/a--o-b" "tip" _blank
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-vocab 2>&1)"; rc=$?
+  (( rc == 0 )) && [[ -z "$out" ]]
+}
+# Fix round 4 stress matrix (negative): every bare link family is reported
+# unlabeled with its operator quoted as written; the invisible link "~~~"
+# is the documented exception (it carries no information).
+test_lint_fails_every_bare_operator() {
+  "$S/init.sh" t-lint-bareops --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-bareops
+  mkdir -p /tmp/ps-commu/t-lint-bareops/app
+  cat > /tmp/ps-commu/t-lint-bareops/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A --> B
+  A --- B
+  A -.-> B
+  A -.- B
+  A ==> B
+  A === B
+  A --x B
+  A --o B
+  A x--x B
+  A o--o B
+  A <--> B
+  A <-.-> B
+  A <==> B
+  A ---> B
+  A -..-> B
+  A ==o B
+  C -->| | D
+  A ~~~ B
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-bareops 2>&1)"; rc=$?
+  (( rc == 1 )) && ! grep -qi 'not understood' <<<"$out" &&
+  (( $(grep -c "has no label" <<<"$out") == 17 )) &&
+  grep -qF "'C --> D' has no label" <<<"$out" &&
+  for op in '-->' '---' '-.->' '-.-' '==>' '===' '--x' '--o' 'x--x' 'o--o' '<-->' '<-.->' '<==>' '--->' '-..->' '==o'; do
+    grep -qF "'A $op B' has no label" <<<"$out" || return 1
+  done
+}
+# Fix round 4 stress matrix (fail-closed): forms Mermaid itself rejects are
+# each reported as a defect with a line number — never silently accepted,
+# never allowed to mask a neighbouring edge's real defect.
+test_lint_fails_closed_on_mermaid_rejected_forms() {
+  "$S/init.sh" t-lint-rejects --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-rejects
+  mkdir -p /tmp/ps-commu/t-lint-rejects/app
+  cat > /tmp/ps-commu/t-lint-rejects/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A --x --> B
+  A --x B  C --o D
+  A[a|b] -->|x| B
+  A(text (nested) here) -->|x| B
+  A [s] -->|x| B
+  A -- t -->|u| B
+  A:::hot:::cold -->|x| B
+  A -->|x| B; end
+  A -- --> B
+  A -->|x| style
+  Z -->|ok| Y
+  W --> V
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-rejects 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  for ln in 2 3 4 5 6 7 8 9; do grep -q "line $ln " <<<"$out" || return 1; done &&
+  grep -q "line 10 .*'-- -->'\|'A -- --> B' has no label" <<<"$out" &&
+  grep -q "line 11 .*reserved word 'style'" <<<"$out" &&
+  ! grep -q "line 12 " <<<"$out" &&
+  grep -q "'W --> V' has no label" <<<"$out"
+}
+# Fix round 4 (block level, fail closed): a mermaid block whose first real
+# line is not a Mermaid diagram type this lint knows (a typo such as
+# "flowchat LR", or a body line before the header) must be REPORTED rather
+# than silently left unchecked; a Mermaid "---" YAML front-matter block and
+# %% lines before the header are skipped when finding it; and diagram types
+# the lint has no rules for (classDiagram, pie, ...) still pass silently by
+# design.
+test_lint_reports_unknown_diagram_header_and_skips_frontmatter() {
+  "$S/init.sh" t-lint-unkhdr --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-unkhdr
+  mkdir -p /tmp/ps-commu/t-lint-unkhdr/app
+  cat > /tmp/ps-commu/t-lint-unkhdr/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchat LR
+  A --> B
+```
+
+```mermaid
+accTitle: title first
+flowchart LR
+  C --> D
+```
+
+```mermaid
+---
+title: Front matter is legal
+config:
+  theme: dark
+---
+%% comment
+flowchart LR
+  E --> F
+```
+
+```mermaid
+classDiagram
+  Animal <|-- Duck
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-unkhdr 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  grep -q "diagram #1 header 'flowchat'" <<<"$out" &&
+  grep -q "diagram #2 header 'accTitle:'" <<<"$out" &&
+  grep -q "diagram #3 edge 'E --> F' has no label" <<<"$out" &&
+  ! grep -q "diagram #4" <<<"$out" &&
+  (( $(grep -c ':' <<<"$out") == 3 ))
+}
+# Fix round 4 (oracle-backed): Mermaid's lexer takes the WHOLE line holding
+# "direction XX" as one token, so "direction LR; A --> B" parses fine in
+# Mermaid but the edge never exists. Report it instead of mirroring the
+# swallow; a plain "direction LR" line and a node named "direction" are fine.
+test_lint_flags_text_swallowed_by_direction() {
+  "$S/init.sh" t-lint-dirswallow --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-dirswallow
+  mkdir -p /tmp/ps-commu/t-lint-dirswallow/app
+  cat > /tmp/ps-commu/t-lint-dirswallow/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  subgraph s
+    direction LR
+    direction -->|x| A
+  end
+  subgraph t
+    direction TB; B --> C
+  end
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dirswallow 2>&1)"; rc=$?
+  (( rc == 1 )) && (( $(grep -c ':' <<<"$out") == 1 )) &&
+  grep -q "line 7 .*'direction TB'.*ignores" <<<"$out"
 }
 
 check lint_passes_starter       test_lint_passes_starter
@@ -588,6 +1024,18 @@ check lint_passes_dash_label_with_semicolon_not_torn test_lint_passes_dash_label
 check lint_fails_capitalized_keyword_lookalike_nodes test_lint_fails_capitalized_keyword_lookalike_nodes
 check lint_fails_unparseable_statement_with_line_number test_lint_fails_unparseable_statement_with_line_number
 check lint_combined_regression_matrix test_lint_combined_regression_matrix
+check lint_fails_cross_circle_then_semicolon_stmt test_lint_fails_cross_circle_then_semicolon_stmt
+check lint_fails_case_mismatched_header_not_skipped test_lint_fails_case_mismatched_header_not_skipped
+check lint_fails_lowercase_keywords_and_End_node test_lint_fails_lowercase_keywords_and_End_node
+check lint_flags_link_operator_in_style_args_only test_lint_flags_link_operator_in_style_args_only
+check lint_dedupes_identical_defect_lines test_lint_dedupes_identical_defect_lines
+check lint_checks_block_behind_init_directive test_lint_checks_block_behind_init_directive
+check lint_flags_inline_comment_but_still_checks_edge test_lint_flags_inline_comment_but_still_checks_edge
+check lint_passes_full_mermaid_vocabulary test_lint_passes_full_mermaid_vocabulary
+check lint_fails_every_bare_operator test_lint_fails_every_bare_operator
+check lint_fails_closed_on_mermaid_rejected_forms test_lint_fails_closed_on_mermaid_rejected_forms
+check lint_reports_unknown_diagram_header_and_skips_frontmatter test_lint_reports_unknown_diagram_header_and_skips_frontmatter
+check lint_flags_text_swallowed_by_direction test_lint_flags_text_swallowed_by_direction
 
 # --- verify.sh (render gate; needs Google Chrome — SKIPs visibly without it) ---
 # A verify run is ~45s on macOS (Chrome start + CDN load + Mermaid render).

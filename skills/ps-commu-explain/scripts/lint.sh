@@ -19,11 +19,20 @@
 #                       in 01-facts.md; forbidden classes absent (stat-grid,
 #                       stat-tile, meter, cat-*, metric-grid, card-grid);
 #                       Mermaid flowchart edges carry a label (-->|x| or
-#                       -- x -->, and the same for the ---/-.->/==>/--x/--o
-#                       link families); sequenceDiagram arrows carry text
-#                       after the colon; flowchart node count <=7 per
-#                       diagram, counting every declared node id (edge
-#                       endpoints AND standalone "ID[label]" declarations).
+#                       -- x -->, for every link family Mermaid has:
+#                       ---/-->/-.->/==>/--x/--o/x--x/o--o/<-->/... ; the
+#                       invisible ~~~ link is exempt); flowchart node count
+#                       <=7 per diagram, counting every declared node id
+#                       (edge endpoints AND standalone "ID[label]"
+#                       declarations); sequenceDiagram arrows carry text
+#                       after the colon. Flowcharts are read by a scanner
+#                       that mirrors Mermaid's own case-sensitive grammar:
+#                       anything it cannot classify, a mis-cased keyword
+#                       ("Graph", "classdef", "End" closing a subgraph), a
+#                       trailing "%% comment", an unbalanced subgraph, a
+#                       link operator inside style arguments, or a block
+#                       whose header is not a known diagram type is REPORTED
+#                       (fail closed) — never silently skipped.
 #   Output: one defect per line ("<file>: <reason>"). Exit 0 = clean;
 #   1 = defects listed.
 set -uo pipefail
@@ -180,191 +189,412 @@ if content is not None:
             if c in forbidden_exact or c.startswith('cat-'):
                 defects.append(f"app/content.md: forbidden class '{c}' used")
 
-    # Strip node-shape text ("A[label]", "A(label)", "A{label}", "A((label))",
-    # "A{{label}}") and the ":::className" inline class-shorthand — neither
-    # declares a new node, so both must be gone before node-id extraction
-    # (":::hot" left in place would otherwise be counted as a phantom node).
-    def strip_shapes(text):
-        text = re.sub(
-            r'([A-Za-z0-9_]+)(\[\[[^\]]*\]\]|\[[^\]]*\]|\(\([^)]*\)\)|\([^)]*\)|\{\{[^}]*\}\}|\{[^}]*\})',
-            r'\1',
-            text,
-        )
-        return re.sub(r':::[\w-]+', '', text)
-
-    # Link (edge) operators, covering the dashed/dotted/thick families Mermaid
-    # flowcharts support, each as a bare token or with inline "-- text -->"
-    # style label text. A trailing "|label|" (the other Mermaid label form,
-    # optionally preceded by whitespace: "--> |x|" is legal Mermaid) is
-    # matched separately below so it also applies to non-dashed link styles.
-    # IMPORTANT: this only matches the OPERATOR text, never the surrounding
-    # node ids — an earlier version matched "src op dst" as one combined,
-    # non-overlapping regex, which silently skipped the tail edge of a chain
-    # like "A --> B --> C" (the first match consumed "B" as its dst, leaving
-    # nothing for the second arrow to anchor a src on). Node ids are now
-    # recovered separately, from the text BETWEEN operator matches.
-    BARE_OPS = {'-->', '---', '--x', '--o', '-.->', '==>'}
-    op_re = re.compile(
-        r'(?P<op>'
-        r'--[^->\n]*-->'      # dashed, inline label, arrowhead
-        r'|--[^->\n]*---'     # dashed, inline label, open link
-        r'|--[^->\n]*--x'     # dashed, inline label, x-end
-        r'|--[^->\n]*--o'     # dashed, inline label, o-end
-        r'|-\.[^.>\n]*\.->'   # dotted, inline label, arrowhead
-        r'|==[^=>\n]*==>'     # thick, inline label, arrowhead
-        r'|-->|---|--x|--o|-\.->|==>'  # bare forms of all of the above
-        r')'
-        r'(?:\s*\|(?P<pipelabel>[^|\n]*)\|)?'  # optional, possibly-spaced |label|
+    # ------------------------------------------------------------------
+    # Mermaid flowchart checking (fix round 4: single-pass scanner).
+    #
+    # The block is read ONCE, left to right, by a scanner modelled on
+    # Mermaid's own flowchart lexer (packages/mermaid/src/diagrams/flowchart/
+    # parser/flow.jison) and checked against Mermaid 11.15's real parser for
+    # every syntax form named below. At every position the scanner knows
+    # whether it is inside a quoted string, a node-shape label ("[...]",
+    # "(...)", "{...}" and the double/stadium/cylinder/trapezoid/odd forms),
+    # an inline edge label ("-- text -->") or a "|text|" label, and only
+    # treats ';', '%%', a link operator or a directive keyword as meaningful
+    # OUTSIDE all of those. Earlier rounds split each line with a sequence
+    # of independent regexes; every fix moved the ambiguity to a different
+    # form (a silent skip each time). Facts this scanner relies on, all
+    # verified against the real parser rather than assumed:
+    #   * Keywords are CASE-SENSITIVE: "Graph TD" is not a diagram at all,
+    #     "classdef" is a parse error, "End" is an ordinary node id and does
+    #     not close a subgraph, lowercase "end"/"style"/... cannot be ids.
+    #   * ';' and '%%' are literal inside every label form, and quoted
+    #     labels, edge text and |labels| may span lines.
+    #   * '%%' comments are only legal on their own line.
+    #   * "style"/"classDef"/"linkStyle" arguments run to END OF LINE (';'
+    #     is a style token), so "style A fill:#f00; B --> C" is an error;
+    #     "class"/"click"/"subgraph"/"end" statements end at ';'.
+    #   * Link vocabulary: [xo<]?--+[-xo>], [xo<]?==+[=xo>],
+    #     [xo<]?-?.+-[xo>]?, ~~~ (invisible), each bare, with "-- text -->"
+    #     inline text, or with a trailing |text| label — never both.
+    # ------------------------------------------------------------------
+    FLOW_RESERVED = {  # exact-case whole tokens that can never be a node id
+        'graph', 'flowchart', 'flowchart-elk', 'subgraph', 'end', 'style',
+        'linkStyle', 'classDef', 'class', 'click', 'interpolate', 'href', 'call',
+    }
+    # Node id: word chars, '.', '#', a single ':' (not the ':::' class
+    # separator) and Mermaid's own dash rule (a '-' not followed by '>', '-'
+    # or '.'), so "a.b", "c-d", "node#1", "ก" are ids while "A-->B" is not.
+    ID_RE = re.compile(r'(?:[\w.#]|:(?!::)|-(?=[^>\-.\s]))+')
+    LINK_RE = re.compile(r'[xo<]?-{2,}[-xo>]|[xo<]?={2,}[=xo>]|[xo<]?-?\.+-[xo>]?|~{2,}')
+    START_LINK_RE = re.compile(r'[xo<]?(?:--|==|-\.)')      # opens "-- text -->"
+    LINK_CLOSER = {                                          # keyed by family char
+        '-': re.compile(r'[xo<]?-{2,}[-xo>]'),
+        '=': re.compile(r'[xo<]?={2,}[=xo>]'),
+        '.': re.compile(r'[xo<]?-?\.+-[xo>]?'),
+    }
+    EDGE_ID_RE = re.compile(r'[\w-]+@(?=[xo<]?[-=.~])')     # "A e1@--> B"
+    CLASS_TAG_RE = re.compile(r':::[\w-]+')
+    HEADER_RE = re.compile(
+        r'(?:flowchart-elk|flowchart|graph)(?:[ \t]+(?:TB|TD|BT|RL|LR|BR|[<>^v]))?[ \t\r]*(?=;|\n|$)'
     )
+    DIRECTION_RE = re.compile(r'direction[ \t]+(?:TB|TD|BT|RL|LR)\b')
+    ACC_RE = re.compile(r'acc(?:Title|Descr)[ \t]*[:{]')
+    SHAPE_OPENERS = [  # longest opener first; each maps to its legal closer(s)
+        ('(((', (')))',)), ('([', ('])',)), ('[(', (')]',)), ('[[', (']]',)),
+        ('[/', ('/]', '\\]')), ('[\\', ('\\]', '/]')), ('((', ('))',)),
+        ('{{', ('}}',)), ('(-', ('-)',)), ('[', (']',)), ('(', (')',)),
+        ('{', ('}',)), ('>', (']',)),
+    ]
     seq_edge_re = re.compile(
         r'(?m)^\s*[\w".]+\s*(?:-{1,2}>{1,2}|-{1,2}[x)])\s*[\w".]+\s*:\s*(?P<text>.*)$'
     )
-    # Statement-level keywords that are never node ids, so a statement
-    # starting with one of them is skipped entirely for node/edge extraction
-    # (the diagram header itself, subgraph boundaries, style/click
-    # directives). Case-SENSITIVE and lowercase-only, matching Mermaid's own
-    # lexer, which reserves these words only in lowercase — so a genuinely
-    # named node "Style"/"Direction"/"Class"/"Graph" (capitalized) is never
-    # mistaken for a directive. The "no link operator" guard below closes
-    # the remaining gap: a lowercase node id that collides with a keyword
-    # (e.g. a node named "style") is still recognized as a real statement as
-    # soon as it appears in an edge, since a genuine Mermaid directive never
-    # contains a link operator.
-    FLOW_KEYWORDS = {
-        'flowchart', 'graph', 'subgraph', 'end', 'direction',
-        'classDef', 'class', 'style', 'linkStyle', 'click',
-    }
 
-    def _split_ids(segment):
-        """A segment may be a single node id, or a "&"-joined fan-out bundle
-        ("B & C") — Mermaid's syntax for one edge with multiple sources or
-        targets. Returns the list of ids, or None if the segment isn't
-        cleanly one-or-more bare identifiers."""
-        ids = [p.strip() for p in segment.split('&')]
-        if not ids or not all(re.fullmatch(r'[A-Za-z0-9_]+', p) for p in ids):
-            return None
-        return ids
+    class Bad(Exception):
+        """A statement this lint cannot classify. Carries the offending
+        position and the reason; the caller turns it into a defect."""
+        def __init__(self, pos, why):
+            super().__init__(why)
+            self.pos, self.why = pos, why
 
-    _quote_re = re.compile(r'"[^"\n]*"')
-    _shape_span_re = re.compile(
-        r'[A-Za-z0-9_]+(\[\[[^\]]*\]\]|\[[^\]]*\]|\(\([^)]*\)\)|\([^)]*\)|\{\{[^}]*\}\}|\{[^}]*\})'
-    )
-
-    def _protected_spans(line):
-        """Character ranges in `line` that must never be read as containing
-        a top-level ';' or '%%' comment/separator, because they are genuine
-        Mermaid label content: bracketed node labels ("ID[...]"/"ID(...)"/
-        "ID{...}"), quoted strings, and an edge operator's own inline label
-        text (both "-- text -->" and "|text|" forms — op_re's match spans
-        already include that text). Computed from the SAME regexes used
-        elsewhere in this parser, so this view of a line and the real parse
-        below can never disagree about what counts as a label."""
-        spans = [m.span() for m in _shape_span_re.finditer(line)]
-        spans += [m.span() for m in _quote_re.finditer(line)]
-        spans += [m.span() for m in op_re.finditer(line)]
-        return spans
-
-    def _protected(pos, spans):
-        return any(s <= pos < e for s, e in spans)
-
-    def split_statements(raw_line):
-        """Split one raw Mermaid line into statements on a top-level ';',
-        and drop a trailing top-level '%%' comment. Mermaid labels may
-        legally contain a literal ';' or '%%' (this kit's labels are prose,
-        e.g. "A[\"one; two\"]" or "A -- yes; no --> B") — splitting on every
-        raw ';'/'%%' would tear such a label in half, producing a spurious
-        "not understood" defect while masking whatever the statement
-        actually needed checked. _protected_spans() finds exactly the
-        ranges that must be immune to this."""
-        spans = _protected_spans(raw_line)
-        cut = len(raw_line)
-        for m in re.finditer('%%', raw_line):
-            if not _protected(m.start(), spans):
-                cut = m.start()
-                break
-        line_nc = raw_line[:cut]
-        stmts, start = [], 0
-        for m in re.finditer(';', line_nc):
-            if not _protected(m.start(), spans):
-                stmts.append(line_nc[start:m.start()])
-                start = m.end()
-        stmts.append(line_nc[start:])
-        return stmts
+    def has_link(text, strip_brackets=False):
+        text = re.sub(r'"[^"]*"', '', text)
+        if strip_brackets:
+            text = re.sub(r'\[[^\]]*\]', '', text)
+        return bool(LINK_RE.search(text) or START_LINK_RE.search(text))
 
     def parse_flowchart(block, idx):
-        """Return (node_ids, unlabeled_edges) for one flowchart/graph block,
-        walking every statement so chained edges, standalone node
-        declarations, "&" fan-out, label-aware ";"-terminated/-separated
-        statements and label-aware inline "%%" comments are all handled. A
-        statement this lightweight parser genuinely cannot classify as a
-        node/edge statement is a DEFECT (fail closed), never a silent skip —
-        a diagram is either checked or it says so, it never drops out of
-        validation without saying anything. One narrow, documented
-        exception: a bare, lowercase node id that exactly collides with a
-        Mermaid directive keyword (e.g. a node literally named "style") AND
-        has no link operator on its own statement is still read as that
-        directive and skipped, matching Mermaid's own reserved-word lexer —
-        this parser cannot tell the two apart in that specific case."""
-        node_ids = set()
-        unlabeled = []  # list of (src, op_text, dst)
-        for line_no, raw_line in enumerate(block.splitlines(), start=1):
-            for stmt in split_statements(raw_line):
-                line = stmt.strip()
-                if not line:
+        """Return (node_ids, unlabeled_edges) for one flowchart/graph block.
+
+        Guarantee: every statement is either understood and checked (node
+        ids counted, every link's label checked, subgraph nesting balanced)
+        or reported as a defect with its line number. Nothing is dropped
+        from validation without a defect saying so.
+
+        Deliberate, documented limits (each is a VISIBLE outcome, never a
+        silent skip):
+          * The lint is stricter than Mermaid on labels: a whitespace-only
+            "|  |" label counts as unlabeled; the invisible link "~~~" is
+            exempt because it carries no information.
+          * Arguments of style/classDef/linkStyle/class/click/accTitle/
+            accDescr and subgraph titles are not validated beyond their
+            shape and the absence of a link operator; a CSS-level mistake
+            there surfaces at render time (verify.sh), not here.
+          * Node ids outside [\\w.#:-] (e.g. containing '&', '/', '"'), ids
+            ending in '-' ("A- --> B" is legal Mermaid) and the "[|...|]"
+            props form are reported as not understood rather than parsed.
+          * A block headed by a diagram type this lint has no rules for
+            (classDiagram, pie, ...) passes without any check, by design;
+            any other unrecognised first line is reported.
+          * Trailing "%% comments" (illegal in Mermaid) are reported, but the
+            statement in front of them is still checked so a real defect
+            there is not masked.
+          * The lint does not track whether an id used by class/click/style
+            was declared, or whether a "[quoted]" label form renders."""
+        n = len(block)
+        nodes, unlabeled, open_subgraphs = set(), [], []
+
+        def line_of(p):
+            return block.count('\n', 0, min(p, n)) + 1
+
+        def eol(p):
+            e = block.find('\n', p)
+            return n if e < 0 else e
+
+        def at_line_start(p):
+            return block[block.rfind('\n', 0, p) + 1:p].strip() == ''
+
+        def skip_ws(p):  # inline whitespace only: a newline ends a statement
+            while p < n and block[p] in ' \t\r':
+                p += 1
+            return p
+
+        def report(p, msg):
+            defects.append(f"app/content.md: flowchart diagram #{idx} line {line_of(p)} {msg}")
+
+        def stmt_text(start, err_pos):
+            text = block[start:eol(max(start, err_pos))]
+            return re.sub(r'\s+', ' ', text).strip()[:120]
+
+        def expect_terminator(p, what):
+            p = skip_ws(p)
+            if p < n and block[p] not in ';\n' and not block.startswith('%%', p):
+                raise Bad(p, f"unexpected text after {what}")
+            return p
+
+        def skip_quoted(p, what):  # p is on the opening '"'
+            e = block.find('"', p + 1)
+            if e < 0:
+                raise Bad(p, f"unterminated quote in {what}")
+            return e + 1
+
+        def scan_to_stmt_end(p, brackets):
+            """Advance to the first top-level ';' or newline, skipping quoted
+            strings and (optionally) bracketed text."""
+            depth = 0
+            while p < n:
+                ch = block[p]
+                if ch == '"':
+                    p = skip_quoted(p, 'statement')
                     continue
-                first_word = re.split(r'\s+', line, maxsplit=1)[0]
-                if first_word in FLOW_KEYWORDS and not op_re.search(line):
+                if brackets and ch in '[({':
+                    depth += 1
+                elif brackets and ch in '])}':
+                    depth = max(0, depth - 1)
+                elif depth == 0 and ch in ';\n':
+                    return p
+                p += 1
+            return p
+
+        def scan_label(p, closers, what):
+            """p is just past a shape opener; returns the position just past
+            its closer. Mirrors Mermaid's text state: quotes protect
+            anything, unquoted brackets and '|' are errors."""
+            while p < n:
+                ch = block[p]
+                if ch == '"':
+                    p = skip_quoted(p, what)
                     continue
-                clean = strip_shapes(line)
-                ops = list(op_re.finditer(clean))
-                if not ops:
-                    # No link in this statement: a standalone node
-                    # declaration (or a "&"-joined bundle of them).
-                    ids = _split_ids(clean)
-                    if ids is None:
-                        defects.append(
-                            f"app/content.md: flowchart diagram #{idx} line {line_no} "
-                            f"not understood by lint: '{raw_line.strip()}'"
-                        )
+                for c in closers:
+                    if block.startswith(c, p):
+                        return p + len(c)
+                if ch in '[](){}|':
+                    raise Bad(p, f"unquoted '{ch}' inside {what} (wrap the label in double quotes)")
+                p += 1
+            raise Bad(p, f"unterminated {what}")
+
+        def scan_shape_data(p, nid):  # p is just past '@{'
+            while p < n:
+                ch = block[p]
+                if ch == '"':
+                    p = skip_quoted(p, f"the @{{...}} data of node '{nid}'")
+                    continue
+                if ch == '}':
+                    return p + 1
+                p += 1
+            raise Bad(p, f"unterminated @{{...}} data on node '{nid}'")
+
+        def parse_node(p):
+            m = ID_RE.match(block, p)
+            if not m:
+                found = f" (found '{block[p]}')" if p < n else ''
+                raise Bad(p, 'expected a node id' + found)
+            nid, p = m.group(), m.end()
+            if nid in FLOW_RESERVED:
+                raise Bad(m.start(), f"reserved word '{nid}' used as a node id — Mermaid keywords "
+                                     f"are case-sensitive, so 'End'/'Style' are node ids but '{nid}' is not")
+            for opener, closers in SHAPE_OPENERS:
+                if block.startswith(opener, p):
+                    p = scan_label(p + len(opener), closers, f"the '{opener}' label of node '{nid}'")
+                    break
+            tagged = False
+            while True:
+                if block.startswith(':::', p):
+                    if tagged:
+                        raise Bad(p, f"node '{nid}' has two ':::' class tags")
+                    c = CLASS_TAG_RE.match(block, p)
+                    if not c:
+                        raise Bad(p, "':::' must be followed by a class name")
+                    p, tagged = c.end(), True
+                elif block.startswith('@{', p):
+                    p = scan_shape_data(p + 2, nid)
+                else:
+                    return nid, p
+
+        def parse_node_group(p):  # "A", or "A & B & C" (spaces around '&')
+            ids = []
+            while True:
+                nid, p = parse_node(p)
+                ids.append(nid)
+                q = skip_ws(p)
+                if q > p and q < n and block[q] == '&' and (q + 1 >= n or block[q + 1] in ' \t\r\n'):
+                    p = skip_ws(q + 1)
+                    continue
+                return ids, p
+
+        def parse_link(p):
+            """Returns (operator text, labeled, position past the link and
+            any |label|)."""
+            m = LINK_RE.match(block, p)
+            if m:
+                op, p, inline = m.group(), m.end(), ''
+            else:
+                s = START_LINK_RE.match(block, p)
+                if not s:
+                    raise Bad(p, f"expected a link operator or end of statement (found '{block[p]}')")
+                closer = LINK_CLOSER[s.group()[-1]].search(block, s.end())
+                if not closer:
+                    raise Bad(p, f"inline edge label opened by '{s.group()}' is never closed by a link operator")
+                inline = block[s.end():closer.start()]
+                op = re.sub(r'\s+', ' ', block[p:closer.end()]).strip()
+                p = closer.end()
+            pipe = None
+            q = skip_ws(p)
+            if q < n and block[q] == '|':
+                if inline.strip():
+                    raise Bad(q, "a link cannot carry both an inline '-- text -->' label and a '|text|' label")
+                r = q + 1
+                while True:
+                    if r >= n:
+                        raise Bad(q, "'|' label is never closed")
+                    if block[r] == '"':
+                        r = skip_quoted(r, '|label|')
                         continue
-                    node_ids.update(ids)
+                    if block[r] == '|':
+                        break
+                    r += 1
+                pipe, p = block[q + 1:r], r + 1
+            labeled = bool(inline.replace('"', '').strip()) or bool(pipe is not None and pipe.replace('"', '').strip())
+            return op, labeled, p
+
+        def parse_vertex_statement(p):
+            groups, links = [], []
+            while True:
+                ids, p = parse_node_group(p)
+                groups.append(ids)
+                p = skip_ws(p)
+                if p >= n or block[p] in ';\n' or block.startswith('%%', p):
+                    break
+                e = EDGE_ID_RE.match(block, p)
+                if e:
+                    p = e.end()
+                op, labeled, p = parse_link(p)
+                links.append((op, labeled))
+                p = skip_ws(p)
+                if p >= n or block[p] in ';\n':
+                    raise Bad(p, f"link '{op}' has no target node")
+            for ids in groups:
+                nodes.update(ids)
+            for i, (op, labeled) in enumerate(links):
+                if labeled or op.startswith('~'):
                     continue
-                segments, prev_end = [], 0
-                for m in ops:
-                    segments.append(clean[prev_end:m.start()].strip())
-                    prev_end = m.end()
-                segments.append(clean[prev_end:].strip())
-                seg_id_lists = [_split_ids(s) for s in segments]
-                if any(ids is None for ids in seg_id_lists):
-                    # Fail closed: a statement this lint can't classify must
-                    # be reported, never silently dropped out of validation —
-                    # that would let an entire diagram (with real defects)
-                    # exit 0 just because one line used unsupported syntax.
-                    defects.append(
-                        f"app/content.md: flowchart diagram #{idx} line {line_no} "
-                        f"not understood by lint: '{raw_line.strip()}'"
-                    )
-                    continue
-                for ids in seg_id_lists:
-                    node_ids.update(ids)
-                for i, m in enumerate(ops):
-                    op_text, pipe_label = m.group('op'), m.group('pipelabel')
-                    labeled = (op_text not in BARE_OPS) or bool(pipe_label and pipe_label.strip())
-                    if labeled:
-                        continue
-                    for src in seg_id_lists[i]:
-                        for dst in seg_id_lists[i + 1]:
-                            unlabeled.append((src, op_text, dst))
-        return node_ids, unlabeled
+                for src in groups[i]:
+                    for dst in groups[i + 1]:
+                        unlabeled.append((src, op, dst))
+            return p
+
+        def parse_statement(p):
+            m = ID_RE.match(block, p)
+            word = m.group() if m else ''
+            if word in ('graph', 'flowchart', 'flowchart-elk'):
+                h = HEADER_RE.match(block, p)
+                if not h:
+                    raise Bad(p, f"'{word}' header must be followed by an optional direction, then ';' or end of line")
+                return h.end()
+            if word == 'subgraph':
+                end = scan_to_stmt_end(m.end(), brackets=True)
+                title = block[m.end():end].strip()
+                if has_link(title, strip_brackets=True):
+                    raise Bad(m.end(), 'link operator inside a subgraph title')
+                name = re.split(r'[\[\s]', title.strip('"'), maxsplit=1)[0]
+                open_subgraphs.append((p, name or title))
+                return end
+            if word == 'end':
+                if open_subgraphs:
+                    open_subgraphs.pop()
+                else:
+                    report(p, "has an 'end' that closes no open subgraph")
+                return expect_terminator(m.end(), "'end'")
+            if word in ('style', 'classDef', 'linkStyle'):
+                end = eol(p)
+                args = block[m.end():end]
+                if not re.match(r'[ \t]+\S', args):
+                    raise Bad(p, f"'{word}' needs arguments")
+                if has_link(args):
+                    report(p, f"has a link operator inside a '{word}' statement — Mermaid reads the rest of "
+                              f"the line as style arguments and rejects '--'/'=='/'-.' there "
+                              f"(so CSS var(--x) cannot be used; put any edge on its own line)")
+                return end
+            if word in ('class', 'click'):
+                end = scan_to_stmt_end(m.end(), brackets=False)
+                args = block[m.end():end]
+                if not re.match(r'[ \t]+\S+[ \t]+\S', args):
+                    raise Bad(p, f"'{word}' needs a node id followed by a "
+                                 f"{'class name' if word == 'class' else 'link or callback'}")
+                if has_link(args):
+                    report(p, f"has a link operator inside a '{word}' statement")
+                return end
+            d = DIRECTION_RE.match(block, p)
+            if d:  # otherwise "direction" is an ordinary node id (legal Mermaid)
+                end = eol(p)
+                if block[d.end():end].strip():
+                    # Mermaid's lexer takes the WHOLE line as the direction
+                    # token, so anything after it (an edge, a ';'-joined
+                    # statement, a comment) silently never exists.
+                    report(p, f"has text after '{d.group()}' that Mermaid silently ignores — "
+                              f"put it on its own line")
+                return end
+            a = ACC_RE.match(block, p)
+            if a:
+                if block[a.end() - 1] == '{':
+                    close = block.find('}', a.end())
+                    if close < 0:
+                        raise Bad(p, 'unterminated accDescr { ... }')
+                    return close + 1
+                return eol(p)
+            return parse_vertex_statement(p)
+
+        pos = 0
+        while pos < n:
+            ch = block[pos]
+            if ch in ' \t\r\n;':
+                pos += 1
+                continue
+            if block.startswith('%%', pos):
+                if not at_line_start(pos):
+                    report(pos, "has a trailing '%%' comment — Mermaid only accepts comments on their own line")
+                pos = eol(pos)
+                continue
+            start = pos
+            try:
+                pos = parse_statement(pos)
+            except Bad as bad:
+                defects.append(
+                    f"app/content.md: flowchart diagram #{idx} line {line_of(start)} "
+                    f"not understood by lint: '{stmt_text(start, bad.pos)}' ({bad.why})"
+                )
+                pos = eol(bad.pos)  # resync at the end of the offending line
+        for p, name in open_subgraphs:
+            report(p, f"opens subgraph '{name}' that is never closed — only lowercase 'end' closes a "
+                      f"subgraph ('End' is a node id; keywords are case-sensitive)")
+        return nodes, unlabeled
+
+    CHECKED_HEADS = {'flowchart', 'graph', 'flowchart-elk', 'sequenceDiagram'}
+    # Mermaid diagram types this lint has no rules for. A block headed by
+    # one of these passes silently BY DESIGN (the brief names flowchart and
+    # sequenceDiagram only). Any other first line is reported, so a typo
+    # ("flowchat"), a body line before the header, or an unknown type can
+    # never leave a block silently unchecked.
+    OTHER_DIAGRAM_HEADS = {
+        'classDiagram', 'stateDiagram', 'stateDiagram-v2', 'erDiagram', 'journey', 'gantt',
+        'pie', 'quadrantChart', 'requirementDiagram', 'gitGraph', 'mindmap', 'timeline',
+        'zenuml', 'sankey-beta', 'xychart-beta', 'block-beta', 'packet-beta', 'kanban',
+        'architecture-beta', 'radar-beta', 'treemap-beta', 'C4Context', 'C4Container',
+        'C4Component', 'C4Dynamic', 'C4Deployment', 'info', 'agentflow-beta', 'swimlane-beta',
+    }
+
+    def split_front_matter(block):
+        """Returns (block with any leading '---' YAML front-matter blanked
+        out so line numbers are preserved, the first real line's keyword).
+        The header search skips blank lines, the front-matter and %% lines."""
+        lines = block.splitlines()
+        i = 0
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        if i < len(lines) and lines[i].strip() == '---':
+            j = i + 1
+            while j < len(lines) and lines[j].strip() != '---':
+                j += 1
+            for k in range(i, min(j + 1, len(lines))):
+                lines[k] = ''
+            i = j + 1
+        while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith('%%')):
+            i += 1
+        head = re.split(r'[\s;]', lines[i].strip(), maxsplit=1)[0] if i < len(lines) else ''
+        return '\n'.join(lines), head
 
     for idx, block_m in enumerate(re.finditer(r'```mermaid\s*\n(.*?)```', content, re.S), start=1):
-        block = block_m.group(1)
-        first_line = ''
-        for ln in block.splitlines():
-            if ln.strip():
-                first_line = ln.strip()
-                break
-        if re.match(r'(?i)^(flowchart|graph)\b', first_line):
+        block, head = split_front_matter(block_m.group(1))
+        if head in ('flowchart', 'graph', 'flowchart-elk'):
             nodes, unlabeled = parse_flowchart(block, idx)
             for src, op_text, dst in unlabeled:
                 defects.append(
@@ -375,14 +605,26 @@ if content is not None:
                 defects.append(
                     f"app/content.md: flowchart diagram #{idx} has {len(nodes)} nodes (max 7)"
                 )
-        elif re.match(r'(?i)^sequenceDiagram\b', first_line):
+        elif head == 'sequenceDiagram':
             for em in seq_edge_re.finditer(block):
                 if not em.group('text').strip():
                     defects.append(
                         f"app/content.md: sequenceDiagram diagram #{idx} arrow has no text after the colon"
                     )
+        elif head.lower() in {h.lower() for h in CHECKED_HEADS}:
+            defects.append(
+                f"app/content.md: diagram #{idx} header '{head}' is not a Mermaid diagram type — "
+                f"diagram keywords are case-sensitive (use 'flowchart', 'graph' or 'sequenceDiagram')"
+            )
+        elif head not in OTHER_DIAGRAM_HEADS:
+            defects.append(
+                f"app/content.md: diagram #{idx} header '{head}' is not a Mermaid diagram type this "
+                f"lint knows, so the block was NOT checked — the diagram keyword must be the first "
+                f"line after any '---' front-matter or '%%' lines"
+            )
 
 if defects:
-    print('\n'.join(defects))
+    seen = set()
+    print('\n'.join(d for d in defects if not (d in seen or seen.add(d))))
 sys.exit(1 if defects else 0)
 PY
