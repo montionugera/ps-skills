@@ -123,6 +123,13 @@ test_serve_html() {
   local port; port="$(meta_get t-serve port)"
   curl -sf "http://127.0.0.1:$port/" | grep -q 'hello t-serve'
 }
+test_serve_no_lint_warns() {  # --no-lint must print a warning line (stderr)
+  "$S/init.sh" t-nolint-warn --tier html >/dev/null
+  echo ok > /tmp/ps-commu/t-nolint-warn/app/index.html
+  local out; out="$("$S/serve.sh" t-nolint-warn --no-lint 2>&1 >/dev/null)"
+  "$S/stop.sh" t-nolint-warn >/dev/null 2>&1
+  grep -qi 'WARNING' <<<"$out"
+}
 test_marker_visible() {     # server argv must contain the workspace path (D7)
   local pid; pid="$(meta_get t-serve pid)"
   pid_has_marker "$pid" t-serve
@@ -177,6 +184,7 @@ test_serve_refuses_unlinted() {  # Task 4: serve.sh refuses to serve a workspace
 # NOTE: marker_visible, bind_localhost_only, port_retry and stop all depend on
 # serve_html having started the t-serve server. Keep registration order.
 check serve_html          test_serve_html
+check serve_no_lint_warns test_serve_no_lint_warns
 check marker_visible      test_marker_visible
 check bind_localhost_only test_bind_localhost_only
 check port_retry          test_port_retry
@@ -249,10 +257,88 @@ EOF
   local out rc; out="$("$S/lint.sh" t-lint-fact 2>&1)"; rc=$?
   (( rc == 1 )) && grep -qi 'cites no existing' <<<"$out"
 }
+test_lint_fails_chained_edge_tail() {  # regression: A --> B --> C must catch the TAIL edge
+  "$S/init.sh" t-lint-chain --tier html >/dev/null                 # too (a combined src-op-dst
+  _lint_valid_brief_facts_storyboard t-lint-chain                  # regex previously consumed B
+  mkdir -p /tmp/ps-commu/t-lint-chain/app                          # as the first edge's dst,
+  cat > /tmp/ps-commu/t-lint-chain/app/content.md <<'EOF'          # leaving nothing to anchor
+See F1 for details.                                                # the second arrow's src on)
+
+```mermaid
+flowchart LR
+  A[a] -->|start| B --> C
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-chain 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "'B --> C' has no label" <<<"$out"
+}
+test_lint_fails_node_cap_standalone() {  # regression: standalone "ID[label]" declarations
+  "$S/init.sh" t-lint-nodecap --tier html >/dev/null               # (no edge at all) must still
+  _lint_valid_brief_facts_storyboard t-lint-nodecap                # count toward the <=7 node cap
+  mkdir -p /tmp/ps-commu/t-lint-nodecap/app
+  cat > /tmp/ps-commu/t-lint-nodecap/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A[a]
+  B[b]
+  C[c]
+  D[d]
+  E[e]
+  F[f]
+  G[g]
+  H[h]
+  A -->|link| B
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-nodecap 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q '8 nodes (max 7)' <<<"$out"
+}
+test_lint_fails_alt_arrow_unlabeled() {  # regression: dotted (-.->) and thick (==>) arrows
+  "$S/init.sh" t-lint-altarrow --tier html >/dev/null              # must be checked too, not just
+  _lint_valid_brief_facts_storyboard t-lint-altarrow                # plain --> (they were invisible
+  mkdir -p /tmp/ps-commu/t-lint-altarrow/app                        # to both checks before)
+  cat > /tmp/ps-commu/t-lint-altarrow/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A -.-> B
+  B ==> C
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-altarrow 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  grep -q "'A -.-> B' has no label" <<<"$out" &&
+  grep -q "'B ==> C' has no label" <<<"$out"
+}
+test_lint_passes_labeled_chain_and_alt_arrows() {  # a LEGITIMATE diagram using chained edges,
+  "$S/init.sh" t-lint-goodflow --tier html >/dev/null              # dotted/thick links and exactly
+  _lint_valid_brief_facts_storyboard t-lint-goodflow                # 7 nodes, all correctly labeled,
+  mkdir -p /tmp/ps-commu/t-lint-goodflow/app                        # must still pass (no false
+  cat > /tmp/ps-commu/t-lint-goodflow/app/content.md <<'EOF'         # positives from the fix above)
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A[a] -->|start| B --> |middle| C
+  C -.->|dotted ok| D
+  D ==>|thick ok| E
+  E -- also ok --> F
+  F --x|x-end ok| G
+```
+EOF
+  "$S/lint.sh" t-lint-goodflow
+}
 
 check lint_passes_starter       test_lint_passes_starter
 check lint_fails_unlabeled_edge test_lint_fails_unlabeled_edge
 check lint_fails_uncited_fact   test_lint_fails_uncited_fact
+check lint_fails_chained_edge_tail  test_lint_fails_chained_edge_tail
+check lint_fails_node_cap_standalone test_lint_fails_node_cap_standalone
+check lint_fails_alt_arrow_unlabeled test_lint_fails_alt_arrow_unlabeled
+check lint_passes_labeled_chain_and_alt_arrows test_lint_passes_labeled_chain_and_alt_arrows
 
 # --- verify.sh (render gate; needs Google Chrome — SKIPs visibly without it) ---
 # A verify run is ~45s on macOS (Chrome start + CDN load + Mermaid render).

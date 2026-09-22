@@ -4,9 +4,11 @@
 #   --dev         React tier only: run vite dev (fix loop). Default serves app/dist.
 #   --keep-alive  Watchdog lifetime: 10s | 90m | 8h | 72h. Default 24h (spec D6).
 #   --no-lint     Skip the scripts/lint.sh authoring-chain gate before serving.
-#                 Exists only for the html/react tiers' dev loops; prints a
-#                 warning. Without it, serve.sh refuses (exit 1, printing the
-#                 lint output) when scripts/lint.sh <slug> fails.
+#                 Intended for the html/react tiers' dev loops — and, until
+#                 assets/template-infographic/content.md is itself lint-clean
+#                 (Task 6/7), this repo's own render-gate lifecycle tests.
+#                 Prints a warning. Without it, serve.sh refuses (exit 1,
+#                 printing the lint output) when scripts/lint.sh <slug> fails.
 # All servers bind 127.0.0.1 ONLY (spec D9). The server command line contains the
 # workspace path — the kill-safety marker (spec D7). Binding is authoritative:
 # on bind failure the next port is tried, up to 7799 (spec D3).
@@ -39,7 +41,7 @@ else
   lint_out=""
   if ! lint_out="$("$(dirname "$0")/lint.sh" "$slug" 2>&1)"; then
     echo "$lint_out"
-    echo "lint failed for $slug — fix the issues above, or pass --no-lint (html/react dev loop only)" >&2
+    echo "lint failed for $slug — fix the issues above, or pass --no-lint (see --no-lint in --help)" >&2
     exit 1
   fi
 fi
