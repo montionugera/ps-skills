@@ -4,13 +4,21 @@
 set -uo pipefail
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 S="$SKILL_DIR/scripts"
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
+skip() { echo "SKIP: $1"; SKIP=$((SKIP+1)); }
 CHECK_LOG="$(mktemp)"
 check(){               # on FAIL, show the test's output so CI logs say why
   local name="$1"; shift
   if "$@" >"$CHECK_LOG" 2>&1; then ok "$name"; else bad "$name"; tail -n 25 "$CHECK_LOG" | sed 's/^/    /'; fi
+}
+check_or_skip(){       # like check, but exit code 2 = visible SKIP (e.g. no Chrome) — never a pass
+  local name="$1"; shift; local rc
+  "$@" >"$CHECK_LOG" 2>&1; rc=$?
+  if (( rc == 0 )); then ok "$name"
+  elif (( rc == 2 )); then skip "$name — $(grep -m1 '^SKIP' "$CHECK_LOG" || head -n1 "$CHECK_LOG")"
+  else bad "$name"; tail -n 25 "$CHECK_LOG" | sed 's/^/    /'; fi
 }
 
 # --- common.sh ---
@@ -156,6 +164,49 @@ check watchdog_fires      test_watchdog_fires
 check stop                test_stop
 check stop_refuses_foreign_pid test_stop_refuses_foreign_pid
 
+# --- verify.sh (render gate; needs Google Chrome — SKIPs visibly without it) ---
+# A verify run is ~45s on macOS (Chrome start + CDN load + Mermaid render).
+verify_run() {           # args... → verify.sh output on stdout; rc 2 = cannot run (Chrome/server)
+  if command -v timeout >/dev/null; then timeout 150 "$S/verify.sh" "$@"; else "$S/verify.sh" "$@"; fi
+}
+test_verify_passes_template() {
+  "$S/init.sh" t-verify >/dev/null
+  "$S/serve.sh" t-verify >/dev/null
+  local out rc; out="$(verify_run t-verify)"; rc=$?
+  echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 0 )) &&
+  grep -q '^PASS: 1 mermaid svg=2 fences=2' <<<"$out" &&
+  ! grep -q '^FAIL' <<<"$out"
+}
+test_verify_fails_on_leak() {  # literal ~~CODE$ in prose + a Mermaid fence that cannot render
+  local port; port="$(meta_get t-verify port)"
+  cat > /tmp/ps-commu/t-verify/app/leak.md <<'MD'
+<div class="section-head cat-coral" data-nav="Intro" data-cat="coral" id="intro">
+<h2>Intro</h2>
+</div>
+
+A literal ~~CODE$ placeholder stays in prose.
+
+```mermaid
+flowchart LR
+  A --> B --> (((
+```
+MD
+  local out rc; out="$(verify_run t-verify --url "http://127.0.0.1:$port/?doc=leak.md")"; rc=$?
+  echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) &&
+  grep -q '^FAIL: 1 mermaid svg=0 fences=1' <<<"$out" &&
+  grep -q '^FAIL: 2 ~~CODE placeholder LEAKED' <<<"$out"
+}
+test_verify_help() { "$S/verify.sh" --help | grep -q 'Usage: verify.sh' && ! "$S/verify.sh" >/dev/null 2>&1; }
+
+check_or_skip verify_passes_template test_verify_passes_template
+check_or_skip verify_fails_on_leak   test_verify_fails_on_leak
+check verify_help                     test_verify_help
+"$S/stop.sh" t-verify >/dev/null 2>&1
+
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.
 test_list_shows_running_and_stopped() {
@@ -194,5 +245,5 @@ check clean_refuses_symlink    test_clean_refuses_symlink_escape
 check clean_removes_dangling   test_clean_removes_dangling_link
 check clean_wipes_and_kills    test_clean_wipes_and_kills
 
-echo "----- $PASS passed, $FAIL failed"
+echo "----- $PASS passed, $FAIL failed, $SKIP skipped"
 exit $(( FAIL > 0 ))
