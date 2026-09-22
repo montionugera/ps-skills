@@ -305,7 +305,7 @@ function buildNav(preview) {
     e.preventDefault();
     el.scrollIntoView({ block: "start", behavior: "instant" });
     history.replaceState(null, "", "#" + id);
-    nav.querySelectorAll(".nav-link").forEach((a) => a.classList.toggle("is-active", a === link));
+    targets.forEach((t) => t.link.classList.toggle("is-active", t.link === link));
   });
 
   document.body.classList.add("has-nav");
