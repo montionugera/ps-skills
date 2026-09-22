@@ -254,7 +254,7 @@ Where the design lock actually pays off — measured against the old one-off-HTM
 | Callout | Flagged note — 7 color-coded kinds | `::: callout warn` |
 | Steps | Numbered timeline for a flow | `<div class="steps">…` |
 | Compare | Two-up before/after panels | `<div class="compare">…` |
-| Mermaid | System / data-flow / state diagrams | fenced ` ```mermaid ` |
+| Mermaid | System, data flow and state diagrams | a fenced code block tagged <code>mermaid</code> |
 
 ::: callout metric
 Across a dozen explainers the whole visual system is defined **once**. Every number on this page is tabular-figured JetBrains Mono, so columns of stats line up to the pixel.

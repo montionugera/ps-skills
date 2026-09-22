@@ -24,12 +24,10 @@
 /* sensible default so components used bare still have a category color */
 .cherry-markdown.theme__explainer { --cat: var(--coral); --cat-weak: var(--coral-weak); --cat-tint: var(--coral-tint); }
 
-/* smooth click-to-jump for the sticky nav — the JS handler scrolls by absolute
-   offset (reliable everywhere), and THIS animates it. Auto-off under reduced
-   motion, so no JS motion guard is needed. */
-@media (prefers-reduced-motion: no-preference) {
-  html { scroll-behavior: smooth; }
-}
+/* NOTE: no `html { scroll-behavior: smooth }` here. It made the nav's
+   window.scrollTo() a compositor animation that never advances in a hidden or
+   headless tab, so click-to-jump silently did nothing. The nav now jumps with
+   an instant scrollIntoView (cherry-setup.js). */
 
 /* ---- page canvas ---------------------------------------------------------- */
 body {
@@ -311,9 +309,11 @@ body::before {
 .nav-link.is-bookend { color: var(--text); }
 .nav-link.is-bookend .nav-label { font-weight: var(--w-semibold); }
 
-/* content offset so it doesn't sit under the fixed sidebar */
+/* content offset so it doesn't sit under the fixed sidebar. Padding on <body>
+   (not margin-left on the column) keeps the column's `margin: 0 auto`, so
+   --maxw is centered inside the post-sidebar area. */
 @media (min-width: 1060px) {
-  body.has-nav .cherry-markdown.theme__explainer { margin-left: var(--nav-w); }
+  body.has-nav { padding-left: var(--nav-w); }
 }
 /* narrow: nav becomes a sticky horizontal strip at the top */
 @media (max-width: 1059px) {
@@ -439,6 +439,7 @@ body::before {
   padding-top: var(--space-5);
   border-top: 1px solid var(--border);
 }
+.section-head { scroll-margin-top: var(--space-4); }
 .section-head .icon-chip { box-shadow: var(--shadow-1); }
 .section-head .sh-text { min-width: 0; }
 .section-head .sh-kicker {

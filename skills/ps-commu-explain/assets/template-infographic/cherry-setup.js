@@ -296,20 +296,25 @@ function buildNav(preview) {
   });
   nav.appendChild(ul);
 
-  // Click-to-jump. We scroll by absolute offset with window.scrollTo (reliable
-   // everywhere) rather than element.scrollIntoView({behavior:"smooth"}), which
-   // is silently a no-op in some engines. The SMOOTH animation comes from CSS
-   // `scroll-behavior: smooth` on <html> (see explainer.css), which the browser
-   // auto-disables under prefers-reduced-motion — so no JS motion guard needed.
+  // Click-to-jump. ROOT CAUSE of the old "hash lands, page doesn't move" bug:
+  // explainer.css set `html { scroll-behavior: smooth }`, which turns
+  // window.scrollTo(0, y) into a compositor animation. That animation only
+  // advances while the tab paints — in a hidden/occluded tab (and every
+  // headless or extension-driven audit) it never starts, so replaceState landed
+  // and the viewport stayed at 0. Fix by construction: an explicit INSTANT
+  // scrollIntoView (overrides any CSS scroll-behavior), the target re-resolved
+  // at click time (Cherry may have re-rendered the DOM since nav build), and
+  // the active class set here — not only by the scroll observer.
   nav.addEventListener("click", (e) => {
     const link = e.target.closest(".nav-link");
     if (!link) return;
-    const el = document.getElementById(link.getAttribute("data-target"));
+    const id = link.getAttribute("data-target");
+    const el = document.getElementById(id);
     if (!el) return;
     e.preventDefault();
-    const y = window.scrollY + el.getBoundingClientRect().top - 12;
-    window.scrollTo(0, y);
-    history.replaceState(null, "", "#" + link.getAttribute("data-target"));
+    el.scrollIntoView({ block: "start", behavior: "instant" });
+    history.replaceState(null, "", "#" + id);
+    nav.querySelectorAll(".nav-link").forEach((a) => a.classList.toggle("is-active", a === link));
   });
 
   document.body.classList.add("has-nav");

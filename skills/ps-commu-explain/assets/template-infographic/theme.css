@@ -52,7 +52,7 @@
   /* --- Text roles (warm near-black ladder; AA on cream + cards) ------------- */
   --text:   #211c15;  /* primary   — warm near-black   (contrast ~14:1 on paper) */
   --text-2: #5c5344;  /* secondary — warm brown-gray   (contrast ~6.5:1)         */
-  --text-3: #8a7d68;  /* tertiary  — muted warm gray   (contrast ~3.6:1, labels) */
+  --text-3: #6b6152;  /* tertiary  — muted warm gray   (4.90:1 on paper, 5.40:1 on cards — AA for ≤12px labels) */
   /* legacy ink aliases → new roles (so no component rule needs rewriting) */
   --ink:        var(--text);
   --ink-bright: #000000;
