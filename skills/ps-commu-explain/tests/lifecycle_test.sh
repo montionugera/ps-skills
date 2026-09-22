@@ -445,6 +445,130 @@ test_lint_flags_unverifiable_q_coverage_when_brief_missing() {  # regression: an
   local out rc; out="$("$S/lint.sh" t-lint-nobrief 2>&1)"; rc=$?
   (( rc == 1 )) && grep -qi 'cannot verify' <<<"$out"
 }
+# regression: a label containing a literal ";" must NOT be torn apart by the
+# statement splitter — round 2's naive ";"/"%%" split did this (fix round 3).
+test_lint_fails_bracket_label_with_semicolon_not_torn() {
+  "$S/init.sh" t-lint-semilabel --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-semilabel
+  mkdir -p /tmp/ps-commu/t-lint-semilabel/app
+  cat > /tmp/ps-commu/t-lint-semilabel/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A["one; two"] --> B
+```
+EOF
+  # The genuine defect (A --> B unlabeled) must be reported, and there must
+  # be NO "not understood" noise — proving the ";" inside the quoted label
+  # was recognized as label content, not a statement separator.
+  local out rc; out="$("$S/lint.sh" t-lint-semilabel 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  grep -q "'A --> B' has no label" <<<"$out" &&
+  ! grep -qi 'not understood' <<<"$out"
+}
+# regression: an inline dash-label containing ";" ("-- yes; no -->") must
+# also survive intact (no brackets/quotes involved at all here).
+test_lint_passes_dash_label_with_semicolon_not_torn() {
+  "$S/init.sh" t-lint-semidash --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-semidash
+  mkdir -p /tmp/ps-commu/t-lint-semidash/app
+  cat > /tmp/ps-commu/t-lint-semidash/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A -- yes; then no --> B
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-semidash 2>&1)"; rc=$?
+  (( rc == 0 )) && [[ -z "$out" ]]
+}
+# regression: a node genuinely named "Direction"/"Style" (capitalized) must
+# NOT be silently swallowed by the FLOW_KEYWORDS check — Mermaid's actual
+# directive keywords are lowercase-only, so capitalized node ids are legal
+# and distinct. Round 2's case-insensitive keyword match dropped these
+# entirely (fix round 3).
+test_lint_fails_capitalized_keyword_lookalike_nodes() {
+  "$S/init.sh" t-lint-kwnode --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-kwnode
+  mkdir -p /tmp/ps-commu/t-lint-kwnode/app
+  cat > /tmp/ps-commu/t-lint-kwnode/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  Direction --> A
+  Style --> B
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-kwnode 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  grep -q "'Direction --> A' has no label" <<<"$out" &&
+  grep -q "'Style --> B' has no label" <<<"$out"
+}
+# Minor: positive test for the fail-closed "not understood" path — every
+# other assertion about it so far has been negative (absence). Feed genuinely
+# unparseable syntax and assert the defect actually fires, with a line
+# number pointing at the real source line.
+test_lint_fails_unparseable_statement_with_line_number() {
+  "$S/init.sh" t-lint-garbled --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-garbled
+  mkdir -p /tmp/ps-commu/t-lint-garbled/app
+  cat > /tmp/ps-commu/t-lint-garbled/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A --> B
+  A --> B{weird[nested syntax}}
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-garbled 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  grep -qi "not understood" <<<"$out" &&
+  grep -q "line 3" <<<"$out" &&
+  grep -q "B{weird\[nested syntax}}" <<<"$out"
+}
+# Required combined regression matrix (fix round 3): every form named across
+# all three fix rounds, exercised TOGETHER in one diagram — chained edges,
+# >7 nodes (via a mix of standalone + edge-declared ids), -.->/==> arrows,
+# a ";"-terminated statement, an inline "%%" comment, "&" fan-out, a
+# ":::class" shorthand assignment, a pipe label containing a literal ";", a
+# bracket label containing a literal "%%", a capitalized keyword-lookalike
+# node, and legitimate classDef/class directive lines — all in one file, so
+# a fix for one round's finding that breaks another round's fix is caught
+# here rather than only in isolated single-purpose fixtures.
+test_lint_combined_regression_matrix() {
+  "$S/init.sh" t-lint-matrix --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-matrix
+  mkdir -p /tmp/ps-commu/t-lint-matrix/app
+  cat > /tmp/ps-commu/t-lint-matrix/app/content.md <<'EOF'
+See F1 for details.
+
+```mermaid
+flowchart LR
+  A[a]:::hot -->|start; ok| B --> C
+  C -.-> D
+  D ==> E %% inline comment here
+  E --> F & G;
+  Style[note %% not a comment] --> H
+  classDef hot fill:#f00
+  class A hot
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-matrix 2>&1)"; rc=$?
+  (( rc == 1 )) &&
+  ! grep -qi 'not understood' <<<"$out" &&
+  ! grep -q "'A --> B' has no label" <<<"$out" &&
+  grep -q "'B --> C' has no label" <<<"$out" &&
+  grep -q "'C -.-> D' has no label" <<<"$out" &&
+  grep -q "'D ==> E' has no label" <<<"$out" &&
+  grep -q "'E --> F' has no label" <<<"$out" &&
+  grep -q "'E --> G' has no label" <<<"$out" &&
+  grep -q "'Style --> H' has no label" <<<"$out" &&
+  grep -q '9 nodes (max 7)' <<<"$out"
+}
 
 check lint_passes_starter       test_lint_passes_starter
 check lint_fails_unlabeled_edge test_lint_fails_unlabeled_edge
@@ -459,6 +583,11 @@ check lint_fails_fanout_edges     test_lint_fails_fanout_edges
 check lint_fails_only_expected_edge_with_spaced_pipe test_lint_fails_only_expected_edge_with_spaced_pipe
 check lint_passes_class_shorthand_not_counted_as_node test_lint_passes_class_shorthand_not_counted_as_node
 check lint_flags_unverifiable_q_coverage_when_brief_missing test_lint_flags_unverifiable_q_coverage_when_brief_missing
+check lint_fails_bracket_label_with_semicolon_not_torn test_lint_fails_bracket_label_with_semicolon_not_torn
+check lint_passes_dash_label_with_semicolon_not_torn test_lint_passes_dash_label_with_semicolon_not_torn
+check lint_fails_capitalized_keyword_lookalike_nodes test_lint_fails_capitalized_keyword_lookalike_nodes
+check lint_fails_unparseable_statement_with_line_number test_lint_fails_unparseable_statement_with_line_number
+check lint_combined_regression_matrix test_lint_combined_regression_matrix
 
 # --- verify.sh (render gate; needs Google Chrome — SKIPs visibly without it) ---
 # A verify run is ~45s on macOS (Chrome start + CDN load + Mermaid render).

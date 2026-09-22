@@ -219,12 +219,20 @@ if content is not None:
     seq_edge_re = re.compile(
         r'(?m)^\s*[\w".]+\s*(?:-{1,2}>{1,2}|-{1,2}[x)])\s*[\w".]+\s*:\s*(?P<text>.*)$'
     )
-    # Statement-level keywords that are never node ids, so lines starting with
-    # one of them are skipped entirely for node/edge extraction (the diagram
-    # header itself, subgraph boundaries, style/click directives).
+    # Statement-level keywords that are never node ids, so a statement
+    # starting with one of them is skipped entirely for node/edge extraction
+    # (the diagram header itself, subgraph boundaries, style/click
+    # directives). Case-SENSITIVE and lowercase-only, matching Mermaid's own
+    # lexer, which reserves these words only in lowercase — so a genuinely
+    # named node "Style"/"Direction"/"Class"/"Graph" (capitalized) is never
+    # mistaken for a directive. The "no link operator" guard below closes
+    # the remaining gap: a lowercase node id that collides with a keyword
+    # (e.g. a node named "style") is still recognized as a real statement as
+    # soon as it appears in an edge, since a genuine Mermaid directive never
+    # contains a link operator.
     FLOW_KEYWORDS = {
         'flowchart', 'graph', 'subgraph', 'end', 'direction',
-        'classdef', 'class', 'style', 'linkstyle', 'click',
+        'classDef', 'class', 'style', 'linkStyle', 'click',
     }
 
     def _split_ids(segment):
@@ -237,28 +245,75 @@ if content is not None:
             return None
         return ids
 
+    _quote_re = re.compile(r'"[^"\n]*"')
+    _shape_span_re = re.compile(
+        r'[A-Za-z0-9_]+(\[\[[^\]]*\]\]|\[[^\]]*\]|\(\([^)]*\)\)|\([^)]*\)|\{\{[^}]*\}\}|\{[^}]*\})'
+    )
+
+    def _protected_spans(line):
+        """Character ranges in `line` that must never be read as containing
+        a top-level ';' or '%%' comment/separator, because they are genuine
+        Mermaid label content: bracketed node labels ("ID[...]"/"ID(...)"/
+        "ID{...}"), quoted strings, and an edge operator's own inline label
+        text (both "-- text -->" and "|text|" forms — op_re's match spans
+        already include that text). Computed from the SAME regexes used
+        elsewhere in this parser, so this view of a line and the real parse
+        below can never disagree about what counts as a label."""
+        spans = [m.span() for m in _shape_span_re.finditer(line)]
+        spans += [m.span() for m in _quote_re.finditer(line)]
+        spans += [m.span() for m in op_re.finditer(line)]
+        return spans
+
+    def _protected(pos, spans):
+        return any(s <= pos < e for s, e in spans)
+
+    def split_statements(raw_line):
+        """Split one raw Mermaid line into statements on a top-level ';',
+        and drop a trailing top-level '%%' comment. Mermaid labels may
+        legally contain a literal ';' or '%%' (this kit's labels are prose,
+        e.g. "A[\"one; two\"]" or "A -- yes; no --> B") — splitting on every
+        raw ';'/'%%' would tear such a label in half, producing a spurious
+        "not understood" defect while masking whatever the statement
+        actually needed checked. _protected_spans() finds exactly the
+        ranges that must be immune to this."""
+        spans = _protected_spans(raw_line)
+        cut = len(raw_line)
+        for m in re.finditer('%%', raw_line):
+            if not _protected(m.start(), spans):
+                cut = m.start()
+                break
+        line_nc = raw_line[:cut]
+        stmts, start = [], 0
+        for m in re.finditer(';', line_nc):
+            if not _protected(m.start(), spans):
+                stmts.append(line_nc[start:m.start()])
+                start = m.end()
+        stmts.append(line_nc[start:])
+        return stmts
+
     def parse_flowchart(block, idx):
         """Return (node_ids, unlabeled_edges) for one flowchart/graph block,
         walking every statement so chained edges, standalone node
-        declarations, "&" fan-out, ";"-terminated/-separated statements and
-        inline "%%" comments are all handled. A statement this lightweight
-        parser genuinely cannot classify is a DEFECT (fail closed), never a
-        silent skip — a diagram is either checked or it says so, it never
-        drops out of validation without saying anything."""
+        declarations, "&" fan-out, label-aware ";"-terminated/-separated
+        statements and label-aware inline "%%" comments are all handled. A
+        statement this lightweight parser genuinely cannot classify as a
+        node/edge statement is a DEFECT (fail closed), never a silent skip —
+        a diagram is either checked or it says so, it never drops out of
+        validation without saying anything. One narrow, documented
+        exception: a bare, lowercase node id that exactly collides with a
+        Mermaid directive keyword (e.g. a node literally named "style") AND
+        has no link operator on its own statement is still read as that
+        directive and skipped, matching Mermaid's own reserved-word lexer —
+        this parser cannot tell the two apart in that specific case."""
         node_ids = set()
         unlabeled = []  # list of (src, op_text, dst)
-        for raw_line in block.splitlines():
-            # Inline "%%" comments run to end of line (a full-line "%% ..."
-            # comment becomes an empty statement below, same as before).
-            line_nc = raw_line.split('%%', 1)[0]
-            # ";" both terminates and separates Mermaid statements — split so
-            # "A --> B;" and "graph TD; A-->B;" both parse each statement.
-            for stmt in line_nc.split(';'):
+        for line_no, raw_line in enumerate(block.splitlines(), start=1):
+            for stmt in split_statements(raw_line):
                 line = stmt.strip()
                 if not line:
                     continue
-                first_word = re.split(r'\s+', line, maxsplit=1)[0].lower()
-                if first_word in FLOW_KEYWORDS:
+                first_word = re.split(r'\s+', line, maxsplit=1)[0]
+                if first_word in FLOW_KEYWORDS and not op_re.search(line):
                     continue
                 clean = strip_shapes(line)
                 ops = list(op_re.finditer(clean))
@@ -268,8 +323,8 @@ if content is not None:
                     ids = _split_ids(clean)
                     if ids is None:
                         defects.append(
-                            f"app/content.md: flowchart diagram #{idx} statement "
-                            f"not understood by lint: '{line}'"
+                            f"app/content.md: flowchart diagram #{idx} line {line_no} "
+                            f"not understood by lint: '{raw_line.strip()}'"
                         )
                         continue
                     node_ids.update(ids)
@@ -286,8 +341,8 @@ if content is not None:
                     # that would let an entire diagram (with real defects)
                     # exit 0 just because one line used unsupported syntax.
                     defects.append(
-                        f"app/content.md: flowchart diagram #{idx} statement "
-                        f"not understood by lint: '{line}'"
+                        f"app/content.md: flowchart diagram #{idx} line {line_no} "
+                        f"not understood by lint: '{raw_line.strip()}'"
                     )
                     continue
                 for ids in seg_id_lists:
