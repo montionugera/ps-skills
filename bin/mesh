@@ -611,6 +611,8 @@ def cmd_mcp(args):
         try:
             req = json.loads(line)
         except Exception:
+            send_resp({"jsonrpc": "2.0", "id": None,
+                       "error": {"code": -32700, "message": "Parse error"}})
             continue
 
         req_id = req.get("id")
@@ -800,6 +802,11 @@ def cmd_mcp(args):
                     "content": [{"type": "text", "text": res_text}]
                 }
             })
+        elif "id" in req:
+            # Every request needs a reply: a silent one hangs the client forever
+            # (agy 1.2.x opens with `server/discover`). Notifications get none.
+            send_resp({"jsonrpc": "2.0", "id": req_id,
+                       "error": {"code": -32601, "message": f"Method not found: {method}"}})
 
 
 def main():
