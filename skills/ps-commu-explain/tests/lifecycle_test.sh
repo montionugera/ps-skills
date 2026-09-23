@@ -104,11 +104,29 @@ test_init_writes_workspace_files() {  # Task 4: 00-brief/01-facts/02-storyboard 
   [[ -f /tmp/ps-commu/t-wsfiles/02-storyboard.md ]]
 }
 
+test_init_example_scaffolds_filled_chain() {  # Task 7: --example sources the
+  # filled assets/workspace/example/ chain instead of the empty skeleton, and
+  # forces the infographic tier (whose shipped content.md is the exemplar).
+  rm -rf /tmp/ps-commu/t-example
+  "$S/init.sh" t-example --example >/dev/null &&
+  [[ "$(meta_get t-example tier)" == "infographic" ]] &&
+  [[ -f /tmp/ps-commu/t-example/app/content.md ]] &&
+  ! grep -q '(\.\.\.)' /tmp/ps-commu/t-example/00-brief.md &&
+  grep -q '^Q1:' /tmp/ps-commu/t-example/00-brief.md &&
+  "$S/lint.sh" t-example    # the whole point: it must already lint clean
+}
+
+test_init_example_rejects_other_tier() {  # --example is infographic-only
+  ! "$S/init.sh" t-example-bad --example --tier html 2>/dev/null
+}
+
 check init_creates     test_init_creates
 check init_bad_slug    test_init_bad_slug
 check sweep_old_dead   test_sweep_old_dead
 check sweep_spares_live test_sweep_spares_live
 check init_writes_workspace_files test_init_writes_workspace_files
+check init_example_scaffolds_filled_chain test_init_example_scaffolds_filled_chain
+check init_example_rejects_other_tier     test_init_example_rejects_other_tier
 
 # --- serve.sh / stop.sh ---
 # NOTE on --tier html + --no-lint below: serve.sh now runs scripts/lint.sh
@@ -1044,18 +1062,20 @@ verify_run() {           # args... → verify.sh output on stdout; rc 2 = cannot
 }
 test_verify_passes_template() {
   # --no-lint: deliberate deviation from --no-lint's "html/react dev loop
-  # only" framing in serve.sh's usage text. This tier must stay infographic
-  # (needs the real cherry-markdown + Mermaid template), but the stock
-  # template-infographic/content.md still contains forbidden classes
-  # (stat-grid, stat-tile, cat-*) that scripts/lint.sh correctly rejects —
-  # making that template lint-clean is Task 6/7 scope, not this batch's.
+  # only" framing in serve.sh's usage text. This test scaffolds a PLAIN
+  # (no --example) infographic workspace: app/content.md ships as the real,
+  # lint-clean Task 7 exemplar (it cites F1-F19), but 01-facts.md/etc. scaffold
+  # as the EMPTY authoring-chain skeleton (see init.sh, no --example flag), so
+  # lint.sh would correctly reject content.md's citations against an empty
+  # facts sheet. init.sh --example (see init_example_* tests above) is the
+  # flow that pairs content.md with a matching filled chain and lints clean.
   "$S/init.sh" t-verify >/dev/null
   "$S/serve.sh" t-verify --no-lint >/dev/null
   local out rc; out="$(verify_run t-verify)"; rc=$?
   echo "$out"
   (( rc == 2 )) && return 2
   (( rc == 0 )) &&
-  grep -q '^PASS: 1 mermaid svg=2 fences=2' <<<"$out" &&
+  grep -q '^PASS: 1 mermaid svg=1 fences=1' <<<"$out" &&
   ! grep -q '^FAIL' <<<"$out"
 }
 test_verify_fails_on_leak() {  # literal ~~CODE$ in prose + a Mermaid fence that cannot render

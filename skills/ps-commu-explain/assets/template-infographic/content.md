@@ -1,300 +1,220 @@
-<div class="hero" data-nav-title="Explainer Kit" data-nav-sub="v2 · infographic">
-  <div class="eyebrow"><i data-lucide="palette"></i> Explainer Kit · v2</div>
-  <div class="title">Markdown in. A designed <span class="hl">infographic</span> out. No build step.</div>
-  <div class="lede">A copy-and-fill template that turns one Markdown file into a consistent, diagram-rich, color-coded explainer — rendered live in the browser by <strong>cherry-markdown</strong> and <strong>Mermaid</strong>, styled by a single locked design-token theme.</div>
+<div class="reader-questions" data-nav-title="Serve Lifecycle" data-nav-sub="init → lint → verify">
+  <div class="rq-kicker"><i data-lucide="help-circle"></i> This explainer answers</div>
+  <div class="rq-list">
+    <div class="rq-q"><span class="rq-num">1</span><span class="rq-text">What actually happens when I run <code>init.sh &lt;slug&gt;</code> and then <code>serve.sh &lt;slug&gt;</code>?</span></div>
+    <div class="rq-q"><span class="rq-num">2</span><span class="rq-text">Why does <code>serve.sh</code> sometimes refuse to serve, and what has to be true for it to pass?</span></div>
+    <div class="rq-q"><span class="rq-num">3</span><span class="rq-text">How does <code>verify.sh</code> prove the page is really rendering, not just that a server responded?</span></div>
+  </div>
 </div>
 
-<div class="chip-row"><span class="topic-chip">visual-explainers</span><span class="topic-chip">cherry-markdown</span><span class="topic-chip">mermaid</span><span class="topic-chip">design-system</span><span class="topic-chip">cream-theme</span></div>
+<div class="chip-row"><span class="topic-chip">init.sh</span><span class="topic-chip">serve.sh</span><span class="topic-chip">lint.sh</span><span class="topic-chip">verify.sh</span><span class="topic-chip">headless-chrome</span></div>
 
-<div class="section-head bookend cat-coral" data-nav="Overview" data-cat="coral" data-nav-icon="compass" id="overview">
+<div class="section-head bookend" data-nav="Overview" data-nav-icon="compass" id="overview">
   <span class="icon-chip lg"><i data-lucide="compass"></i></span>
   <div class="sh-text">
     <span class="sh-kicker">Start here</span>
-    <div class="sh-title">Overview — the whole kit at a glance</div>
+    <div class="sh-title">How a Markdown file becomes a verified local URL</div>
   </div>
 </div>
 
-The kit is five small files that never change their look, plus one Markdown file that carries the words. Everything that could drift between explainers lives in **one token file, and nowhere else**. Here is where it lands:
+This page describes the exact mechanism it went through to reach your browser. `ps-commu-explain` is always served through `scripts/serve.sh` — never an ad-hoc server (F1) — and its default look is the infographic tier: run `init.sh <slug>` with no `--tier` flag and you get a cream, Markdown-driven explainer rendered by cherry-markdown, Mermaid and Lucide (F2). Nothing below is invented: every fact traces to a real line in `SKILL.md` or `scripts/`, and every one of them is listed in the Receipts footer.
 
-<div class="stat-grid">
-  <div class="stat-tile cat-coral">
-    <div class="stat-head"><span class="icon-chip"><i data-lucide="package"></i></span><span class="stat-delta"><i data-lucide="check"></i> lean</span></div>
-    <div class="stat-value">5</div>
-    <div class="stat-label">files in the kit</div>
-    <div class="stat-sub">tokens · components · engine · shell · content</div>
-  </div>
-  <div class="stat-tile cat-teal">
-    <div class="stat-head"><span class="icon-chip"><i data-lucide="zap"></i></span><span class="stat-delta"><i data-lucide="arrow-down"></i> zero</span></div>
-    <div class="stat-value">0</div>
-    <div class="stat-label">build steps</div>
-    <div class="stat-sub">just serve the folder</div>
-  </div>
-  <div class="stat-tile cat-blue">
-    <div class="stat-head"><span class="icon-chip"><i data-lucide="timer"></i></span><span class="stat-delta"><i data-lucide="trending-up"></i> fast</span></div>
-    <div class="stat-value">30<span class="unit">s</span></div>
-    <div class="stat-label">idea → live page</div>
-    <div class="stat-sub">copy · edit · refresh</div>
-  </div>
-  <div class="stat-tile cat-magenta">
-    <div class="stat-head"><span class="icon-chip"><i data-lucide="target"></i></span><span class="stat-delta"><i data-lucide="lock"></i> locked</span></div>
-    <div class="stat-value">1</div>
-    <div class="stat-label">source of truth</div>
-    <div class="stat-sub">one token file for all style</div>
-  </div>
-</div>
-
-### Why it exists
-
-Explaining a spec today means hand-rolling CSS in yet another one-off file, or running a heavyweight build. Both are slow, and neither is *consistent*. This kit fixes that with three moves:
-
-<div class="card-grid">
-  <div class="card cat-coral">
-    <span class="icon-chip lg"><i data-lucide="feather"></i></span>
-    <div class="card-title">Write plain Markdown</div>
-    <p>Author in Markdown, drop in a few component blocks. No framework, no bundler, no JSX — just text and a handful of tags.</p>
-  </div>
-  <div class="card cat-teal">
-    <span class="icon-chip lg"><i data-lucide="palette"></i></span>
-    <div class="card-title">Inherit the look</div>
-    <p>Every color, size and font is a <code>var(--token)</code>. Change the token, every explainer updates. Consistency comes for free.</p>
-  </div>
-  <div class="card cat-blue">
-    <span class="icon-chip lg"><i data-lucide="refresh-cw"></i></span>
-    <div class="card-title">Refresh to iterate</div>
-    <p>The browser does the rest. Serve the folder, reload the tab, and the explainer is already done. No watch process, no rebuild.</p>
-  </div>
-</div>
-
-::: callout idea
-Every explainer you produce looks like it came from the same studio — because it did. The design system is a lock, not a suggestion.
-:::
-
-<div class="section-head cat-teal" data-nav="System overview" data-cat="teal" data-nav-icon="boxes" id="system">
-  <span class="icon-chip lg"><i data-lucide="boxes"></i></span>
+<div class="section-head" data-nav="Mechanism" data-nav-icon="git-branch" id="mechanism">
+  <span class="icon-chip lg"><i data-lucide="git-branch"></i></span>
   <div class="sh-text">
-    <span class="sh-kicker">Section A · architecture</span>
-    <div class="sh-title">System overview</div>
+    <span class="sh-kicker">1 · how it works</span>
+    <div class="sh-title">Two scripts, one lifecycle</div>
   </div>
 </div>
 
-Five small files, each with one job, communicating only through CSS custom properties and the Cherry config. The colored **locked design system** cluster is the whole point: swap the content, keep the look.
+`init.sh` first rejects any slug that isn't kebab-case (F3), then scaffolds a fresh workspace: the authoring-chain docs — `00-brief.md`, `01-facts.md`, `02-storyboard.md` — land in the workspace root, sibling to `app/`, so they are never served to a reader (F4). It also probes ports 7700–7799 with `lsof` for an advisory candidate (F5), and only sweeps a workspace that has sat idle more than 3 days *and* has no live, marker-verified server (F7). `serve.sh` then takes over: it runs the lint gate detailed in Claims below, and its own bind attempt is the one that actually matters — on failure it walks forward to the next port, up to 7799 (F6).
 
 ```mermaid
 flowchart LR
-    A["author writes<br/>content.md"] --> B["shell.html<br/>(cherry host)"]
-    T["theme.css<br/>design tokens"] --> B
-    C["explainer.css<br/>component library"] --> B
-    S["cherry-setup.js<br/>engine + mermaid"] --> B
-    B --> R["rendered<br/>infographic"]
-    subgraph locked["locked design system"]
-        T
-        C
-        S
-    end
-    class A coral
-    class B blue
-    class R magenta
-    class T teal
-    class C teal
-    class S teal
+    A["init.sh"] -->|scaffold workspace + advisory port| B["00-brief / 01-facts / 02-storyboard + app/"]
+    B -->|author edits content.md| C["serve.sh"]
+    C -->|run lint.sh gate| D{"lint clean?"}
+    D -->|no: exit 1| B
+    D -->|yes: bind 127.0.0.1 + watchdog| E["live at 127.0.0.1:PORT"]
+    E -->|verify.sh: headless Chrome| F["6 PASS/FAIL/SKIP asserts"]
 ```
 
-<div class="legend">
-  <span class="legend-item cat-coral"><span class="legend-swatch"></span> author input</span>
-  <span class="legend-item cat-teal"><span class="legend-swatch"></span> locked system</span>
-  <span class="legend-item cat-blue"><span class="legend-swatch"></span> host</span>
-  <span class="legend-item cat-magenta"><span class="legend-swatch"></span> output</span>
-</div>
+<div class="schematic">/tmp/ps-commu/&lt;slug&gt;/
+├── meta.json           ← slug, tier, port, pid, started_at
+├── 00-brief.md         ← 3 reader questions + section budget
+├── 01-facts.md         ← F&lt;n&gt; rows, source = path:line
+├── 02-storyboard.md    ← section → question → facts
+├── server.log
+└── app/                ← the ONLY served directory (docroot)
+    ├── content.md
+    ├── index.html
+    ├── explainer.css
+    └── components.md</div>
 
-<div class="section-head cat-blue" data-nav="Data flow" data-cat="blue" data-nav-icon="git-branch" id="dataflow">
-  <span class="icon-chip lg"><i data-lucide="git-branch"></i></span>
+<div class="section-head" data-nav="Worked example" data-nav-icon="flask-conical" id="workedexample">
+  <span class="icon-chip lg"><i data-lucide="flask-conical"></i></span>
   <div class="sh-text">
-    <span class="sh-kicker">Section B · the render path</span>
-    <div class="sh-title">Data flow</div>
+    <span class="sh-kicker">2 · make it concrete</span>
+    <div class="sh-title">The lint gate and the render gate, run for real</div>
   </div>
 </div>
 
-No server-side rendering, no pre-processing. `shell.html` fetches your Markdown as raw text and hands it to Cherry; a post-render pass upgrades fenced `mermaid` blocks into themed SVG and injects the line icons.
+<div class="worked-example">
+  <div class="we-label"><i data-lucide="flask-conical"></i> Worked example — the lint gate</div>
+  <div class="we-flow">
+    <div class="we-stage"><span class="we-stage-k">Input</span><div class="we-stage-v">scripts/serve.sh how-serve-works</div></div>
+    <i class="we-arrow" data-lucide="arrow-right"></i>
+    <div class="we-stage"><span class="we-stage-k">Mechanism</span><div class="we-stage-v">scripts/lint.sh authoring-chain gate</div></div>
+    <i class="we-arrow" data-lucide="arrow-right"></i>
+    <div class="we-stage"><span class="we-stage-k">Output</span><div class="we-stage-v">exit 1 + defect lines, or a live URL</div></div>
+  </div>
+  <p>Point <code>serve.sh</code> at a workspace whose <code>00-brief.md</code> still has an unfilled <code>Q1: (...)</code> and it refuses before a single byte is served — no <code>--no-lint</code>, no server (F8).</p>
+</div>
 
-```mermaid
-sequenceDiagram
-    participant U as Author
-    participant Sh as shell.html
-    participant Ch as cherry-markdown
-    participant Me as Mermaid + Lucide
-    U->>Sh: serve → open shell.html?doc=content.md
-    Sh->>Sh: fetch(content.md) as raw text
-    Sh->>Ch: new Cherry({ previewOnly, value: md })
-    Ch->>Ch: parse markdown + callout hook
-    Ch-->>Sh: styled preview DOM
-    Sh->>Me: frame diagrams + render icons + build nav
-    Me-->>Sh: SVG diagrams + inline icon SVGs
-    Sh->>U: consistent cream infographic
-```
+<div class="worked-example">
+  <div class="we-label"><i data-lucide="flask-conical"></i> Worked example — the render gate</div>
+  <div class="we-flow">
+    <div class="we-stage"><span class="we-stage-k">Input</span><div class="we-stage-v">scripts/verify.sh how-serve-works</div></div>
+    <i class="we-arrow" data-lucide="arrow-right"></i>
+    <div class="we-stage"><span class="we-stage-k">Mechanism</span><div class="we-stage-v">headless Chrome --dump-dom, 6 asserts</div></div>
+    <i class="we-arrow" data-lucide="arrow-right"></i>
+    <div class="we-stage"><span class="we-stage-k">Output</span><div class="we-stage-v">one PASS/FAIL/SKIP line per assert</div></div>
+  </div>
+  <p>Assert 1 counts rendered Mermaid SVG elements against the fenced <code>mermaid</code> blocks in this very doc (F13); if Chrome isn't installed the whole run exits 2 — SKIP, never a silent pass (F15).</p>
+</div>
 
-::: callout info
-Diagrams render through the **post-render** path (Path B): Cherry emits fenced `mermaid` as ordinary code blocks, then `cherry-setup.js` calls `mermaid.run()` over them with the locked light `themeVariables` and the category `classDef` palette.
-:::
-
-<div class="section-head cat-violet" data-nav="The moving parts" data-cat="violet" data-nav-icon="layers" id="parts">
-  <span class="icon-chip lg"><i data-lucide="layers"></i></span>
+<div class="section-head" data-nav="Claims" data-nav-icon="badge-check" id="claims">
+  <span class="icon-chip lg"><i data-lucide="badge-check"></i></span>
   <div class="sh-text">
-    <span class="sh-kicker">Section C · anatomy</span>
-    <div class="sh-title">The moving parts</div>
+    <span class="sh-kicker">3 · back it with a citation</span>
+    <div class="sh-title">What the gates actually check</div>
   </div>
 </div>
 
-<div class="schematic">
-explainer-kit/
-├── theme.css        ← design tokens ONLY — the lock
-├── explainer.css    ← component classes, built on tokens
-├── cherry-setup.js  ← Cherry config + mermaid + icons + nav
-├── shell.html       ← host: loads deps, fetches ?doc=, renders
-└── content.md       ← this file — a worked example
+<div class="claim-card">
+  <div class="claim-text">serve.sh refuses to serve a workspace until its authoring chain (00-brief.md, 01-facts.md, 02-storyboard.md) passes scripts/lint.sh.</div>
+  <div class="claim-meta"><span class="claim-fact">F8</span><span class="claim-source">scripts/serve.sh:44</span></div>
+  <div class="claim-check"><i data-lucide="search"></i> Check it: run <code>grep -n "lint failed for" scripts/serve.sh</code></div>
 </div>
 
-### One token file, two payoffs
-
-<div class="compare">
-  <div class="compare-panel cat-teal">
-    <div class="cmp-head"><span class="icon-chip sm"><i data-lucide="check-check"></i></span> Consistency for free</div>
-    <div class="cmp-body">
-      <ul>
-        <li>Every color, size, and font is a <code>var(--token)</code>.</li>
-        <li>Change one token → every explainer updates.</li>
-        <li>No per-doc CSS to drift out of sync.</li>
-      </ul>
-    </div>
-  </div>
-  <div class="compare-panel cat-amber">
-    <div class="cmp-head"><span class="icon-chip sm"><i data-lucide="shield-alert"></i></span> The one rule</div>
-    <div class="cmp-body">
-      <ul>
-        <li>Raw hex or px may appear <em>only</em> in <code>theme.css</code>.</li>
-        <li>A stray color in <code>explainer.css</code> is a bug.</li>
-        <li>Promote it to a token — no exceptions.</li>
-      </ul>
-    </div>
-  </div>
+<div class="claim-card">
+  <div class="claim-text">Every server serve.sh starts binds 127.0.0.1 only — never an interface reachable off the machine.</div>
+  <div class="claim-meta"><span class="claim-fact">F9</span><span class="claim-source">scripts/serve.sh:12</span></div>
+  <div class="claim-check"><i data-lucide="search"></i> Check it: run <code>grep -n "bind 127.0.0.1" scripts/serve.sh</code></div>
 </div>
 
-<div class="section-head cat-amber" data-nav="Authoring flow" data-cat="amber" data-nav-icon="list-checks" id="authoring">
-  <span class="icon-chip lg"><i data-lucide="list-checks"></i></span>
+<div class="claim-card">
+  <div class="claim-text">A live server is only ever killed if its own process command line contains the workspace path — never an unverified PID.</div>
+  <div class="claim-meta"><span class="claim-fact">F10</span><span class="claim-source">scripts/common.sh:13</span></div>
+  <div class="claim-check"><i data-lucide="search"></i> Check it: run <code>grep -n pid_has_marker -A4 scripts/common.sh</code></div>
+</div>
+
+<div class="claim-card">
+  <div class="claim-text">lint.sh rejects five exact stale-CSS class names, plus any class prefixed cat-, in app/content.md.</div>
+  <div class="claim-meta"><span class="claim-fact">F16</span><span class="claim-source">scripts/lint.sh:186</span></div>
+  <div class="claim-check"><i data-lucide="search"></i> Check it: run <code>grep -n forbidden_exact scripts/lint.sh</code></div>
+</div>
+
+<div class="claim-card">
+  <div class="claim-text">Every unlabeled Mermaid flowchart edge in app/content.md is reported as its own lint defect, not just the first one found.</div>
+  <div class="claim-meta"><span class="claim-fact">F17</span><span class="claim-source">scripts/lint.sh:597</span></div>
+  <div class="claim-check"><i data-lucide="search"></i> Check it: run <code>grep -n "has no label" scripts/lint.sh</code></div>
+</div>
+
+<div class="claim-card">
+  <div class="claim-text">A single Mermaid flowchart may declare at most 7 nodes — the diagram in the Mechanism section above stops at 6 for exactly this reason.</div>
+  <div class="claim-meta"><span class="claim-fact">F18</span><span class="claim-source">scripts/lint.sh:604</span></div>
+  <div class="claim-check"><i data-lucide="search"></i> Check it: run <code>grep -n "max 7" scripts/lint.sh</code></div>
+</div>
+
+<div class="section-head" data-nav="Wrong, without this" data-nav-icon="triangle-alert" id="wrongwithout">
+  <span class="icon-chip lg"><i data-lucide="triangle-alert"></i></span>
   <div class="sh-text">
-    <span class="sh-kicker">Section D · workflow</span>
-    <div class="sh-title">Authoring flow</div>
+    <span class="sh-kicker">4 · name the failure mode</span>
+    <div class="sh-title">What breaks if these gates are skipped</div>
   </div>
 </div>
 
-Four steps from blank to shared. Every step is a refresh away from the last.
-
-<div class="steps">
-  <div class="step cat-coral">
-    <span class="step-num">1</span>
-    <div class="step-body">
-      <div class="step-title"><i data-lucide="copy"></i> Copy the template</div>
-      <p>Run <code>./new.sh my-topic</code> to clone <code>content.md</code> into a fresh <code>my-topic.md</code>.</p>
-    </div>
-  </div>
-  <div class="step cat-amber">
-    <span class="step-num">2</span>
-    <div class="step-body">
-      <div class="step-title"><i data-lucide="pencil"></i> Write the copy</div>
-      <p>Edit the Markdown. Drop in section headers, KPI tiles, cards, callouts and diagrams from the gallery.</p>
-    </div>
-  </div>
-  <div class="step cat-teal">
-    <span class="step-num">3</span>
-    <div class="step-body">
-      <div class="step-title"><i data-lucide="server"></i> Serve the folder</div>
-      <p>Run <code>./serve.sh</code>. The kit must be served over HTTP — never opened as a bare <code>file://</code> URL.</p>
-    </div>
-  </div>
-  <div class="step cat-blue">
-    <span class="step-num">4</span>
-    <div class="step-body">
-      <div class="step-title"><i data-lucide="eye"></i> View &amp; iterate</div>
-      <p>Open <code>shell.html?doc=my-topic.md</code>. Refresh to iterate; share the folder when it's done.</p>
-    </div>
+<div class="wrong-without">
+  <span class="ww-ico"><i data-lucide="triangle-alert"></i></span>
+  <div class="ww-body">
+    <div class="ww-title">Wrong, without the lint gate</div>
+    <p>Skip scripts/lint.sh and a page with an invented fact that cites nothing real, or a diagram full of unlabeled arrows, ships anyway — the exact hallucination-and-mystery-diagram failure mode the whole authoring chain exists to catch before a reader ever sees it.</p>
   </div>
 </div>
 
-> The best build step is the one that isn't there. Serve the folder, refresh the tab, and the explainer is already done.
+<div class="wrong-without">
+  <span class="ww-ico"><i data-lucide="triangle-alert"></i></span>
+  <div class="ww-body">
+    <div class="ww-title">Wrong, without the marker check</div>
+    <p>A bare <code>kill $pid</code> on an unverified PID can kill an unrelated process that happened to reuse that PID after the original server exited. pid_has_marker checks the live process's own command line for the workspace path first, so a stale or recycled PID is never touched.</p>
+  </div>
+</div>
 
-<div class="section-head cat-magenta" data-nav="Results" data-cat="magenta" data-nav-icon="chart-column" id="results">
-  <span class="icon-chip lg"><i data-lucide="chart-column"></i></span>
+<div class="section-head" data-nav="Before / after" data-nav-icon="columns-2" id="beforeafter">
+  <span class="icon-chip lg"><i data-lucide="columns-2"></i></span>
   <div class="sh-text">
-    <span class="sh-kicker">Section E · impact</span>
-    <div class="sh-title">Results at a glance</div>
+    <span class="sh-kicker">5 · prove the improvement</span>
+    <div class="sh-title">An ad-hoc server vs. serve.sh</div>
   </div>
 </div>
 
-Where the design lock actually pays off — measured against the old one-off-HTML habit.
-
-<div class="row three">
-  <div class="meter cat-teal">
-    <div class="meter-label"><span>Look consistency</span><span class="meter-val">100%</span></div>
-    <div class="meter-track"><div class="meter-fill" style="width:100%"></div></div>
+<div class="before-after">
+  <div class="ba-panel">
+    <span class="ba-label">Before</span>
+    <div class="ba-value">python -m http.server</div>
+    <p>Hand-started, by habit. Binds every interface, has no scoped docroot, and never stops on its own — it exposes all of /tmp on the network, forever, until someone remembers to kill it.</p>
   </div>
-  <div class="meter cat-blue">
-    <div class="meter-label"><span>Time saved vs one-off</span><span class="meter-val">~90%</span></div>
-    <div class="meter-track"><div class="meter-fill" style="width:90%"></div></div>
-  </div>
-  <div class="meter cat-magenta">
-    <div class="meter-label"><span>Style drift</span><span class="meter-val">0%</span></div>
-    <div class="meter-track"><div class="meter-fill" style="width:4%"></div></div>
+  <i class="ba-arrow" data-lucide="arrow-right"></i>
+  <div class="ba-panel">
+    <span class="ba-label">After</span>
+    <div class="ba-value">scripts/serve.sh</div>
+    <p>Binds 127.0.0.1 only, serves just the workspace's app/ directory, and self-destructs after its keep-alive TTL — 24h by default.</p>
   </div>
 </div>
 
-| Component | What it's for | Syntax |
-|---|---|---|
-| Section header | Icon chip + kicker + title, feeds the nav | `<div class="section-head" data-nav="…">` |
-| KPI / stat tile | Big tabular number, icon, delta | `<div class="stat-grid">…` |
-| Feature card | Icon chip + title + text | `<div class="card-grid">…` |
-| Callout | Flagged note — 7 color-coded kinds | `::: callout warn` |
-| Steps | Numbered timeline for a flow | `<div class="steps">…` |
-| Compare | Two-up before/after panels | `<div class="compare">…` |
-| Mermaid | System, data flow and state diagrams | a fenced code block tagged <code>mermaid</code> |
+That's the difference between an ad-hoc server (F19) and the one this skill mandates (F1): loopback-only binding (F9) with a watchdog that eventually cleans up after itself (F11).
 
-::: callout metric
-Across a dozen explainers the whole visual system is defined **once**. Every number on this page is tabular-figured JetBrains Mono, so columns of stats line up to the pixel.
-:::
-
-<div class="section-head bookend cat-coral" data-nav="Summary" data-cat="coral" data-nav-icon="flag" id="summary">
-  <span class="icon-chip lg"><i data-lucide="flag"></i></span>
+<div class="section-head bookend" data-nav="Receipts" data-nav-icon="receipt" id="receipts">
+  <span class="icon-chip lg"><i data-lucide="receipt"></i></span>
   <div class="sh-text">
-    <span class="sh-kicker">Wrap up</span>
-    <div class="sh-title">Summary &amp; next step</div>
+    <span class="sh-kicker">6 · close the chain</span>
+    <div class="sh-title">Every citation on this page</div>
   </div>
 </div>
 
-The kit trades a build pipeline for a single design lock. You write Markdown; the tokens, components, engine and shell turn it into a colorful, diagram-rich, on-theme infographic that reads the same every time.
-
-<div class="card-grid">
-  <div class="card cat-teal">
-    <span class="icon-chip lg"><i data-lucide="check-check"></i></span>
-    <div class="card-title">One look, every doc</div>
-    <p>The locked token file means no explainer ever drifts. Swap content freely.</p>
-  </div>
-  <div class="card cat-blue">
-    <span class="icon-chip lg"><i data-lucide="rocket"></i></span>
-    <div class="card-title">Zero-build speed</div>
-    <p>Idea to live page in about thirty seconds. Refresh is the whole toolchain.</p>
-  </div>
-  <div class="card cat-magenta">
-    <span class="icon-chip lg"><i data-lucide="book-open"></i></span>
-    <div class="card-title">A full component kit</div>
-    <p>Tiles, cards, callouts, steps, compares, diagrams — all in <code>components.md</code>.</p>
-  </div>
+<div class="receipts">
+  <div class="receipts-label"><i data-lucide="receipt"></i> Receipts</div>
+  <ul class="receipts-list">
+    <li><span class="receipts-fact">F1</span> SKILL.md:8 — always serve via scripts/serve.sh</li>
+    <li><span class="receipts-fact">F2</span> SKILL.md:18 — infographic is the default tier</li>
+    <li><span class="receipts-fact">F3</span> scripts/init.sh:39 — kebab-case slug validation</li>
+    <li><span class="receipts-fact">F4</span> scripts/init.sh:82 — authoring docs never served</li>
+    <li><span class="receipts-fact">F5</span> scripts/init.sh:100 — advisory port probe, 7700-7799</li>
+    <li><span class="receipts-fact">F6</span> scripts/serve.sh:14 — the real bind is authoritative</li>
+    <li><span class="receipts-fact">F7</span> scripts/init.sh:59 — 3-day sweep, live servers spared</li>
+    <li><span class="receipts-fact">F8</span> scripts/serve.sh:44 — lint gate refusal</li>
+    <li><span class="receipts-fact">F9</span> scripts/serve.sh:12 — loopback-only bind</li>
+    <li><span class="receipts-fact">F10</span> scripts/common.sh:13 — marker-verified kill</li>
+    <li><span class="receipts-fact">F11</span> scripts/serve.sh:136 — self-destruct watchdog</li>
+    <li><span class="receipts-fact">F12</span> scripts/verify.sh:4 — headless Chrome dump-dom</li>
+    <li><span class="receipts-fact">F13</span> scripts/verify.sh:158 — Mermaid svg-count assert</li>
+    <li><span class="receipts-fact">F14</span> scripts/verify.sh:198 — scroll-behavior regression gate</li>
+    <li><span class="receipts-fact">F15</span> scripts/verify.sh:54 — no-Chrome SKIP, never a pass</li>
+    <li><span class="receipts-fact">F16</span> scripts/lint.sh:186 — forbidden CSS classes</li>
+    <li><span class="receipts-fact">F17</span> scripts/lint.sh:597 — unlabeled edge, per-edge defect</li>
+    <li><span class="receipts-fact">F18</span> scripts/lint.sh:604 — 7-node flowchart cap</li>
+    <li><span class="receipts-fact">F19</span> SKILL.md:54 — the ad-hoc server it replaced</li>
+  </ul>
 </div>
 
-::: callout action
-**Ready to make your own?** Run `./new.sh <slug>`, edit the copy, and reload the printed URL. Read `README.md` first — this kit must be **served**, never opened as `file://`.
+::: callout check
+Every claim above cites a real line in this skill's own source. Run the `grep` in any "Check it" line yourself — that's the point of the chain.
 :::
 
 <details>
-<summary>Why not React / an interactive tier?</summary>
+<summary>Why doesn't this page just say "trust me"?</summary>
 
-That's a deliberate non-goal. This kit is for static, diagram-rich explainers with light nav. When you genuinely need sliders or simulators, reach for the heavier `ps-commu-explain` path instead. Keeping this kit static is what makes it 30-seconds-fast.
+Because the whole point of the authoring chain — `00-brief.md` → `01-facts.md` → `02-storyboard.md` → `app/content.md` — is that nothing enters a page unless it traces to a real fact first. This page is the chain explaining itself, which only works if it holds itself to its own rule.
 
 </details>

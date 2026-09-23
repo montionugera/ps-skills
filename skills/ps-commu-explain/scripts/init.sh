@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # init.sh — create a ps-commu workspace (sweeps stale ones first).
-# Usage: init.sh <slug> [--tier infographic|html|react]
-#   slug    kebab-case topic id, e.g. jwt-refresh-rotation
-#   --tier  infographic (default) | html | react
-#           infographic  cream Markdown-driven explainer (cherry-markdown);
-#                        author app/content.md
-#           html         classic bespoke hand-written HTML; edit app/index.html
-#           react        interactive React+TS tier
+# Usage: init.sh <slug> [--tier infographic|html|react] [--example]
+#   slug       kebab-case topic id, e.g. jwt-refresh-rotation
+#   --tier     infographic (default) | html | react
+#              infographic  cream Markdown-driven explainer (cherry-markdown);
+#                           author app/content.md
+#              html         classic bespoke hand-written HTML; edit app/index.html
+#              react        interactive React+TS tier
+#   --example  scaffold the filled exemplar chain instead of empty skeletons:
+#              assets/workspace/example/'s filled 00-brief.md/01-facts.md/
+#              02-storyboard.md, plus the infographic tier's shipped
+#              app/content.md (itself that same exemplar). Forces --tier
+#              infographic (errors if combined with another --tier).
+#              `init.sh --example <slug> && serve.sh <slug>` passes lint.sh
+#              and verify.sh out of the box — no authoring required.
 # Also scaffolds the authoring-chain docs (00-brief.md, 01-facts.md,
 # 02-storyboard.md) from assets/workspace/ into the workspace root, sibling
 # to app/ — never served. scripts/lint.sh gates them; serve.sh runs it
@@ -18,11 +25,12 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
 usage() { grep '^#' "$0" | cut -c3-; exit "${1:-0}"; }
-slug="" tier="infographic"
+slug="" tier="infographic" example=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tier) [[ $# -ge 2 ]] || { echo "--tier requires a value" >&2; exit 1; }
             tier="$2"; shift ;;
+    --example) example=1 ;;
     -h|--help) usage ;;
     *) slug="$1" ;;
   esac
@@ -30,6 +38,10 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$slug" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || { echo "bad slug: '$slug' (use kebab-case)" >&2; exit 1; }
 [[ "$tier" == "infographic" || "$tier" == "html" || "$tier" == "react" ]] || { echo "bad tier: '$tier'" >&2; exit 1; }
+if [[ "$example" == 1 && "$tier" != "infographic" ]]; then
+  echo "--example only supports the infographic tier (got --tier $tier)" >&2
+  exit 1
+fi
 
 mkdir -p "$PS_COMMU_ROOT"
 chmod 700 "$PS_COMMU_ROOT"   # spec D2: fact sheets may contain private code
@@ -68,10 +80,15 @@ fi
 
 # --- scaffold authoring-chain docs from assets/workspace/ (workspace root,
 # sibling to app/ — never served, so the reader-facing tree stays free of
-# authoring docs). Idempotent: never clobbers an existing file. ---
+# authoring docs). Idempotent: never clobbers an existing file. --example
+# sources the already-filled chain from assets/workspace/example/ instead of
+# the empty skeleton, so it lints clean immediately (paired with the
+# infographic tier's shipped app/content.md, which is that same exemplar). ---
 wtpl="$(cd "$(dirname "$0")/.." && pwd)/assets/workspace"
+[[ "$example" == 1 ]] && wtpl="$wtpl/example"
 if [[ -d "$wtpl" ]]; then
   for f in "$wtpl"/*; do
+    [[ -f "$f" ]] || continue   # skip subdirs (e.g. assets/workspace/example/)
     name="$(basename "$f")"
     [[ -e "$ws/$name" ]] || cp "$f" "$ws/$name"
   done
