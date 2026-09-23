@@ -36,7 +36,7 @@ digraph tier {
 
 ## The six-stage chain
 
-Each stage produces a file the next one reads. `lint.sh <slug>` is the single script that checks all four authoring files; `serve.sh` runs it automatically before binding and refuses (exit 1 + defect list) on failure. `--no-lint` is a real, visibly-warned escape hatch scoped to the html/react tiers' dev loops — not a silent bypass of this chain.
+Each stage produces a file the next one reads. `lint.sh <slug>` is the single script that checks all four authoring files; `serve.sh` runs it automatically before binding and refuses (exit 1 + defect list) on failure. `--no-lint` skips `lint.sh` entirely — on ANY tier, there is no tier check gating it — which turns off every one of lint.sh's checks at once: fact-citation verification, forbidden-component checks, Mermaid edge-label checks, and the brief/facts/storyboard checks. It's intended for the html/react tiers' dev loops (serve.sh's own comment), not as a general-purpose escape hatch; passing it on real authored infographic content is genuinely risky, not a narrower or safer option.
 
 | # | Stage | Output | Checked by |
 |---|---|---|---|
@@ -58,7 +58,7 @@ Each stage produces a file the next one reads. `lint.sh <slug>` is the single sc
 
 `scripts/verify.sh <slug>` loads the served page in headless Chrome and prints 6 PASS/FAIL/SKIP asserts: Mermaid `<svg>` count == fenced ` ```mermaid ` count; no `~~CODE` placeholder leak; no raw `data-nav` text in body; zero page-origin console errors; nav-click scrollY change (permanent SKIP — a DOM dump can't dispatch clicks); served `explainer.css` has no `scroll-behavior` declared (the static regression gate for the click-to-jump root cause). Exit 0 = every non-skipped assert passed. `verify.sh --help` for detail.
 
-A clean render gate is necessary, not sufficient. Dispatch the reader-gate subagent below with that same URL's rendered page text. It must answer the brief's 3 questions with `F<n>` citations, pulled from the page's own evidence footer, before the page counts as done.
+A clean render gate is necessary, not sufficient. Dispatch the reader-gate subagent below with that same URL's rendered page text. It must answer the brief's 3 questions with `F<n>` citations, pulled from the page's own Receipts footer, before the page counts as done.
 
 ### Reader-gate prompt (paste verbatim, fill the brackets)
 
@@ -98,7 +98,7 @@ Report: the URL, the brief's 3 questions with the reader-gate's answers + citati
 |---|---|
 | "I read the code, a fact sheet is overhead" | `lint.sh` rejects any `F<n>` in content.md with no matching row in 01-facts.md — unbacked content can't pass. |
 | "Console is clean, ship it" | Console errors are 1 of 6 `verify.sh` asserts, and a clean render gate still isn't a reader gate — it must independently answer the brief's 3 questions with citations. |
-| "--no-lint gets past the gate" | `--no-lint` is a real, visibly-warned escape hatch scoped to the html/react tiers' dev loops, not a silent bypass of the infographic chain — it doesn't relax which facts content.md may cite. |
+| "--no-lint gets past the gate" | `--no-lint` skips `lint.sh` entirely, on any tier — it turns off fact-citation checking, forbidden-component checks, Mermaid edge-label checks, and the brief/facts/storyboard checks all at once. It's meant for the html/react dev loops, not a safe way to skip the infographic chain. |
 | "I'll skip 00-brief.md, the diagram speaks for itself" | `lint.sh` rejects unfilled `(...)` placeholders, a wrong count of Q1-Q3, or a missing section budget — `serve.sh` won't serve until it's clean. |
 | "I'll just python -m http.server it quickly" | Baselines exposed all of /tmp on all interfaces, forever. `serve.sh`: loopback-only, scoped doc root, watchdog self-destruct. |
 | "React would look more impressive" | Animation and diagrams live in the HTML tier too. State or HTML — react is opt-in, only for sections that need it. |
