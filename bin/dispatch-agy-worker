@@ -6,7 +6,7 @@ after verifying quota thresholds (5h > 30%, weekly > 10%).
 
 Thinking mode (--think / --capability deep-design-v1, the `dispatch-thinker` shim) routes to
 Claude Opus 5.5 first (`claude -p`, model via CLAUDE_THINK_MODEL) and falls back to Codex
-gpt-6-sol (CODEX_THINK_MODEL; quota 5h > 80%, weekly > 20%) when claude is unavailable or its
+gpt-5.6-sol (CODEX_THINK_MODEL; quota 5h > 80%, weekly > 20%) when claude is unavailable or its
 run fails. deep-design-v1 fails closed with exit 12 when neither thinker is available.
 
 Exit Codes:
@@ -45,7 +45,7 @@ DEFAULT_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_MIN_WEEKLY_QUOTA", "1
 DEFAULT_THINK_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_5H_QUOTA", "80.0"))
 DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKLY_QUOTA", "20.0"))
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
-DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-6-sol")
+DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 DEFAULT_CLAUDE_THINK_MODEL = os.environ.get("CLAUDE_THINK_MODEL", "claude-opus-5-5")
 DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "900")
 
@@ -269,9 +269,7 @@ def normalize_model_name(agent, model):
     if agent == "codex":
         if clean.lower() in ("terra", "terra:5.6", "5.6"):
             return "gpt-5.6-terra"
-        if clean.lower() == "sol:5.6":
-            return "gpt-5.6-sol"
-        if clean.lower() in ("sol", "thinking"):
+        if clean.lower() in ("sol", "sol:5.6", "thinking"):
             return DEFAULT_CODEX_THINK_MODEL
     if agent == "claude" and clean.lower() == "opus":
         return DEFAULT_CLAUDE_THINK_MODEL
@@ -343,7 +341,7 @@ CLAUDE_THINK_MODEL_NAMES = ("claude-opus-5-5", "opus", "claude-fable", "fable")
 def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H, min_weekly=DEFAULT_THINK_MIN_WEEKLY,
                   current_time=None):
     """
-    Thinking-mode chain: Claude Opus 5.5 first, then Codex gpt-6-sol under the think quota.
+    Thinking-mode chain: Claude Opus 5.5 first, then Codex gpt-5.6-sol under the think quota.
     An explicit model pins its provider (Claude-family -> claude only, anything else -> codex only).
     Returns: (agent, model, eligible, rem_5h, rem_weekly, msg, runtime_fallback), where runtime_fallback is the
     next eligible (agent, model) to retry once if the chosen agent's run fails, else None.
@@ -370,6 +368,29 @@ def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H
     agent, agent_model, r5, rw, msg = eligible_picks[0]
     fallback = eligible_picks[1][:2] if len(eligible_picks) > 1 else None
     return agent, agent_model, True, r5, rw, msg, fallback
+
+
+def git_status_entries(target_dir):
+    """`git status --porcelain` lines with untracked files expanded, or None when git status is unavailable."""
+    try:
+        proc = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                              cwd=target_dir, capture_output=True, text=True, timeout=30)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return {line for line in proc.stdout.splitlines() if line.strip()}
+
+
+def changes_left_behind(target_dir, before, ignore_path=None):
+    """Paths whose git status changed since `before`, minus `ignore_path`. None if status can't be compared."""
+    after = git_status_entries(target_dir)
+    if before is None or after is None:
+        return None
+    paths = sorted({line[3:] for line in after - before})
+    if ignore_path:
+        paths = [p for p in paths if os.path.abspath(os.path.join(target_dir, p)) != ignore_path]
+    return paths
 
 
 def build_context_block(context_paths, max_lines_per_file=300):
@@ -985,7 +1006,11 @@ def list_all_jobs(job_dir=DEFAULT_JOB_DIR):
     return jobs
 
 
-def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir):
+CLAUDE_ALLOWED_TOOLS = "Read,Grep,Glob,Write,Edit"
+CLAUDE_DISALLOWED_TOOLS = "Bash,WebFetch,WebSearch"
+
+
+def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=None):
     if chosen_agent == "codex":
         model = chosen_model or DEFAULT_CODEX_MODEL
         return [
@@ -995,13 +1020,24 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir):
             wrapped_task
         ]
     elif chosen_agent == "claude":
-        return [
-            "claude", "-p",
-            "--model", chosen_model or DEFAULT_CLAUDE_THINK_MODEL,
-            "--permission-mode", "bypassPermissions",
+        # Least privilege: read + Write/Edit only (the deliverable file), no shell or web access.
+        # The tool/dir flags are variadic, so they take one comma-joined value each and never sit right before the prompt.
+        dirs = [target_dir]
+        if output_file:
+            out_dir = os.path.dirname(os.path.abspath(os.path.join(target_dir, output_file)))
+            if out_dir not in dirs:
+                dirs.append(out_dir)
+        cmd = ["claude", "-p", "--model", chosen_model or DEFAULT_CLAUDE_THINK_MODEL]
+        for d in dirs:
+            cmd.extend(["--add-dir", d])
+        cmd.extend([
+            "--permission-mode", "acceptEdits",
+            "--allowedTools", CLAUDE_ALLOWED_TOOLS,
+            "--disallowedTools", CLAUDE_DISALLOWED_TOOLS,
             "--output-format", "text",
             wrapped_task,
-        ]
+        ])
+        return cmd
     elif chosen_agent == "cursor":
         cmd = ["cursor-agent", "-p", "--yolo", "--trust"]
         if chosen_model:
@@ -1077,7 +1113,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
             verify_cmd=verify_cmd,
             acceptance=opts.get("acceptance"),
         )
-        cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir)
+        cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=output_file)
         return execute_worker_process(cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent)
 
     def _own_exit(code):
@@ -1485,9 +1521,9 @@ def main():
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
-    parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Claude Opus 5.5 first, then Codex gpt-6-sol (enforces 5h > 80%%, weekly > 20%% quota)")
+    parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Claude Opus 5.5 first, then Codex gpt-5.6-sol (enforces 5h > 80%%, weekly > 20%% quota)")
     parser.add_argument("--capability", type=str, default=None, choices=["deep-design-v1"],
-                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Claude Opus 5.5 / Fable or GPT-6-Sol and fails closed with exit code 12)")
+                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Claude Opus 5.5 / Fable or GPT-5.6-Sol and fails closed with exit code 12)")
     parser.add_argument("--attestation-file", type=str, default=None, help="Explicit path to write Thinker attestation JSON (.thinker.json)")
     parser.add_argument("--context", nargs="+", dest="context_files", help="Paths to context/reference files or directories")
     parser.add_argument("--output-file", type=str, default=None, help="File path where worker must write primary deliverable")
@@ -1599,8 +1635,8 @@ def main():
     is_deep_design = (args.capability == "deep-design-v1")
     if is_deep_design:
         args.think = True
-        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 / Fable or GPT-6-Sol
-        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "claude-fable", "fable", "gpt-6-sol", "gpt-5.6-sol", "sol"]
+        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 / Fable or GPT-5.6-Sol
+        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "claude-fable", "fable", "gpt-5.6-sol", "sol"]
         if chosen_model and chosen_model.lower() not in ALLOWED_DEEP_DESIGN_MODELS:
             print(f"FAILED: capability 'deep-design-v1' strictly forbids model '{chosen_model}'. Allowed models: {ALLOWED_DEEP_DESIGN_MODELS}", file=sys.stderr)
             sys.exit(12)  # Fail-closed: THINKER_UNAVAILABLE / FORBIDDEN_MODEL
@@ -1612,7 +1648,7 @@ def main():
             min_5h = DEFAULT_THINK_MIN_5H
         if "--min-weekly" not in sys.argv:
             min_weekly = DEFAULT_THINK_MIN_WEEKLY
-        # Explicit agents are respected; otherwise route_thinker picks Claude Opus 5.5, then Codex gpt-6-sol.
+        # Explicit agents are respected; otherwise route_thinker picks Claude Opus 5.5, then Codex gpt-5.6-sol.
         if chosen_agent == "codex":
             chosen_model = normalize_model_name("codex", chosen_model) if chosen_model else DEFAULT_CODEX_THINK_MODEL
     if chosen_agent == "claude":
@@ -1840,13 +1876,37 @@ def main():
             print(f"FAILED: isolated execution error: {e}", file=sys.stderr)
             sys.exit(1)
 
+    # Non-isolated runs share the user's tree: snapshot it so a failed first thinker's writes are never
+    # attributed to the fallback (and never wiped - the tree may hold the user's own uncommitted work).
+    output_abs = os.path.abspath(os.path.join(cwd, args.output_file)) if args.output_file else None
+    output_preexisted = bool(output_abs and os.path.exists(output_abs))
+    pre_status = git_status_entries(cwd) if (runtime_fallback and not args.isolated) else None
+
     exit_code, stdout, stderr, files_changed, diff_summary = dispatch_once(chosen_agent, chosen_model)
     if exit_code != 0 and runtime_fallback:
-        print(f"[Thinker] {chosen_agent} ({chosen_model}) exited {exit_code}; falling back once to "
-              f"{runtime_fallback[0]} with {runtime_fallback[1]}.", file=sys.stderr)
-        chosen_agent, chosen_model = runtime_fallback
-        verify_info.clear()
-        exit_code, stdout, stderr, files_changed, diff_summary = dispatch_once(chosen_agent, chosen_model)
+        retry = True
+        if not args.isolated:
+            left = changes_left_behind(cwd, pre_status, ignore_path=output_abs)
+            if left is None:
+                retry = False
+                print(f"[Thinker] {chosen_agent} failed and git status could not be compared in {cwd}; "
+                      f"refusing fallback to {runtime_fallback[0]}.", file=sys.stderr)
+            elif left:
+                retry = False
+                print(f"[Thinker] {chosen_agent} failed and left changes behind; refusing fallback to "
+                      f"{runtime_fallback[0]} so they are not attributed to it. Files left by {chosen_agent}:\n  "
+                      + "\n  ".join(left), file=sys.stderr)
+            elif output_abs and not output_preexisted and os.path.exists(output_abs):
+                os.remove(output_abs)
+                print(f"[Thinker] discarded {chosen_agent}'s partial output file {args.output_file}.", file=sys.stderr)
+        if retry:
+            print(f"[Thinker] {chosen_agent} ({chosen_model}) exited {exit_code}; falling back once to "
+                  f"{runtime_fallback[0]} with {runtime_fallback[1]}.", file=sys.stderr)
+            chosen_agent, chosen_model = runtime_fallback
+            verify_info.clear()
+            exit_code, stdout, stderr, files_changed, diff_summary = dispatch_once(chosen_agent, chosen_model)
+        elif is_deep_design:
+            exit_code = 12  # Fail closed: THINKER_UNAVAILABLE
 
     status = derive_status(exit_code, files_changed)
 

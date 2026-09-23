@@ -58,7 +58,7 @@ dispatch-worker --task "Heavy refactor in src/engine" --detach --cwd "$REPO_DIR"
 
 # --- Heavy Thinking & Architecture Mode (Capability deep-design-v1) ---
 # Offload deep reasoning, RFC generation, or code reviews: Claude Opus 5.5 first (`claude -p`),
-# Codex GPT-6-Sol fallback (also used once if the Claude run fails). Pin one with --agent claude|codex.
+# Codex GPT-5.6-Sol fallback (also used once if the Claude run fails). Pin one with --agent claude|codex.
 # Fails closed (exit code 12) if both thinkers are unavailable or an unapproved model is specified.
 dispatch-thinker --task "Synthesize multi-wave portal architecture" \
   --context docs/specs/hub.md \

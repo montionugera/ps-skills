@@ -998,9 +998,9 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertIn("min 80.0%", msg_t)
 
     def test_normalize_model_name_thinking_aliases(self):
-        self.assertEqual(dispatch_mod.normalize_model_name("codex", "sol"), "gpt-6-sol")
+        self.assertEqual(dispatch_mod.normalize_model_name("codex", "sol"), "gpt-5.6-sol")
         self.assertEqual(dispatch_mod.normalize_model_name("codex", "sol:5.6"), "gpt-5.6-sol")
-        self.assertEqual(dispatch_mod.normalize_model_name("codex", "thinking"), "gpt-6-sol")
+        self.assertEqual(dispatch_mod.normalize_model_name("codex", "thinking"), "gpt-5.6-sol")
         self.assertEqual(dispatch_mod.normalize_model_name("claude", "opus"), "claude-opus-5-5")
 
     def test_wrap_prompt_contract_with_context_and_output(self):
@@ -1059,7 +1059,7 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
 
 
 class TestThinkerRouting(unittest.TestCase):
-    """dispatch-thinker (deep-design-v1): Claude Opus 5.5 first, Codex gpt-6-sol fallback, exit 12 if neither.
+    """dispatch-thinker (deep-design-v1): Claude Opus 5.5 first, Codex gpt-5.6-sol fallback, exit 12 if neither.
 
     Hermetic: PATH holds only fake binaries plus system dirs, and codex quota comes from a temp --state-file.
     """
@@ -1088,21 +1088,26 @@ class TestThinkerRouting(unittest.TestCase):
             {"kind": "weekly", "remaining_percent": weekly},
         ]}), encoding="utf-8")
 
-    def _fake(self, name, exit_code=0, output="ok"):
+    def _fake(self, name, exit_code=0, output="ok", body=""):
         path = self.fake_bin / name
         path.write_text(
-            f"#!/bin/sh\necho \"{name} $1 $2 $3 $4\" >> '{self.calls_log}'\necho '{output}'\nexit {exit_code}\n",
+            f"#!/bin/sh\necho \"{name} $1 $2 $3 $4\" >> '{self.calls_log}'\n"
+            f"printf '%s\\0' \"$@\" > '{self.root}/{name}.args'\n"
+            f"{body}\necho '{output}'\nexit {exit_code}\n",
             encoding="utf-8",
         )
         path.chmod(0o755)
 
-    def _run(self, *extra, env_extra=None):
+    def _args(self, name):
+        return (self.root / f"{name}.args").read_text(encoding="utf-8").split("\0")
+
+    def _run(self, *extra, env_extra=None, capability=True):
         env = {k: v for k, v in os.environ.items()
                if k not in ("DISPATCH_THINKER_SKIP_CLAUDE", "CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL")}
         env["PATH"] = f"{self.fake_bin}:/usr/bin:/bin"
         env.update(env_extra or {})
         return subprocess.run(
-            [sys.executable, str(self.WORKER_BIN), "--capability", "deep-design-v1",
+            [sys.executable, str(self.WORKER_BIN), *(["--capability", "deep-design-v1"] if capability else ["--think"]),
              "--state-file", str(self.codex_state), "--cwd", str(self.repo), "--task", "x", *extra],
             capture_output=True, text=True, env=env,
         )
@@ -1131,14 +1136,14 @@ class TestThinkerRouting(unittest.TestCase):
         self._codex_quota(100.0, 100.0)
         proc = self._run("--dry-run")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("to codex with gpt-6-sol", proc.stdout)
+        self.assertIn("to codex with gpt-5.6-sol", proc.stdout)
 
     def test_skip_claude_env_forces_codex(self):
         self._fake("claude")
         self._codex_quota(100.0, 100.0)
         proc = self._run("--dry-run", env_extra={"DISPATCH_THINKER_SKIP_CLAUDE": "1"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("to codex with gpt-6-sol", proc.stdout)
+        self.assertIn("to codex with gpt-5.6-sol", proc.stdout)
 
     def test_both_unavailable_fails_closed_12(self):
         self._codex_quota(10.0, 5.0)
@@ -1165,7 +1170,7 @@ class TestThinkerRouting(unittest.TestCase):
         self._codex_quota(100.0, 100.0)
         proc = self._run("--dry-run", "--agent", "codex")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("to codex with gpt-6-sol", proc.stdout)
+        self.assertIn("to codex with gpt-5.6-sol", proc.stdout)
 
     def test_explicit_agent_claude_is_respected(self):
         self._fake("claude")
@@ -1183,10 +1188,10 @@ class TestThinkerRouting(unittest.TestCase):
         calls = self.calls_log.read_text(encoding="utf-8").splitlines()
         self.assertTrue(calls[0].startswith("claude -p --model claude-opus-5-5"), calls)
         self.assertTrue(calls[1].startswith("codex exec"), calls)
-        self.assertIn('model="gpt-6-sol"', calls[1])
+        self.assertIn('model="gpt-5.6-sol"', calls[1])
         attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
         self.assertEqual(attestation["agent"], "codex")
-        self.assertEqual(attestation["model"], "gpt-6-sol")
+        self.assertEqual(attestation["model"], "gpt-5.6-sol")
 
     def test_runtime_claude_failure_without_eligible_codex_returns_failure(self):
         self._fake("claude", exit_code=1, output="claude-boom")
@@ -1195,6 +1200,59 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         calls = self.calls_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(calls), 1, calls)
+
+
+    def test_claude_run_is_least_privilege(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        args = self._args("claude")
+        self.assertNotIn("bypassPermissions", args)
+        self.assertNotIn("--dangerously-skip-permissions", args)
+        self.assertIn("--disallowedTools", args)
+        self.assertIn("Bash", args[args.index("--disallowedTools") + 1].split(","))
+        self.assertIn("--allowedTools", args)
+        self.assertNotIn("Bash", args[args.index("--allowedTools") + 1].split(","))
+        self.assertIn("--add-dir", args)
+
+    def test_runtime_fallback_discards_claude_partial_output_file_then_retries(self):
+        out = self.repo / "design.md"
+        self._fake("claude", exit_code=1, body=f"echo partial > '{out}'")
+        self._fake("codex", output="sol-ok")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--output-file", str(out))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        calls = self.calls_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual([c.split()[0] for c in calls], ["claude", "codex"])
+        self.assertFalse(out.exists(), "Claude's partial output must not be attributed to codex")
+
+    def test_runtime_fallback_refused_when_claude_left_other_changes(self):
+        (self.repo / "user-wip.txt").write_text("mine", encoding="utf-8")  # user's own uncommitted work
+        self._fake("claude", exit_code=1, body=f"echo stray > '{self.repo}/stray.txt'")
+        self._fake("codex", output="sol-ok")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertIn("stray.txt", proc.stderr)
+        self.assertNotIn("user-wip.txt", proc.stderr)
+        calls = self.calls_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertTrue((self.repo / "stray.txt").exists())
+        self.assertTrue((self.repo / "user-wip.txt").exists())
+
+    def test_plain_think_both_unavailable_falls_back_internal_10(self):
+        self._codex_quota(10.0, 5.0)
+        proc = self._run("--dry-run", capability=False)
+        self.assertEqual(proc.returncode, 10, proc.stdout + proc.stderr)
+        self.assertIn("FALLBACK_INTERNAL", proc.stdout)
+
+    def test_plain_think_prefers_claude(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", capability=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
 
 
 if __name__ == "__main__":
