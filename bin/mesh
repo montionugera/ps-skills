@@ -614,10 +614,16 @@ def cmd_mcp(args):
             send_resp({"jsonrpc": "2.0", "id": None,
                        "error": {"code": -32700, "message": "Parse error"}})
             continue
+        if not isinstance(req, dict):
+            send_resp({"jsonrpc": "2.0", "id": None,
+                       "error": {"code": -32600, "message": "Invalid Request"}})
+            continue
 
         req_id = req.get("id")
         method = req.get("method")
         params = req.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
 
         if method == "initialize":
             send_resp({
@@ -645,155 +651,167 @@ def cmd_mcp(args):
             res_text = ""
             now = now_ms()
 
-            if tool_name == "mesh_status":
-                claims = c.execute("SELECT * FROM claims WHERE state='held'").fetchall()
-                tasks = c.execute("SELECT * FROM tasks WHERE status IN ('pending','in_progress')").fetchall()
-                ideas = c.execute("SELECT COUNT(*) as cnt FROM ideas WHERE status='backlog'").fetchone()["cnt"]
-                res_text = json.dumps({
-                    "active_claims": [dict(cl) for cl in claims],
-                    "pending_tasks": [dict(t) for t in tasks],
-                    "backlog_ideas": ideas
-                })
-
-            elif tool_name == "mesh_claim":
-                res_key = args_in["resource"]
-                ttl = int(args_in.get("ttl_sec", 120)) * 1000
-                note = args_in.get("note", "")
-                try:
-                    c.execute("BEGIN IMMEDIATE")
-                    cur = c.execute("""
-                      INSERT INTO claims(resource, owner_id, claimed_at, expires_at, fence, state, note)
-                      VALUES(?, ?, ?, ?, 1, 'held', ?)
-                      ON CONFLICT(resource) DO UPDATE SET
-                        owner_id = excluded.owner_id,
-                        claimed_at = excluded.claimed_at,
-                        expires_at = excluded.expires_at,
-                        fence = CASE WHEN claims.owner_id = excluded.owner_id THEN claims.fence ELSE claims.fence + 1 END,
-                        state = 'held',
-                        note = excluded.note
-                      WHERE claims.expires_at < ? OR claims.state <> 'held' OR claims.owner_id = excluded.owner_id
-                      RETURNING fence;
-                    """, (res_key, agent_id, now, now + ttl, note, now))
-                    row = cur.fetchone()
-                    c.execute("COMMIT")
-                    if row:
-                        res_text = json.dumps({"ok": True, "fence": row["fence"], "owner": agent_id, "resource": res_key})
-                    else:
-                        holder = c.execute("SELECT owner_id, expires_at FROM claims WHERE resource=?", (res_key,)).fetchone()
-                        res_text = json.dumps({"ok": False, "holder": holder["owner_id"] if holder else "unknown", "resource": res_key})
-                except Exception as e:
-                    try: c.execute("ROLLBACK")
-                    except Exception: pass
-                    res_text = json.dumps({"ok": False, "error": str(e)})
-
-            elif tool_name == "mesh_release":
-                res_key = args_in["resource"]
-                c.execute("UPDATE claims SET state='released' WHERE resource=? AND owner_id=?", (res_key, agent_id))
-                res_text = json.dumps({"ok": True, "released": res_key})
-
-            elif tool_name == "mesh_next":
-                task = c.execute("""
-                  SELECT * FROM tasks
-                  WHERE owner_id=? AND status='in_progress' AND expires_at > ?
-                  ORDER BY updated_at DESC LIMIT 1
-                """, (agent_id, now)).fetchone()
-
-                if task:
+            try:
+                if tool_name == "mesh_status":
+                    claims = c.execute("SELECT * FROM claims WHERE state='held'").fetchall()
+                    tasks = c.execute("SELECT * FROM tasks WHERE status IN ('pending','in_progress')").fetchall()
+                    ideas = c.execute("SELECT COUNT(*) as cnt FROM ideas WHERE status='backlog'").fetchone()["cnt"]
                     res_text = json.dumps({
-                        "action": "continue",
-                        "task_id": task["id"],
-                        "title": task["title"],
-                        "prompt": f"You are currently working on task [{task['id']}]: '{task['title']}'. Complete verification and run mesh_task_done."
+                        "active_claims": [dict(cl) for cl in claims],
+                        "pending_tasks": [dict(t) for t in tasks],
+                        "backlog_ideas": ideas
                     })
-                else:
-                    pending = c.execute("SELECT * FROM tasks WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
-                    if pending:
-                        res_text = json.dumps({
-                            "action": "claim_and_continue",
-                            "task_id": pending["id"],
-                            "title": pending["title"],
-                            "prompt": f"Pending task available [{pending['id']}]: '{pending['title']}'. Claim it with mesh_task_claim and proceed."
-                        })
-                    else:
-                        res_text = json.dumps({
-                            "action": "stop",
-                            "reason": "All tasks completed and no active claims."
-                        })
 
-            elif tool_name == "mesh_task_claim":
-                tid = args_in.get("task_id")
-                ttl = int(args_in.get("ttl_sec", 300)) * 1000
-                try:
-                    c.execute("BEGIN IMMEDIATE")
-                    if tid:
+                elif tool_name == "mesh_claim":
+                    res_key = args_in["resource"]
+                    ttl = int(args_in.get("ttl_sec", 120)) * 1000
+                    note = args_in.get("note", "")
+                    try:
+                        c.execute("BEGIN IMMEDIATE")
                         cur = c.execute("""
-                          UPDATE tasks
-                          SET status='in_progress', owner_id=?, claimed_at=?, expires_at=?, updated_at=?
-                          WHERE id=? AND (status='pending' OR (status='in_progress' AND expires_at < ?))
-                        """, (agent_id, now, now + ttl, now, tid, now))
+                          INSERT INTO claims(resource, owner_id, claimed_at, expires_at, fence, state, note)
+                          VALUES(?, ?, ?, ?, 1, 'held', ?)
+                          ON CONFLICT(resource) DO UPDATE SET
+                            owner_id = excluded.owner_id,
+                            claimed_at = excluded.claimed_at,
+                            expires_at = excluded.expires_at,
+                            fence = CASE WHEN claims.owner_id = excluded.owner_id THEN claims.fence ELSE claims.fence + 1 END,
+                            state = 'held',
+                            note = excluded.note
+                          WHERE claims.expires_at < ? OR claims.state <> 'held' OR claims.owner_id = excluded.owner_id
+                          RETURNING fence;
+                        """, (res_key, agent_id, now, now + ttl, note, now))
+                        row = cur.fetchone()
+                        c.execute("COMMIT")
+                        if row:
+                            res_text = json.dumps({"ok": True, "fence": row["fence"], "owner": agent_id, "resource": res_key})
+                        else:
+                            holder = c.execute("SELECT owner_id, expires_at FROM claims WHERE resource=?", (res_key,)).fetchone()
+                            res_text = json.dumps({"ok": False, "holder": holder["owner_id"] if holder else "unknown", "resource": res_key})
+                    except Exception as e:
+                        try: c.execute("ROLLBACK")
+                        except Exception: pass
+                        res_text = json.dumps({"ok": False, "error": str(e)})
+
+                elif tool_name == "mesh_release":
+                    res_key = args_in["resource"]
+                    c.execute("UPDATE claims SET state='released' WHERE resource=? AND owner_id=?", (res_key, agent_id))
+                    res_text = json.dumps({"ok": True, "released": res_key})
+
+                elif tool_name == "mesh_next":
+                    task = c.execute("""
+                      SELECT * FROM tasks
+                      WHERE owner_id=? AND status='in_progress' AND expires_at > ?
+                      ORDER BY updated_at DESC LIMIT 1
+                    """, (agent_id, now)).fetchone()
+
+                    if task:
+                        res_text = json.dumps({
+                            "action": "continue",
+                            "task_id": task["id"],
+                            "title": task["title"],
+                            "prompt": f"You are currently working on task [{task['id']}]: '{task['title']}'. Complete verification and run mesh_task_done."
+                        })
                     else:
-                        cand = c.execute("SELECT id FROM tasks WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
-                        if cand:
-                            tid = cand["id"]
+                        pending = c.execute("SELECT * FROM tasks WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
+                        if pending:
+                            res_text = json.dumps({
+                                "action": "claim_and_continue",
+                                "task_id": pending["id"],
+                                "title": pending["title"],
+                                "prompt": f"Pending task available [{pending['id']}]: '{pending['title']}'. Claim it with mesh_task_claim and proceed."
+                            })
+                        else:
+                            res_text = json.dumps({
+                                "action": "stop",
+                                "reason": "All tasks completed and no active claims."
+                            })
+
+                elif tool_name == "mesh_task_claim":
+                    tid = args_in.get("task_id")
+                    ttl = int(args_in.get("ttl_sec", 300)) * 1000
+                    try:
+                        c.execute("BEGIN IMMEDIATE")
+                        if tid:
                             cur = c.execute("""
                               UPDATE tasks
                               SET status='in_progress', owner_id=?, claimed_at=?, expires_at=?, updated_at=?
-                              WHERE id=?
-                            """, (agent_id, now, now + ttl, now, tid))
+                              WHERE id=? AND (status='pending' OR (status='in_progress' AND expires_at < ?))
+                            """, (agent_id, now, now + ttl, now, tid, now))
                         else:
-                            cur = None
-                    c.execute("COMMIT")
-                    if cur and cur.rowcount > 0:
-                        res_text = json.dumps({"ok": True, "task_id": tid, "owner": agent_id})
-                    else:
-                        res_text = json.dumps({"ok": False, "reason": "No pending task or task already claimed"})
-                except Exception as e:
-                    try: c.execute("ROLLBACK")
-                    except Exception: pass
-                    res_text = json.dumps({"ok": False, "error": str(e)})
+                            cand = c.execute("SELECT id FROM tasks WHERE status='pending' ORDER BY created_at ASC LIMIT 1").fetchone()
+                            if cand:
+                                tid = cand["id"]
+                                cur = c.execute("""
+                                  UPDATE tasks
+                                  SET status='in_progress', owner_id=?, claimed_at=?, expires_at=?, updated_at=?
+                                  WHERE id=?
+                                """, (agent_id, now, now + ttl, now, tid))
+                            else:
+                                cur = None
+                        c.execute("COMMIT")
+                        if cur and cur.rowcount > 0:
+                            res_text = json.dumps({"ok": True, "task_id": tid, "owner": agent_id})
+                        else:
+                            res_text = json.dumps({"ok": False, "reason": "No pending task or task already claimed"})
+                    except Exception as e:
+                        try: c.execute("ROLLBACK")
+                        except Exception: pass
+                        res_text = json.dumps({"ok": False, "error": str(e)})
 
-            elif tool_name == "mesh_task_done":
-                tid = args_in["task_id"]
-                res_sum = args_in.get("result_summary", "{}")
-                cur = c.execute("""
-                  UPDATE tasks
-                  SET status='done', result_json=?, updated_at=?
-                  WHERE id=? AND owner_id=?
-                """, (json.dumps({"summary": res_sum}), now, tid, agent_id))
-                res_text = json.dumps({"ok": cur.rowcount > 0, "task_id": tid})
+                elif tool_name == "mesh_task_done":
+                    tid = args_in["task_id"]
+                    res_sum = args_in.get("result_summary", "{}")
+                    cur = c.execute("""
+                      UPDATE tasks
+                      SET status='done', result_json=?, updated_at=?
+                      WHERE id=? AND owner_id=?
+                    """, (json.dumps({"summary": res_sum}), now, tid, agent_id))
+                    res_text = json.dumps({"ok": cur.rowcount > 0, "task_id": tid})
 
-            elif tool_name == "mesh_idea_add":
-                title = args_in["title"]
-                pri = args_in.get("priority", "normal")
-                blast = args_in.get("blast_radius", "R2")
-                notes = args_in.get("notes", "")
-                cnt = c.execute("SELECT COUNT(*) as c FROM ideas").fetchone()["c"]
-                idea_id = f"IDEA-{cnt + 1:03d}"
-                c.execute("""
-                  INSERT INTO ideas(id, title, origin_agent, priority, blast_radius, status, notes, created_at, updated_at)
-                  VALUES(?, ?, ?, ?, ?, 'backlog', ?, ?, ?)
-                """, (idea_id, title, agent_id, pri, blast, notes, now, now))
-                res_text = json.dumps({"ok": True, "idea_id": idea_id, "title": title})
+                elif tool_name == "mesh_idea_add":
+                    title = args_in["title"]
+                    pri = args_in.get("priority", "normal")
+                    blast = args_in.get("blast_radius", "R2")
+                    notes = args_in.get("notes", "")
+                    cnt = c.execute("SELECT COUNT(*) as c FROM ideas").fetchone()["c"]
+                    idea_id = f"IDEA-{cnt + 1:03d}"
+                    c.execute("""
+                      INSERT INTO ideas(id, title, origin_agent, priority, blast_radius, status, notes, created_at, updated_at)
+                      VALUES(?, ?, ?, ?, ?, 'backlog', ?, ?, ?)
+                    """, (idea_id, title, agent_id, pri, blast, notes, now, now))
+                    res_text = json.dumps({"ok": True, "idea_id": idea_id, "title": title})
 
-            elif tool_name == "mesh_send":
-                to_ag = args_in.get("to")
-                kind = args_in["kind"]
-                body = args_in["body"]
-                c.execute("""
-                  INSERT INTO messages(from_agent, to_agent, kind, body_json, created_at)
-                  VALUES(?, ?, ?, ?, ?)
-                """, (agent_id, to_ag, kind, body if isinstance(body, str) else json.dumps(body), now))
-                mid = c.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
-                res_text = json.dumps({"ok": True, "message_id": mid})
+                elif tool_name == "mesh_send":
+                    to_ag = args_in.get("to")
+                    kind = args_in["kind"]
+                    body = args_in["body"]
+                    c.execute("""
+                      INSERT INTO messages(from_agent, to_agent, kind, body_json, created_at)
+                      VALUES(?, ?, ?, ?, ?)
+                    """, (agent_id, to_ag, kind, body if isinstance(body, str) else json.dumps(body), now))
+                    mid = c.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
+                    res_text = json.dumps({"ok": True, "message_id": mid})
 
-            elif tool_name == "mesh_inbox":
-                unacked = args_in.get("unacked_only", True)
-                q = "SELECT * FROM messages WHERE (to_agent IS NULL OR to_agent=?)"
-                if unacked:
-                    q += " AND acked_at IS NULL"
-                q += " ORDER BY id ASC"
-                msgs = c.execute(q, (agent_id,)).fetchall()
-                res_text = json.dumps([dict(m) for m in msgs])
+                elif tool_name == "mesh_inbox":
+                    unacked = args_in.get("unacked_only", True)
+                    q = "SELECT * FROM messages WHERE (to_agent IS NULL OR to_agent=?)"
+                    if unacked:
+                        q += " AND acked_at IS NULL"
+                    q += " ORDER BY id ASC"
+                    msgs = c.execute(q, (agent_id,)).fetchall()
+                    res_text = json.dumps([dict(m) for m in msgs])
+                else:
+                    send_resp({"jsonrpc": "2.0", "id": req_id,
+                               "error": {"code": -32602, "message": f"Unknown tool: {tool_name}"}})
+                    continue
+            except Exception as e:
+                # A bad argument must not kill the server: every client would hang.
+                if c.in_transaction:
+                    c.execute("ROLLBACK")
+                send_resp({"jsonrpc": "2.0", "id": req_id,
+                           "error": {"code": -32602, "message": f"{tool_name}: {type(e).__name__}: {e}"}})
+                continue
 
             send_resp({
                 "jsonrpc": "2.0",
