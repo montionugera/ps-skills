@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dispatch-thinker: Front-end for dispatch-worker with --capability deep-design-v1
-# Strictly restricts thinking / architecture tasks to Claude Fable or GPT-5.6-Sol.
-# Fails closed with exit code 12 if thinker is unavailable.
+# Routes thinking / architecture tasks to Claude Opus 5.5 first, GPT-6-Sol (Codex) fallback.
+# Fails closed with exit code 12 only if both thinkers are unavailable.
 
 set -euo pipefail
 

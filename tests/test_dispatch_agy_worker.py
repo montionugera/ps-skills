@@ -998,9 +998,10 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertIn("min 80.0%", msg_t)
 
     def test_normalize_model_name_thinking_aliases(self):
-        self.assertEqual(dispatch_mod.normalize_model_name("codex", "sol"), "gpt-5.6-sol")
+        self.assertEqual(dispatch_mod.normalize_model_name("codex", "sol"), "gpt-6-sol")
         self.assertEqual(dispatch_mod.normalize_model_name("codex", "sol:5.6"), "gpt-5.6-sol")
-        self.assertEqual(dispatch_mod.normalize_model_name("codex", "thinking"), "gpt-5.6-sol")
+        self.assertEqual(dispatch_mod.normalize_model_name("codex", "thinking"), "gpt-6-sol")
+        self.assertEqual(dispatch_mod.normalize_model_name("claude", "opus"), "claude-opus-5-5")
 
     def test_wrap_prompt_contract_with_context_and_output(self):
         cfile = Path(self.temp_dir.name) / "spec.md"
@@ -1056,16 +1057,144 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertEqual(proc.returncode, 12)
         self.assertIn("strictly forbids model 'gpt-5.6-terra'", proc.stderr)
 
-    def test_deep_design_capability_dry_run_success(self):
-        worker_bin = BIN_DIR / "dispatch-worker"
-        proc = subprocess.run(
-            [sys.executable, str(worker_bin), "--capability", "deep-design-v1", "--dry-run", "--task", "x"],
-            capture_output=True,
-            text=True,
+
+class TestThinkerRouting(unittest.TestCase):
+    """dispatch-thinker (deep-design-v1): Claude Opus 5.5 first, Codex gpt-6-sol fallback, exit 12 if neither.
+
+    Hermetic: PATH holds only fake binaries plus system dirs, and codex quota comes from a temp --state-file.
+    """
+
+    WORKER_BIN = BIN_DIR / "dispatch-worker"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.fake_bin = self.root / "bin"
+        self.fake_bin.mkdir()
+        self.codex_state = self.root / "codex-status.json"
+        self.calls_log = self.root / "calls.log"
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"],
+                       cwd=self.repo, check=True)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _codex_quota(self, five_hour, weekly):
+        self.codex_state.write_text(json.dumps({"windows": [
+            {"kind": "five_hour", "remaining_percent": five_hour},
+            {"kind": "weekly", "remaining_percent": weekly},
+        ]}), encoding="utf-8")
+
+    def _fake(self, name, exit_code=0, output="ok"):
+        path = self.fake_bin / name
+        path.write_text(
+            f"#!/bin/sh\necho \"{name} $1 $2 $3 $4\" >> '{self.calls_log}'\necho '{output}'\nexit {exit_code}\n",
+            encoding="utf-8",
         )
-        self.assertEqual(proc.returncode, 0)
+        path.chmod(0o755)
+
+    def _run(self, *extra, env_extra=None):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("DISPATCH_THINKER_SKIP_CLAUDE", "CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL")}
+        env["PATH"] = f"{self.fake_bin}:/usr/bin:/bin"
+        env.update(env_extra or {})
+        return subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--capability", "deep-design-v1",
+             "--state-file", str(self.codex_state), "--cwd", str(self.repo), "--task", "x", *extra],
+            capture_output=True, text=True, env=env,
+        )
+
+    def test_deep_design_capability_dry_run_success(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("DRY_RUN", proc.stdout)
-        self.assertIn("gpt-5.6-sol", proc.stdout)
+
+    def test_dry_run_prefers_claude_opus_when_on_path(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+
+    def test_claude_model_overridable_via_env(self):
+        self._fake("claude")
+        proc = self._run("--dry-run", env_extra={"CLAUDE_THINK_MODEL": "claude-opus-9"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-9", proc.stdout)
+
+    def test_dry_run_falls_back_to_codex_sol_when_claude_missing(self):
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to codex with gpt-6-sol", proc.stdout)
+
+    def test_skip_claude_env_forces_codex(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", env_extra={"DISPATCH_THINKER_SKIP_CLAUDE": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to codex with gpt-6-sol", proc.stdout)
+
+    def test_both_unavailable_fails_closed_12(self):
+        self._codex_quota(10.0, 5.0)
+        proc = self._run("--dry-run")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("Thinker unavailable", proc.stderr)
+        self.assertIn("claude", proc.stderr.lower())
+        self.assertIn("CODEX", proc.stderr)
+
+    def test_forbidden_model_fails_closed_12(self):
+        self._fake("claude")
+        proc = self._run("--dry-run", "--model", "gpt-5.6-terra")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("strictly forbids model 'gpt-5.6-terra'", proc.stderr)
+
+    def test_opus_alias_allowed_and_mapped(self):
+        self._fake("claude")
+        proc = self._run("--dry-run", "--model", "opus")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+
+    def test_explicit_agent_codex_is_respected(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--agent", "codex")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to codex with gpt-6-sol", proc.stdout)
+
+    def test_explicit_agent_claude_is_respected(self):
+        self._fake("claude")
+        proc = self._run("--dry-run", "--agent", "claude")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+
+    def test_runtime_claude_failure_falls_back_to_codex(self):
+        self._fake("claude", exit_code=1, output="claude-boom")
+        self._fake("codex", exit_code=0, output="sol-ok")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("sol-ok", proc.stdout)
+        calls = self.calls_log.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(calls[0].startswith("claude -p --model claude-opus-5-5"), calls)
+        self.assertTrue(calls[1].startswith("codex exec"), calls)
+        self.assertIn('model="gpt-6-sol"', calls[1])
+        attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
+        self.assertEqual(attestation["agent"], "codex")
+        self.assertEqual(attestation["model"], "gpt-6-sol")
+
+    def test_runtime_claude_failure_without_eligible_codex_returns_failure(self):
+        self._fake("claude", exit_code=1, output="claude-boom")
+        self._codex_quota(10.0, 5.0)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 1)
+        calls = self.calls_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(calls), 1, calls)
 
 
 if __name__ == "__main__":

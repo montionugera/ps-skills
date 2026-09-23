@@ -94,6 +94,16 @@ export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE="subscription_quota_remaining"
 export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3.8-flash > agy > codex"
 ```
 
+### Thinking tasks (`dispatch-thinker`)
+
+`dispatch-thinker` (= `dispatch-worker --capability deep-design-v1`; `--think` uses the same routing) sends deep-reasoning work to **Claude Opus 5.5 first** (`claude -p --model claude-opus-5-5`, available when `claude` is on `PATH`), then **Codex `gpt-6-sol`** (quota 5h > 80%, weekly > 20%). If the Claude run fails, it retries once on Codex when eligible. Exit `12` (fail closed) only when neither is available or a non-thinker model is requested. `--agent claude` / `--agent codex` pins one provider.
+
+| Env var | Default | Purpose |
+| :--- | :--- | :--- |
+| `CLAUDE_THINK_MODEL` | `claude-opus-5-5` | Claude thinker model id |
+| `CODEX_THINK_MODEL` | `gpt-6-sol` | Codex fallback thinker model id |
+| `DISPATCH_THINKER_SKIP_CLAUDE` | unset | `1` skips Claude and routes straight to Codex |
+
 ## Plugin Bridge & Antigravity (agy) Context Budget (`ps-plugin-bridge`)
 
 Bridge Claude plugins (e.g. `superpowers`, `frontend-design`) directly into Google Antigravity CLI (`~/.gemini/config/plugins`):
