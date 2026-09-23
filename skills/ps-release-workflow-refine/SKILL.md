@@ -41,7 +41,7 @@ its `--slices` allowlist; `psrw epic plan` refuses a slice whose spec is still a
 
 Repo not opted in · no release in progress · `I-NNN` not found in the idea catalog ·
 idea already promoted · the idea's `spec.md` still holds a template placeholder, or has no
-"Acceptance criteria" heading with at least one `- [ ]` item (the message names each gap).
+"Acceptance criteria" (or "Acceptance evidence") heading with at least one `- [ ]` item or line of evidence prose under it (the message names each gap).
 `--allow-empty-spec` overrides with a warning — a human decision, never an agent default.
 
 Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#d11-backlog-routing`

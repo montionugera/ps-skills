@@ -113,30 +113,42 @@ def _is_untouched_skeleton(text: str, skeleton: str) -> bool:
 
 
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.*)$")
-_CHECKLIST_ITEM_RE = re.compile(r"^\s*[-*] \[[ xX]\]\s+\S")
+_ACCEPTANCE_HEADING_RE = re.compile(r"acceptance (criteria|evidence)", re.IGNORECASE)
+_CHECKLIST_MARKER_RE = re.compile(r"^\s*[-*] \[[ xX]\]\s*")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
 
-def _has_acceptance_checklist(text: str, placeholders: list[str]) -> tuple[bool, bool]:
-    """(heading present, real checklist item under it). The section ends at the
-    next heading of any level, so a checklist elsewhere in the spec does not count;
-    neither does an item that is still the skeleton's placeholder, nor anything
-    inside a code fence (that is example markdown, not the spec)."""
-    heading = item = in_section = in_fence = False
+def _is_acceptance_content(line: str, placeholders: list[str]) -> bool:
+    """A checklist item or a line of evidence prose; not a bare `- [ ]`, not
+    the skeleton's placeholder."""
+    body = _CHECKLIST_MARKER_RE.sub("", line).strip()
+    return bool(body) and not any(ph in body for ph in placeholders)
+
+
+def _has_acceptance_section(text: str, placeholders: list[str]) -> tuple[bool, bool]:
+    """(heading present, real content under it). The heading is "Acceptance
+    criteria" or "Acceptance evidence" (epic slices write "Acceptance evidence
+    (worker-shaped)"). Content is a checklist item or evidence prose. The section
+    ends at the next heading of any level, so content elsewhere in the spec does
+    not count; neither does the skeleton's placeholder, an HTML comment, or
+    anything inside a code fence (that is example markdown, not the spec)."""
+    heading = content = in_section = in_fence = in_comment = False
     for line in text.splitlines():
         if _FENCE_RE.match(line):
             in_fence = not in_fence
             continue
         if in_fence:
             continue
+        if in_comment or line.lstrip().startswith("<!--"):
+            in_comment = "-->" not in line
+            continue
         m = _HEADING_RE.match(line)
         if m:
-            in_section = "acceptance criteria" in m.group(1).lower()
+            in_section = bool(_ACCEPTANCE_HEADING_RE.search(m.group(1)))
             heading = heading or in_section
-        elif (in_section and _CHECKLIST_ITEM_RE.match(line)
-              and not any(ph in line for ph in placeholders)):
-            item = True
-    return heading, item
+        elif in_section and _is_acceptance_content(line, placeholders):
+            content = True
+    return heading, content
 
 
 def spec_readiness_problems(text: str) -> list[str]:
@@ -144,7 +156,8 @@ def spec_readiness_problems(text: str) -> list[str]:
 
     Two mechanical checks: no line of the idea skeleton is still unfilled (the
     placeholders are read from new_idea.SPEC_TEMPLATE, never copied here), and
-    there is an "Acceptance criteria" heading with at least one `- [ ]` item.
+    there is an "Acceptance criteria" (or "Acceptance evidence") heading with at
+    least one `- [ ]` item or line of evidence prose under it.
     """
     placeholders = _new_idea.idea_spec_placeholders()
     problems = [
@@ -152,11 +165,12 @@ def spec_readiness_problems(text: str) -> list[str]:
         for placeholder in placeholders
         if placeholder in text
     ]
-    heading, item = _has_acceptance_checklist(text, placeholders)
+    heading, content = _has_acceptance_section(text, placeholders)
     if not heading:
-        problems.append('no "Acceptance criteria" heading')
-    elif not item:
-        problems.append('"Acceptance criteria" has no checklist item (- [ ] ...)')
+        problems.append('no "Acceptance criteria" (or "Acceptance evidence") heading')
+    elif not content:
+        problems.append('"Acceptance criteria" section is empty '
+                        '(add checklist items (- [ ] ...) or evidence prose)')
     return problems
 
 

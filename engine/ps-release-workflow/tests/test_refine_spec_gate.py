@@ -95,18 +95,23 @@ def test_missing_acceptance_heading_is_named():
     assert any("Acceptance criteria" in p for p in problems)
 
 
-def test_acceptance_heading_without_checklist_item_is_refused():
+def test_empty_acceptance_section_is_refused():
     text = FILLED_SPEC.replace(
-        "- [ ] An order with a fee above the cap is rejected with a 422.",
-        "It should work.",
-    )
+        "- [ ] An order with a fee above the cap is rejected with a 422.", "")
     problems = spec_readiness_problems(text)
     assert any("- [ ]" in p for p in problems)
 
 
+def test_acceptance_section_with_only_an_html_comment_is_refused():
+    text = FILLED_SPEC.replace(
+        "- [ ] An order with a fee above the cap is rejected with a 422.",
+        "<!-- what proves this works? -->")
+    assert any("- [ ]" in p for p in spec_readiness_problems(text))
+
+
 def test_checklist_item_outside_the_acceptance_section_does_not_count():
     text = FILLED_SPEC.replace(
-        "- [ ] An order with a fee above the cap is rejected with a 422.", "tbd"
+        "- [ ] An order with a fee above the cap is rejected with a 422.", ""
     ) + "\n## Follow-ups\n\n- [ ] rename the module\n"
     assert any("- [ ]" in p for p in spec_readiness_problems(text))
 
@@ -122,6 +127,8 @@ def test_empty_checklist_item_does_not_count():
     "## Acceptance criteria",
     "### acceptance criteria",
     "## Tests / acceptance criteria",
+    "## Acceptance evidence (worker-shaped)",
+    "### acceptance evidence",
 ])
 def test_acceptance_heading_variants_are_accepted(heading):
     assert spec_readiness_problems(
@@ -242,3 +249,52 @@ def test_checklist_item_inside_a_code_fence_does_not_count():
         "~~~\n- [ ] an example item\n~~~",
     )
     assert any("- [ ]" in p for p in spec_readiness_problems(text))
+
+
+# --- epic slice specs: "Acceptance evidence (worker-shaped)" and prose evidence ---
+
+EVIDENCE_PROSE = ("`REPORT.md` with `id -u joy-agent`, `ls -la` of the vault and the "
+                  "captured sessions as JSON files.")
+
+
+def test_acceptance_evidence_heading_with_prose_refines():
+    text = FILLED_SPEC.replace(
+        "## Acceptance criteria\n\n- [ ] An order with a fee above the cap is rejected with a 422.",
+        "## Acceptance evidence (worker-shaped)\n\n" + EVIDENCE_PROSE)
+    assert spec_readiness_problems(text) == []
+
+
+def test_acceptance_criteria_with_prose_evidence_refines():
+    text = FILLED_SPEC.replace(
+        "- [ ] An order with a fee above the cap is rejected with a 422.", EVIDENCE_PROSE)
+    assert spec_readiness_problems(text) == []
+
+
+def test_empty_acceptance_evidence_section_is_refused():
+    text = FILLED_SPEC.replace(
+        "## Acceptance criteria\n\n- [ ] An order with a fee above the cap is rejected with a 422.",
+        "## Acceptance evidence (worker-shaped)\n\n")
+    problems = spec_readiness_problems(text)
+    assert problems and not any("no \"Acceptance criteria\" heading" in p for p in problems)
+
+
+def test_acceptance_evidence_with_only_the_placeholder_is_refused():
+    placeholder = [p for p in idea_spec_placeholders() if "observable" in p][0]
+    text = FILLED_SPEC.replace(
+        "## Acceptance criteria\n\n- [ ] An order with a fee above the cap is rejected with a 422.",
+        f"## Acceptance evidence (worker-shaped)\n\n- [ ] {placeholder}")
+    assert spec_readiness_problems(text)
+
+
+def test_fanout_slice_skeleton_prompts_for_acceptance_criteria_checklist():
+    from scripts.epic import _fanout_idea_spec
+    stub = _fanout_idea_spec("Slice one", "I-001")
+    assert "## Acceptance criteria" in stub
+    assert "\n- [ ] " in stub.split("## Acceptance criteria", 1)[1]
+
+
+def test_fanout_slice_with_acceptance_filled_in_refines():
+    from scripts.epic import _fanout_idea_spec
+    placeholder = [p for p in idea_spec_placeholders() if "observable" in p][0]
+    stub = _fanout_idea_spec("Slice one", "I-001")
+    assert spec_readiness_problems(stub.replace(placeholder, "The slice ships a 200.")) == []

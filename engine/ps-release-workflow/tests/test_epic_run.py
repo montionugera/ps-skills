@@ -139,6 +139,16 @@ def test_plan_refuses_an_untouched_new_idea_skeleton_spec(epic_repo, idea_spec):
     assert "I-002" in message and "skeleton" in message
 
 
+def test_plan_refuses_a_pre_acceptance_fanout_skeleton_spec(epic_repo, idea_spec):
+    """Slices fanned out before the stub gained an Acceptance criteria section
+    are still untouched skeletons."""
+    spec = idea_spec(epic_repo, "I-002")
+    spec.write_text('---\ntitle: "beta"\nid: I-002\nstatus: idea\n---\n\n# beta\n')
+    commit_all(get_release_worktree(epic_repo), "test: reset I-002 spec to old stub")
+    message = _plan_error(epic_repo, "E-001", "I-001,I-002")
+    assert "I-002" in message and "skeleton" in message
+
+
 def test_plan_ignores_the_spec_of_an_already_shipped_slice(epic_repo, idea_spec):
     feature = promote_idea_to_refined(epic_repo, "I-001", allow_empty_spec=True)["id"]
     mark_shipped(get_backlog_catalog_path(epic_repo, "refined"), feature, "1.1")
