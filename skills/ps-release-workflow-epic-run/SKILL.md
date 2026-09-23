@@ -28,7 +28,7 @@ slice in order with `state`, `claimed_by`, `action`. Touch only slices in its `a
 
 ## Per slice, in order (any failure -> STOP and report)
 
-1. `skip` -> next slice. `refine` -> `psrw refine I-NNN`, then `psrw claim F-NNN`. `claim`
+1. `skip` -> next slice. `refine` -> `psrw refine I-NNN` (never `--allow-empty-spec`), then `psrw claim F-NNN`. `claim`
    (state `refined`) -> `psrw claim F-NNN`. Default owner, never `--owner`.
 2. `resume` -> STOP if `claimed_by` differs from this machine's owner id
    (`$CLAUDE_SESSION_ID`, else `~/.cache/ps-release-workflow/session-id`); that only catches another

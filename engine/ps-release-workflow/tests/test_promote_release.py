@@ -48,7 +48,7 @@ def _setup_and_ship_feature(tmp_repo_with_release: Path, fixed_owner: str, title
     subprocess.run(["git", "push", "origin", "main"], cwd=tmp_repo_with_release, check=True, capture_output=True)
     new_release(tmp_repo_with_release, version="1.1")
     idea = new_idea(tmp_repo_with_release, title=title)
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"], allow_empty_spec=True)
     claim = claim_feature(tmp_repo_with_release, feat["id"], owner=fixed_owner)
     wt = Path(claim["worktree"])
     (wt / "f.txt").write_text("x")
@@ -96,7 +96,7 @@ def _open_epic_and_fanout(repo: Path, slices: list[str], title: str = "Cap the r
 
 def _ship_idea_as_feature(repo: Path, idea_id: str, owner: str, filename: str = "f.txt") -> dict:
     """Promote an idea to refined, claim it, commit a file, and ship it."""
-    feat = promote_idea_to_refined(repo, idea_id)
+    feat = promote_idea_to_refined(repo, idea_id, allow_empty_spec=True)
     claim = claim_feature(repo, feat["id"], owner=owner)
     wt = Path(claim["worktree"])
     (wt / filename).write_text("x")
@@ -858,7 +858,7 @@ def test_cleanup_sweep_warns_and_continues_past_missing_catalog_entry(
     feat_a = _setup_and_ship_feature(tmp_repo_with_release, fixed_owner, title="A")
     # Ship a second feature into the same release.
     idea_b = new_idea(tmp_repo_with_release, title="B")
-    feat_b = promote_idea_to_refined(tmp_repo_with_release, idea_b["id"])
+    feat_b = promote_idea_to_refined(tmp_repo_with_release, idea_b["id"], allow_empty_spec=True)
     claim_b = claim_feature(tmp_repo_with_release, feat_b["id"], owner=fixed_owner)
     wt_b = Path(claim_b["worktree"])
     (wt_b / "b.txt").write_text("b")

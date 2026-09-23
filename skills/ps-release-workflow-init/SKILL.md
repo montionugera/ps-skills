@@ -24,7 +24,10 @@ Opt the current repo into ps-release-workflow. Run ONCE per repo.
 3. Extends `.gitignore` with `.claude/state/` and `.claude/worktrees/`.
 4. Installs the routing convention into `~/.claude/CLAUDE.md` (idempotent — skipped if
    already present).
-5. Commits the opt-in as `chore: adopt ps-release-workflow`.
+5. Stamps `scripts/precheck.sh` (Gate 1) and `scripts/integration.sh` (Gate 2) from templates
+   when absent — never over an existing script. Each has labelled slots; an unfilled slot
+   prints `UNFILLED GATE SLOT: <name>` and fails Gate 2 unless marked `# n/a: <reason>`.
+6. Commits the opt-in as `chore: adopt ps-release-workflow`.
 
 ## Then
 

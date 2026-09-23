@@ -26,7 +26,7 @@ def test_enumerate_excludes_marked_worktrees(tmp_repo_with_release: Path, fixed_
     from scripts.init_work_refined_backlog import claim_feature
     new_release(tmp_repo_with_release, version="1.1")
     idea = new_idea(tmp_repo_with_release, title="X")
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"], allow_empty_spec=True)
     claim = claim_feature(tmp_repo_with_release, feat["id"], owner=fixed_owner)
     found = enumerate_legacy_worktrees(tmp_repo_with_release)
     assert all(claim["worktree"] not in w["path"] for w in found)

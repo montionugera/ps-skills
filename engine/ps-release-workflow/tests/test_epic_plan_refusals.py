@@ -33,7 +33,7 @@ def test_plan_refuses_a_slice_whose_feature_is_missing_from_the_refined_catalog(
 
 
 def test_plan_refuses_a_feature_with_an_unexpected_status(epic_repo):
-    feature = promote_idea_to_refined(epic_repo, "I-001")["id"]
+    feature = promote_idea_to_refined(epic_repo, "I-001", allow_empty_spec=True)["id"]
     update_entry(get_backlog_catalog_path(epic_repo, "refined"), feature,
                  lambda entry: entry.update(status="weird"))
     commit_all(get_release_worktree(epic_repo), "test: give the feature an unexpected status")

@@ -21,7 +21,7 @@ from tests._helpers import git as _git
 
 def _run_slice(repo: Path, idea_id: str, filename: str) -> dict:
     """Refine, claim, sync, 'implement' (one commit), ship: the chain minus the LLM."""
-    feature = promote_idea_to_refined(repo, idea_id)["id"]
+    feature = promote_idea_to_refined(repo, idea_id, allow_empty_spec=True)["id"]
     wt = Path(claim_feature(repo, feature, owner="chain-owner")["worktree"])
     synced = epic_sync(wt)
     (wt / filename).write_text(f"{idea_id}\n")

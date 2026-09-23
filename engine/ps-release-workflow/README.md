@@ -30,7 +30,7 @@ own edit tools; see [`docs/lifecycle.md#guard-guarantees`](docs/lifecycle.md#gua
 
 | Script | What it does |
 | --- | --- |
-| `init_repo.py` (`psrw init`) | Opt the repo in: create `.release.json`, backlog dirs, gitignore the state dir, install the routing convention. Once per repo. |
+| `init_repo.py` (`psrw init`) | Opt the repo in: create `.release.json`, backlog dirs, gitignore the state dir, stamp the gate-script templates (`templates/`, never over an existing script), install the routing convention. Once per repo. |
 | `init_work_new_release.py` (`psrw new-release`) | Open `release/<v>`, mark `.release.json` in-progress, create the long-lived `_release` worktree. |
 | `new_idea.py` (`psrw idea`) | Mint `I-NNN`, create the idea folder with spec/research skeletons, commit on `release/<v>`. |
 | `promote_idea_to_refined.py` (`psrw refine`) | Promote `I-NNN` → `F-NNN`, carry the idea's content forward into the refined backlog, update catalogs. |

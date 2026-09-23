@@ -42,6 +42,29 @@ When you are inside a repo that has adopted ps-release-workflow
 """
 
 
+# Gate-script templates stamped into <repo>/scripts/ (never over an existing file).
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+GATE_TEMPLATES = {
+    "precheck.sh": _TEMPLATES_DIR / "precheck.sh",        # Gate 1, run by `psrw ship`
+    "integration.sh": _TEMPLATES_DIR / "integration.sh",  # Gate 2, run by `psrw promote`
+}
+
+
+def _stamp_gate_templates(repo: Path) -> list[str]:
+    """Create scripts/precheck.sh and scripts/integration.sh from the templates
+    when absent. An existing script is the repo's own gate and is left untouched."""
+    stamped = []
+    for name, template in GATE_TEMPLATES.items():
+        target = repo / "scripts" / name
+        if target.exists() or target.is_symlink():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(template.read_text())
+        target.chmod(0o755)
+        stamped.append(f"scripts/{name}")
+    return stamped
+
+
 class AlreadyInitializedError(Exception):
     pass
 
@@ -75,7 +98,10 @@ def init_repo(repo: Path) -> None:
         gi.write_text(existing + ("\n" if existing and not existing.endswith("\n") else "") +
                      "# ps-release-workflow (gitignored state)\n" + "\n".join(additions) + "\n")
 
-    # 4. Install routing convention to ~/.claude/CLAUDE.md (idempotent)
+    # 4. Stamp gate-script templates (unfilled Gate 2 slots fail until filled or n/a)
+    _stamp_gate_templates(repo)
+
+    # 5. Install routing convention to ~/.claude/CLAUDE.md (idempotent)
     home = Path(os.environ.get("HOME", str(Path.home())))
     claude_md = home / ".claude" / "CLAUDE.md"
     if claude_md.exists():
@@ -83,7 +109,7 @@ def init_repo(repo: Path) -> None:
         if ROUTING_MARKER not in content:
             claude_md.write_text(content + ROUTING_BLOCK)
 
-    # 5. Commit the opt-in
+    # 6. Commit the opt-in
     commit_all(repo, "chore: adopt ps-release-workflow")
 
 
@@ -101,6 +127,8 @@ def main() -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     print(f"✅ Initialized ps-release-workflow in {repo}")
+    print("   Gate templates: scripts/precheck.sh (Gate 1), scripts/integration.sh (Gate 2).")
+    print("   Fill each slot or mark it `# n/a: <reason>` — unfilled Gate 2 slots fail promote.")
     return 0
 
 

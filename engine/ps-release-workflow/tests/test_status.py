@@ -28,7 +28,7 @@ def _setup_release_with_features(repo: Path, owner: str) -> list[dict]:
     feats = []
     for title in ("First feature", "Second feature"):
         idea = new_idea(repo, title=title)
-        feats.append(promote_idea_to_refined(repo, idea["id"]))
+        feats.append(promote_idea_to_refined(repo, idea["id"], allow_empty_spec=True))
     new_idea(repo, title="Unpromoted idea")
     claim_feature(repo, feats[0]["id"], owner=owner)
     return feats
@@ -239,7 +239,7 @@ def _setup_epic_with_three_slices(repo: Path) -> list[dict]:
     new_release(repo, version="1.1")
     epic_open(repo, "Multi-account risk limits")
     ideas = epic_fanout(repo, "E-001", ["per-account cap", "aggregate cap", "breach alert"])["ideas"]
-    return [promote_idea_to_refined(repo, i["id"]) for i in ideas]
+    return [promote_idea_to_refined(repo, i["id"], allow_empty_spec=True) for i in ideas]
 
 
 def test_status_groups_features_under_their_epic(tmp_repo_with_release: Path, fixed_owner: str):

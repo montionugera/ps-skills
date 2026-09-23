@@ -29,7 +29,7 @@ def test_prints_active_claim_inside_workflow_repo(tmp_repo_with_release: Path, f
     from scripts.init_work_refined_backlog import claim_feature
     new_release(tmp_repo_with_release, version="1.1")
     idea = new_idea(tmp_repo_with_release, title="X")
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"], allow_empty_spec=True)
     claim_feature(tmp_repo_with_release, feat["id"], owner=fixed_owner)
 
     cp = _run(tmp_repo_with_release)

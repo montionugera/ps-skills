@@ -19,7 +19,7 @@ def _make_claimed_worktree(tmp_repo_with_release: Path, owner: str) -> Path:
 
     new_release(tmp_repo_with_release, version="1.1")
     idea = new_idea(tmp_repo_with_release, title="X")
-    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"])
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"], allow_empty_spec=True)
     claim = claim_feature(tmp_repo_with_release, feat["id"], owner=owner)
     return Path(claim["worktree"])
 

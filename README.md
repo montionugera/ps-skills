@@ -104,6 +104,17 @@ ps-plugin-bridge --list   # inspect bridged plugins, skill counts, and context b
 ps-skills-doctor --fix    # audit runtime health, repair broken symlinks, and link agy binaries
 ```
 
+### One source of rules for agy (`sync-agent-rules`)
+
+`~/.gemini/GEMINI.md` is a build output of `~/.claude/CLAUDE.md`, never a hand copy (a hand copy went
+stale and agy never saw the Target Fidelity Tiers). `@file` import lines such as `@RTK.md` are resolved
+inline; agy-only rules live in `~/.gemini/GEMINI.local.md`, which is appended verbatim.
+
+```bash
+bin/sync-agent-rules --check   # exit 1 + bounded diff when GEMINI.md is out of date (read-only)
+bin/sync-agent-rules --write   # back up to GEMINI.md.bak-<timestamp>, then regenerate
+```
+
 ### Why Antigravity (agy) Can Struggle to Detect Skills
 
 Antigravity CLI indexes all skills from `~/.gemini/config/skills/` and all sub-plugins in `~/.gemini/config/plugins/*/skills/`. However, Antigravity enforces a **strict context budget** for skills in its prompt:

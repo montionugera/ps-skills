@@ -44,6 +44,12 @@ def test_full_lifecycle_through_the_cli(tmp_repo, tmp_path):
     assert len(idea_catalog) == 1
     idea_id = idea_catalog[0]["id"]
 
+    # The untouched skeleton is refused; a filled spec with acceptance criteria passes.
+    psrw(tmp_repo, "refine", idea_id, home=home, expect=1)
+    spec = next((rel_wt / ".claude" / "idea_backlog").glob(f"{idea_id}-*")) / "spec.md"
+    spec.write_text(
+        "# add fee cap\n\n## Problem\n\nFees eat the position.\n\n"
+        "## Acceptance criteria\n\n- [ ] an order above the cap is rejected\n")
     psrw(tmp_repo, "refine", idea_id, home=home)
     refined = json.loads(
         (rel_wt / ".claude" / "refined_backlog" / "_catalog.json").read_text())

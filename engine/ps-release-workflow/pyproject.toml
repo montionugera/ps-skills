@@ -9,6 +9,11 @@ description = "Ship-the-release workflow toolkit for Claude Code sessions"
 requires-python = ">=3.11"
 dependencies = []
 
+# Only lib/ is a package. templates/ (gate-script templates stamped by psrw init)
+# sits beside it and must not be auto-discovered as a second top-level package.
+[tool.setuptools.packages.find]
+include = ["lib", "lib.*"]
+
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-mock>=3", "pyyaml>=6"]
 
