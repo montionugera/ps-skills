@@ -789,7 +789,7 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
             {"task": "task 2"}
         ]
 
-        def mock_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds):
+        def mock_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, **_kwargs):
             file_name = "file1.txt" if "task 1" in task_text else "file2.txt"
             (Path(target_dir) / file_name).write_text(f"created by {task_text}\n", encoding="utf-8")
             subprocess.run(["git", "add", file_name], cwd=target_dir, check=True, capture_output=True)
@@ -948,7 +948,7 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
             {"task": "task 2 edit base"}
         ]
 
-        def conflicting_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds):
+        def conflicting_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, **_kwargs):
             # Both tasks edit base.txt with conflicting lines
             (Path(target_dir) / "base.txt").write_text(f"conflicting edit from {task_text}\n", encoding="utf-8")
             subprocess.run(["git", "add", "base.txt"], cwd=target_dir, check=True, capture_output=True)

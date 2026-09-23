@@ -9,6 +9,7 @@ Exit Codes:
   1: Task execution failed (or error in execution)
   2: Invalid arguments / missing required task prompt
   10: Insufficient quota (signals orchestrator to fall back to internal Claude subagent)
+  13: Worker exited 0 but the verify command failed (twice); nothing was merged
 """
 
 import argparse
@@ -19,6 +20,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -39,6 +41,11 @@ DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKL
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "900")
+
+DEFAULT_VERIFY_TIMEOUT = int(os.environ.get("DISPATCH_VERIFY_TIMEOUT") or "600")
+DEFAULT_VERIFY_SCRIPT = "scripts/precheck.sh"
+VERIFY_FAILED_EXIT_CODE = 13
+VERIFY_TAIL_LINES = 40
 
 PROTECTED_CONFIG_PATTERNS = [
     ".release.json",
@@ -347,7 +354,8 @@ def build_context_block(context_paths, max_lines_per_file=300):
     return "\n".join(blocks) + "\n"
 
 
-def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_thinking=False):
+def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_thinking=False,
+                         verify_cmd=None, acceptance=None):
     """
     Wraps task prompt with standard standing rules:
     - Test-Driven Development (TDD) (for implementation) or Rigorous Reasoning (for thinking)
@@ -356,6 +364,17 @@ def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_t
     - Scoped Verification (targeted tests only)
     - Context bundling and output file destination
     """
+    if verify_cmd:
+        gate_rule = (
+            f"Before declaring completion, run the repo's gate command `{verify_cmd}` from the repo root and paste its final "
+            "lines in your reply. The dispatcher re-runs this exact command after you exit and will NOT merge your work if it fails."
+        )
+    else:
+        gate_rule = (
+            "Before declaring completion, run the repo's full gate or test command (including end-to-end / UI suites when "
+            "your change touches them) and paste its final lines in your reply."
+        )
+
     if is_thinking:
         contract_header = (
             "Standing Rules & Prompt Contract (Thinking / Architecture Mode):\n"
@@ -372,8 +391,8 @@ def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_t
             "3. Preserve protected config files: Do NOT overwrite or delete protected configuration files "
             "(.release.json, working-feature.json, claims.json, or git internal state).\n"
             "4. Evidence before assertions & Scoped Verification: Run TARGETED unit tests or build commands for the touched "
-            "files/modules (e.g. pytest path/to/test.py, npm test -- specific.test.ts) before declaring completion. Do NOT run the "
-            "entire monorepo or end-to-end suite for scoped implementation tasks.\n"
+            "files/modules (e.g. pytest path/to/test.py, npm test -- specific.test.ts) while iterating. "
+            f"{gate_rule}\n"
             "5. NO CSS/Class Invention (Visual Integrity): When writing HTML, JSX, Svelte, or Vue markup, NEVER invent class "
             "names or Tailwind utilities that do not exist in the project's CSS/tokens. Always verify defined classes directly in the "
             "theme or component source before applying them.\n"
@@ -388,7 +407,15 @@ def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_t
             f"Ensure parent directories exist if necessary.\n"
         )
 
-    return f"{contract_header}{context_section}{output_section}\nTask Brief:\n{task_prompt.strip()}"
+    acceptance_section = ""
+    if acceptance and acceptance.strip():
+        acceptance_section = (
+            "\nAcceptance criteria:\n"
+            "The work is done only when every item below holds. State how you checked each one.\n"
+            f"{acceptance.strip()}\n"
+        )
+
+    return f"{contract_header}{context_section}{output_section}{acceptance_section}\nTask Brief:\n{task_prompt.strip()}"
 
 
 def inspect_git_changes(target_dir, initial_head=None):
@@ -470,6 +497,59 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
         return 1, "", f"FAILED: error launching {agent_name}: {e}", False
 
 
+def resolve_verify_cmd(target_dir, verify_cmd=None, no_verify=False):
+    """
+    Picks the verify command for target_dir. Returns (cmd_or_None, source), source being one of:
+    "disabled" (--no-verify), "explicit" (--verify-cmd), "default" (scripts/precheck.sh), "none".
+    """
+    if no_verify:
+        return None, "disabled"
+    if verify_cmd and verify_cmd.strip():
+        return verify_cmd.strip(), "explicit"
+    script = Path(target_dir) / DEFAULT_VERIFY_SCRIPT
+    if script.is_file() and os.access(script, os.X_OK):
+        return f"./{DEFAULT_VERIFY_SCRIPT}", "default"
+    return None, "none"
+
+
+def run_verify_cmd(verify_cmd, target_dir, timeout_seconds):
+    """
+    Runs the verify shell command inside target_dir. Returns (ok, tail_output, is_timeout).
+    A timeout is a failure. The command gets its own process group so a timeout kills the whole tree.
+    """
+    try:
+        proc = subprocess.Popen(
+            verify_cmd,
+            shell=True,
+            cwd=target_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            start_new_session=True,
+        )
+    except Exception as e:
+        return False, f"[verify] could not launch `{verify_cmd}`: {e}", False
+
+    is_timeout = False
+    try:
+        output, _ = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        is_timeout = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+        output, _ = proc.communicate()
+
+    tail_lines = (output or "").splitlines()[-VERIFY_TAIL_LINES:]
+    if is_timeout:
+        tail_lines.append(f"[verify] `{verify_cmd}` timed out after {timeout_seconds}s")
+    elif proc.returncode != 0:
+        tail_lines.append(f"[verify] `{verify_cmd}` exited {proc.returncode}")
+    return (not is_timeout and proc.returncode == 0), "\n".join(tail_lines), is_timeout
+
+
 def execute_in_isolated_worktree(base_repo_dir, execute_fn, merge_lock=None):
     """
     Executes a callback inside a temporary git worktree:
@@ -486,6 +566,7 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn, merge_lock=None):
     except OSError:
         pass
 
+    keep_worktree = False
     try:
         initial_base_head = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -505,6 +586,16 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn, merge_lock=None):
             raise RuntimeError(f"Failed to create git worktree at {temp_worktree_dir}: {add_res.stderr.strip()}")
 
         exit_code, stdout, stderr, files_changed, diff_summary = execute_fn(temp_worktree_dir)
+
+        if exit_code == VERIFY_FAILED_EXIT_CODE:
+            # Never merged; left on disk so the failing state can be inspected and re-run.
+            keep_worktree = True
+            keep_msg = (
+                f"[Verify] Nothing merged. Worktree left in place for inspection: {temp_worktree_dir} "
+                f"(remove with: git -C {base_repo_dir} worktree remove --force {temp_worktree_dir})"
+            )
+            stderr = f"{stderr}\n{keep_msg}".strip()
+            print(keep_msg, file=sys.stderr)
 
         lock_ctx = merge_lock if merge_lock is not None else nullcontext()
         with lock_ctx:
@@ -616,7 +707,7 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn, merge_lock=None):
                     if src_path.is_file():
                         dst_path.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(src_path, dst_path)
-            else:
+            elif not keep_worktree:
                 # Worker failed or timed out: salvage any partial work before removing worktree
                 try:
                     base_head_rev = subprocess.run(
@@ -698,18 +789,29 @@ def execute_in_isolated_worktree(base_repo_dir, execute_fn, merge_lock=None):
         return exit_code, stdout, stderr, files_changed, diff_summary
 
     finally:
-        # Cleanup worktree
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", temp_worktree_dir],
-            cwd=base_repo_dir,
-            capture_output=True,
-            text=True,
-        )
-        if os.path.exists(temp_worktree_dir):
-            shutil.rmtree(temp_worktree_dir, ignore_errors=True)
+        # Cleanup worktree (unless verify failed: see keep_worktree above)
+        if not keep_worktree:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", temp_worktree_dir],
+                cwd=base_repo_dir,
+                capture_output=True,
+                text=True,
+            )
+            if os.path.exists(temp_worktree_dir):
+                shutil.rmtree(temp_worktree_dir, ignore_errors=True)
 
 
-def format_report(agent, status, exit_code, cwd, files_changed, diff_summary, tail_output, artifact=None, context_count=0):
+def format_verified_line(verify_info=None):
+    """One report line for the verify outcome: `Verified: true|false|skipped (<cmd or reason>)`."""
+    info = verify_info or {}
+    verified = info.get("verified", "skipped")
+    label = {True: "true", False: "false"}.get(verified, "skipped")
+    detail = info.get("verify_cmd") or ("--no-verify" if info.get("verify_source") == "disabled" else "no verify command")
+    return f"Verified: {label} ({detail})"
+
+
+def format_report(agent, status, exit_code, cwd, files_changed, diff_summary, tail_output, artifact=None, context_count=0,
+                  verify_info=None):
     """Formats a concise <= 15 line report for thin orchestrators."""
     lines = [
         f"=== {agent.upper()} SUBAGENT REPORT ===",
@@ -722,6 +824,7 @@ def format_report(agent, status, exit_code, cwd, files_changed, diff_summary, ta
         lines.append(f"Context: {context_count} document(s) referenced")
     lines.extend([
         f"Files Modified: {files_changed} ({diff_summary})",
+        format_verified_line(verify_info),
         "Last Output:",
     ])
     out_lines = [line for line in tail_output.splitlines() if line.strip()]
@@ -848,7 +951,52 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir):
         return cmd
 
 
-def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, context_files=None, output_file=None, is_thinking=False):
+def derive_status(exit_code, files_changed):
+    if exit_code == 0:
+        return "SUCCESS"
+    if exit_code == VERIFY_FAILED_EXIT_CODE:
+        return "VERIFY_FAILED"
+    if exit_code == 124:
+        return "TIMEOUT_PARTIAL_WORK" if files_changed > 0 else "TIMEOUT_NO_PROGRESS"
+    return "FAILED_PARTIAL_WORK" if files_changed > 0 else "FAILED"
+
+
+def verify_opts_from(source):
+    """Extracts the verify/acceptance options from a dict-like (batch item or job state)."""
+    return {
+        "verify_cmd": source.get("verify_cmd"),
+        "no_verify": bool(source.get("no_verify", False)),
+        "verify_timeout": source.get("verify_timeout") or DEFAULT_VERIFY_TIMEOUT,
+        "acceptance": source.get("acceptance"),
+    }
+
+
+def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, context_files=None, output_file=None,
+                    is_thinking=False, verify_opts=None, verify_info=None):
+    """
+    Runs the worker, then (worker exit 0 only) the verify command inside target_dir. On verify failure the same
+    worker is re-invoked exactly once with the failure output; a second failure returns VERIFY_FAILED_EXIT_CODE,
+    which keeps execute_in_isolated_worktree from merging. The verify outcome is written into `verify_info`.
+    """
+    opts = verify_opts or {}
+    info = verify_info if verify_info is not None else {}
+    verify_timeout = opts.get("verify_timeout") or DEFAULT_VERIFY_TIMEOUT
+    # Thinking-mode tasks produce a document, not code: only an explicit --verify-cmd applies to them.
+    verify_cmd, verify_source = resolve_verify_cmd(
+        target_dir,
+        verify_cmd=opts.get("verify_cmd"),
+        no_verify=opts.get("no_verify", False) or (is_thinking and not opts.get("verify_cmd")),
+    )
+    info.update({
+        "verified": "skipped", "verify_cmd": verify_cmd, "verify_source": verify_source,
+        "verify_attempts": 0, "verify_output": "", "worktree": target_dir,
+    })
+    if verify_source == "none":
+        print(
+            f"WARNING: result will be UNVERIFIED - no --verify-cmd given and no executable {DEFAULT_VERIFY_SCRIPT} in {target_dir}.",
+            file=sys.stderr,
+        )
+
     initial_head = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=target_dir,
@@ -856,17 +1004,52 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         text=True,
     ).stdout.strip()
 
-    wrapped_task = wrap_prompt_contract(
-        task_text,
-        context_files=context_files,
-        output_file=output_file,
-        is_thinking=is_thinking,
-    )
-    cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir)
+    def _invoke_worker(prompt_text):
+        wrapped_task = wrap_prompt_contract(
+            prompt_text,
+            context_files=context_files,
+            output_file=output_file,
+            is_thinking=is_thinking,
+            verify_cmd=verify_cmd,
+            acceptance=opts.get("acceptance"),
+        )
+        cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir)
+        return execute_worker_process(cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent)
 
-    exit_code, stdout, stderr, is_timeout = execute_worker_process(
-        cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent
-    )
+    def _own_exit(code):
+        # VERIFY_FAILED_EXIT_CODE is reserved for the dispatcher's verdict, never the worker's own exit status.
+        return 1 if code == VERIFY_FAILED_EXIT_CODE else code
+
+    exit_code, stdout, stderr, is_timeout = _invoke_worker(task_text)
+    exit_code = _own_exit(exit_code)
+
+    if exit_code == 0 and verify_cmd:
+        for attempt in (1, 2):
+            ok, verify_tail, _verify_timed_out = run_verify_cmd(verify_cmd, target_dir, verify_timeout)
+            info.update({"verified": ok, "verify_attempts": attempt, "verify_output": verify_tail})
+            if ok:
+                break
+            if attempt == 1:
+                print(f"[Verify] `{verify_cmd}` failed; re-invoking {chosen_agent} once with the failure output.", file=sys.stderr)
+                retry_prompt = (
+                    f"{task_text.strip()}\n\n"
+                    f"VERIFY FAILED: your previous attempt at the task above exited cleanly, but the dispatcher's verify "
+                    f"command `{verify_cmd}` failed. Your earlier changes are still in this working tree. Fix the cause "
+                    f"(do not weaken, skip, or delete the check), re-run `{verify_cmd}` yourself, and only then finish.\n"
+                    f"Last lines of the verify output:\n{verify_tail}"
+                )
+                exit_code, stdout, stderr, is_timeout = _invoke_worker(retry_prompt)
+                exit_code = _own_exit(exit_code)
+                if exit_code != 0:
+                    break
+        if exit_code == 0 and info["verified"] is not True:
+            exit_code = VERIFY_FAILED_EXIT_CODE
+            fail_msg = (
+                f"VERIFY FAILED: `{verify_cmd}` still failing after 1 retry. Nothing was merged.\n"
+                f"--- last {VERIFY_TAIL_LINES} lines of verify output ---\n{info['verify_output']}"
+            )
+            stderr = f"{stderr}\n{fail_msg}".strip()
+            print(fail_msg, file=sys.stderr)
 
     files_changed, diff_summary, commit_count = inspect_git_changes(target_dir, initial_head)
     return exit_code, stdout, stderr, files_changed, diff_summary
@@ -953,6 +1136,14 @@ def extract_tasks_from_plan(plan_path, target_phase=None):
     return extracted
 
 
+def batch_overall_exit(results):
+    """0 when every task succeeded; VERIFY_FAILED_EXIT_CODE when verify failures are the only failures; else 1."""
+    failures = [r.get("exit_code") for r in results if r.get("exit_code") != 0]
+    if not failures:
+        return 0
+    return VERIFY_FAILED_EXIT_CODE if all(ec == VERIFY_FAILED_EXIT_CODE for ec in failures) else 1
+
+
 def format_batch_report(results):
     total = len(results)
     succeeded = sum(1 for r in results if r.get("exit_code") == 0)
@@ -962,11 +1153,13 @@ def format_batch_report(results):
     ]
     for idx, r in enumerate(results, 1):
         task_preview = r.get("task", "")[:28] + "..." if len(r.get("task", "")) > 28 else r.get("task", "")
-        status_icon = "SUCCESS" if r.get("exit_code") == 0 else "FAILED"
+        status_icon = "SUCCESS" if r.get("exit_code") == 0 else (
+            "VERIFY_FAILED" if r.get("exit_code") == VERIFY_FAILED_EXIT_CODE else "FAILED")
         agent = r.get("agent", "worker").upper()
         fc = r.get("files_changed", 0)
         ds = r.get("diff_summary", "no diff")
-        lines.append(f"#{idx} [{agent}] {status_icon}: {fc} files ({ds}) - '{task_preview}'")
+        verified = {True: "true", False: "false"}.get(r.get("verified", "skipped"), "skipped")
+        lines.append(f"#{idx} [{agent}] {status_icon}: {fc} files ({ds}) verified={verified} - '{task_preview}'")
 
     failed_tasks = [r.get("task", "") for r in results if r.get("exit_code") != 0 and r.get("task")]
     if failed_tasks and len(lines) < 14:
@@ -1087,10 +1280,13 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     state["pid"] = os.getpid()
     save_job_state(job_id, state, job_dir)
 
+    verify_info = {}
+
     def _execute(target_dir):
         return run_single_task(
             task, target_dir, agent, model, timeout,
-            context_files=context_files, output_file=output_file, is_thinking=is_thinking
+            context_files=context_files, output_file=output_file, is_thinking=is_thinking,
+            verify_opts=verify_opts_from(state), verify_info=verify_info,
         )
 
     try:
@@ -1101,15 +1297,17 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     except Exception as e:
         exit_code, stdout, stderr, files_changed, diff_summary = 1, "", f"Execution error: {e}", 0, "error"
 
-    if exit_code == 0:
-        status = "SUCCESS"
-    elif exit_code == 124:
-        status = "TIMEOUT_PARTIAL_WORK" if files_changed > 0 else "TIMEOUT_NO_PROGRESS"
-    else:
-        status = "FAILED_PARTIAL_WORK" if files_changed > 0 else "FAILED"
+    status = derive_status(exit_code, files_changed)
 
     tail_output = stdout if stdout else (stderr or "none")
+    if status == "VERIFY_FAILED":
+        tail_output = stderr or tail_output
     state["status"] = status
+    state["verified"] = verify_info.get("verified", "skipped")
+    state["verify_cmd"] = verify_info.get("verify_cmd")
+    state["verify_output"] = verify_info.get("verify_output", "")
+    if status == "VERIFY_FAILED" and isolated:
+        state["worktree"] = verify_info.get("worktree")
     state["exit_code"] = exit_code
     state["files_changed"] = files_changed
     state["diff_summary"] = diff_summary
@@ -1149,15 +1347,14 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
         t_context_files = item.get("context_files")
         t_output_file = item.get("output_file")
         t_is_thinking = item.get("is_thinking", False)
+        t_verify_info = {}
 
         def _execute(target_dir):
-            try:
-                return run_single_task(
-                    t_task, target_dir, t_agent, t_model, t_timeout,
-                    context_files=t_context_files, output_file=t_output_file, is_thinking=t_is_thinking
-                )
-            except TypeError:
-                return run_single_task(t_task, target_dir, t_agent, t_model, t_timeout)
+            return run_single_task(
+                t_task, target_dir, t_agent, t_model, t_timeout,
+                context_files=t_context_files, output_file=t_output_file, is_thinking=t_is_thinking,
+                verify_opts=verify_opts_from(item), verify_info=t_verify_info,
+            )
 
         try:
             exit_code, stdout, stderr, files_changed, diff_summary = execute_in_isolated_worktree(
@@ -1173,7 +1370,9 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
             "exit_code": exit_code,
             "files_changed": files_changed,
             "diff_summary": diff_summary,
-            "tail_output": stdout if stdout else (stderr or "none")
+            "tail_output": (stderr or stdout or "none") if exit_code == VERIFY_FAILED_EXIT_CODE else (stdout if stdout else (stderr or "none")),
+            "verified": t_verify_info.get("verified", "skipped"),
+            "verify_cmd": t_verify_info.get("verify_cmd"),
         }
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(len(tasks), max_parallel))) as executor:
@@ -1229,6 +1428,16 @@ def main():
     parser.add_argument("--context", nargs="+", dest="context_files", help="Paths to context/reference files or directories")
     parser.add_argument("--output-file", type=str, default=None, help="File path where worker must write primary deliverable")
     parser.add_argument("--isolated", action="store_true", help="Execute inside a temporary isolated git worktree")
+    verify_group = parser.add_mutually_exclusive_group()
+    verify_group.add_argument("--verify-cmd", type=str, default=None,
+                              help=f"Shell command run inside the worker's worktree after the worker exits 0 and BEFORE any merge. "
+                                   f"Default: ./{DEFAULT_VERIFY_SCRIPT} when present and executable")
+    verify_group.add_argument("--no-verify", action="store_true", help="Explicitly skip the verify step (result reported as verified: skipped)")
+    parser.add_argument("--verify-timeout", type=int, default=DEFAULT_VERIFY_TIMEOUT,
+                        help=f"Verify command timeout in seconds; a timeout counts as failure (default: {DEFAULT_VERIFY_TIMEOUT})")
+    acceptance_group = parser.add_mutually_exclusive_group()
+    acceptance_group.add_argument("--acceptance", type=str, default=None, help="Acceptance criteria text added to the worker prompt contract")
+    acceptance_group.add_argument("--acceptance-file", type=str, default=None, help="File holding the acceptance criteria")
     parser.add_argument("--internal-run-job", type=str, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
@@ -1307,15 +1516,15 @@ def main():
                 res.get("diff_summary", ""),
                 res.get("tail_output", ""),
                 artifact=res.get("output_file"),
-                context_count=len(res.get("context_files") or [])
+                context_count=len(res.get("context_files") or []),
+                verify_info=res,
             )
             print(rep)
             sys.exit(ec if ec is not None else 1)
         else:
             results_list = [completed_results.get(jid, {"task": jid, "agent": args.agent, "exit_code": 1, "files_changed": 0, "diff_summary": "error"}) for jid in target_ids]
             print(format_batch_report(results_list))
-            overall_ec = 0 if all(r.get("exit_code") == 0 for r in results_list) else 1
-            sys.exit(overall_ec)
+            sys.exit(batch_overall_exit(results_list))
 
     # 4. Quota check / evaluation
     effective_on_demand = args.allow_on_demand or (args.mode == "on_demand")
@@ -1414,6 +1623,26 @@ def main():
         sys.exit(10)  # exit code 10 signals fallback to Claude internal subagent
 
     cwd = os.path.abspath(args.cwd)
+
+    acceptance_text = args.acceptance
+    if args.acceptance_file:
+        try:
+            acceptance_text = Path(args.acceptance_file).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"FAILED: cannot read --acceptance-file: {e}", file=sys.stderr)
+            sys.exit(2)
+    if not (acceptance_text and acceptance_text.strip()) and not args.think:
+        print("WARNING: no acceptance criteria given (--acceptance / --acceptance-file); the worker only has the task text to judge 'done' by.",
+              file=sys.stderr)
+    cli_verify_opts = {
+        "verify_cmd": args.verify_cmd,
+        "no_verify": args.no_verify,
+        "verify_timeout": args.verify_timeout,
+        "acceptance": acceptance_text,
+    }
+    planned_verify_cmd, planned_verify_source = resolve_verify_cmd(cwd, args.verify_cmd, args.no_verify)
+    verify_plan = planned_verify_cmd or ("skipped (--no-verify)" if planned_verify_source == "disabled" else "UNVERIFIED (no verify command)")
+
     model_info = ""
     if chosen_model:
         model_info = f" with {chosen_model}"
@@ -1426,10 +1655,10 @@ def main():
     # Dry-run check
     if args.dry_run:
         if is_batch:
-            print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch {len(batch_tasks)} task(s) in parallel to {chosen_agent}{model_info} in {cwd} [isolated worktrees].")
+            print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch {len(batch_tasks)} task(s) in parallel to {chosen_agent}{model_info} in {cwd} [isolated worktrees]. Verify: {verify_plan}")
         else:
             iso_str = " [isolated worktree]" if args.isolated else ""
-            print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch to {chosen_agent}{model_info} in {cwd}{iso_str}.")
+            print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch to {chosen_agent}{model_info} in {cwd}{iso_str}. Verify: {verify_plan}")
         sys.exit(0)
 
     # Detached / Background mode
@@ -1449,6 +1678,7 @@ def main():
                     "context_files": item.get("context_files") or args.context_files,
                     "output_file": item.get("output_file") or args.output_file,
                     "is_thinking": item.get("is_thinking", args.think),
+                    **{k: (item.get(k) if item.get(k) is not None else v) for k, v in cli_verify_opts.items()},
                     "status": "PENDING",
                     "created_at": time.time(),
                     "log_file": f"{DEFAULT_LOG_DIR}/{jid}.log",
@@ -1477,6 +1707,7 @@ def main():
                 "context_files": args.context_files,
                 "output_file": args.output_file,
                 "is_thinking": args.think,
+                **cli_verify_opts,
                 "status": "PENDING",
                 "created_at": time.time(),
                 "log_file": f"{DEFAULT_LOG_DIR}/{jid}.log",
@@ -1502,6 +1733,9 @@ def main():
                 b_item["is_thinking"] = args.think
             if "output_file" not in b_item and args.output_file:
                 b_item["output_file"] = args.output_file
+            for v_key, v_val in cli_verify_opts.items():
+                if b_item.get(v_key) is None:
+                    b_item[v_key] = v_val
 
         results = execute_batch_parallel(
             batch_tasks,
@@ -1513,16 +1747,18 @@ def main():
         )
         report = format_batch_report(results)
         print(report)
-        overall_exit = 0 if all(r.get("exit_code") == 0 for r in results) else 1
-        sys.exit(overall_exit)
+        sys.exit(batch_overall_exit(results))
 
     # Synchronous Single Task Execution
     print(f"Dispatching to {chosen_agent.upper()}{model_info} in {cwd} ({msg})...")
 
+    verify_info = {}
+
     def run_worker_in_target(target_dir):
         return run_single_task(
             args.task, target_dir, chosen_agent, chosen_model, args.timeout,
-            context_files=args.context_files, output_file=args.output_file, is_thinking=args.think
+            context_files=args.context_files, output_file=args.output_file, is_thinking=args.think,
+            verify_opts=cli_verify_opts, verify_info=verify_info,
         )
 
     if args.isolated:
@@ -1534,17 +1770,14 @@ def main():
     else:
         exit_code, stdout, stderr, files_changed, diff_summary = run_worker_in_target(cwd)
 
-    if exit_code == 0:
-        status = "SUCCESS"
-    elif exit_code == 124:
-        status = "TIMEOUT_PARTIAL_WORK" if files_changed > 0 else "TIMEOUT_NO_PROGRESS"
-    else:
-        status = "FAILED_PARTIAL_WORK" if files_changed > 0 else "FAILED"
+    status = derive_status(exit_code, files_changed)
 
     tail_output = stdout if stdout else (stderr or "none")
+    if status == "VERIFY_FAILED":
+        tail_output = verify_info.get("verify_output") or stderr or tail_output
     report = format_report(
         chosen_agent, status, exit_code, cwd, files_changed, diff_summary, tail_output,
-        artifact=args.output_file, context_count=len(args.context_files or [])
+        artifact=args.output_file, context_count=len(args.context_files or []), verify_info=verify_info,
     )
     print(report)
 
