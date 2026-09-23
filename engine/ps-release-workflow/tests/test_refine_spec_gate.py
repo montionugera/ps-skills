@@ -95,24 +95,25 @@ def test_missing_acceptance_heading_is_named():
     assert any("Acceptance criteria" in p for p in problems)
 
 
-def test_empty_acceptance_section_is_refused():
+def test_acceptance_heading_without_checklist_item_is_refused():
     text = FILLED_SPEC.replace(
-        "- [ ] An order with a fee above the cap is rejected with a 422.", "")
+        "- [ ] An order with a fee above the cap is rejected with a 422.",
+        "It should work.",
+    )
     problems = spec_readiness_problems(text)
     assert any("- [ ]" in p for p in problems)
 
 
-def test_acceptance_section_with_only_an_html_comment_is_refused():
+def test_checklist_item_outside_the_acceptance_section_does_not_count():
     text = FILLED_SPEC.replace(
-        "- [ ] An order with a fee above the cap is rejected with a 422.",
-        "<!-- what proves this works? -->")
+        "- [ ] An order with a fee above the cap is rejected with a 422.", "tbd"
+    ) + "\n## Follow-ups\n\n- [ ] rename the module\n"
     assert any("- [ ]" in p for p in spec_readiness_problems(text))
 
 
-def test_checklist_item_outside_the_acceptance_section_does_not_count():
+def test_empty_acceptance_section_is_refused():
     text = FILLED_SPEC.replace(
-        "- [ ] An order with a fee above the cap is rejected with a 422.", ""
-    ) + "\n## Follow-ups\n\n- [ ] rename the module\n"
+        "- [ ] An order with a fee above the cap is rejected with a 422.", "")
     assert any("- [ ]" in p for p in spec_readiness_problems(text))
 
 
@@ -264,10 +265,25 @@ def test_acceptance_evidence_heading_with_prose_refines():
     assert spec_readiness_problems(text) == []
 
 
-def test_acceptance_criteria_with_prose_evidence_refines():
+def test_acceptance_criteria_with_prose_only_is_refused():
+    """Prose is evidence, not criteria: only an "Acceptance evidence" heading takes it."""
     text = FILLED_SPEC.replace(
         "- [ ] An order with a fee above the cap is rejected with a 422.", EVIDENCE_PROSE)
-    assert spec_readiness_problems(text) == []
+    assert any("- [ ]" in p for p in spec_readiness_problems(text))
+
+
+def test_acceptance_evidence_with_only_an_html_comment_is_refused():
+    text = FILLED_SPEC.replace(
+        "## Acceptance criteria\n\n- [ ] An order with a fee above the cap is rejected with a 422.",
+        "## Acceptance evidence (worker-shaped)\n\n<!-- what proves this works? -->")
+    assert spec_readiness_problems(text)
+
+
+def test_acceptance_evidence_inside_a_code_fence_is_refused():
+    text = FILLED_SPEC.replace(
+        "## Acceptance criteria\n\n- [ ] An order with a fee above the cap is rejected with a 422.",
+        "## Acceptance evidence\n\n```\n" + EVIDENCE_PROSE + "\n```")
+    assert spec_readiness_problems(text)
 
 
 def test_empty_acceptance_evidence_section_is_refused():
