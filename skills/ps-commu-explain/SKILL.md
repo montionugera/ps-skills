@@ -108,7 +108,7 @@ Report: the URL, the brief's 3 questions with the reader-gate's answers + citati
 
 ## Red flags — STOP
 
-- `content.md` citing an `F<n>` with no matching row in `01-facts.md` after you've written your own content (lint catches this — if it didn't, lint wasn't run). A FRESH `init.sh <slug>` without `--example` legitimately shows this on your first lint/serve (pre-filled exemplar `content.md` vs. an empty `01-facts.md`) — that's real output on content you haven't replaced yet, not a lint bug; see Stage 4.
+- `content.md` citing an `F<n>` with no matching row in `01-facts.md` after you've replaced the exemplar content (lint catches this — if it didn't, lint wasn't run). A fresh `init.sh <slug>` without `--example` legitimately shows this before you've replaced the exemplar — not a lint bug; see Stage 4.
 - A screenshot or Chrome check run inline in the main thread instead of a subagent
 - A reader-gate subagent given the brief/facts/storyboard files, or answering from outside knowledge
 - More than 5 verify/fix cycles without stopping to report defects

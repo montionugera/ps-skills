@@ -159,15 +159,16 @@ class Preview(HTMLParser):
             if not self.code: self.prose.append(data)   # samples in <code> are legit
 pv = Preview(); pv.feed(dom)
 text, prose = "".join(pv.text), "".join(pv.prose)
+no_preview_msg = "no .cherry-previewer subtree in the dump (page did not render)"
 if dump_text:
     # Reuse the exact same extraction used by asserts 2/3 below — do not
     # duplicate it. This is the reader gate's input (SKILL.md Stage 5).
     if not pv.text:
-        sys.stderr.write("FAIL: no .cherry-previewer subtree in the dump (page did not render)\n")
+        sys.stderr.write(f"FAIL: {no_preview_msg}\n")
         sys.exit(1)
     sys.stdout.write(text)
     sys.exit(0)
-if not pv.text: report("FAIL", 0, "no .cherry-previewer subtree in the dump (page did not render)")
+if not pv.text: report("FAIL", 0, no_preview_msg)
 frames = len(re.findall(r'class="mermaid-frame', dom))
 roles = re.findall(r'<svg[^>]*aria-roledescription="([^"]+)"', dom)
 err_svgs = roles.count("error")
