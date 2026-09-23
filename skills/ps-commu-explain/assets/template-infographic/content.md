@@ -68,7 +68,7 @@ flowchart LR
     <i class="we-arrow" data-lucide="arrow-right"></i>
     <div class="we-stage"><span class="we-stage-k">Output</span><div class="we-stage-v">exit 1 + defect lines, or a live URL</div></div>
   </div>
-  <p>Point <code>serve.sh</code> at a workspace whose <code>00-brief.md</code> still has an unfilled <code>Q1: (...)</code> and it refuses before a single byte is served — no <code>--no-lint</code>, no server (F8).</p>
+  <p>Point <code>serve.sh</code> at a workspace whose <code>00-brief.md</code> still has an unfilled <code>Q1: (...)</code> and it refuses before a single byte is served by default. There is a documented escape hatch — <code>--no-lint</code>, meant for the html/react tiers' dev loops, not for skipping this check — but using it prints a visible warning; it is not a silent bypass (F8).</p>
 </div>
 
 <div class="worked-example">
