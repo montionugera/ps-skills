@@ -16,7 +16,9 @@
 #        for the click-to-jump root cause: `scroll-behavior: smooth` on <html>
 #        turns window.scrollTo into a compositor animation that silently
 #        no-ops in a hidden/headless tab — this is a real PASS/FAIL, not a
-#        SKIP, so defect 1 keeps a scripted gate even while assert 5 can't run)
+#        SKIP, so defect 1 keeps a scripted gate even while assert 5 can't run.
+#        Assert 6 needs neither Chrome nor a live server, so it still runs —
+#        and can still FAIL — even when Chrome is missing; see below)
 #   --url  page URL to load (default: http://127.0.0.1:<port> from meta.json;
 #          requires a live marker-verified server). A ?doc=X query selects
 #          which app/X markdown file the fence count is taken from.
@@ -30,7 +32,10 @@
 #          unavailable, same as the normal run.
 #   Chrome: $CHROME_BIN, else google-chrome/chromium on PATH, else the macOS app.
 # Exit 0 = every non-skipped assert passed; 1 = defects listed; 2 = cannot run
-# (no Chrome / no server) — callers treat 2 as SKIP, never as pass.
+# (no Chrome / no server) — callers treat 2 as SKIP, never as pass. Exception:
+# with no Chrome, assert 6 (no Chrome/server dependency) still runs, and a
+# FAIL there is exit 1, not 2 — a real, actionable defect is never masked as
+# "cannot run".
 set -uo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -50,6 +55,29 @@ done
 ws="$PS_COMMU_ROOT/$slug"
 [[ -d "$ws/app" ]] || { echo "no workspace app dir: $ws/app (run init.sh first)" >&2; exit 1; }
 
+# Assert 6 (defined here, run at its usual point below AND from the
+# no-Chrome branch just below): a static grep of a file already on disk, not
+# a Chrome check, so it must not be silently skipped on a Chrome-less box —
+# see the assert 6 comment further down for the full rationale.
+assert6() {
+  local explainer_css="$ws/app/explainer.css"
+  if [[ ! -f "$explainer_css" ]]; then
+    echo "FAIL: 6 explainer.css not found at $explainer_css"
+    return 1
+  elif python3 -c "
+import re, sys
+css = open(sys.argv[1]).read()
+css = re.sub(r'/\*.*?\*/', '', css, flags=re.S)
+sys.exit(0 if 'scroll-behavior' in css else 1)
+" "$explainer_css"; then
+    echo "FAIL: 6 explainer.css declares scroll-behavior (reintroduces the nav click-to-jump root cause)"
+    return 1
+  else
+    echo "PASS: 6 explainer.css does not declare scroll-behavior (nav click-to-jump root-cause gate)"
+    return 0
+  fi
+}
+
 find_chrome() {
   if [[ -n "${CHROME_BIN:-}" && -x "${CHROME_BIN:-}" ]]; then echo "$CHROME_BIN"; return 0; fi
   local c
@@ -60,7 +88,16 @@ find_chrome() {
   [[ -x "$c" ]] && { echo "$c"; return 0; }
   return 1
 }
-chrome="$(find_chrome)" || { echo "SKIP: no Google Chrome found (set CHROME_BIN)"; exit 2; }
+chrome="$(find_chrome)" || {
+  echo "SKIP: no Google Chrome found (set CHROME_BIN)"
+  # --dump-text has nothing to export without Chrome — unchanged, exit 2.
+  [[ "$dump_text" == "1" ]] && exit 2
+  # Asserts 1-5 need Chrome and cannot run, but assert 6 needs neither Chrome
+  # nor a live server (it greps a file on disk) — run it so a Chrome-less CI
+  # box still gates the branch's flagship regression instead of skipping it
+  # along with everything else.
+  if assert6; then exit 2; else exit 1; fi
+}
 
 if [[ -z "$url" ]]; then
   port="$(meta_get "$slug" port)"; pid="$(meta_get "$slug" pid)"
@@ -204,25 +241,13 @@ py_status=$?
 # verification. `scroll-behavior: smooth` on <html> is the documented root
 # cause (it turns window.scrollTo into a compositor animation that silently
 # no-ops in a hidden/headless tab); this greps the SERVED explainer.css for
-# it. Cheap, dependency-free, PASS/FAIL — never SKIP.
+# it. Cheap, dependency-free, PASS/FAIL — never SKIP. It needs neither Chrome
+# nor a live server, so it's also defined and runnable from the no-Chrome
+# branch above `find_chrome` — see `assert6()`, called here too so the logic
+# lives in one place.
 # CSS comments are stripped first (python3, already a hard dependency of this
 # script) so a rule like "/* no scroll-behavior:smooth here, see ... */" that
 # EXPLAINS the fix in prose doesn't itself trip a false FAIL.
-explainer_css="$ws/app/explainer.css"
-if [[ ! -f "$explainer_css" ]]; then
-  echo "FAIL: 6 explainer.css not found at $explainer_css"
-  css_status=1
-elif python3 -c "
-import re, sys
-css = open(sys.argv[1]).read()
-css = re.sub(r'/\*.*?\*/', '', css, flags=re.S)
-sys.exit(0 if 'scroll-behavior' in css else 1)
-" "$explainer_css"; then
-  echo "FAIL: 6 explainer.css declares scroll-behavior (reintroduces the nav click-to-jump root cause)"
-  css_status=1
-else
-  echo "PASS: 6 explainer.css does not declare scroll-behavior (nav click-to-jump root-cause gate)"
-  css_status=0
-fi
+css_status=0; assert6 || css_status=$?
 
 [[ "$py_status" -eq 0 && "$css_status" -eq 0 ]]

@@ -410,6 +410,18 @@ body::before {
   border-top: 1px solid var(--border);
 }
 .section-head { scroll-margin-top: var(--space-4); }
+/* Below 1060px the nav collapses into a sticky top strip (see the
+   max-width: 1059px block above) that overlays content at scroll position
+   0, so a click-to-jump target must clear the strip's rendered height —
+   measured 132px (space-3 padding top/bottom + the nav-brand row + the
+   nav-link row + the ul's space-1 padding-bottom) — or it lands hidden
+   underneath it, reintroducing the exact bug Task 1 fixed. 9.5rem (152px)
+   clears the measured strip with ~20px of breathing room. This must stay
+   below the unconditioned .section-head rule above: same specificity, so
+   source order (not media-query position) decides the winner. */
+@media (max-width: 1059px) {
+  .section-head { scroll-margin-top: 9.5rem; }
+}
 .section-head .icon-chip { box-shadow: var(--shadow-1); }
 .section-head .sh-text { min-width: 0; }
 .section-head .sh-kicker {

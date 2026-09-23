@@ -466,5 +466,5 @@ Hidden content, revealed on click. Styled on-theme with a warm card surface.
 </details>
 
 ::: callout check
-That's the full v3 kit. Copy any block above into your own `.md` and reload. See `content.md` for a worked end-to-end example (its content still shows the old v2 component set until it's rewritten — that's a separate task, not this gallery).
+That's the full v3 kit. Copy any block above into your own `.md` and reload. See `content.md` — it IS the worked v3 exemplar, cites F1-F19, and is what `init.sh --example` scaffolds a fresh workspace with.
 :::

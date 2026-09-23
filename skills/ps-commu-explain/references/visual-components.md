@@ -1,5 +1,15 @@
 # Visual components — ps-commu templates
 
+> **Scope: `html` and `react` tiers ONLY.** These two tiers were explicitly out of scope
+> for the F-011 infographic redesign and still use the dark visual language, `metric-grid`
+> / `metric-tile`, `callout warn`/`danger`/`success`/`idea`, and `data-cat` classes
+> documented below — confirmed current in `assets/template-html/index.html` and
+> `assets/template-react/src/styles.css`. **None of this applies to the default
+> infographic tier.** Its v3 component set is a different, cream visual language with only
+> three callout kinds (`note`/`pitfall`/`check` — anything else silently renders as
+> `note`), no `metric-grid` (lint-forbidden), and no `data-cat`/six-hue category system.
+> For the infographic tier, use `assets/template-infographic/components.md` instead.
+
 Catalog for phase 4 (outline treatment tags) and phase 5 (build). Both templates share
 the same dark visual language. Tag each outline section with one PRIMARY treatment.
 

@@ -16,8 +16,8 @@ Build a fact-checked, visually rich explanation served from /tmp; hand over a ve
 ## Tiers
 
 - **infographic (DEFAULT)** — cream, Markdown-driven explainer rendered by cherry-markdown + Mermaid + Lucide. You author `app/content.md`; you do NOT touch `app/index.html`. Component cheat-sheet ships live at `app/components.md` (served alongside). This is the default look — `init.sh <slug>` with no `--tier`.
-- **html** (opt-in `--tier html`) — the classic bespoke, hand-written HTML tier. You edit `app/index.html` in place.
-- **react** (opt-in `--tier react`) — interactive React+TS, for sections that need state (slider / step-sim / live-filter).
+- **html** (opt-in `--tier html`) — the classic bespoke, hand-written HTML tier. You edit `app/index.html` in place. Component/treatment-tag reference: `references/visual-components.md`.
+- **react** (opt-in `--tier react`) — interactive React+TS, for sections that need state (slider / step-sim / live-filter). Component/treatment-tag reference: `references/visual-components.md`. Build before serving: `npm ci` in `app/` once, then `npm run build` (creates `app/dist`, which `serve.sh` hard-requires) — or `serve.sh <slug> --dev` to run `vite` directly instead (still needs `npm ci` first).
 
 ```dot
 digraph tier {
@@ -43,7 +43,7 @@ Each stage produces a file the next one reads. `lint.sh <slug>` is the single sc
 | 1 | Brief | `00-brief.md` — exactly 3 numbered reader questions (Q1-Q3) and a section budget (integer, 4-7) | `init.sh` scaffolds it (never overwrites an existing one); `lint.sh` rejects unfilled `(...)` placeholders, a wrong count of Q1-Q3, or a missing/bad section-budget integer |
 | 2 | Facts | `01-facts.md` — `F<n> \| statement \| source` rows (source: `path:line`, bare path, commit hash, or `"user said"`), gathered by a subagent | `lint.sh` rejects a bad source shape and any `F<n>` content.md cites that isn't a row here |
 | 3 | Storyboard | `02-storyboard.md` — one row per planned `app/content.md` section: `section \| question (Q1-Q3) \| facts (F<n>,...)` | `lint.sh` rejects an uncovered Q1-Q3, or a row citing an `F<n>` missing from 01-facts.md |
-| 4 | Author | `app/content.md` — **ships pre-filled with the shipped exemplar (cites F1-F19)**; replace it wholesale, or run `init.sh --example <slug>` to pair it with a matching filled 00-brief/01-facts/02-storyboard so it lints clean immediately. Component set v3 (cheat-sheet live at `app/components.md`) | `lint.sh` rejects removed classes (`stat-grid`, `stat-tile`, `meter`, `cat-*`, `metric-grid`, `card-grid`), unlabeled Mermaid edges, >7 nodes per diagram, and any uncited `F<n>` |
+| 4 | Author | `app/content.md` — **ships pre-filled with the shipped exemplar (cites F1-F19)**; replace it wholesale, or run `init.sh --example <slug>` to pair it with a matching filled 00-brief/01-facts/02-storyboard so it lints clean immediately. Component set v3 (cheat-sheet live at `app/components.md`) | `lint.sh` rejects removed classes (`stat-grid`, `stat-tile`, `meter`, `cat-*`, `metric-grid`, `card-grid`), unlabeled Mermaid edges, >7 nodes per diagram, and any cited `F<n>` missing from `01-facts.md` |
 | 5 | Verify | render gate (`verify.sh`, **infographic tier only**) then reader gate (subagent, `verify.sh --dump-text` output) | both pass on infographic (html/react: a subagent Chrome load stands in for the render gate — see below), or an honest defect list — ≤5 cycles |
 | 6 | Handoff | URL + the 3 questions/reader answers + re-serve command | prose |
 

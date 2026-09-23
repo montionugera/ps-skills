@@ -563,10 +563,22 @@ if content is not None:
     # ("flowchat"), a body line before the header, or an unknown type can
     # never leave a block silently unchecked.
     OTHER_DIAGRAM_HEADS = {
-        'classDiagram', 'stateDiagram', 'stateDiagram-v2', 'erDiagram', 'journey', 'gantt',
-        'pie', 'quadrantChart', 'requirementDiagram', 'gitGraph', 'mindmap', 'timeline',
-        'zenuml', 'sankey-beta', 'xychart-beta', 'block-beta', 'packet-beta', 'kanban',
-        'architecture-beta', 'radar-beta', 'treemap-beta', 'C4Context', 'C4Container',
+        # Some of these have a plain form alongside (or instead of) their
+        # '-beta' form — verified against mermaid-js/mermaid's own detector
+        # regexes (each diagram's detector.ts), not guessed:
+        # classDiagram-v2 (classDetector-V2.ts: /^\s*classDiagram/, comment says
+        # "Both classDiagram and classDiagram-v2 render with the unified class
+        # diagram"), sankey/sankey-beta and packet/packet-beta (both detectors:
+        # /^\s*<name>(-beta)?/), block/block-beta and xychart/xychart-beta
+        # (same (-beta)? pattern), architecture/architecture-beta (detector:
+        # /^\s*architecture/, a bare prefix match), treemap/treemap-beta
+        # (detector: /^\s*treemap/, also a bare prefix match). radar has NO
+        # plain form — its detector requires the literal 'radar-beta'.
+        'classDiagram', 'classDiagram-v2', 'stateDiagram', 'stateDiagram-v2', 'erDiagram',
+        'journey', 'gantt', 'pie', 'quadrantChart', 'requirementDiagram', 'gitGraph',
+        'mindmap', 'timeline', 'zenuml', 'sankey', 'sankey-beta', 'xychart-beta', 'xychart',
+        'block-beta', 'block', 'packet-beta', 'packet', 'kanban', 'architecture-beta',
+        'architecture', 'radar-beta', 'treemap-beta', 'treemap', 'C4Context', 'C4Container',
         'C4Component', 'C4Dynamic', 'C4Deployment', 'info', 'agentflow-beta', 'swimlane-beta',
     }
 
