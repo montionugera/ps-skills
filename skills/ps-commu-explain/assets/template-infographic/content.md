@@ -198,13 +198,13 @@ That's the difference between an ad-hoc server (F19) and the one this skill mand
     <li><span class="receipts-fact">F10</span> scripts/common.sh:13 — marker-verified kill</li>
     <li><span class="receipts-fact">F11</span> scripts/serve.sh:136 — self-destruct watchdog</li>
     <li><span class="receipts-fact">F12</span> scripts/verify.sh:4 — headless Chrome dump-dom</li>
-    <li><span class="receipts-fact">F13</span> scripts/verify.sh:158 — Mermaid svg-count assert</li>
-    <li><span class="receipts-fact">F14</span> scripts/verify.sh:198 — scroll-behavior regression gate</li>
-    <li><span class="receipts-fact">F15</span> scripts/verify.sh:54 — no-Chrome SKIP, never a pass</li>
+    <li><span class="receipts-fact">F13</span> scripts/verify.sh:175 — Mermaid svg-count assert</li>
+    <li><span class="receipts-fact">F14</span> scripts/verify.sh:220 — scroll-behavior regression gate</li>
+    <li><span class="receipts-fact">F15</span> scripts/verify.sh:63 — no-Chrome SKIP, never a pass</li>
     <li><span class="receipts-fact">F16</span> scripts/lint.sh:186 — forbidden CSS classes</li>
     <li><span class="receipts-fact">F17</span> scripts/lint.sh:597 — unlabeled edge, per-edge defect</li>
     <li><span class="receipts-fact">F18</span> scripts/lint.sh:604 — 7-node flowchart cap</li>
-    <li><span class="receipts-fact">F19</span> SKILL.md:54 — the ad-hoc server it replaced</li>
+    <li><span class="receipts-fact">F19</span> SKILL.md:103 — the ad-hoc server it replaced</li>
   </ul>
 </div>
 

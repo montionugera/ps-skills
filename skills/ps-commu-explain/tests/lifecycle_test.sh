@@ -1078,6 +1078,16 @@ test_verify_passes_template() {
   grep -q '^PASS: 1 mermaid svg=1 fences=1' <<<"$out" &&
   ! grep -q '^FAIL' <<<"$out"
 }
+test_verify_dump_text() {  # --dump-text: clean reader-visible text on stdout, exit 0, no raw markup leaks
+  local out rc; out="$(verify_run t-verify --dump-text)"; rc=$?
+  echo "chars=${#out}"
+  (( rc == 2 )) && return 2
+  (( rc == 0 )) &&
+  [[ -n "$out" ]] &&
+  ! grep -q 'data-nav' <<<"$out" &&
+  ! grep -q '```mermaid' <<<"$out" &&
+  ! grep -qE '^(PASS|FAIL|SKIP):' <<<"$out"
+}
 test_verify_fails_on_leak() {  # literal ~~CODE$ in prose + a Mermaid fence that cannot render
   local port; port="$(meta_get t-verify port)"
   cat > /tmp/ps-commu/t-verify/app/leak.md <<'MD'
@@ -1102,6 +1112,7 @@ MD
 test_verify_help() { "$S/verify.sh" --help | grep -q 'Usage: verify.sh' && ! "$S/verify.sh" >/dev/null 2>&1; }
 
 check_or_skip verify_passes_template test_verify_passes_template
+check_or_skip verify_dump_text       test_verify_dump_text
 check_or_skip verify_fails_on_leak   test_verify_fails_on_leak
 check verify_help                     test_verify_help
 "$S/stop.sh" t-verify >/dev/null 2>&1

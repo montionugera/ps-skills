@@ -20,6 +20,14 @@
 #   --url  page URL to load (default: http://127.0.0.1:<port> from meta.json;
 #          requires a live marker-verified server). A ?doc=X query selects
 #          which app/X markdown file the fence count is taken from.
+#   --dump-text  skip the PASS/FAIL asserts; instead print the clean,
+#          reader-visible page text to stdout and exit 0 (reuses the same
+#          .cherry-previewer extractor the asserts use internally — this is
+#          the reader gate's input, NOT a raw --dump-dom: that would return
+#          duplicated toolbar/source-pane/preview copies plus raw data-nav
+#          markup and unrendered ```mermaid fences). Exit 1 if the page never
+#          rendered a .cherry-previewer subtree; 2 if Chrome/server is
+#          unavailable, same as the normal run.
 #   Chrome: $CHROME_BIN, else google-chrome/chromium on PATH, else the macOS app.
 # Exit 0 = every non-skipped assert passed; 1 = defects listed; 2 = cannot run
 # (no Chrome / no server) — callers treat 2 as SKIP, never as pass.
@@ -27,11 +35,12 @@ set -uo pipefail
 source "$(dirname "$0")/common.sh"
 
 usage() { grep '^#' "$0" | cut -c3-; exit "${1:-0}"; }
-slug="" url=""
+slug="" url="" dump_text=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --url) [[ $# -ge 2 ]] || { echo "--url requires a value" >&2; exit 1; }
            url="$2"; shift ;;
+    --dump-text) dump_text=1 ;;
     -h|--help) usage ;;
     *) slug="$1" ;;
   esac
@@ -67,10 +76,10 @@ md="$ws/app/$doc"
 [[ -f "$md" ]] || { echo "FAIL: doc not found: $md"; exit 1; }
 fences="$(grep -cE '^[[:space:]]*```[[:space:]]*mermaid' "$md" || true)"
 
-python3 - "$chrome" "$url" "$fences" <<'PY'
+python3 - "$chrome" "$url" "$fences" "$dump_text" <<'PY'
 import os, re, select, shutil, signal, subprocess, sys, tempfile, time
 from html.parser import HTMLParser
-chrome, url, fences = sys.argv[1], sys.argv[2], int(sys.argv[3])
+chrome, url, fences, dump_text = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4] == "1"
 prof = tempfile.mkdtemp(prefix="ps-commu-verify-")
 proc = None
 out, err = b"", b""
@@ -150,6 +159,14 @@ class Preview(HTMLParser):
             if not self.code: self.prose.append(data)   # samples in <code> are legit
 pv = Preview(); pv.feed(dom)
 text, prose = "".join(pv.text), "".join(pv.prose)
+if dump_text:
+    # Reuse the exact same extraction used by asserts 2/3 below — do not
+    # duplicate it. This is the reader gate's input (SKILL.md Stage 5).
+    if not pv.text:
+        sys.stderr.write("FAIL: no .cherry-previewer subtree in the dump (page did not render)\n")
+        sys.exit(1)
+    sys.stdout.write(text)
+    sys.exit(0)
 if not pv.text: report("FAIL", 0, "no .cherry-previewer subtree in the dump (page did not render)")
 frames = len(re.findall(r'class="mermaid-frame', dom))
 roles = re.findall(r'<svg[^>]*aria-roledescription="([^"]+)"', dom)
@@ -173,6 +190,11 @@ print("\n".join(lines))
 sys.exit(1 if failed else 0)
 PY
 py_status=$?
+
+# --dump-text is a text-export mode, not an assert run: the python block
+# above already printed the text (or a FAIL) and exited — skip assert 6 and
+# report its own exit code directly.
+[[ "$dump_text" == "1" ]] && exit "$py_status"
 
 # Assert 6: static regression gate for the nav click-to-jump root cause. Assert
 # 5 above is a permanent SKIP (--dump-dom cannot click, and the DevTools route
