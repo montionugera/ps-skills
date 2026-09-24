@@ -77,3 +77,40 @@ def delete_branch_remote(cwd: Path, name: str, remote: str = "origin") -> None:
 
 def push(cwd: Path, ref: str = "HEAD", remote: str = "origin") -> None:
     _run(cwd, "push", remote, ref)
+
+
+def has_origin(cwd: Path) -> bool:
+    """True if an `origin` remote is configured (False in local-only repos/tests)."""
+    return _run(cwd, "remote", "get-url", "origin", check=False).returncode == 0
+
+
+def is_ancestor(cwd: Path, ancestor: str, descendant: str = "HEAD") -> bool:
+    """True if ancestor commit is reachable from descendant."""
+    return _run(cwd, "merge-base", "--is-ancestor", ancestor, descendant, check=False).returncode == 0
+
+
+def unmerged_files(cwd: Path) -> list[str]:
+    """List conflicting / unmerged files in the current worktree."""
+    out = _run(cwd, "diff", "--name-only", "--diff-filter=U", check=False).stdout.strip()
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def rev_parse(cwd: Path, rev: str) -> str:
+    """Resolve revision or ref to full 40-char SHA."""
+    return _run(cwd, "rev-parse", rev).stdout.strip()
+
+
+def diff_names(cwd: Path, a: str, b: str) -> list[str]:
+    """List file names changed between two revisions."""
+    out = _run(cwd, "diff", "--name-only", a, b, check=False).stdout.strip()
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def rev_count(cwd: Path, rev_range: str) -> int:
+    """Count commits in revision range, e.g. 'HEAD..origin/main'."""
+    out = _run(cwd, "rev-list", "--count", rev_range, check=False).stdout.strip()
+    try:
+        return int(out)
+    except ValueError:
+        return 0
+

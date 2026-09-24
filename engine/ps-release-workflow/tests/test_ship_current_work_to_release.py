@@ -612,3 +612,81 @@ def test_second_ship_does_not_run_a_second_check(tmp_repo_with_release: Path, fi
     assert marker.read_text().count("\n") == 1, "epic-check.sh must not have run again"
     epic_cat = json.loads((rel_wt / ".claude" / "epic_backlog" / "_catalog.json").read_text())
     assert next(e for e in epic_cat if e["id"] == epic_id)["status"] == "verified"
+
+
+def test_ship_post_merge_gate1_failure_rolls_back_to_exact_pre_sha(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """Proves that a Gate 1 failure after the merge resets release/<v> to the exact
+    pre_sha recorded at the start of the lock.
+    """
+    feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
+    wt = Path(claim["worktree"])
+    _commit_feature_file(wt)
+
+    rel_wt = tmp_repo_with_release / ".claude" / "worktrees" / "_release"
+    precheck = rel_wt / "scripts" / "precheck.sh"
+    precheck.parent.mkdir(parents=True, exist_ok=True)
+    precheck.write_text("#!/bin/sh\nexit 1\n")
+    precheck.chmod(0o755)
+    subprocess.run(["git", "add", "scripts/precheck.sh"], cwd=rel_wt, check=True)
+    subprocess.run(["git", "commit", "-m", "failing precheck on release"], cwd=rel_wt, check=True)
+
+    head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rel_wt,
+                                 capture_output=True, text=True, check=True).stdout.strip()
+
+    with pytest.raises(GateFailedError):
+        ship_current_work(wt)
+
+    head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rel_wt,
+                                capture_output=True, text=True, check=True).stdout.strip()
+    assert head_after == head_before
+
+
+def test_ship_absorbs_hotfix_on_main(tmp_repo_with_release: Path, fixed_owner: str):
+    """Proves that ship automatically absorbs commits from main (e.g. squash hotfixes)."""
+    feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
+    wt = Path(claim["worktree"])
+    _commit_feature_file(wt)
+
+    repo = tmp_repo_with_release
+    rel_wt = repo / ".claude" / "worktrees" / "_release"
+
+    # Simulate hotfix landed on origin/main (via PR squash-merge)
+    (repo / "hotfix.txt").write_text("emergency fix\n")
+    subprocess.run(["git", "add", "hotfix.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "hotfix on main"], cwd=repo, check=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=repo, check=True)
+
+    assert not (rel_wt / "hotfix.txt").exists()
+
+    res = ship_current_work(wt)
+    assert res["ok"]
+    assert res["main_sync"] is not None
+    assert res["main_sync"]["synced"] is True
+    assert res["main_sync"]["behind"] == 1
+    assert (rel_wt / "hotfix.txt").exists()
+    assert (rel_wt / "feature.txt").exists()
+
+
+def test_ship_no_sync_main_flag(tmp_repo_with_release: Path, fixed_owner: str):
+    """Proves that --no-sync-main skips absorbing main."""
+    feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
+    wt = Path(claim["worktree"])
+    _commit_feature_file(wt)
+
+    repo = tmp_repo_with_release
+    rel_wt = repo / ".claude" / "worktrees" / "_release"
+
+    # Commit hotfix on main
+    (repo / "hotfix.txt").write_text("emergency fix\n")
+    subprocess.run(["git", "add", "hotfix.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "hotfix on main"], cwd=repo, check=True)
+
+    res = ship_current_work(wt, no_sync_main=True)
+    assert res["ok"]
+    assert res["main_sync"] is None
+    assert not (rel_wt / "hotfix.txt").exists()
+    assert (rel_wt / "feature.txt").exists()
+
+

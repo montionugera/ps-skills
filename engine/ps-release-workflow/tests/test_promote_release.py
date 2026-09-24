@@ -1005,3 +1005,65 @@ def test_deploy_honours_a_custom_hooks_path(tmp_repo_with_release: Path, fixed_o
     assert Path(receipt.read_text().strip().splitlines()[0]).resolve() == rel_wt.resolve(), (
         "the custom deploy hook must still run from the _release worktree"
     )
+
+
+def test_promote_syncs_main_and_includes_pr_body_disclosure(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """Proves that promote absorbs hotfix from origin/main before Gate 2 and adds PR line."""
+    _setup_and_ship_feature(tmp_repo_with_release, fixed_owner)
+    repo = tmp_repo_with_release
+    rel_wt = repo / ".claude" / "worktrees" / "_release"
+
+    # Commit hotfix on main and push to origin
+    (repo / "hotfix.txt").write_text("hotfix\n")
+    subprocess.run(["git", "add", "hotfix.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "hotfix on main"], cwd=repo, check=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=repo, check=True)
+
+    captured_pr = {}
+
+    def fake_gh(args, **kwargs):
+        cmd = list(args)
+        if "create" in cmd:
+            body_idx = cmd.index("--body") + 1
+            captured_pr["body"] = cmd[body_idx]
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/org/repo/pull/1\n", stderr="")
+        if "view" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/org/repo/pull/1\n", stderr="")
+        return subprocess.run(args, **kwargs)
+
+    res = promote_release(repo, run_gate2=False, run_deploy=False, use_pr=True,
+                          babysit=False, gh_runner=fake_gh)
+    assert res["ok"]
+    assert (rel_wt / "hotfix.txt").exists()
+    assert "- Synced with origin/main@" in captured_pr["body"]
+
+
+def test_promote_babysit_race_aborts_if_main_advances_during_ci(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """Proves that babysit aborts merge if origin/main advances while CI is watching."""
+    _setup_and_ship_feature(tmp_repo_with_release, fixed_owner)
+    repo = tmp_repo_with_release
+
+    def racing_gh(args, **kwargs):
+        cmd = list(args)
+        if "create" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/org/repo/pull/1\n", stderr="")
+        if "checks" in cmd:
+            # Main advances on origin while checks are running!
+            (repo / "concurrent_hotfix.txt").write_text("racing hotfix\n")
+            subprocess.run(["git", "add", "concurrent_hotfix.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "racing hotfix on main"], cwd=repo, check=True)
+            subprocess.run(["git", "push", "origin", "main"], cwd=repo, check=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "merge" in cmd:
+            raise AssertionError("merge should not have been called!")
+        return subprocess.run(args, **kwargs)
+
+    with pytest.raises(Gate2FailedError) as exc_info:
+        promote_release(repo, run_gate2=False, run_deploy=False, use_pr=True,
+                        babysit=True, gh_runner=racing_gh)
+    assert "while PR checks were running" in str(exc_info.value)
+
