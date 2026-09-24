@@ -51,11 +51,14 @@ status: idea
 (rough shape; not a design yet)
 """
 
-SPEC_TEMPLATE = LEGACY_SPEC_TEMPLATE + """
+# Shared with `epic fanout`'s slice stub so both skeletons prompt the same way.
+ACCEPTANCE_SECTION = """
 ## Acceptance criteria
 
 - [ ] (one observable, testable outcome per item; refine refuses a spec without any)
 """
+
+SPEC_TEMPLATE = LEGACY_SPEC_TEMPLATE + ACCEPTANCE_SECTION
 
 # A placeholder is a whole template line in parentheses, optionally behind a
 # checklist marker. Derived from SPEC_TEMPLATE so the refine gate can never drift

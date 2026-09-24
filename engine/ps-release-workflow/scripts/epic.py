@@ -20,6 +20,7 @@ from lib.hooks import HookPathError, resolve_hook
 from lib.repo import find_repo_root
 from lib.slug import SlugError, slugify
 from lib.state import file_lock, mutate_state
+from scripts.new_idea import ACCEPTANCE_SECTION
 from scripts.new_idea import LEGACY_SPEC_TEMPLATE as LEGACY_IDEA_SPEC_TEMPLATE
 from scripts.new_idea import SPEC_TEMPLATE as IDEA_SPEC_TEMPLATE
 from scripts.promote_idea_to_refined import _is_untouched_skeleton
@@ -90,12 +91,18 @@ def _yaml_quote(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _legacy_fanout_idea_spec(title: str, idea_id: str) -> str:
+    """The slice stub `epic fanout` wrote before it gained an acceptance section.
+    Kept so slices fanned out earlier are still recognised as untouched."""
+    return (f"---\ntitle: {_yaml_quote(title)}\nid: {idea_id}\n"
+            f"status: idea\n---\n\n# {title}\n")
+
+
 def _fanout_idea_spec(title: str, idea_id: str) -> str:
     """The exact spec.md `epic fanout` writes for a new slice idea. One source of
     truth: epic_fanout writes it and epic_plan compares against it, so the two
-    cannot drift."""
-    return (f"---\ntitle: {_yaml_quote(title)}\nid: {idea_id}\n"
-            f"status: idea\n---\n\n# {title}\n")
+    cannot drift. Its acceptance section is the one refine's gate looks for."""
+    return _legacy_fanout_idea_spec(title, idea_id) + ACCEPTANCE_SECTION
 
 
 def _rollback_epic(epic_cat: Path, epic_id: str, folder: Path) -> None:
@@ -257,6 +264,7 @@ def _slice_spec_is_skeleton(rel_wt: Path, idea: dict) -> bool:
         return False
     skeletons = (
         _fanout_idea_spec(idea["title"], idea["id"]),
+        _legacy_fanout_idea_spec(idea["title"], idea["id"]),
         IDEA_SPEC_TEMPLATE.format(title=idea["title"], id=idea["id"]),
         LEGACY_IDEA_SPEC_TEMPLATE.format(title=idea["title"], id=idea["id"]),
     )
