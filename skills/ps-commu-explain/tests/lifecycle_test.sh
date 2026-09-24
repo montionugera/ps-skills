@@ -1055,6 +1055,291 @@ check lint_fails_closed_on_mermaid_rejected_forms test_lint_fails_closed_on_merm
 check lint_reports_unknown_diagram_header_and_skips_frontmatter test_lint_reports_unknown_diagram_header_and_skips_frontmatter
 check lint_flags_text_swallowed_by_direction test_lint_flags_text_swallowed_by_direction
 
+# --- lint.sh (draw.io / mxGraph XML validator, Task 2) ---
+# The ```drawio fence loop that replaced the Mermaid scanner above. These 9
+# fixtures are the task's own required coverage; the bulk migration of the
+# retired Mermaid tests above is a separate, later task.
+test_lint_fails_drawio_malformed_xml() {  # unclosed XML tags -> ET.fromstring ParseError
+  "$S/init.sh" t-lint-dmalformed --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-dmalformed
+  mkdir -p /tmp/ps-commu/t-lint-dmalformed/app
+  cat > /tmp/ps-commu/t-lint-dmalformed/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="400" pageHeight="200">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0">
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dmalformed 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -qi 'unparseable' <<<"$out"
+}
+test_lint_fails_drawio_missing_root_cells() {  # valid XML missing id="1" parent="0"
+  "$S/init.sh" t-lint-drootcells --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-drootcells
+  mkdir -p /tmp/ps-commu/t-lint-drootcells/app
+  cat > /tmp/ps-commu/t-lint-drootcells/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="400" pageHeight="200">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="A" value="Solo" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="0">
+      <mxGeometry x="40" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-drootcells 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q 'root mxCell id="1"' <<<"$out"
+}
+test_lint_fails_drawio_unlabeled_edge() {  # edge="1" cell with no value attribute
+  "$S/init.sh" t-lint-dedge --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-dedge
+  mkdir -p /tmp/ps-commu/t-lint-dedge/app
+  cat > /tmp/ps-commu/t-lint-dedge/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="800" pageHeight="300">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="Start" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="40" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="B" value="End" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="240" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="e1" style="html=1;" edge="1" parent="1" source="A" target="B">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dedge 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "edge 'e1' has no label" <<<"$out"
+}
+test_lint_fails_drawio_node_cap() {  # 8 vertex cells in one diagram -> over the 7-node cap
+  "$S/init.sh" t-lint-dnodecap --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-dnodecap
+  mkdir -p /tmp/ps-commu/t-lint-dnodecap/app
+  {
+    echo 'See F1 for details.'
+    echo
+    echo '```drawio'
+    echo '<mxGraphModel pageWidth="1400" pageHeight="300">'
+    echo '  <root>'
+    echo '    <mxCell id="0" />'
+    echo '    <mxCell id="1" parent="0" />'
+    for i in 1 2 3 4 5 6 7 8; do
+      local x=$(( (i - 1) * 150 ))
+      printf '    <mxCell id="V%d" value="V%d" style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">\n' "$i" "$i"
+      printf '      <mxGeometry x="%d" y="40" width="120" height="60" as="geometry" />\n' "$x"
+      echo '    </mxCell>'
+    done
+    echo '  </root>'
+    echo '</mxGraphModel>'
+    echo '```'
+  } > /tmp/ps-commu/t-lint-dnodecap/app/content.md
+  local out rc; out="$("$S/lint.sh" t-lint-dnodecap 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q '8 vertex cells (max 7)' <<<"$out"
+}
+test_lint_fails_drawio_overlap() {  # two vertex geometries with overlapping x/y/width/height
+  "$S/init.sh" t-lint-doverlap --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-doverlap
+  mkdir -p /tmp/ps-commu/t-lint-doverlap/app
+  cat > /tmp/ps-commu/t-lint-doverlap/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="800" pageHeight="600">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="A" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="40" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="B" value="B" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="100" y="60" width="120" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-doverlap 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "vertex 'A' overlaps vertex 'B'" <<<"$out"
+}
+test_lint_fails_drawio_out_of_bounds() {  # x+width exceeds the graph's declared pageWidth
+  "$S/init.sh" t-lint-doob --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-doob
+  mkdir -p /tmp/ps-commu/t-lint-doob/app
+  cat > /tmp/ps-commu/t-lint-doob/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="200" pageHeight="200">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="A" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="150" y="50" width="100" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-doob 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "extends beyond the declared page bounds" <<<"$out"
+}
+test_lint_fails_drawio_unescaped_label() {  # value="F<n> cites this" — a literal '<'
+  "$S/init.sh" t-lint-dunesc --tier html >/dev/null                # surviving XML-decode, e.g. via
+  _lint_valid_brief_facts_storyboard t-lint-dunesc                 # &lt;n&gt; — valid XML, but
+  mkdir -p /tmp/ps-commu/t-lint-dunesc/app                          # corrupts the html=1 render
+  cat > /tmp/ps-commu/t-lint-dunesc/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="800" pageHeight="400">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="F&lt;n&gt; cites this"
+        style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="40" y="40" width="160" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dunesc 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "literal '<' after XML-decoding" <<<"$out"
+}
+test_lint_fails_drawio_raw_hex() {  # style has fillColor=#1c4f8f instead of role=accent
+  "$S/init.sh" t-lint-dhex --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-dhex
+  mkdir -p /tmp/ps-commu/t-lint-dhex/app
+  cat > /tmp/ps-commu/t-lint-dhex/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="800" pageHeight="400">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="Plain label"
+        style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1c4f8f;" vertex="1" parent="1">
+      <mxGeometry x="40" y="40" width="160" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dhex 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "raw hex color 'fillColor=#1c4f8f'" <<<"$out"
+}
+test_lint_passes_drawio_valid() {  # Task 0's final verified XML, wrapped in a ```drawio fence
+  "$S/init.sh" t-lint-dvalid --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-dvalid
+  mkdir -p /tmp/ps-commu/t-lint-dvalid/app
+  cat > /tmp/ps-commu/t-lint-dvalid/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1"
+    connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400"
+    pageHeight="400" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="init.sh" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="40" y="140" width="160" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="B" value="00-brief / 01-facts / 02-storyboard + app/"
+        style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="240" y="140" width="200" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="C" value="serve.sh" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="480" y="140" width="160" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="D" value="lint clean?" style="rhombus;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="680" y="130" width="140" height="80" as="geometry" />
+    </mxCell>
+    <mxCell id="E" value="live at 127.0.0.1:PORT"
+        style="rounded=1;whiteSpace=wrap;html=1;role=check;" vertex="1" parent="1">
+      <mxGeometry x="860" y="140" width="200" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="F" value="6 PASS/FAIL/SKIP asserts"
+        style="rounded=1;whiteSpace=wrap;html=1;role=check;" vertex="1" parent="1">
+      <mxGeometry x="1100" y="140" width="220" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="e1" value="scaffold workspace + advisory port" style="html=1;"
+        edge="1" parent="1" source="A" target="B">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e2" value="author edits content.md" style="html=1;" edge="1" parent="1"
+        source="B" target="C">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e3" value="run lint.sh gate" style="html=1;" edge="1" parent="1"
+        source="C" target="D">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e4" value="no: exit 1" style="html=1;role=pitfall;" edge="1" parent="1"
+        source="D" target="B">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points"><mxPoint x="750" y="60" /></Array>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e5" value="yes: bind 127.0.0.1 + watchdog" style="html=1;role=check;"
+        edge="1" parent="1" source="D" target="E">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e6" value="verify.sh: headless Chrome" style="html=1;" edge="1" parent="1"
+        source="E" target="F">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  "$S/lint.sh" t-lint-dvalid
+}
+
+check lint_fails_drawio_malformed_xml      test_lint_fails_drawio_malformed_xml
+check lint_fails_drawio_missing_root_cells test_lint_fails_drawio_missing_root_cells
+check lint_fails_drawio_unlabeled_edge     test_lint_fails_drawio_unlabeled_edge
+check lint_fails_drawio_node_cap           test_lint_fails_drawio_node_cap
+check lint_fails_drawio_overlap            test_lint_fails_drawio_overlap
+check lint_fails_drawio_out_of_bounds      test_lint_fails_drawio_out_of_bounds
+check lint_fails_drawio_unescaped_label    test_lint_fails_drawio_unescaped_label
+check lint_fails_drawio_raw_hex            test_lint_fails_drawio_raw_hex
+check lint_passes_drawio_valid             test_lint_passes_drawio_valid
+
 # --- cherry-setup.js drawio render pipeline (Task 1: frameAndRunDrawio) ---
 # Needs Google Chrome (headless --dump-dom) — SKIPs visibly without it, same
 # convention as the verify.sh tests below (rc 2 = cannot run, never a pass).
