@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # serve.sh — start the server for a ps-commu workspace.
-# Usage: serve.sh <slug> [--dev] [--keep-alive <dur>]
+# Usage: serve.sh <slug> [--dev] [--keep-alive <dur>] [--no-lint]
 #   --dev         React tier only: run vite dev (fix loop). Default serves app/dist.
 #   --keep-alive  Watchdog lifetime: 10s | 90m | 8h | 72h. Default 24h (spec D6).
+#   --no-lint     Skip the scripts/lint.sh authoring-chain gate before serving.
+#                 Intended for the html/react tiers' dev loops — and, until
+#                 assets/template-infographic/content.md is itself lint-clean
+#                 (Task 6/7), this repo's own render-gate lifecycle tests.
+#                 Prints a warning. Without it, serve.sh refuses (exit 1,
+#                 printing the lint output) when scripts/lint.sh <slug> fails.
 # All servers bind 127.0.0.1 ONLY (spec D9). The server command line contains the
 # workspace path — the kill-safety marker (spec D7). Binding is authoritative:
 # on bind failure the next port is tried, up to 7799 (spec D3).
@@ -10,12 +16,13 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
 usage() { grep '^#' "$0" | cut -c3-; exit "${1:-0}"; }
-slug="" dev=0 keep="24h"
+slug="" dev=0 keep="24h" no_lint=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dev) dev=1 ;;
     --keep-alive) [[ $# -ge 2 ]] || { echo "--keep-alive requires a value" >&2; exit 1; }
                   keep="$2"; shift ;;
+    --no-lint) no_lint=1 ;;
     -h|--help) usage ;;
     *) slug="$1" ;;
   esac
@@ -26,6 +33,18 @@ ws="$PS_COMMU_ROOT/$slug"
 [[ -d "$ws" ]] || { echo "no workspace: $ws (run init.sh first)" >&2; exit 1; }
 tier="$(meta_get "$slug" tier)"
 [[ "$tier" == "infographic" || "$tier" == "html" || "$tier" == "react" ]] || { echo "bad tier='$tier' in meta.json for $slug (re-run init.sh)" >&2; exit 1; }
+
+# --- authoring-chain lint gate ---
+if [[ "$no_lint" == 1 ]]; then
+  echo "WARNING: --no-lint skips the authoring-chain lint gate (scripts/lint.sh $slug)" >&2
+else
+  lint_out=""
+  if ! lint_out="$("$(dirname "$0")/lint.sh" "$slug" 2>&1)"; then
+    echo "$lint_out"
+    echo "lint failed for $slug — fix the issues above, or pass --no-lint (see --no-lint in --help)" >&2
+    exit 1
+  fi
+fi
 
 # Replace any previous server for this slug (marker-verified).
 old_pid="$(meta_get "$slug" pid)"

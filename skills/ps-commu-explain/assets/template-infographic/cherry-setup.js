@@ -14,10 +14,11 @@
      we ever see them. The core build ships no addon, so fences survive as
      language-mermaid code blocks for Path B to frame + theme. Verified in a
      real browser: Path B nodes fill with the locked light node colors below
-     (default #ffffff, category classDef fills), on the cream diagram frame.
+     (default #ffffff, one structural accent stroke), on the cream diagram frame.
    - Adds ONE custom syntax hook (`::: callout <kind>`) because a fenced callout
      shorthand is meaningfully terser than hand-writing <div class="callout ...">.
-     Everything else (tiles, schematic, rows, hero) maps cleanly to plain
+     Everything else (reader-questions, claim-card, before-after, worked-example,
+     wrong-without, receipts, schematic, rows) maps cleanly to plain
      HTML-in-markdown, so per YAGNI we add no further hooks.
 
    CHERRY GLOBAL SHAPE (0.8.58 UMD): `window.Cherry` is an ESM-interop *namespace*
@@ -25,13 +26,12 @@
    (createSyntaxHook, constants) live on `window.Cherry.default`. We resolve that
    once in resolveCherry() and use the resolved constructor everywhere.
 
-   MERMAID PARITY LOCK: MERMAID_THEME_VARIABLES below is LOCKED to
-   ~/.claude/spec-style.html (lines 398-419) so kit diagrams look byte-for-byte
-   identical to spec diagrams. Raw hex here is intentional and permitted: Mermaid
-   reads a JS object, not CSS custom properties. The theme.css tokens were ported
-   FROM spec-style.html and are visually continuous, but the authoritative source
-   for these diagram values is spec-style.html — each key below is annotated with
-   its spec-style.html source so any drift is caught in review.
+   COLOR RULE (theme.css): a neutral cream ramp, ONE structural accent, and two
+   reserved hues (pitfall, check) that mean something. Diagrams follow it: every
+   node/actor is cream with the accent stroke; only `class N pitfall` /
+   `class N check` may recolor a node. No per-node rainbow. Raw hex here is
+   intentional and permitted: Mermaid reads a JS object, not CSS custom
+   properties — each key is annotated with the theme.css token it mirrors.
    ============================================================================ */
 
 /* ---- Mermaid theme — MIRRORS theme.css tokens ------------------------------
@@ -42,53 +42,45 @@
    per-node vivid category colors come from `classDef` lines authored in the
    markdown (see CLASSDEF_PRELUDE below), which reference these same hues. */
 const MERMAID_THEME_VARIABLES = {
-  background: "#fdfaf4", // --surface (card cream-white)
-  primaryColor: "#ffffff", // --n-4 (cleanest surface — default node fill)
+  background: "#f7f1e6", // --surface (card cream)
+  primaryColor: "#fcf8f0", // --n-4 (cleanest surface — default node fill)
   primaryTextColor: "#211c15", // --text (warm near-black — readable on light)
-  primaryBorderColor: "#e0533d", // --coral (--primary)
-  lineColor: "#a99a80", // warm gray edge line (~between --text-3 and --border-strong)
-  secondaryColor: "#fdfaf4", // --surface
-  tertiaryColor: "#fbf7ef", // --bg (cream paper)
+  primaryBorderColor: "#1c4f8f", // --accent (the one structural hue)
+  lineColor: "#6b6152", // --text-3 (edge lines, ≥4.5:1 on paper)
+  secondaryColor: "#f7f1e6", // --surface
+  tertiaryColor: "#efe6d3", // --bg (cream paper)
   tertiaryBorderColor: "#e6dcc7", // --border
-  clusterBkg: "#f4ecdd", // --n-1 (cream shade — subgraph background)
+  clusterBkg: "#e9dfca", // --n-1 (cream shade — subgraph background)
   clusterBorder: "#d9ccb2", // --border-strong
   titleColor: "#211c15", // --text
-  actorBkg: "#ffffff", // --n-4 (sequence actor fill)
-  actorBorder: "#e0533d", // --coral
+  actorBkg: "#fcf8f0", // --n-4 (sequence actor fill)
+  actorBorder: "#1c4f8f", // --accent
   actorTextColor: "#211c15", // --text
-  signalColor: "#a99a80", // warm gray signal lines
-  signalTextColor: "#5c5344", // --text-2 (signal labels)
-  noteBkgColor: "#fbf0dd", // --amber-tint (note fill)
-  noteBorderColor: "#e08a1e", // --amber
+  signalColor: "#6b6152", // --text-3 (signal lines)
+  signalTextColor: "#211c15", // --text (signal labels must read at 14px)
+  noteBkgColor: "#e2ebfb", // --accent-tint (note fill)
+  noteBorderColor: "#1c4f8f", // --accent
   noteTextColor: "#211c15", // --text
   fontSize: "14px",
 };
 
-/* ---- classDef prelude — vivid category node colors ------------------------
+/* ---- classDef prelude — the two reserved hues, nothing else --------------
    Injected into every flowchart/graph/state diagram that doesn't already carry
-   classDefs, so authors get colored nodes for free. Fills use the -tint hex,
-   strokes the solid hex, text the warm near-black --text. Mirrors theme.css:
-     coral #e0533d · amber #e08a1e · teal #109a86 · blue #2f6bd6 ·
-     violet #7a53d1 · magenta #c43a8f · warm text #211c15. */
+   classDefs. Nodes are cream + accent stroke by default; an author may mark a
+   node `class N pitfall` (the thing that goes wrong) or `class N check` (the
+   verified outcome). Mirrors theme.css: pitfall #a8321f/#fbeae5 ·
+   check #186a42/#daf1ec · accent #1c4f8f/#e2ebfb · text #211c15. */
 const CLASSDEF_PRELUDE = [
-  "classDef coral   fill:#fbeae5,stroke:#e0533d,stroke-width:2px,color:#211c15;",
-  "classDef amber   fill:#fbf0dd,stroke:#e08a1e,stroke-width:2px,color:#211c15;",
-  "classDef teal    fill:#daf1ec,stroke:#109a86,stroke-width:2px,color:#211c15;",
-  "classDef blue    fill:#e2ebfb,stroke:#2f6bd6,stroke-width:2px,color:#211c15;",
-  "classDef violet  fill:#ece5fa,stroke:#7a53d1,stroke-width:2px,color:#211c15;",
-  "classDef magenta fill:#fbe3f1,stroke:#c43a8f,stroke-width:2px,color:#211c15;",
+  "classDef accent  fill:#e2ebfb,stroke:#1c4f8f,stroke-width:2px,color:#211c15;",
+  "classDef pitfall fill:#fbeae5,stroke:#a8321f,stroke-width:2px,color:#211c15;",
+  "classDef check   fill:#daf1ec,stroke:#186a42,stroke-width:2px,color:#211c15;",
 ].join("\n");
 
 /* ---- Lucide icon names per callout kind (rendered into a colored chip) ---- */
 const CALLOUT_ICONS = {
-  info: "info",
-  warn: "triangle-alert",
-  success: "circle-check",
-  danger: "octagon-alert",
-  idea: "lightbulb",
-  metric: "chart-column",
-  action: "arrow-right",
-  "": "message-square",
+  note: "info",
+  pitfall: "triangle-alert",
+  check: "circle-check",
 };
 
 /* ---- resolve the real Cherry constructor from the UMD namespace ----------- */
@@ -107,12 +99,12 @@ const MERMAID_HEAD = /^(flowchart|graph|sequenceDiagram|stateDiagram(-v2)?|class
 
 /* ---- custom syntax hook: ::: callout <kind> ... :::  ----------------------
    Authors write:
-       ::: callout warn
+       ::: callout pitfall
        **Heads up.** Body text, *markdown* allowed.
        :::
-   which expands to <div class="callout warn"> … the same structure
-   explainer.css styles. Kinds: info warn success danger idea metric action
-   (default: plain).
+   which expands to <div class="callout pitfall"> … the same structure
+   explainer.css styles. Kinds: note | pitfall | check. Anything else
+   (including no kind) falls back to note.
 
    The body is rendered with the inline parser Cherry passes in
    (`sentenceMakeFunc`) and the whole block is returned through `pushCache`
@@ -122,7 +114,7 @@ const MERMAID_HEAD = /^(flowchart|graph|sequenceDiagram|stateDiagram(-v2)?|class
    `code` span downstream would leak into the output unresolved. Verified in
    the browser: the re-entrant version leaked, this one does not. ----------- */
 function registerCalloutHook(Cherry) {
-  const KINDS = ["info", "warn", "success", "danger", "idea", "metric", "action"];
+  const KINDS = ["note", "pitfall", "check"];
   const CalloutHook = Cherry.createSyntaxHook(
     "explainerCallout",
     Cherry.constants.HOOKS_TYPE_LIST.PAR,
@@ -130,8 +122,9 @@ function registerCalloutHook(Cherry) {
       needCache: true,
       makeHtml(str, sentenceMakeFunc) {
         return str.replace(this.RULE.reg, (whole, kind, body) => {
-          const k = (kind || "").trim();
-          const cls = KINDS.includes(k) ? ` ${k}` : "";
+          const raw = (kind || "").trim();
+          const k = KINDS.includes(raw) ? raw : "note";
+          const cls = ` ${k}`;
           const lines = this.getLineCount(whole);
           const { sign, html } = sentenceMakeFunc(body.trim());
           // A colored icon chip (populated with a Lucide SVG in post-render via
@@ -191,7 +184,7 @@ function frameAndRunMermaid(rootEl) {
 
     const pre = node.tagName === "CODE" ? node.closest("pre") : node;
 
-    // Give node-based diagrams the vivid category classDefs for free (only if
+    // Give node-based diagrams the reserved-hue classDefs for free (only if
     // the author didn't already define their own). Sequence diagrams don't use
     // classDef, so skip them.
     let src = source;
@@ -237,7 +230,7 @@ function renderIcons(preview) {
   preview.querySelectorAll(".co-ico[data-ico]").forEach((chip) => {
     if (chip.querySelector("[data-lucide], svg")) return; // already populated
     const kind = chip.getAttribute("data-ico") || "";
-    const name = CALLOUT_ICONS[kind] || CALLOUT_ICONS[""];
+    const name = CALLOUT_ICONS[kind] || CALLOUT_ICONS.note;
     const i = document.createElement("i");
     i.setAttribute("data-lucide", name);
     chip.appendChild(i);
@@ -251,8 +244,8 @@ function renderIcons(preview) {
 
 /* ---- build the sticky navigation from the section headers -----------------
    Reads every `.section-head[data-nav]` (and the hero) to construct the left
-   sidebar / top strip. Each nav item carries the section's category color +
-   Lucide icon. Returns the list of {id, el} section targets for scrollspy. */
+   sidebar / top strip. Each nav item carries the section's Lucide icon (one
+   accent hue for all — section order is never colored). Returns the list of {id, el} section targets for scrollspy. */
 function buildNav(preview) {
   const heads = Array.from(preview.querySelectorAll(".section-head[data-nav]"));
   if (!heads.length) return [];
@@ -261,10 +254,11 @@ function buildNav(preview) {
   nav.className = "explainer-nav";
   nav.setAttribute("aria-label", "Document sections");
 
-  // brand row (reads optional data-* on the hero)
-  const hero = preview.querySelector(".hero");
-  const brandTitle = (hero && hero.getAttribute("data-nav-title")) || "Explainer";
-  const brandSub = (hero && hero.getAttribute("data-nav-sub")) || "contents";
+  // brand row (reads optional data-* on the top-of-page reader-questions box —
+  // this replaced .hero as the page's top-level component in v3)
+  const brandSrc = preview.querySelector(".reader-questions");
+  const brandTitle = (brandSrc && brandSrc.getAttribute("data-nav-title")) || "Explainer";
+  const brandSub = (brandSrc && brandSrc.getAttribute("data-nav-sub")) || "contents";
   nav.innerHTML =
     '<div class="nav-brand">' +
     '<span class="icon-chip sm"><i data-lucide="sparkles"></i></span>' +
@@ -275,7 +269,6 @@ function buildNav(preview) {
   const ul = document.createElement("ul");
   const targets = [];
   heads.forEach((head, idx) => {
-    const cat = head.getAttribute("data-cat") || "coral";
     const icon = head.getAttribute("data-nav-icon") || head.getAttribute("data-icon") || "hash";
     const label = head.getAttribute("data-nav") || "Section";
     const bookend = head.classList.contains("bookend");
@@ -284,7 +277,7 @@ function buildNav(preview) {
 
     const li = document.createElement("li");
     const a = document.createElement("a");
-    a.className = "nav-link cat-" + cat + (bookend ? " is-bookend" : "");
+    a.className = "nav-link" + (bookend ? " is-bookend" : "");
     a.href = "#" + id;
     a.setAttribute("data-target", id);
     a.innerHTML =
@@ -296,20 +289,25 @@ function buildNav(preview) {
   });
   nav.appendChild(ul);
 
-  // Click-to-jump. We scroll by absolute offset with window.scrollTo (reliable
-   // everywhere) rather than element.scrollIntoView({behavior:"smooth"}), which
-   // is silently a no-op in some engines. The SMOOTH animation comes from CSS
-   // `scroll-behavior: smooth` on <html> (see explainer.css), which the browser
-   // auto-disables under prefers-reduced-motion — so no JS motion guard needed.
+  // Click-to-jump. ROOT CAUSE of the old "hash lands, page doesn't move" bug:
+  // explainer.css set `html { scroll-behavior: smooth }`, which turns
+  // window.scrollTo(0, y) into a compositor animation. That animation only
+  // advances while the tab paints — in a hidden/occluded tab (and every
+  // headless or extension-driven audit) it never starts, so replaceState landed
+  // and the viewport stayed at 0. Fix by construction: an explicit INSTANT
+  // scrollIntoView (overrides any CSS scroll-behavior), the target re-resolved
+  // at click time (Cherry may have re-rendered the DOM since nav build), and
+  // the active class set here — not only by the scroll observer.
   nav.addEventListener("click", (e) => {
     const link = e.target.closest(".nav-link");
     if (!link) return;
-    const el = document.getElementById(link.getAttribute("data-target"));
+    const id = link.getAttribute("data-target");
+    const el = document.getElementById(id);
     if (!el) return;
     e.preventDefault();
-    const y = window.scrollY + el.getBoundingClientRect().top - 12;
-    window.scrollTo(0, y);
-    history.replaceState(null, "", "#" + link.getAttribute("data-target"));
+    el.scrollIntoView({ block: "start", behavior: "instant" });
+    history.replaceState(null, "", "#" + id);
+    targets.forEach((t) => t.link.classList.toggle("is-active", t.link === link));
   });
 
   document.body.classList.add("has-nav");
