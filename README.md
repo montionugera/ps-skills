@@ -169,7 +169,11 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
 - **ps-interactive-learning-builder** — invoke `/ps-interactive-learning-builder <topic>` to create a
   source-backed course, explorable reference, or hybrid learning project with gated audit and verification.
 - **ps-release-workflow** — start with `ps-release-workflow-init` in a repo, then
-  idea → refine → claim → ship → promote. Each skill's `SKILL.md` documents its preconditions.
+  idea → refine → claim → ship → promote. Hotfixes merged to `main` are merged into
+  `release/<v>` automatically by `psrw ship` and `psrw promote` before they gate or deploy
+  (a conflict refuses with the exact command); `psrw sync-main` does it on demand, and
+  `psrw status` flags a release that is behind `main`. Each skill's `SKILL.md` documents
+  its preconditions.
 
 ## Development
 
