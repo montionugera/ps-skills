@@ -76,53 +76,154 @@ The top-of-page box. Three numbered questions — verbatim from `00-brief.md`'s 
   <span class="icon-chip lg"><i data-lucide="git-branch"></i></span>
   <div class="sh-text">
     <span class="sh-kicker">2 · show how it works</span>
-    <div class="sh-title">Mermaid, schematic &amp; the labeled-edge rule</div>
+    <div class="sh-title">draw.io, schematic &amp; the labeled-edge rule</div>
   </div>
 </div>
 
-Any fenced code block tagged <code>mermaid</code> becomes a themed light SVG: cream nodes, accent strokes. Mark a node `class N pitfall` or `class N check` to use a reserved hue; the classDefs are injected automatically. `scripts/lint.sh` enforces the mechanism-diagram rule mechanically, not just by convention — for every flowchart it checks:
+Any fenced code block tagged <code>drawio</code> — or an untagged/`xml`-tagged block whose body starts with <code>&lt;mxGraphModel</code> (cherry-setup.js content-sniffs either signal identically) — becomes an interactive, pan/zoom SVG diagram rendered live by draw.io's own viewer: cream nodes, accent strokes. Give a vertex or edge `role=accent`, `role=pitfall` or `role=check` in its `style=` attribute to use a reserved hue — mxGraph itself silently ignores the unrecognized key, and cherry-setup.js substitutes the real theme color at render time. `scripts/lint.sh` enforces the mechanism-diagram rule mechanically, not just by convention — for every diagram it checks:
 
-- **Every edge is labeled.** `A --> B` with no text says nothing about what moves along it; `lint.sh` reports it as `flowchart diagram edge 'A --> B' has no label`. Write `A -->|renders| B` or `A -- renders --> B` instead — a labeled arrow names the payload, not just the direction.
-- **At most 7 nodes per diagram.** A mechanism worth drawing is a small number of real moving parts; past 7 nodes, split it into two diagrams or simplify.
-- **`sequenceDiagram` arrows carry text after the colon** (`A->>B: fetch(url)`, not `A->>B:`).
+- **Every edge is labeled.** An `<mxCell edge="1">` with no `value=` says nothing about what moves along it; `lint.sh` reports it as `edge '<id>' has no label`. Give every edge a `value="..."` — a labeled arrow names the payload, not just the direction.
+- **At most 7 vertex cells per diagram.** A mechanism worth drawing is a small number of real moving parts; past 7 vertices, split it into two diagrams or simplify.
+- **Colors are `role=` tokens, never raw hex.** `style="fillColor=#ff0000;"` is rejected — `lint.sh` reports it as a raw hex color; use `role=accent`/`role=pitfall`/`role=check` instead, so the diagram tracks the page's theme instead of hardcoding it.
 
 <div class="gallery-item">
-  <div class="gallery-label">GOOD — every edge labeled, 5 nodes, passes <code>lint.sh</code></div>
+  <div class="gallery-label">GOOD — every edge labeled, 6 nodes, passes <code>lint.sh</code></div>
   <div class="gallery-body">
 
-```mermaid
-sequenceDiagram
-    participant U as Author
-    participant Sh as shell.html
-    participant Ch as cherry-markdown
-    participant Me as Mermaid + Lucide
-    U->>Sh: serve → open shell.html?doc=content.md
-    Sh->>Sh: fetch(content.md) as raw text
-    Sh->>Ch: new Cherry({ previewOnly, value: md })
-    Ch->>Ch: parse markdown + callout hook
-    Ch-->>Sh: styled preview DOM
-    Sh->>Me: frame diagrams + render icons + build nav
-    Me-->>Sh: SVG diagrams + inline icon SVGs
-    Sh->>U: consistent cream infographic
+```drawio
+<mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1"
+    connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1590"
+    pageHeight="400" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="Author opens shell.html?doc=content.md"
+        style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="40" y="140" width="220" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="B" value="shell.html fetches content.md as raw text"
+        style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="300" y="140" width="230" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="C" value="cherry-markdown parses + builds preview DOM"
+        style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="570" y="140" width="230" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="D" value="shell.html frames diagrams, icons + nav"
+        style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="840" y="140" width="210" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="E" value="draw.io + Lucide render SVG output"
+        style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="1090" y="140" width="200" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="F" value="reader sees consistent cream infographic"
+        style="rounded=1;whiteSpace=wrap;html=1;role=check;" vertex="1" parent="1">
+      <mxGeometry x="1330" y="140" width="220" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="e1" value="serve to open shell.html?doc=content.md" style="html=1;"
+        edge="1" parent="1" source="A" target="B">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e2" value="new Cherry({ previewOnly, value: md })" style="html=1;"
+        edge="1" parent="1" source="B" target="C">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e3" value="styled preview DOM" style="html=1;"
+        edge="1" parent="1" source="C" target="D">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e4" value="frame diagrams + render icons + build nav" style="html=1;"
+        edge="1" parent="1" source="D" target="E">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e5" value="SVG diagrams + inline icon SVGs" style="html=1;role=check;"
+        edge="1" parent="1" source="E" target="F">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+  </root>
+</mxGraphModel>
 ```
 
   </div>
 </div>
+
+<p><em>Why a flowchart, not a sequence diagram:</em> a sequence-diagram-style mxGraph (4 lifelines as tall vertices, messages pinned to rows via <code>exitY</code>/<code>entryY</code> fractions) was attempted directly and got close within the 2-iteration budget — it rendered legibly on the first pass except that long message labels between adjacent lifelines fully hid their own connector line under the label's opaque background; the fix (a small negative-<code>y</code> label offset) cleared that but introduced a new collision with the lifeline header on the very first row. Rather than keep iterating past the budget, this flowchart covers the same four real components (Author, shell.html, cherry-markdown, draw.io + Lucide) in the same interaction order — the gallery's requirement is a real diagram demonstrating the chain, not specifically a sequence diagram.</p>
+
+<div class="section-head" data-nav="Authoring skeleton" data-nav-icon="pencil-ruler" id="authoringskeleton">
+  <span class="icon-chip lg"><i data-lucide="pencil-ruler"></i></span>
+  <div class="sh-text">
+    <span class="sh-kicker">2c · start here</span>
+    <div class="sh-title">Authoring skeleton — copy this to start a new diagram</div>
+  </div>
+</div>
+
+Every diagram needs exactly two root cells — `<mxCell id="0" />` and `<mxCell id="1" parent="0" />` — `lint.sh` rejects a diagram missing either. Position each new vertex with a **running cursor**, not a fixed multiple: `x = <previous vertex's x> + <previous vertex's width> + 40`. It is NOT `x = 40 + 200*i` — that only works if every vertex is the same width, and real diagrams rarely are. Worked example below: vertex A starts at `x=40`; B's `x` is `40 + 160 (A's width) + 40 = 240`; C's `x` is `240 + 200 (B's width) + 40 = 480` — widths vary (160/200/140), so a fixed 200px step would already have drifted by the third node.
+
+<div class="gallery-item">
+  <div class="gallery-label">skeleton — 3 nodes, running-cursor x, one <code>role=</code> each</div>
+  <div class="gallery-body">
+
+```drawio
+<mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1"
+    connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="700"
+    pageHeight="160" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="Start" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="40" y="40" width="160" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="B" value="Do the thing" style="rounded=1;whiteSpace=wrap;html=1;"
+        vertex="1" parent="1">
+      <mxGeometry x="240" y="40" width="200" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="C" value="Verified" style="rounded=1;whiteSpace=wrap;html=1;role=check;"
+        vertex="1" parent="1">
+      <mxGeometry x="480" y="40" width="140" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="e1" value="step 1" style="html=1;" edge="1" parent="1" source="A" target="B">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+    <mxCell id="e2" value="step 2" style="html=1;role=check;" edge="1" parent="1" source="B" target="C">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+
+  </div>
+</div>
+
+::: callout note
+If a straight edge's label text is wider than the gap between the two nodes it connects, the label can overlap the node text (or hide its own connector line under a busy diagram). Fix it by adding `<mxPoint x="0" y="-24" as="offset" />` inside the edge's `<mxGeometry relative="1" as="geometry">` — it lifts the label clear without moving the nodes. See the Mechanism diagram in `content.md` for a worked example.
+:::
 
 <div class="wrong-without">
   <span class="ww-ico"><i data-lucide="triangle-alert"></i></span>
   <div class="ww-body">
-    <div class="ww-title">BAD — two edges, two independent rejections</div>
-    <p>Below are the two offending lines, not a runnable diagram (this page never feeds a bare <code>flowchart</code>/<code>graph</code> keyword to a fence — cherry-setup.js content-sniffs <em>any</em> fenced block that opens with one and hands it to Mermaid, live example or not, so an inert bad-example diagram would render as a broken error box instead of teaching anything).</p>
+    <div class="ww-title">BAD — two cells, two independent rejections</div>
+    <p>Below are the two offending lines, not a runnable diagram (this page never feeds a fence tagged <code>drawio</code>, or one whose body starts with <code>&lt;mxGraphModel</code>, that would actually render — cherry-setup.js content-sniffs <em>either</em> signal and hands it to draw.io's viewer, live example or not, so an inert bad-example diagram would render as an empty or broken graph instead of teaching anything).</p>
   </div>
 </div>
 
 ```text
-Author --> System        ← no label: says nothing about what moves along it
-System --> end           ← 'end' is a reserved keyword, never a valid node id
+<mxCell id="e1" edge="1" source="A" target="B" style="html=1;">        ← no value=: says nothing about what moves along it
+<mxCell id="B" vertex="1" style="fillColor=#ff0000;html=1;">           ← raw hex color: use role=accent/pitfall/check instead
 ```
 
-`lint.sh` reports both independently: an unlabeled edge, and a reserved word used as a node id (Mermaid keywords are case-sensitive — `end` closes a subgraph and can never be an id; `End` would be fine). The fix is the same move as the GOOD example above: name what's on the wire, and never reuse a keyword.
+`lint.sh` reports both independently: an edge cell with no label, and a raw hex `fillColor` where a `role=` token belongs (raw hex bypasses the theme substitution cherry-setup.js performs at render time, so it silently diverges from the page's cream/accent palette). The fix is the same move as the GOOD example above: name what's on the wire, and use the reserved role tokens instead of hardcoded colors.
 
 A monospace **schematic** block for file trees (whitespace preserved):
 
@@ -130,7 +231,7 @@ A monospace **schematic** block for file trees (whitespace preserved):
 <div class="schematic">explainer-kit/
 ├── theme.css        ← the lock
 ├── explainer.css    ← components
-└── cherry-setup.js  ← engine + mermaid + icons</div>
+└── cherry-setup.js  ← engine + drawio + icons</div>
 ```
 
 <div class="gallery-item">
@@ -139,7 +240,7 @@ A monospace **schematic** block for file trees (whitespace preserved):
     <div class="schematic" style="margin:0">explainer-kit/
 ├── theme.css        ← the lock
 ├── explainer.css    ← components
-└── cherry-setup.js  ← engine + mermaid + icons</div>
+└── cherry-setup.js  ← engine + drawio + icons</div>
   </div>
 </div>
 
@@ -175,7 +276,7 @@ One real input → mechanism → output walkthrough, sitting next to the diagram
       <div class="we-flow">
         <div class="we-stage"><span class="we-stage-k">Input</span><div class="we-stage-v">app/content.md</div></div>
         <i class="we-arrow" data-lucide="arrow-right"></i>
-        <div class="we-stage"><span class="we-stage-k">Mechanism</span><div class="we-stage-v">forbidden-class + mermaid scan</div></div>
+        <div class="we-stage"><span class="we-stage-k">Mechanism</span><div class="we-stage-v">forbidden-class + drawio scan</div></div>
         <i class="we-arrow" data-lucide="arrow-right"></i>
         <div class="we-stage"><span class="we-stage-k">Output</span><div class="we-stage-v">one defect line per problem</div></div>
       </div>
@@ -279,13 +380,13 @@ Two panels, real values — not a percentage meter. Say what the number actually
       <div class="ba-panel">
         <span class="ba-label">Before</span>
         <div class="ba-value">4 regex passes</div>
-        <p>Round 1-3 of the flowchart lint: split the block by independent regexes.</p>
+        <p>Round 1-3 of the mermaid-era flowchart lint: split the block by independent regexes.</p>
       </div>
       <i class="ba-arrow" data-lucide="arrow-right"></i>
       <div class="ba-panel">
         <span class="ba-label">After</span>
-        <div class="ba-value">1 scanner</div>
-        <p>Round 4: a single left-to-right pass mirroring Mermaid's own grammar.</p>
+        <div class="ba-value">1 XML parser</div>
+        <p>F-013's draw.io migration: a single ElementTree-based mxGraph XML validator, no per-edge regexes.</p>
       </div>
     </div>
   </div>
@@ -412,7 +513,7 @@ Status pills with dots, and a color key for a diagram's classes.
 
 Inline **topic chips**, kept as a purely optional, non-forbidden utility (not part of the chain — use for a skimmable keyword row if a doc wants one):
 
-<div class="chip-row"><span class="topic-chip">design-system</span><span class="topic-chip">mermaid</span><span class="topic-chip">cherry-markdown</span></div>
+<div class="chip-row"><span class="topic-chip">design-system</span><span class="topic-chip">drawio</span><span class="topic-chip">cherry-markdown</span></div>
 
 <div class="section-head bookend" data-nav="Receipts" data-nav-icon="receipt" id="receipts">
   <span class="icon-chip lg"><i data-lucide="receipt"></i></span>
