@@ -130,6 +130,7 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
     # or roll back the wrong commit.
     feat_branch = f"feat/{feature_id}"
     with file_lock(rel_wt):
+        pre_sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
         try:
             git_run(rel_wt, "merge", "--no-ff", "-m", f"merge {feat_branch} into {release_branch}", feat_branch)
         except GitError as e:
@@ -145,11 +146,11 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
             # A bad hooks.precheck path must not leave the merge standing: the
             # raise would otherwise skip the rollback below and escape the lock
             # with the feature merged on release/<v> while ship reports failure.
-            git_run(rel_wt, "reset", "--hard", "HEAD~1")
+            git_run(rel_wt, "reset", "--hard", pre_sha)
             raise
         if rc is not None and rc != 0:
-            # Roll back the merge: hard reset to release HEAD~1
-            git_run(rel_wt, "reset", "--hard", "HEAD~1")
+            # Roll back the merge: hard reset to pre_sha
+            git_run(rel_wt, "reset", "--hard", pre_sha)
             raise GateFailedError(f"Gate 1 failed on combined release after merge — rolled back")
 
         # Mark catalog status=shipped IN PLACE in the _release worktree (D11/SR-1).
