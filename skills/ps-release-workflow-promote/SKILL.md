@@ -47,7 +47,8 @@ then run `psrw promote --cleanup-only <version>`. With `--babysit`: release is f
 
 ## Refuses if
 
-No release in progress · Gate 2 fails, or is missing without `--allow-missing-gate2` ·
+No release in progress · `main` (a hotfix) cannot merge cleanly into `release/<v>` —
+promote syncs it first, before the epic gate, deploy and Gate 2 · Gate 2 fails, or is missing without `--allow-missing-gate2` ·
 `--deploy` fails · `gh` cannot create or find the PR (release left in progress — fix gh
 and re-run, or use `--direct`) · `--cleanup-only` when the PR is not merged or gh cannot
 verify it.

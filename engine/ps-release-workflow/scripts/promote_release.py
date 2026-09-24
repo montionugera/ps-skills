@@ -24,6 +24,7 @@ from lib.git_ops import (
     delete_branch_local, delete_branch_remote, push, remove_worktree,
 )
 from lib.hooks import resolve_hook
+from lib.main_sync import MainSyncConflictError, resolve_main_ref, sync_main_into_release
 from lib.owner import resolve_owner_id
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
 from lib.state import file_lock, mutate_state
@@ -479,6 +480,14 @@ def promote_release(
     # G-E3: the completeness-and-freshness epic gate, before any other gate —
     # a release must not reach Gate 2 (let alone main) carrying an epic that
     # is incomplete or unverified at this release's HEAD.
+    # Absorb any hotfix merged to main since the last ship BEFORE the epic
+    # gate, the deploy and Gate 2: all of them must verify and run the tree the
+    # PR will actually land, never a release missing main's commits. A
+    # conflict refuses here, release untouched, with the manual command.
+    main_ref = resolve_main_ref(repo)
+    with file_lock(rel_wt):
+        sync_main_into_release(repo, rel_wt, release_branch, main_ref)
+
     check_epics(repo, rel_wt, version, allow_split_epic)
 
     if run_deploy:
@@ -884,7 +893,7 @@ def main() -> int:
                                      allow_missing_gate2=args.allow_missing_gate2,
                                      allow_split_epic=args.allow_split_epic,
                                      babysit=args.babysit)
-    except (NoReleaseInProgressError, Gate2FailedError,
+    except (NoReleaseInProgressError, Gate2FailedError, MainSyncConflictError,
             CatalogEntryNotFoundError, RuntimeError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1

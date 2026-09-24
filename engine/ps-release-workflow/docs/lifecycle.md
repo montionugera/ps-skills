@@ -40,6 +40,25 @@ skips silently: with no deploy script at `hooks.deploy_local` (default
 scripts/deploy-local.sh or hooks.deploy_local`, a notice distinct from the
 `--no-deploy` one.
 
+### Main sync: hotfixes reach the open release
+<a id="main-sync"></a>
+
+A hotfix squash-merged to `main` while `release/<v>` is open does not reach the release
+by itself, so anything run from `_release` (Gate 1, the local deploy, Gate 2, the promote
+PR) would run without it. `lib/main_sync.py` merges `main` (`origin/main` after a fetch
+when an origin exists) into `release/<v>` in the `_release` worktree, under its file lock:
+
+- **`ship`** syncs before merging the feature, so Gate 1 verifies release + hotfix +
+  feature. Any failure resets to the pre-ship head, undoing sync and merge together.
+  Its post-merge deploy re-checks and **refuses** a release still behind `main`.
+- **`promote`** syncs first, before the epic gate, `--deploy` and Gate 2.
+- **`psrw hotfix --sync-release`** is the last step of the hotfix flow, once the PR merged.
+
+A conflict aborts the merge, leaves `release/<v>` untouched and prints the exact
+`cd <_release> && git merge origin/main` to run. So does a `main` change to release
+bookkeeping (`.release.json`, the backlog dirs, `.claude/state/`), which must never be
+auto-merged over the release's own copy.
+
 ### Epic gates: G-E2 and G-E3
 
 An **epic** (`E-NNN`) is one outcome delivered by several features. Its gates run a
@@ -144,7 +163,8 @@ so its `hooks` block legitimately differs per branch.
 
 `psrw promote` is PR-based by default and is **not** the terminal step:
 
-1. Gate 2 runs, then `--deploy` if given.
+1. `main` is synced into `release/<v>` (see [main sync](#main-sync)), then Gate 2 runs,
+   then `--deploy` if given.
 2. `release/<v>` is pushed and a PR to `main` is opened. Release state is finalized on
    the release branch only *after* the PR exists, so a failed `gh` call leaves the
    release in progress and promote can simply be re-run.
