@@ -1768,14 +1768,15 @@ test_verify_passes_template() {
   local out rc; out="$(verify_run t-verify)"; rc=$?
   echo "$out"
   (( rc == 2 )) && return 2
-  # The shipped content.md still carries its pre-migration ```mermaid fence
-  # (F-013's content migration is a separate, later task) — cherry-setup.js
-  # no longer processes that language at all, so it renders as an inert,
-  # unconverted code block: zero ```drawio fences, zero .mxgraph divs,
-  # assert 1 PASSes vacuously (0==0). test_verify_passes_drawio_template
-  # below is the real positive-path drawio render-gate coverage.
+  # F-013's content migration (Task 4) landed: the shipped content.md now
+  # carries its real, migrated ```drawio fence (Task 0's verified 6-node
+  # flowchart) instead of the pre-migration ```mermaid one. Assert 1 sees
+  # exactly 1 fence and 1 rendered .mxgraph div, both non-empty — a real
+  # PASS, not the old vacuous 0==0 one. test_verify_passes_drawio_template
+  # below remains the dedicated positive-path drawio render-gate coverage,
+  # using its own synthetic fixture rather than the shipped exemplar.
   (( rc == 0 )) &&
-  grep -q '^PASS: 1 drawio svg=0 fences=0 (mxgraph-divs=0 empty-render=0 no-svg=0)' <<<"$out" &&
+  grep -q '^PASS: 1 drawio svg=1 fences=1 (mxgraph-divs=1 empty-render=0 no-svg=0)' <<<"$out" &&
   ! grep -q '^FAIL' <<<"$out"
 }
 test_verify_dump_text() {  # --dump-text: clean reader-visible text on stdout, exit 0, no raw markup leaks
