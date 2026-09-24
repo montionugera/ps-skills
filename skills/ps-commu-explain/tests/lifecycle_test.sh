@@ -1330,6 +1330,266 @@ EOF
   "$S/lint.sh" t-lint-dvalid
 }
 
+# --- fix round 1 (5 Important review findings, A-F) ---------------------
+test_lint_passes_drawio_origin_vertex() {  # (A) mxCodec omits x/y at the
+  "$S/init.sh" t-lint-dorigin --tier html >/dev/null              # default 0 -- a legit
+  _lint_valid_brief_facts_storyboard t-lint-dorigin                # origin-positioned vertex
+  mkdir -p /tmp/ps-commu/t-lint-dorigin/app                        # must lint clean, not
+  cat > /tmp/ps-commu/t-lint-dorigin/app/content.md <<'EOF'         # "missing x/y"
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="800" pageHeight="400">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="Origin" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry width="120" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  "$S/lint.sh" t-lint-dorigin
+}
+test_lint_fails_drawio_bounds_unverifiable() {  # (B) no pageWidth/pageHeight
+  "$S/init.sh" t-lint-dnobounds --tier html >/dev/null              # at all -> must be its
+  _lint_valid_brief_facts_storyboard t-lint-dnobounds                # own defect, never a
+  mkdir -p /tmp/ps-commu/t-lint-dnobounds/app                        # silent skip
+  cat > /tmp/ps-commu/t-lint-dnobounds/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel>
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="A" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="9000" y="9000" width="120" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dnobounds 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q 'so vertex bounds cannot be verified' <<<"$out"
+}
+test_lint_fails_drawio_content_sniffed_fence() {  # (C) an UNLABELLED ```xml
+  "$S/init.sh" t-lint-dsniff --tier html >/dev/null                 # fence whose body starts
+  _lint_valid_brief_facts_storyboard t-lint-dsniff                  # with <mxGraphModel must
+  mkdir -p /tmp/ps-commu/t-lint-dsniff/app                          # still be validated --
+  cat > /tmp/ps-commu/t-lint-dsniff/app/content.md <<'EOF'          # cherry-setup.js renders
+See F1 for details.                                                # it regardless of tag
+
+```xml
+<mxGraphModel pageWidth="800" pageHeight="300">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="A" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="40" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="B" value="B" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="240" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="e1" edge="1" parent="1" source="A" target="B">
+      <mxGeometry relative="1" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dsniff 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "edge 'e1' has no label" <<<"$out"
+}
+test_lint_passes_drawio_grouped_siblings_no_false_overlap() {  # (D) two
+  "$S/init.sh" t-lint-dgroupok --tier html >/dev/null                 # unrelated groups, each
+  _lint_valid_brief_facts_storyboard t-lint-dgroupok                  # with a child at the SAME
+  mkdir -p /tmp/ps-commu/t-lint-dgroupok/app                          # relative offset -- must
+  cat > /tmp/ps-commu/t-lint-dgroupok/app/content.md <<'EOF'          # NOT be flagged: their
+See F1 for details.                                                  # absolute positions don't
+                                                                       # overlap
+```drawio
+<mxGraphModel pageWidth="1200" pageHeight="400">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="G1" value="Group 1" style="group;html=1;role=accent;" vertex="1"
+        parent="1">
+      <mxGeometry x="0" y="0" width="200" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="a" value="a" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="G1">
+      <mxGeometry x="10" y="10" width="80" height="40" as="geometry" />
+    </mxCell>
+    <mxCell id="G2" value="Group 2" style="group;html=1;role=accent;" vertex="1"
+        parent="1">
+      <mxGeometry x="600" y="0" width="200" height="200" as="geometry" />
+    </mxCell>
+    <mxCell id="b" value="b" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="G2">
+      <mxGeometry x="10" y="10" width="80" height="40" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  "$S/lint.sh" t-lint-dgroupok
+}
+test_lint_fails_drawio_grouped_child_out_of_bounds() {  # (D) the false-
+  "$S/init.sh" t-lint-dgroupoob --tier html >/dev/null                 # negative direction: a
+  _lint_valid_brief_facts_storyboard t-lint-dgroupoob                  # child whose ABSOLUTE
+  mkdir -p /tmp/ps-commu/t-lint-dgroupoob/app                          # position (group offset
+  cat > /tmp/ps-commu/t-lint-dgroupoob/app/content.md <<'EOF'          # + its own relative x/y)
+See F1 for details.                                                   # is off-page must be
+                                                                        # caught even though the
+```drawio                                                              # group itself is in-bounds
+<mxGraphModel pageWidth="400" pageHeight="300">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="G1" value="Group" style="group;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="10" y="10" width="60" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="a" value="a" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="G1">
+      <mxGeometry x="380" y="10" width="80" height="40" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dgroupoob 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "vertex 'a' extends beyond the declared page bounds" <<<"$out"
+}
+test_lint_fails_drawio_negative_width() {  # (E) width="-160" must be its own
+  "$S/init.sh" t-lint-dnegw --tier html >/dev/null                # defect (non-positive
+  _lint_valid_brief_facts_storyboard t-lint-dnegw                 # geometry), not a silently
+  mkdir -p /tmp/ps-commu/t-lint-dnegw/app                         # clean inverted AABB that
+  cat > /tmp/ps-commu/t-lint-dnegw/app/content.md <<'EOF'         # masks a genuine overlap
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="800" pageHeight="400">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="A" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="200" y="40" width="-160" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="B" value="B" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="60" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dnegw 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "vertex 'A' has non-positive geometry" <<<"$out"
+}
+test_lint_fails_drawio_negative_position_out_of_bounds() {  # (E) the bounds
+  "$S/init.sh" t-lint-dnegpos --tier html >/dev/null                 # check was one-sided --
+  _lint_valid_brief_facts_storyboard t-lint-dnegpos                  # x<0/y<0 (off-page to the
+  mkdir -p /tmp/ps-commu/t-lint-dnegpos/app                          # left/top) must now be
+  cat > /tmp/ps-commu/t-lint-dnegpos/app/content.md <<'EOF'          # caught too
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="400" pageHeight="300">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="A" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="-900" y="-900" width="120" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dnegpos 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "vertex 'A' extends beyond the declared page bounds" <<<"$out"
+}
+test_lint_fails_drawio_vertex_edge_exclusivity() {  # (F) both vertex="1"
+  "$S/init.sh" t-lint-dboth --tier html >/dev/null                # AND edge="1" set on the
+  _lint_valid_brief_facts_storyboard t-lint-dboth                 # same cell
+  mkdir -p /tmp/ps-commu/t-lint-dboth/app
+  cat > /tmp/ps-commu/t-lint-dboth/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="800" pageHeight="400">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="Weird" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" edge="1" parent="1">
+      <mxGeometry x="40" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-dboth 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q 'both vertex="1" and edge="1"' <<<"$out"
+}
+test_lint_fails_drawio_duplicate_id() {  # (F) two mxCell elements sharing id="A"
+  "$S/init.sh" t-lint-ddupe --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-ddupe
+  mkdir -p /tmp/ps-commu/t-lint-ddupe/app
+  cat > /tmp/ps-commu/t-lint-ddupe/app/content.md <<'EOF'
+See F1 for details.
+
+```drawio
+<mxGraphModel pageWidth="800" pageHeight="400">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="First" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="40" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="A" value="Second" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="240" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-ddupe 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "duplicate mxCell id 'A'" <<<"$out"
+}
+test_lint_fails_drawio_bare_ampersand() {  # (F) pins the "ET.fromstring itself
+  "$S/init.sh" t-lint-damp --tier html >/dev/null                 # rejects a bare &" guarantee
+  _lint_valid_brief_facts_storyboard t-lint-damp                  # that the bare-& check was
+  mkdir -p /tmp/ps-commu/t-lint-damp/app                          # deliberately NOT built on
+  cat > /tmp/ps-commu/t-lint-damp/app/content.md <<'EOF'          # top of, with a live fixture
+See F1 for details.                                              # instead of manual-only proof
+
+```drawio
+<mxGraphModel pageWidth="800" pageHeight="400">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="Q&A" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="40" y="40" width="120" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+EOF
+  local out rc; out="$("$S/lint.sh" t-lint-damp 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -qi 'unparseable' <<<"$out"
+}
+
 check lint_fails_drawio_malformed_xml      test_lint_fails_drawio_malformed_xml
 check lint_fails_drawio_missing_root_cells test_lint_fails_drawio_missing_root_cells
 check lint_fails_drawio_unlabeled_edge     test_lint_fails_drawio_unlabeled_edge
@@ -1339,6 +1599,16 @@ check lint_fails_drawio_out_of_bounds      test_lint_fails_drawio_out_of_bounds
 check lint_fails_drawio_unescaped_label    test_lint_fails_drawio_unescaped_label
 check lint_fails_drawio_raw_hex            test_lint_fails_drawio_raw_hex
 check lint_passes_drawio_valid             test_lint_passes_drawio_valid
+check lint_passes_drawio_origin_vertex               test_lint_passes_drawio_origin_vertex
+check lint_fails_drawio_bounds_unverifiable          test_lint_fails_drawio_bounds_unverifiable
+check lint_fails_drawio_content_sniffed_fence        test_lint_fails_drawio_content_sniffed_fence
+check lint_passes_drawio_grouped_siblings_no_false_overlap test_lint_passes_drawio_grouped_siblings_no_false_overlap
+check lint_fails_drawio_grouped_child_out_of_bounds  test_lint_fails_drawio_grouped_child_out_of_bounds
+check lint_fails_drawio_negative_width               test_lint_fails_drawio_negative_width
+check lint_fails_drawio_negative_position_out_of_bounds test_lint_fails_drawio_negative_position_out_of_bounds
+check lint_fails_drawio_vertex_edge_exclusivity      test_lint_fails_drawio_vertex_edge_exclusivity
+check lint_fails_drawio_duplicate_id                 test_lint_fails_drawio_duplicate_id
+check lint_fails_drawio_bare_ampersand               test_lint_fails_drawio_bare_ampersand
 
 # --- cherry-setup.js drawio render pipeline (Task 1: frameAndRunDrawio) ---
 # Needs Google Chrome (headless --dump-dom) — SKIPs visibly without it, same
