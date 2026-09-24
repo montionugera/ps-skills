@@ -2,19 +2,21 @@
    cherry-setup.js — ENGINE + DIAGRAMS + TERSE AUTHORING
    ----------------------------------------------------------------------------
    - Instantiates cherry-markdown in preview-only / no-toolbar mode.
-   - Wires Mermaid via PATH B (post-render): cherry renders ```mermaid fences as
-     normal <pre><code class="language-mermaid"> blocks, then we hand those nodes
-     to mermaid.run(). This mirrors spec-style.html exactly and keeps FULL
-     control of the diagram frame styling and the locked dark theme.
-     PATH A (cherry's bundled mermaid addon) is deliberately NOT used, and this
-     is WHY shell.html loads the *core* build (cherry-markdown.core.js) rather
-     than the full cherry-markdown.min.js: the full build auto-registers that
-     addon with a HARDCODED light `theme:"default"` that cannot be overridden
-     via instance config, and it consumes the fences into <figure><svg> before
-     we ever see them. The core build ships no addon, so fences survive as
-     language-mermaid code blocks for Path B to frame + theme. Verified in a
-     real browser: Path B nodes fill with the locked light node colors below
-     (default #ffffff, one structural accent stroke), on the cream diagram frame.
+   - Wires draw.io via PATH B (post-render): cherry renders ```drawio fences as
+     normal <pre><code class="language-drawio"> blocks, then we hand those nodes
+     to draw.io's static viewer (`GraphViewer.processElements()`). Authors write
+     plain mxGraph XML with `role=accent`/`role=pitfall`/`role=check` tokens
+     inside a vertex/edge's `style="..."` attribute (mxGraph ignores unknown
+     style keys, so this is inert until we substitute it below); we read the
+     real hex straight off the page's own CSS custom properties (theme.css is
+     the single source of truth — no duplicated hex here) and swap the token
+     for `strokeColor=<hex>` before injecting the XML into a `data-mxgraph`
+     div. `viewer-static.min.js`'s own bootstrap only scans `.mxgraph` elements
+     present in the DOM at the moment the script itself finishes loading (read
+     from its source: a single `GraphViewer.processElements()` IIFE call, no
+     MutationObserver) — divs built here, after Cherry's async render, would
+     stay inert without the explicit `GraphViewer.processElements()` call this
+     file makes once they're inserted.
    - Adds ONE custom syntax hook (`::: callout <kind>`) because a fenced callout
      shorthand is meaningfully terser than hand-writing <div class="callout ...">.
      Everything else (reader-questions, claim-card, before-after, worked-example,
@@ -28,53 +30,41 @@
 
    COLOR RULE (theme.css): a neutral cream ramp, ONE structural accent, and two
    reserved hues (pitfall, check) that mean something. Diagrams follow it: every
-   node/actor is cream with the accent stroke; only `class N pitfall` /
-   `class N check` may recolor a node. No per-node rainbow. Raw hex here is
-   intentional and permitted: Mermaid reads a JS object, not CSS custom
-   properties — each key is annotated with the theme.css token it mirrors.
+   node/actor defaults to draw.io's own white/black look unless the author
+   opts a vertex/edge into `role=accent` / `role=pitfall` / `role=check`, which
+   recolors its stroke to the matching theme hue. No per-node rainbow.
    ============================================================================ */
 
-/* ---- Mermaid theme — MIRRORS theme.css tokens ------------------------------
-   Mermaid reads a JS object, not CSS custom properties, so these must be raw
-   hex/rgba here. Each key is annotated with the theme.css token it mirrors so
-   any drift is caught in review. Palette = "Cream Infographic" — light cream/
-   white diagram background, dark readable node text, warm styled edges. The
-   per-node vivid category colors come from `classDef` lines authored in the
-   markdown (see CLASSDEF_PRELUDE below), which reference these same hues. */
-const MERMAID_THEME_VARIABLES = {
-  background: "#f7f1e6", // --surface (card cream)
-  primaryColor: "#fcf8f0", // --n-4 (cleanest surface — default node fill)
-  primaryTextColor: "#211c15", // --text (warm near-black — readable on light)
-  primaryBorderColor: "#1c4f8f", // --accent (the one structural hue)
-  lineColor: "#6b6152", // --text-3 (edge lines, ≥4.5:1 on paper)
-  secondaryColor: "#f7f1e6", // --surface
-  tertiaryColor: "#efe6d3", // --bg (cream paper)
-  tertiaryBorderColor: "#e6dcc7", // --border
-  clusterBkg: "#e9dfca", // --n-1 (cream shade — subgraph background)
-  clusterBorder: "#d9ccb2", // --border-strong
-  titleColor: "#211c15", // --text
-  actorBkg: "#fcf8f0", // --n-4 (sequence actor fill)
-  actorBorder: "#1c4f8f", // --accent
-  actorTextColor: "#211c15", // --text
-  signalColor: "#6b6152", // --text-3 (signal lines)
-  signalTextColor: "#211c15", // --text (signal labels must read at 14px)
-  noteBkgColor: "#e2ebfb", // --accent-tint (note fill)
-  noteBorderColor: "#1c4f8f", // --accent
-  noteTextColor: "#211c15", // --text
-  fontSize: "14px",
-};
+/* ---- role-token substitution — reads theme.css's OWN computed hex ---------
+   Unlike Mermaid (which read a JS object, forcing raw hex duplicated from
+   theme.css), draw.io's mxGraph style strings are plain key=value text and we
+   run in the same page as theme.css, so we read the real, live values off
+   :root at render time instead of hardcoding them here — zero drift risk. */
+function readRoleColors() {
+  const cs = getComputedStyle(document.documentElement);
+  return {
+    accent: cs.getPropertyValue("--accent").trim(),
+    pitfall: cs.getPropertyValue("--pitfall").trim(),
+    check: cs.getPropertyValue("--check").trim(),
+  };
+}
 
-/* ---- classDef prelude — the two reserved hues, nothing else --------------
-   Injected into every flowchart/graph/state diagram that doesn't already carry
-   classDefs. Nodes are cream + accent stroke by default; an author may mark a
-   node `class N pitfall` (the thing that goes wrong) or `class N check` (the
-   verified outcome). Mirrors theme.css: pitfall #a8321f/#fbeae5 ·
-   check #186a42/#daf1ec · accent #1c4f8f/#e2ebfb · text #211c15. */
-const CLASSDEF_PRELUDE = [
-  "classDef accent  fill:#e2ebfb,stroke:#1c4f8f,stroke-width:2px,color:#211c15;",
-  "classDef pitfall fill:#fbeae5,stroke:#a8321f,stroke-width:2px,color:#211c15;",
-  "classDef check   fill:#daf1ec,stroke:#186a42,stroke-width:2px,color:#211c15;",
-].join("\n");
+/* ---- substitute role=<kind> tokens inside style="..." attributes ----------
+   mxGraph has no `role` style key, so it's inert until we turn it into a real
+   `strokeColor=#hex` — the same border-only recoloring Mermaid's
+   primaryBorderColor/actorBorder/noteBorderColor all used for --accent above,
+   now generalized to draw.io's plain-text style syntax. Works uniformly on
+   both vertex and edge styles (edges have no fillColor concept). */
+const ROLE_TOKEN = /\brole=(accent|pitfall|check)\b;?/g;
+function substituteRoleTokens(xml, colors) {
+  return xml.replace(/style="([^"]*)"/g, (whole, body) => {
+    const substituted = body.replace(ROLE_TOKEN, (token, kind) => {
+      const hex = colors[kind];
+      return hex ? `strokeColor=${hex};` : "";
+    });
+    return `style="${substituted}"`;
+  });
+}
 
 /* ---- Lucide icon names per callout kind (rendered into a colored chip) ---- */
 const CALLOUT_ICONS = {
@@ -93,9 +83,9 @@ function resolveCherry() {
   return Ctor;
 }
 
-/* ---- mermaid source detection (Cherry 0.8.58 does not tag fences with a
-   language-mermaid class, so we detect by content) -------------------------- */
-const MERMAID_HEAD = /^(flowchart|graph|sequenceDiagram|stateDiagram(-v2)?|classDiagram|erDiagram|gantt|pie|journey|mindmap|timeline|gitGraph|quadrantChart|requirementDiagram|C4Context)\b/;
+/* ---- drawio source detection (content-sniff fallback for fences a future
+   Cherry build might not tag with a language-drawio class) ------------------ */
+const DRAWIO_HEAD = /^(<\?xml\b|<mxfile\b|<mxGraphModel\b)/;
 
 /* ---- custom syntax hook: ::: callout <kind> ... :::  ----------------------
    Authors write:
@@ -148,27 +138,24 @@ function registerCalloutHook(Cherry) {
   return CalloutHook;
 }
 
-/* ---- wrap each rendered mermaid code block in a themed frame --------------
-   Returns the mermaid.run() promise (or a resolved promise if nothing to run)
-   so the caller can await diagrams before revealing the page. */
-function frameAndRunMermaid(rootEl) {
-  if (typeof mermaid === "undefined") return Promise.resolve();
+/* ---- wrap each ```drawio code block in a themed frame + render it ---------
+   Same call signature and return contract as the retired frameAndRunMermaid:
+   returns a Promise the caller awaits before revealing the page. Every
+   data-mxgraph div this builds carries "toolbar":"zoom" and "nav":1 (per the
+   spec's explicit-config-key requirement — draw.io does NOT turn these on by
+   default) plus "resize":1 so the frame reflows with its container. */
+function frameAndRunDrawio(rootEl) {
+  if (typeof GraphViewer === "undefined") return Promise.resolve();
 
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: "loose",
-    theme: "base",
-    themeVariables: MERMAID_THEME_VARIABLES,
-    flowchart: { curve: "basis", useMaxWidth: true },
-    sequence: { useMaxWidth: true },
-  });
+  const colors = readRoleColors();
 
-  // The core build emits fenced mermaid as <pre><code class="language-mermaid">.
-  // We match that primarily, and also fall back to content-sniffing any code
-  // block whose text starts with a mermaid diagram keyword — so the frame still
-  // works even if a future build labels fences differently.
+  // The core build emits fenced drawio as <pre><code class="language-drawio">
+  // (mirrors how ```mermaid fences were matched). We match that primarily,
+  // and also fall back to content-sniffing any code block whose text looks
+  // like mxGraph XML — so the frame still works even if a future build
+  // labels fences differently.
   const candidates = rootEl.querySelectorAll(
-    "code.language-mermaid, pre.language-mermaid, .mermaid, pre code"
+    "code.language-drawio, pre.language-drawio, .drawio, pre code"
   );
 
   const seen = new Set();
@@ -177,27 +164,22 @@ function frameAndRunMermaid(rootEl) {
     const source = (node.textContent || "").trim();
     if (!source || seen.has(node)) return;
     const isLabelled =
-      node.classList.contains("language-mermaid") ||
-      node.classList.contains("mermaid");
-    if (!isLabelled && !MERMAID_HEAD.test(source)) return;
+      node.classList.contains("language-drawio") ||
+      node.classList.contains("drawio");
+    if (!isLabelled && !DRAWIO_HEAD.test(source)) return;
     seen.add(node);
 
     const pre = node.tagName === "CODE" ? node.closest("pre") : node;
-
-    // Give node-based diagrams the reserved-hue classDefs for free (only if
-    // the author didn't already define their own). Sequence diagrams don't use
-    // classDef, so skip them.
-    let src = source;
-    const isNodeDiagram = /^(flowchart|graph|stateDiagram)/.test(src);
-    if (isNodeDiagram && !/classDef\s/.test(src)) {
-      src = src + "\n" + CLASSDEF_PRELUDE;
-    }
+    const xml = substituteRoleTokens(source, colors);
 
     const frame = document.createElement("div");
-    frame.className = "mermaid-frame is-pending";
+    frame.className = "diagram-frame is-pending";
     const holder = document.createElement("div");
-    holder.className = "mermaid";
-    holder.textContent = src;
+    holder.className = "mxgraph";
+    holder.setAttribute(
+      "data-mxgraph",
+      JSON.stringify({ xml, toolbar: "zoom", nav: 1, resize: 1 })
+    );
     frame.appendChild(holder);
 
     if (pre && pre.parentNode) {
@@ -205,23 +187,31 @@ function frameAndRunMermaid(rootEl) {
     } else if (node.parentNode) {
       node.parentNode.replaceChild(frame, node);
     }
-    targets.push({ holder, frame });
+    targets.push({ frame });
   });
 
   if (!targets.length) return Promise.resolve();
 
-  // mermaid.run renders its own inline error per-diagram on bad syntax, so a
-  // single malformed diagram never white-screens the rest of the doc.
-  return mermaid
-    .run({ nodes: targets.map((t) => t.holder) })
-    .catch((err) => {
-      console.warn("[explainer-kit] mermaid.run reported:", err);
-    })
-    .finally(() => {
-      // fade each freshly-populated frame in so diagrams never pop in dead,
-      // even though they land after the initial staggered reveal.
-      targets.forEach(({ frame }) => frame.classList.remove("is-pending"));
-    });
+  // GraphViewer's own bootstrap (read straight from viewer-static.min.js's
+  // source: a single `GraphViewer.processElements()` call in an IIFE at the
+  // bottom of the script, no MutationObserver) only scans .mxgraph elements
+  // present in the DOM the moment the script itself finishes loading. Divs
+  // built here land AFTER that — Cherry-Markdown renders content
+  // asynchronously, which is this skill's real usage pattern — so without
+  // this explicit call they would sit inert forever. GraphViewer catches its
+  // own per-element render errors internally (never throws out to us), but
+  // wrap defensively anyway so one malformed diagram never white-screens the
+  // rest of the doc.
+  try {
+    GraphViewer.processElements();
+  } catch (err) {
+    console.warn("[explainer-kit] GraphViewer.processElements reported:", err);
+  }
+
+  // fade each freshly-populated frame in so diagrams never pop in dead, even
+  // though they land after the initial staggered reveal.
+  targets.forEach(({ frame }) => frame.classList.remove("is-pending"));
+  return Promise.resolve();
 }
 
 /* ---- populate callout icon chips + render all Lucide icons ---------------- */
@@ -357,10 +347,10 @@ function wireScrollspy(targets) {
   recompute();
 }
 
-/* ---- post-render pipeline: theme class + mermaid + icons + nav + reveal ----
+/* ---- post-render pipeline: theme class + drawio + icons + nav + reveal ----
    Runs manually after construction because callback.afterInit does NOT fire in
    previewOnly mode in Cherry 0.8.58. We locate the mounted preview surface,
-   tag it with the theme class, frame + run mermaid, render icons, build the
+   tag it with the theme class, frame + run drawio, render icons, build the
    sticky nav + scrollspy, THEN reveal. */
 function runPostRender(container) {
   const preview =
@@ -370,7 +360,7 @@ function runPostRender(container) {
   // ensure our theme class is present on the preview surface
   preview.classList.add("cherry-markdown", "theme__explainer");
 
-  // icons + navigation are independent of mermaid and safe to run immediately.
+  // icons + navigation are independent of drawio and safe to run immediately.
   renderIcons(preview);
   const targets = buildNav(preview);
   wireScrollspy(targets);
@@ -378,12 +368,12 @@ function runPostRender(container) {
   // await diagrams so the framed SVGs are populated when the stagger plays,
   // instead of animating empty <pre>s that then snap to SVG.
   // Reveal AFTER diagrams resolve so framed SVGs are populated when the stagger
-  // plays. The mermaid promise is a real async boundary, so a plain microtask
-  // (not requestAnimationFrame) is enough — and rAF can be starved when the tab
-  // isn't painting, which would leave the page permanently pre-reveal.
-  Promise.resolve(frameAndRunMermaid(preview)).finally(() => {
-    // mermaid may inject <i data-lucide> inside labels? no — but re-run icons in
-    // case any deferred content landed after the first pass. Cheap + idempotent.
+  // plays. frameAndRunDrawio resolves synchronously today (GraphViewer's
+  // render pass is synchronous), but it keeps the Promise contract so this
+  // await boundary still holds if that ever changes.
+  Promise.resolve(frameAndRunDrawio(preview)).finally(() => {
+    // re-run icons in case any deferred content landed after the first pass.
+    // Cheap + idempotent.
     renderIcons(preview);
     preview.classList.add("is-ready");
   });

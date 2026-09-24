@@ -1055,6 +1055,130 @@ check lint_fails_closed_on_mermaid_rejected_forms test_lint_fails_closed_on_merm
 check lint_reports_unknown_diagram_header_and_skips_frontmatter test_lint_reports_unknown_diagram_header_and_skips_frontmatter
 check lint_flags_text_swallowed_by_direction test_lint_flags_text_swallowed_by_direction
 
+# --- cherry-setup.js drawio render pipeline (Task 1: frameAndRunDrawio) ---
+# Needs Google Chrome (headless --dump-dom) — SKIPs visibly without it, same
+# convention as the verify.sh tests below (rc 2 = cannot run, never a pass).
+test_drawio_fence_detection_and_role_substitution() {
+  local chrome="" c
+  if [[ -n "${CHROME_BIN:-}" && -x "${CHROME_BIN:-}" ]]; then
+    chrome="$CHROME_BIN"
+  else
+    for c in google-chrome google-chrome-stable chromium chromium-browser; do
+      chrome="$(command -v "$c" 2>/dev/null)" && break
+    done
+    if [[ -z "$chrome" ]]; then
+      c="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      [[ -x "$c" ]] && chrome="$c"
+    fi
+  fi
+  if [[ -z "$chrome" ]]; then echo "SKIP: no Google Chrome found (set CHROME_BIN)"; return 2; fi
+
+  # Static HTML fixture: the real theme.css + cherry-setup.js (read-only
+  # copies, never the workspace lifecycle machinery) plus the pinned draw.io
+  # viewer CDN script, one <pre><code class="language-drawio"> block (exactly
+  # what Cherry-Markdown's core build emits for a ```drawio fence) with a
+  # role=accent; styled vertex, then a direct call to
+  # frameAndRunDrawio(document.getElementById('root')) — no Cherry-Markdown
+  # parsing in the loop, this isolates the render function itself.
+  local d=/tmp/ps-commu/t-drawio-role
+  mkdir -p "$d"
+  cp "$SKILL_DIR/assets/template-infographic/cherry-setup.js" "$d/cherry-setup.js"
+  cp "$SKILL_DIR/assets/template-infographic/theme.css" "$d/theme.css"
+
+  # Expected hex read from the REAL theme.css at test time (never hardcoded)
+  # so this test can't silently drift from F-011's own color rule.
+  local accent_hex
+  accent_hex="$(grep -oE -- '--accent:[[:space:]]*#[0-9a-fA-F]{6}' "$d/theme.css" | head -1 | grep -oE '#[0-9a-fA-F]{6}')"
+  [[ -n "$accent_hex" ]] || { echo "FAIL: could not read --accent from theme.css"; return 1; }
+
+  cat > "$d/fixture.html" <<'HTML'
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="./theme.css">
+<script src="https://cdn.jsdelivr.net/gh/jgraph/drawio@v31.5.2/src/main/webapp/js/viewer-static.min.js"></script>
+<script src="./cherry-setup.js"></script>
+</head>
+<body>
+<div id="root"><pre><code class="language-drawio">&lt;mxGraphModel dx="400" dy="200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="400" pageHeight="200" math="0" shadow="0"&gt;
+  &lt;root&gt;
+    &lt;mxCell id="0" /&gt;
+    &lt;mxCell id="1" parent="0" /&gt;
+    &lt;mxCell id="A" value="hi" style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1"&gt;
+      &lt;mxGeometry x="40" y="40" width="120" height="40" as="geometry" /&gt;
+    &lt;/mxCell&gt;
+  &lt;/root&gt;
+&lt;/mxGraphModel&gt;</code></pre></div>
+<script>
+  Promise.resolve(frameAndRunDrawio(document.getElementById('root'))).finally(function () {
+    document.title = 'drawio-fixture-done';
+  });
+</script>
+</body></html>
+HTML
+
+  python3 -m http.server 7699 --bind 127.0.0.1 --directory "$d" >/dev/null 2>&1 &
+  local httpd=$!
+  sleep 1
+
+  # Mirrors verify.sh's own Chrome --dump-dom harness: this Chrome build
+  # prints the DOM to stdout and then hangs on shutdown (does not exit on its
+  # own), so a plain `timeout` wrapper is not enough — it only signals the
+  # direct child, while helper/renderer processes still hold the stdout pipe
+  # open, so a shell redirect never sees EOF. Read non-blockingly until
+  # </html> appears, then SIGKILL the whole process group ourselves.
+  local dump
+  dump="$(python3 - "$chrome" "http://127.0.0.1:7699/fixture.html" <<'PY'
+import os, select, shutil, signal, subprocess, sys, tempfile, time
+chrome, url = sys.argv[1], sys.argv[2]
+prof = tempfile.mkdtemp(prefix="ps-commu-drawio-test-")
+proc = None
+out = b""
+try:
+    cmd = [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+           "--no-default-browser-check", "--disable-background-networking", "--disable-sync",
+           "--disable-component-update", "--disable-extensions", "--window-size=1280,900",
+           "--user-data-dir=" + prof, "--enable-logging=stderr", "--v=0",
+           "--virtual-time-budget=8000", "--run-all-compositor-stages-before-draw",
+           "--dump-dom", url]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    end = time.time() + 90
+    fds = [proc.stdout, proc.stderr]
+    while fds and time.time() < end and b"</html>" not in out:
+        r, _, _ = select.select(fds, [], [], 0.5)
+        for f in r:
+            chunk = os.read(f.fileno(), 65536)
+            if not chunk: fds.remove(f); continue
+            if f is proc.stdout: out += chunk
+finally:
+    if proc is not None and proc.poll() is None:
+        try: os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+    if proc is not None:
+        try: proc.wait(timeout=5)
+        except Exception: pass
+    shutil.rmtree(prof, ignore_errors=True)
+sys.stdout.write(out.decode("utf-8", "replace"))
+PY
+)"
+  kill "$httpd" 2>/dev/null
+
+  if [[ "$dump" != *"</html>"* ]]; then
+    echo "FAIL: Chrome produced no complete DOM within 30s"; return 1
+  fi
+  if [[ "$dump" != *"data-mxgraph"* ]]; then
+    echo "FAIL: no data-mxgraph div found — fence was not detected/converted"; return 1
+  fi
+  if [[ "$dump" == *"role=accent"* ]]; then
+    echo "FAIL: literal 'role=accent' token survived substitution"; return 1
+  fi
+  if [[ "$dump" != *"$accent_hex"* ]]; then
+    echo "FAIL: substituted xml does not contain the real --accent hex ($accent_hex)"; return 1
+  fi
+  return 0
+}
+
+check_or_skip drawio_fence_detection_and_role_substitution test_drawio_fence_detection_and_role_substitution
+
 # --- verify.sh (render gate; needs Google Chrome — SKIPs visibly without it) ---
 # A verify run is ~45s on macOS (Chrome start + CDN load + Mermaid render).
 verify_run() {           # args... → verify.sh output on stdout; rc 2 = cannot run (Chrome/server)
