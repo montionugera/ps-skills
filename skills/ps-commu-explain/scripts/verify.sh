@@ -41,16 +41,20 @@
 #        this assert runs at all) if either: no `.mxgraph` div rendered at
 #        all for >=1 ```drawio fence (same GraphViewer-never-loaded signal
 #        as assert 1's failure mode (a), checked here as its own named
-#        assertion); or no `.mxgraph` div shows the `margin-top` inline-style
-#        side effect that GraphViewer's addToolbar() sets unconditionally
-#        the instant a div's `toolbar` config key is honored — confirmed
-#        empirically (render the same diagram with and without
-#        `"toolbar":"zoom"` in data-mxgraph) to appear ONLY when the key is
-#        set. The zoom-in/out/fit BUTTONS themselves are NOT usable evidence
-#        here: confirmed empirically that GraphViewer only appends them to
-#        the DOM on a live `mouseenter` over the graph container, which a
-#        --dump-dom capture can never trigger — the same hover/click
-#        limitation that makes assert 5 a permanent SKIP.
+#        assertion); or FEWER than ALL rendered `.mxgraph` divs show the
+#        `margin-top` inline-style side effect that GraphViewer's
+#        addToolbar() sets unconditionally the instant a div's `toolbar`
+#        config key is honored — per-diagram, all-or-nothing, mirroring
+#        assert 1's own rule, so a PARTIAL regression (e.g. 1 of 3 diagrams
+#        losing pan/zoom) still FAILs instead of hiding behind "at least one
+#        worked". Confirmed empirically (render the same diagram with and
+#        without `"toolbar":"zoom"` in data-mxgraph) that `margin-top`
+#        appears ONLY when the key is set. The zoom-in/out/fit BUTTONS
+#        themselves are NOT usable evidence here: confirmed empirically that
+#        GraphViewer only appends them to the DOM on a live `mouseenter`
+#        over the graph container, which a --dump-dom capture can never
+#        trigger — the same hover/click limitation that makes assert 5 a
+#        permanent SKIP.
 #   --url  page URL to load (default: http://127.0.0.1:<port> from meta.json;
 #          requires a live marker-verified server). A ?doc=X query selects
 #          which app/X markdown file the fence count is taken from.
@@ -143,7 +147,28 @@ fi
 doc="$(python3 -c 'import sys,urllib.parse as u; q=u.parse_qs(u.urlparse(sys.argv[1]).query); print(q.get("doc",["content.md"])[0])' "$url")"
 md="$ws/app/$doc"
 [[ -f "$md" ]] || { echo "FAIL: doc not found: $md"; exit 1; }
-fences="$(grep -cE '^[[:space:]]*```[[:space:]]*drawio' "$md" || true)"
+# Fence detection MUST mirror cherry-setup.js's frameAndRunDrawio() (the
+# renderer) and lint.sh's own already-widened rule (lint.sh:464-485), not a
+# plain ```drawio grep: the renderer also content-sniffs ANY fenced block
+# (any language tag, or none) whose trimmed body starts with "<mxGraphModel"
+# (cherry-setup.js's DRAWIO_HEAD = /^<mxGraphModel\b/ -- deliberately NOT
+# <mxfile> or <?xml, see that file's own comment on why those two are
+# excluded). A plain ```drawio-only count would report fences=0 for a real,
+# live-rendered ```xml-fenced diagram -- a false FAIL on assert 1, and worse,
+# a vacuous PASS on assert 7's interactivity check if that were the doc's
+# only diagram. All three files (renderer, lint.sh, verify.sh) must agree on
+# what counts as a drawio diagram.
+fences="$(python3 -c '
+import re, sys
+content = open(sys.argv[1]).read()
+DRAWIO_HEAD_RE = re.compile(r"^<mxGraphModel\b")
+n = 0
+for m in re.finditer(r"```([^\n`]*)\n(.*?)```", content, re.S):
+    lang, body = m.group(1).strip(), m.group(2)
+    if lang == "drawio" or DRAWIO_HEAD_RE.match(body.strip()):
+        n += 1
+print(n)
+' "$md")"
 
 python3 - "$chrome" "$url" "$fences" "$dump_text" <<'PY'
 import os, re, select, shutil, signal, subprocess, sys, tempfile, time
@@ -300,9 +325,14 @@ if fences == 0:
 elif mxgraph_total == 0:
     report("FAIL", 7, f"GraphViewer global absent: zero .mxgraph divs rendered for {fences} "
            "```drawio fence(s) (CDN miss, or frameAndRunDrawio bailed before wrapping)")
-elif toolbar_init == 0:
-    report("FAIL", 7, "toolbar not initialized: no .mxgraph div shows the addToolbar() "
-           "margin-top side effect (pan/zoom toolbar did not take effect)")
+elif toolbar_init < mxgraph_total:
+    # Per-diagram, all-or-nothing — mirrors assert 1's own rule. `> 0` alone
+    # would PASS a partial regression (e.g. 1/3 diagrams initialized the
+    # toolbar, 2 silently didn't): the whole gate must not go green while
+    # any rendered diagram's pan/zoom is dead.
+    report("FAIL", 7, f"toolbar not initialized on {mxgraph_total - toolbar_init}/{mxgraph_total} "
+           "diagram(s): missing the addToolbar() margin-top side effect for at least one "
+           "(pan/zoom toolbar did not take effect)")
 else:
     report("PASS", 7, f"drawio interactivity: GraphViewer loaded, toolbar initialized on "
            f"{toolbar_init}/{mxgraph_total} diagram(s)")

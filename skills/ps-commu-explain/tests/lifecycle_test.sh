@@ -1922,6 +1922,88 @@ MD
   # assert numbers are independent, not redundant.
   grep -q '^PASS: 7 drawio interactivity: GraphViewer loaded, toolbar initialized on 1/1 diagram(s)' <<<"$out"
 }
+test_verify_counts_xml_fenced_drawio() {  # fix round 1, finding B: a ```xml fence whose body
+  # starts with <mxGraphModel> is content-sniffed and rendered by cherry-setup.js's
+  # frameAndRunDrawio() (DRAWIO_HEAD, the "pre code" broad candidate selector) exactly like
+  # lint.sh already mirrors (lint.sh:464-485) — verify.sh's fence-count must agree, not just
+  # count literal ```drawio fences, or a real live-rendered diagram gets a false FAIL on assert 1
+  # (fences=0 while a real .mxgraph div rendered) and a vacuous assert-7 PASS if it's the only one.
+  local port; port="$(meta_get t-verify port)"
+  cat > /tmp/ps-commu/t-verify/app/drawio-xml-fence.md <<'MD'
+A diagram authored inside a fence tagged xml instead of drawio.
+
+```xml
+<mxGraphModel dx="400" dy="200" grid="1" gridSize="10" guides="1" tooltips="1"
+    connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="400"
+    pageHeight="200" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="hi" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+      <mxGeometry x="40" y="40" width="120" height="40" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+MD
+  local out rc; out="$(verify_run t-verify --url "http://127.0.0.1:$port/?doc=drawio-xml-fence.md")"; rc=$?
+  echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 0 )) &&
+  grep -q '^PASS: 1 drawio svg=1 fences=1 (mxgraph-divs=1 empty-render=0 no-svg=0)' <<<"$out" &&
+  grep -q '^PASS: 7 drawio interactivity: GraphViewer loaded, toolbar initialized on 1/1 diagram(s)' <<<"$out" &&
+  ! grep -q '^FAIL' <<<"$out"
+}
+test_verify_fails_partial_toolbar() {  # fix round 1, finding A: >=1 rendered diagram losing the
+  # toolbar must FAIL the whole gate, not hide behind "at least one worked". Real content authoring
+  # cannot reach this state (cherry-setup.js hardcodes toolbar:"zoom" per fence uniformly — see
+  # task-3-report.md's self-flagged-concerns section), so this hand-crafts the exact DOM shape
+  # GraphViewer would leave behind if ONE of two diagrams' addToolbar() silently didn't run: two
+  # .mxgraph divs, both with a real rendered <rect> (so assert 1 stays clean), only the FIRST
+  # carrying the margin-top side effect. Served from a throwaway static file server (bypasses
+  # cherry-setup.js/GraphViewer entirely — this targets verify.sh's own threshold logic), while the
+  # fence COUNT still comes from a real t-verify workspace doc (verify.sh always resolves the
+  # markdown file from the workspace's own app/ dir via the slug, independent of --url's host).
+  local d=/tmp/ps-commu/t-verify-partial-toolbar
+  mkdir -p "$d"
+  cat > "$d/fixture.html" <<'HTML'
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<div class="cherry-previewer theme__explainer is-ready">
+<p>Two diagrams, one lost its toolbar.</p>
+<div class="mxgraph" style="margin-top: 26px;">
+<svg><g><g></g><g><g><rect x="0" y="0" width="10" height="10"></rect></g></g><g></g><g></g></g></svg>
+</div>
+<div class="mxgraph">
+<svg><g><g></g><g><g><rect x="0" y="0" width="10" height="10"></rect></g></g><g></g><g></g></g></svg>
+</div>
+</div>
+</body></html>
+HTML
+  cat > /tmp/ps-commu/t-verify/app/partial-toolbar.md <<'MD'
+Two diagrams (content unused — this file only feeds verify.sh's fence count).
+
+```drawio
+<mxGraphModel><root><mxCell id="0" /><mxCell id="1" parent="0" /></root></mxGraphModel>
+```
+
+```drawio
+<mxGraphModel><root><mxCell id="0" /><mxCell id="1" parent="0" /></root></mxGraphModel>
+```
+MD
+  python3 -m http.server 7698 --bind 127.0.0.1 --directory "$d" >/dev/null 2>&1 &
+  local httpd=$!
+  sleep 1
+  local out rc
+  out="$(verify_run t-verify --url "http://127.0.0.1:7698/fixture.html?doc=partial-toolbar.md")"; rc=$?
+  kill "$httpd" 2>/dev/null
+  echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) &&
+  grep -q '^PASS: 1 drawio svg=2 fences=2 (mxgraph-divs=2 empty-render=0 no-svg=0)' <<<"$out" &&
+  grep -q '^FAIL: 7 toolbar not initialized on 1/2 diagram(s)' <<<"$out"
+}
 test_verify_help() { "$S/verify.sh" --help | grep -q 'Usage: verify.sh' && ! "$S/verify.sh" >/dev/null 2>&1; }
 
 check_or_skip verify_passes_template           test_verify_passes_template
@@ -1929,6 +2011,8 @@ check_or_skip verify_dump_text                 test_verify_dump_text
 check_or_skip verify_fails_on_leak             test_verify_fails_on_leak
 check_or_skip verify_passes_drawio_template    test_verify_passes_drawio_template
 check_or_skip verify_fails_drawio_empty_render test_verify_fails_drawio_empty_render
+check_or_skip verify_counts_xml_fenced_drawio  test_verify_counts_xml_fenced_drawio
+check_or_skip verify_fails_partial_toolbar     test_verify_fails_partial_toolbar
 check verify_help                              test_verify_help
 "$S/stop.sh" t-verify >/dev/null 2>&1
 
