@@ -1,5 +1,5 @@
 ---
-title: "Add pan/zoom to ps-commu-explain Mermaid diagrams"
+title: "Replace Mermaid with draw.io in ps-commu-explain"
 id: F-013
 status: refined
 from_idea: I-012
