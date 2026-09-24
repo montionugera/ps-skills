@@ -21,6 +21,8 @@ import sys
 from pathlib import Path
 
 from lib.backlog_paths import read_release_state, release_worktree_path
+from lib.git_ops import GitError
+from lib.main_sync import cached_main_ref, missing_main_commits
 from lib.owner import self_ids
 from lib.repo import RepoNotFoundError, find_repo_root, is_ps_release_workflow_repo
 from lib.state import read_state
@@ -230,6 +232,18 @@ def collect_status(repo: Path) -> dict:
 
     epic_rollup = _epic_rollup(epics, ideas, features)
 
+    # A hotfix merged to main but not yet in release/<v>: count it against the
+    # CACHED main ref only — status is read-only and must never hit the network.
+    behind_main, main_ref = 0, None
+    rel_wt = release_worktree_path(repo)
+    if in_progress and rel_wt.is_dir():
+        main_ref = cached_main_ref(repo)
+        if main_ref:
+            try:
+                behind_main = len(missing_main_commits(rel_wt, main_ref))
+            except GitError:
+                behind_main = 0
+
     return {
         "opted_in": True,
         "repo": str(repo),
@@ -240,6 +254,8 @@ def collect_status(repo: Path) -> dict:
             "started_by": (state or {}).get("started_by"),
             "last_promoted_version": last_promoted_version,
             "last_promoted_at": last_promoted_at,
+            "behind_main": behind_main,
+            "main_ref": main_ref,
         },
         "features": enriched,
         "counts": counts,
@@ -267,6 +283,9 @@ def _release_line(st: dict) -> str:
         if rel.get("started_by"):
             line += f" by {rel['started_by']}"
         line += ")"
+        if rel.get("behind_main"):
+            line += (f" — {rel['behind_main']} behind {rel.get('main_ref') or 'main'} "
+                     f"(hotfix pending sync; run psrw sync-main)")
     else:
         line = "no release in progress"
     if rel.get("last_promoted_version"):

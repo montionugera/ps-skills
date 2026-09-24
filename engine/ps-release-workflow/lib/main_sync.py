@@ -43,6 +43,15 @@ def resolve_main_ref(repo: Path) -> str:
     return "main"
 
 
+def cached_main_ref(repo: Path) -> str | None:
+    """origin/main if it is known locally, else main, else None. Never fetches —
+    for read-only callers (status) that must stay offline."""
+    for ref in ("origin/main", "main"):
+        if git_run(Path(repo), "rev-parse", "--verify", "-q", ref, check=False).returncode == 0:
+            return ref
+    return None
+
+
 def missing_main_commits(tree: Path, main_ref: str) -> list[str]:
     """Commits on main_ref that the tree's HEAD lacks (empty = up to date)."""
     return git_run(tree, "rev-list", f"HEAD..{main_ref}").stdout.split()
