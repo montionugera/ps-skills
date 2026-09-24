@@ -41,6 +41,11 @@
   <!-- draw.io static viewer (pinned v31.5.2, resolved from the jgraph/drawio
        repo's actual latest tagged release via jsdelivr's `gh` CDN mode — NOT
        @latest/main) + cherry engine, then our setup.
+       CAVEAT (carried from Task 0's spike, not fixed here — no simpler
+       alternative found): this pinned script itself unconditionally runs
+       Editor.initMath() at load, which fetches additional UNPINNED
+       viewer.diagrams.net JS at runtime (math typesetting support). The
+       primary viewer script is pinned; this secondary runtime fetch is not.
        NOTE: we load the *core* build, NOT cherry-markdown.min.js. The full
        (.min.js) build auto-registers its own mermaid addon with a hardcoded
        light `theme:"default"` that cannot be overridden and that would consume

@@ -1163,7 +1163,10 @@ PY
   kill "$httpd" 2>/dev/null
 
   if [[ "$dump" != *"</html>"* ]]; then
-    echo "FAIL: Chrome produced no complete DOM within 30s"; return 1
+    echo "FAIL: Chrome produced no complete DOM within 90s"; return 1
+  fi
+  if [[ "$dump" != *"drawio-fixture-done"* ]]; then
+    echo "FAIL: page never reached document.title='drawio-fixture-done' — frameAndRunDrawio threw or never resolved"; return 1
   fi
   if [[ "$dump" != *"data-mxgraph"* ]]; then
     echo "FAIL: no data-mxgraph div found — fence was not detected/converted"; return 1
@@ -1173,6 +1176,18 @@ PY
   fi
   if [[ "$dump" != *"$accent_hex"* ]]; then
     echo "FAIL: substituted xml does not contain the real --accent hex ($accent_hex)"; return 1
+  fi
+  # The four checks above all pass on the data-mxgraph ATTRIBUTE alone, which
+  # frameAndRunDrawio builds BEFORE calling GraphViewer.processElements() —
+  # they'd stay green even if that call were silently removed. Assert the
+  # diagram actually got RENDERED (an <svg> exists with the real stroke
+  # color), so a regression that breaks the processElements() trigger itself
+  # is caught here, not just the substitution logic upstream of it.
+  if [[ "$dump" != *"<svg"* ]]; then
+    echo "FAIL: no <svg> in the dump — GraphViewer never rendered the div (processElements() not called, or failed)"; return 1
+  fi
+  if [[ "$dump" != *"stroke=\"$accent_hex\""* ]]; then
+    echo "FAIL: rendered <svg> has no stroke=\"$accent_hex\" — GraphViewer rendered, but not with the substituted color"; return 1
   fi
   return 0
 }

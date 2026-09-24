@@ -49,21 +49,37 @@ function readRoleColors() {
   };
 }
 
-/* ---- substitute role=<kind> tokens inside style="..." attributes ----------
+/* ---- substitute role=<kind> tokens inside style="..."/'...' attributes ----
    mxGraph has no `role` style key, so it's inert until we turn it into a real
    `strokeColor=#hex` — the same border-only recoloring Mermaid's
    primaryBorderColor/actorBorder/noteBorderColor all used for --accent above,
    now generalized to draw.io's plain-text style syntax. Works uniformly on
-   both vertex and edge styles (edges have no fillColor concept). */
+   both vertex and edge styles (edges have no fillColor concept). The
+   attribute regex accepts EITHER quote character (XML permits both, and
+   hand-authored XML is exactly where a single-quoted style="'..'" shows up)
+   via a backreference so the same quote closes what it opened. A console.warn
+   fires if a role= token survives — a typo, an unsupported quote/compression
+   shape, or a missing CSS var all fail SILENTLY otherwise (mxGraph just
+   ignores the unknown key), which is exactly the kind of silent-pass bug the
+   plan's Global Constraints call out as the thing to never repeat. */
 const ROLE_TOKEN = /\brole=(accent|pitfall|check)\b;?/g;
 function substituteRoleTokens(xml, colors) {
-  return xml.replace(/style="([^"]*)"/g, (whole, body) => {
-    const substituted = body.replace(ROLE_TOKEN, (token, kind) => {
+  const substituted = xml.replace(/style=(["'])([^"']*)\1/g, (whole, quote, body) => {
+    const swapped = body.replace(ROLE_TOKEN, (token, kind) => {
       const hex = colors[kind];
       return hex ? `strokeColor=${hex};` : "";
     });
-    return `style="${substituted}"`;
+    return `style=${quote}${swapped}${quote}`;
   });
+  // A fresh non-global regex literal here (not the shared, stateful ROLE_TOKEN
+  // above) so this check never depends on ROLE_TOKEN's lastIndex bookkeeping.
+  if (/\brole=(accent|pitfall|check)\b/.test(substituted)) {
+    console.warn(
+      "[explainer-kit] a role= token survived substitution (typo, single/double-quote mismatch, or compressed <mxfile> export?):",
+      substituted
+    );
+  }
+  return substituted;
 }
 
 /* ---- Lucide icon names per callout kind (rendered into a colored chip) ---- */
@@ -84,8 +100,19 @@ function resolveCherry() {
 }
 
 /* ---- drawio source detection (content-sniff fallback for fences a future
-   Cherry build might not tag with a language-drawio class) ------------------ */
-const DRAWIO_HEAD = /^(<\?xml\b|<mxfile\b|<mxGraphModel\b)/;
+   Cherry build might not tag with a language-drawio class) ------------------
+   Deliberately narrow: ONLY the bare <mxGraphModel> root the spec's authoring
+   convention actually asks for (plain, uncompressed mxGraph XML — see Task
+   0's verified exemplar). Earlier drafts also matched a leading <?xml
+   declaration and <mxfile>, but both are real false-positive/silent-failure
+   traps in a skill whose whole job is showing worked examples: a generic
+   ```xml sample starting "<?xml ...?>" would get hijacked and handed to
+   GraphViewer (which writes its parse error into the frame), and draw.io's
+   own compressed <mxfile> app-export format has no <style="..."> for
+   substituteRoleTokens to find — role colors would silently vanish with no
+   diagnostic. Neither shape is part of the supported authoring format, so
+   neither is detected. */
+const DRAWIO_HEAD = /^<mxGraphModel\b/;
 
 /* ---- custom syntax hook: ::: callout <kind> ... :::  ----------------------
    Authors write:
@@ -187,7 +214,7 @@ function frameAndRunDrawio(rootEl) {
     } else if (node.parentNode) {
       node.parentNode.replaceChild(frame, node);
     }
-    targets.push({ frame });
+    targets.push(frame);
   });
 
   if (!targets.length) return Promise.resolve();
@@ -210,7 +237,7 @@ function frameAndRunDrawio(rootEl) {
 
   // fade each freshly-populated frame in so diagrams never pop in dead, even
   // though they land after the initial staggered reveal.
-  targets.forEach(({ frame }) => frame.classList.remove("is-pending"));
+  targets.forEach((frame) => frame.classList.remove("is-pending"));
   return Promise.resolve();
 }
 
