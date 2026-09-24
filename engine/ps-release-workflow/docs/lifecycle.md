@@ -176,7 +176,7 @@ clean up.
     _catalog.json                     # E-NNN registry (committed on release/<v>)
     E-NNN-<slug>/spec.md verification.md
     _archive/<v>/                     # epics archived by cleanup
-  state/claims.json                   # gitignored — F-NNN -> owner map
+  state/claims.json                   # gitignored — F-NNN -> owner (+ session_id) map
   worktrees/                          # gitignored
     _release/                         # long-lived, on release/<v>
     F-NNN-<slug>/                     # claimed feature worktree (owner marker)
@@ -221,6 +221,11 @@ It does **not** provide per-session isolation between two Claude sessions on the
 machine: claims are created with a machine-cached fallback id, so local sessions
 normally resolve to the same owner. The ownership check protects against
 cross-machine claims and hand-edited markers, not against two local sessions.
+To narrow that gap, `claim` (and `claim --resume`) also records the harness session id
+(`$CLAUDE_CODE_SESSION_ID`, else `$CLAUDE_SESSION_ID`) as `session_id` in
+`claims.json` and the marker. `unclaim` warns when that id differs from the current
+session's, and refuses a worktree with uncommitted or untracked changes — listing
+each path — unless `--force` is given.
 
 The guard is a read path: it never generates or persists an identity as a side effect.
 It bypasses entirely when `PS_RELEASE_WORKFLOW_SCRIPTED=1`, warns but allows on a
