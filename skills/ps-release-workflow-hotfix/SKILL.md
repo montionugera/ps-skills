@@ -36,16 +36,16 @@ main checkout and carries no claim marker, so edits are allowed.
 4. Run the repo's verification with **visible exit codes**.
 5. Commit — a **new commit**, never `git commit --amend`.
 6. Push, open a PR to `main`, babysit CI, squash-merge.
-7. **If a release is in progress: `psrw hotfix --sync-release`** — merges `main` into
-   `release/<v>` so no deploy or promote runs without the hotfix (a conflict refuses
-   with the exact `git merge` command). Then re-deploy locally if you deploy.
-8. `git worktree remove <path>` and delete the remote branch.
+7. `git worktree remove <path>` and delete the remote branch.
+8. If a release is in progress, the hotfix reaches `release/<v>` automatically at the
+   next `psrw ship` / `psrw promote`. To absorb it now (e.g. to redeploy locally):
+   `psrw sync-main --deploy`.
 
 Saying "babysit + merge" authorizes steps 6-8 without re-asking.
 
 ## Refuses if
 
-The sibling directory already exists. `--sync-release`: the merge conflicts (exact
-command printed), or the release is frozen for promote (re-run promote instead).
+The sibling directory already exists. (`--sync-release` is an alias for
+`psrw sync-main`; see that skill.)
 
 Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#guard-guarantees`
