@@ -223,7 +223,7 @@ If a straight edge's label text is wider than the gap between the two nodes it c
 <mxCell id="B" vertex="1" style="fillColor=#ff0000;html=1;">           ← raw hex color: use role=accent/pitfall/check instead
 ```
 
-`lint.sh` reports both independently: an edge cell with no label, and a raw hex `fillColor` where a `role=` token belongs (raw hex bypasses the theme substitution cherry-setup.js performs at render time, so it silently diverges from the page's cream/accent palette). The fix is the same move as the GOOD example above: name what's on the wire, and use the reserved role tokens instead of hardcoded colors.
+`lint.sh` reports both independently: an edge cell with no label, and a raw hex `fillColor` where a `role=` token belongs (see the labeled-edge rule above for why). The fix is the same move as the GOOD example above: name what's on the wire, and use the reserved role tokens instead of hardcoded colors.
 
 A monospace **schematic** block for file trees (whitespace preserved):
 
