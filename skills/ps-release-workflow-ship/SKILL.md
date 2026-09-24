@@ -34,7 +34,8 @@ Clean tree, run from inside the claimed feature worktree.
 Runs the repo's own local deploy script against `release/<v>`, so the local env
 reflects the integrated release: `scripts/deploy-local.sh`, or whatever
 `hooks.deploy_local` in `.release.json` points at (an unusable value refuses the
-deploy loudly and leaves the merge standing). That script is
+deploy loudly and leaves the merge standing). With no script at all, ship prints
+`no local deploy configured` instead of skipping silently. That script is
 responsible for refusing any non-local kubectl context, so ship can never touch prod.
 Prod stays untouched until `psrw promote`, whose `--deploy` runs against the `_release`
 worktree — the release tree, not `main` — because the local DB may already be migrated

@@ -612,3 +612,41 @@ def test_second_ship_does_not_run_a_second_check(tmp_repo_with_release: Path, fi
     assert marker.read_text().count("\n") == 1, "epic-check.sh must not have run again"
     epic_cat = json.loads((rel_wt / ".claude" / "epic_backlog" / "_catalog.json").read_text())
     assert next(e for e in epic_cat if e["id"] == epic_id)["status"] == "verified"
+
+
+# ── Silent deploy skip: a missing deploy script must be announced ──────────────
+
+
+def _ship_main(repo: Path, fixed_owner: str, monkeypatch, *flags: str) -> int:
+    import sys as _sys
+    import scripts.ship_current_work_to_release as ship_mod
+    feat, claim = _make_repo_with_open_release_and_claim(repo, fixed_owner)
+    wt = Path(claim["worktree"])
+    _commit_feature_file(wt)
+    monkeypatch.chdir(wt)
+    monkeypatch.setattr(_sys, "argv", ["ship_current_work_to_release.py", *flags])
+    return ship_mod.main()
+
+
+def test_ship_main_announces_when_no_local_deploy_is_configured(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, capsys
+):
+    """No scripts/deploy-local.sh and no hooks.deploy_local: ship used to print
+    NOTHING about the deploy, so a stale local cluster went unnoticed."""
+    assert _ship_main(tmp_repo_with_release, fixed_owner, monkeypatch) == 0
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "no local deploy configured" in text
+    assert "scripts/deploy-local.sh" in text and "hooks.deploy_local" in text
+
+
+def test_ship_main_no_deploy_flag_is_not_reported_as_unconfigured(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, capsys
+):
+    """--no-deploy is an explicit choice: it must not print the 'not configured'
+    notice (the two reasons for skipping stay distinguishable)."""
+    assert _ship_main(tmp_repo_with_release, fixed_owner, monkeypatch, "--no-deploy") == 0
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "no local deploy configured" not in text
+    assert "--no-deploy" in text

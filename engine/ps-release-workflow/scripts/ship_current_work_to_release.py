@@ -276,18 +276,27 @@ def main() -> int:
         )
         print(f"\n   Continue with next feature, or promote: psrw promote")
         return 0
-    if deploy_script.exists():
+    if args.no_deploy:
+        # An explicit choice — reported as such, never as "not configured".
+        hint = (f" Run it manually when ready: cd {rel_wt} && {deploy_script}"
+                if deploy_script.exists() else "")
+        print(f"\n⏭️  Local deploy skipped (--no-deploy).{hint}")
+    elif not deploy_script.exists():
+        # Never skip silently: a repo without a deploy script otherwise leaves
+        # the local cluster on stale code with no hint that nothing deployed.
+        print(f"\nℹ️  Local deploy skipped: no local deploy configured: add "
+              f"scripts/deploy-local.sh or hooks.deploy_local "
+              f"(looked for {deploy_script}).")
+    else:
         # Deploy-local is a DEFAULT step of ship (treat merge-to-release like an
-        # MR merge that triggers a staging deploy). Precedence UNCHANGED:
-        #   --no-deploy      -> skip (concurrent-session burst; batch the deploy)
+        # MR merge that triggers a staging deploy). Precedence (--no-deploy is
+        # handled above, before the existence check):
         #   --deploy         -> force deploy
         #   interactive tty  -> prompt (Enter = yes)
         #   non-interactive  -> deploy by default
         # deploy-local.sh itself refuses any non-local kubectl context, so this
         # can never touch prod even when it runs unattended.
-        if args.no_deploy:                      # was: "--no-deploy" in sys.argv
-            deploy_now = False
-        elif args.deploy:                       # was: "--deploy" in sys.argv
+        if args.deploy:                         # was: "--deploy" in sys.argv
             deploy_now = True
         elif sys.stdin.isatty():
             deploy_now = False

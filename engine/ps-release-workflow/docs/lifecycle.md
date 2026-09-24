@@ -34,7 +34,11 @@ proceeds UNVERIFIED, for repos that never had one.
 
 `--deploy` (local prod-style deploy) is opt-in and repo-specific. It runs from the
 `_release` worktree, because the shared local DB may already be migrated ahead of
-`main` by the release's own migrations.
+`main` by the release's own migrations. `ship`'s post-merge deploy never
+skips silently: with no deploy script at `hooks.deploy_local` (default
+`scripts/deploy-local.sh`) it prints `no local deploy configured: add
+scripts/deploy-local.sh or hooks.deploy_local`, a notice distinct from the
+`--no-deploy` one.
 
 ### Epic gates: G-E2 and G-E3
 
