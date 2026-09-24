@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from lib.backlog_paths import read_release_state, release_worktree_path
+from lib.git_ops import has_origin, rev_count, rev_parse
 from lib.owner import self_ids
 from lib.repo import RepoNotFoundError, find_repo_root, is_ps_release_workflow_repo
 from lib.state import read_state
@@ -230,6 +231,26 @@ def collect_status(repo: Path) -> dict:
 
     epic_rollup = _epic_rollup(epics, ideas, features)
 
+    # Check cached behind count vs origin/main without network fetch
+    behind_main = 0
+    main_ref = None
+    if in_progress:
+        rel_wt = release_worktree_path(repo)
+        if rel_wt.is_dir():
+            candidate = "origin/main" if has_origin(repo) else "main"
+            try:
+                rev_parse(repo, candidate)
+                main_ref = candidate
+            except Exception:
+                if candidate == "origin/main":
+                    try:
+                        rev_parse(repo, "main")
+                        main_ref = "main"
+                    except Exception:
+                        pass
+            if main_ref:
+                behind_main = rev_count(rel_wt, f"HEAD..{main_ref}")
+
     return {
         "opted_in": True,
         "repo": str(repo),
@@ -240,6 +261,8 @@ def collect_status(repo: Path) -> dict:
             "started_by": (state or {}).get("started_by"),
             "last_promoted_version": last_promoted_version,
             "last_promoted_at": last_promoted_at,
+            "behind_main": behind_main,
+            "main_ref": main_ref,
         },
         "features": enriched,
         "counts": counts,
@@ -267,6 +290,9 @@ def _release_line(st: dict) -> str:
         if rel.get("started_by"):
             line += f" by {rel['started_by']}"
         line += ")"
+        if rel.get("behind_main", 0) > 0:
+            ref_name = rel.get("main_ref") or "origin/main"
+            line += f" — {rel['behind_main']} behind {ref_name} (hotfix pending sync)"
     else:
         line = "no release in progress"
     if rel.get("last_promoted_version"):

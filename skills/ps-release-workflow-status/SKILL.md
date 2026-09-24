@@ -20,7 +20,8 @@ One-screen "what's in flight" report for the current repo. Read-only, safe anyti
 ## What it reports
 
 1. Release line from the `_release` worktree's `.release.json` (version, in_progress,
-   started, last promoted).
+   started, last promoted), including cached sync drift vs `origin/main`
+   (e.g., `N behind origin/main (hotfix pending sync)`).
 2. Features table — refined catalog joined with `claims.json` and the real
    `git worktree list`, flagging drift (e.g. claimed but worktree missing).
 3. Idea counts (total / unpromoted) and promoted-but-uncleaned leftovers.

@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from lib.backlog_paths import read_release_state
 from lib.git_ops import add_worktree_new_branch
 from lib.repo import find_repo_root
 from lib.slug import slugify
@@ -66,6 +67,13 @@ def main() -> int:
     print("     5. commit — a NEW commit, never `git commit --amend`")
     print("     6. push, open a PR to main, babysit CI, squash-merge")
     print(f"     7. clean up: git worktree remove {wt}")
+    state = read_release_state(repo)
+    if state and state.get("version"):
+        v = state["version"]
+        print(
+            f"     8. release/{v} is in progress — the hotfix reaches it automatically "
+            f"at the next psrw ship / psrw promote. To absorb it now: psrw sync-main"
+        )
     return 0
 
 

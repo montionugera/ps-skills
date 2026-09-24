@@ -403,3 +403,19 @@ def test_unpromoted_slice_stays_idea_with_no_warning(
     st = collect_status(tmp_repo_with_release)
     assert [s["status"] for s in st["epics"][0]["slices"]] == ["idea", "idea"]
     assert st["warnings"] == []
+
+
+def test_status_reports_behind_origin_main_when_hotfix_pending(tmp_repo_in_release: Path):
+    # Commit a hotfix to main and push to origin
+    hotfix_file = tmp_repo_in_release / "hotfix.txt"
+    hotfix_file.write_text("critical patch")
+    subprocess.run(["git", "add", "hotfix.txt"], cwd=tmp_repo_in_release, check=True)
+    subprocess.run(["git", "commit", "-m", "fix: critical hotfix on main"], cwd=tmp_repo_in_release, check=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=tmp_repo_in_release, check=True)
+
+    st = collect_status(tmp_repo_in_release)
+    assert st["release"]["behind_main"] == 1
+    assert st["release"]["main_ref"] == "origin/main"
+    assert "1 behind origin/main (hotfix pending sync)" in render_brief(st)
+    assert "1 behind origin/main (hotfix pending sync)" in render_full(st)
+
