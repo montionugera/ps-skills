@@ -260,7 +260,7 @@ if content is not None:
 
         seen_ids = set()
         has_root0 = has_root1 = False
-        vertex_ids = []
+        vertex_count = 0
         geom_by_id = {}    # cid -> (x, y, w, h), OWN (parent-relative) geometry
         parent_by_id = {}  # cid -> parent id, vertices only
 
@@ -315,7 +315,7 @@ if content is not None:
                 continue
 
             # vertex
-            vertex_ids.append(cid)
+            vertex_count += 1
             geom = cell.find('mxGeometry')
             if geom is None:
                 report(f"vertex '{cid}' has no <mxGeometry> child")
@@ -356,8 +356,8 @@ if content is not None:
         if not has_root1:
             report('is missing the required root mxCell id="1" parent="0"')
 
-        if len(vertex_ids) > DRAWIO_MAX_VERTICES:
-            report(f"has {len(vertex_ids)} vertex cells (max {DRAWIO_MAX_VERTICES})")
+        if vertex_count > DRAWIO_MAX_VERTICES:
+            report(f"has {vertex_count} vertex cells (max {DRAWIO_MAX_VERTICES})")
 
         # mxGraph child geometry is PARENT-RELATIVE, not absolute: a vertex
         # whose parent is not the default layer ("1") has x/y measured from
