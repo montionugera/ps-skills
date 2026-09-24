@@ -146,7 +146,7 @@ def test_ship_main_refuses_to_deploy_a_release_that_is_behind_main(
     assert ship_mod.main() == 0, "the merge landed; only the deploy is refused"
     assert not marker.exists(), "deployed a release that is missing a commit on main"
     err = capsys.readouterr().err
-    assert "behind main" in err and "psrw hotfix --sync-release" in err
+    assert "behind main" in err and "psrw sync-main" in err
 
 
 def test_promote_syncs_main_before_gate2_and_push(tmp_repo_with_release: Path, fixed_owner: str):
@@ -165,20 +165,6 @@ def test_promote_syncs_main_before_gate2_and_push(tmp_repo_with_release: Path, f
     promote_release(repo, run_gate2=False, run_deploy=False, gh_runner=Gh())
     origin = repo.parent / "origin.git"
     assert git(origin, "show", "release/1.1:hotfix.txt") == "urgent"
-
-
-def test_hotfix_sync_release_merges_main_into_the_open_release(
-    tmp_repo_with_release: Path, fixed_owner: str
-):
-    from scripts.hotfix import sync_release
-    repo = tmp_repo_with_release
-    new_release(repo, version="1.1")
-    _land_on_origin_main(repo, "hotfix.txt", "urgent\n")
-
-    result = sync_release(repo)
-    assert result["synced"] == 1
-    assert (_rel_wt(repo) / "hotfix.txt").exists()
-    assert sync_release(repo)["synced"] == 0, "second run must be a no-op"
 
 
 def test_sync_refuses_when_main_touched_release_bookkeeping(tmp_repo_with_release: Path):
@@ -206,19 +192,3 @@ def test_bookkeeping_refusal_offers_a_merge_that_keeps_the_release_copy(tmp_repo
         with pytest.raises(MainSyncConflictError) as ei:
             sync_main_into_release(repo, rel, "release/1.1")
     assert "git checkout HEAD -- .release.json" in str(ei.value)
-
-
-def test_hotfix_sync_release_refuses_while_the_release_is_being_promoted(
-    tmp_repo_with_release: Path,
-):
-    """promote runs Gate 2 and the push outside the _release lock; a sync under
-    it would ship a tree Gate 2 never verified."""
-    from lib.release_freeze import freeze_release
-    from scripts.hotfix import sync_release
-    repo = tmp_repo_with_release
-    new_release(repo, version="1.1")
-    freeze_release(repo, "1.1")
-    _land_on_origin_main(repo, "hotfix.txt", "urgent\n")
-    with pytest.raises(MainSyncConflictError, match="being promoted"):
-        sync_release(repo)
-    assert not (_rel_wt(repo) / "hotfix.txt").exists()

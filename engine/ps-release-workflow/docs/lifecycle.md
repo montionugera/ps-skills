@@ -52,8 +52,12 @@ when an origin exists) into `release/<v>` in the `_release` worktree, under its 
   feature. Any failure resets to the pre-ship head, undoing sync and merge together.
   Its post-merge deploy re-checks and **refuses** a release still behind `main`.
 - **`promote`** syncs first, before the epic gate, `--deploy` and Gate 2.
-- **`psrw hotfix --sync-release`** is the last step of the hotfix flow, once the PR merged.
-  It refuses while the release is frozen for promote, which syncs `main` itself.
+- **`psrw sync-main`** (alias `psrw hotfix --sync-release`) syncs on demand, e.g. as the
+  last step of the hotfix flow, then runs Gate 1 from `_release` on the synced tree and
+  rolls the sync back if it fails. `--deploy` then runs the local deploy. It refuses while
+  the release is frozen for promote, which syncs `main` itself.
+- **`psrw status`** shows `N behind origin/main (hotfix pending sync; run psrw sync-main)`
+  against the cached ref, without fetching.
 
 A conflict aborts the merge, leaves `release/<v>` untouched and prints the exact
 `cd <_release> && git merge origin/main` to run. So does a `main` change to release

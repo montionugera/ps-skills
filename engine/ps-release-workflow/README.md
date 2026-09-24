@@ -23,7 +23,7 @@ init            # once per repo — opt in
 ```
 
 `psrw` mirrors these steps as verbs: `psrw init`, `new-release`, `idea`, `refine`, `claim`,
-`ship`, `promote`, `unclaim`, `status`, `hotfix`. The guard fires automatically on Claude's
+`ship`, `promote`, `unclaim`, `status`, `hotfix`, `sync-main`. The guard fires automatically on Claude's
 own edit tools; see [`docs/lifecycle.md#guard-guarantees`](docs/lifecycle.md#guard-guarantees).
 
 ## Scripts
@@ -39,7 +39,8 @@ own edit tools; see [`docs/lifecycle.md#guard-guarantees`](docs/lifecycle.md#gua
 | `promote_release.py` (`psrw promote`) | Run Gate 2 (`integration.sh`), push `release/<v>`, open a PR to `main` (default) or squash-merge locally (`--direct`). After the PR merges, `--cleanup-only <v>` archives + prunes. See *Promote lifecycle* below. |
 | `unclaim.py` (`psrw unclaim`) | Abandon a claim, keeping the feature branch. |
 | `status.py` (`psrw status`) | One-screen report of what is in flight. |
-| `hotfix.py` (`psrw hotfix`) | Create a sibling hotfix worktree; `--sync-release` merges `main` into the open `release/<v>` once the hotfix PR merged. |
+| `hotfix.py` (`psrw hotfix`) | Create a sibling hotfix worktree (`--sync-release` is an alias for `psrw sync-main`). |
+| `sync_main.py` (`psrw sync-main`) | Merge `main` (hotfixes) into the open `release/<v>`, verify with Gate 1, roll back on failure; `--deploy` redeploys locally. |
 | `cleanup_legacy_worktrees.py` | Interactive GC of marker-less ("legacy") worktrees, showing merged-to-main status. **Deferred** — garbage collection has no `psrw` verb yet (later spec); invoke directly with `python3 scripts/cleanup_legacy_worktrees.py`. |
 | `guard_check.py` | PreToolUse hook: blocks edits on `main` of an opted-in repo, or in a worktree owned by another session. See *Guard guarantees* in `docs/lifecycle.md`. |
 

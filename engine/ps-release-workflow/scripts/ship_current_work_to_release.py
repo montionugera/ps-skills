@@ -322,9 +322,8 @@ def main() -> int:
         print(
             f"\n❌ Post-merge local deploy REFUSED — release/{result['release']} is "
             f"{len(behind)} commit(s) behind main (a hotfix landed after this ship's "
-            f"sync).\n   The merge SUCCEEDED; only the deploy was skipped. Sync first: "
-            f"psrw hotfix --sync-release"
-            + (f" && cd {rel_wt} && {deploy_script}" if deploy_script.exists() else ""),
+            f"sync).\n   The merge SUCCEEDED; only the deploy was skipped. Sync and "
+            f"deploy: psrw sync-main --deploy",
             file=sys.stderr,
         )
     elif args.no_deploy:
