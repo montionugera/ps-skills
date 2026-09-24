@@ -20,10 +20,14 @@ from lib.epic import (
 )
 from lib.epic_gate import run_and_record
 from lib.git_ops import (
-    GitError, _run as git_run, commit_all, is_dirty,
+    GitError, _run as git_run, commit_all, is_ancestor, is_dirty,
     delete_branch_local, delete_branch_remote, push, remove_worktree,
 )
 from lib.hooks import resolve_hook
+from lib.main_sync import (
+    MainSyncConflictError, MainUnreachableError, ProtectedPathSyncError,
+    resolve_main_sha, sync_main_into_release,
+)
 from lib.owner import resolve_owner_id
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
 from lib.state import file_lock, mutate_state
@@ -452,6 +456,7 @@ def promote_release(
     use_pr: bool = True,
     allow_missing_gate2: bool = False,
     allow_split_epic: bool = False,
+    allow_stale_main: bool = False,
     babysit: bool = False,
     gh_runner=subprocess.run,
 ) -> dict:
@@ -475,6 +480,33 @@ def promote_release(
     version = state["version"]
     release_branch = f"release/{version}"
     rel_wt = repo / ".claude" / "worktrees" / "_release"
+
+    main_sync_result = None
+    if not allow_stale_main:
+        try:
+            main_sha, source = resolve_main_sha(repo, strict=use_pr)
+        except Exception as e:
+            raise Gate2FailedError(f"Main sync failed before promote: {e}")
+
+        with file_lock(rel_wt):
+            pre_sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
+            try:
+                sync_res = sync_main_into_release(repo, rel_wt, release_branch, main_sha, source)
+            except (MainSyncConflictError, ProtectedPathSyncError) as e:
+                raise Gate2FailedError(
+                    f"promote refused — release/{version} cannot absorb {source}@{main_sha[:12]}: {e}"
+                )
+            if sync_res.synced:
+                main_sync_result = sync_res
+                # Re-verify Gate 1 on the release branch after absorbing main
+                precheck = resolve_hook(rel_wt, "precheck")
+                if precheck.exists():
+                    rc = subprocess.run([str(precheck)], cwd=rel_wt).returncode
+                    if rc != 0:
+                        git_run(rel_wt, "reset", "--hard", pre_sha)
+                        raise Gate2FailedError(
+                            f"Gate 1 failed after absorbing {source}@{main_sha[:12]} — rolled back to {pre_sha[:12]}"
+                        )
 
     # G-E3: the completeness-and-freshness epic gate, before any other gate —
     # a release must not reach Gate 2 (let alone main) carrying an epic that
@@ -536,11 +568,15 @@ def promote_release(
             if gate2_ran else
             "- ⚠️ Gate 2 did NOT run at promote (skipped or `integration.sh` missing) — UNVERIFIED."
         )
+        sync_line = ""
+        if main_sync_result and main_sync_result.synced:
+            sync_line = f"- Synced with {main_sync_result.source}@{main_sync_result.main_sha[:12]} before Gate 2 ({main_sync_result.behind} commits absorbed).\n"
         split_lines = _epic_split_disclosure_lines(rel_wt, version)
         split_block = ("\n".join(split_lines) + "\n") if split_lines else ""
         pr_body = (
             f"Promote `{release_branch}` → `main`.\n\n"
             f"- Gate 1 (`precheck.sh`) passed at ship.\n"
+            f"{sync_line}"
             f"{gate2_line}\n"
             f"{split_block}\n"
             f"Squash-merging this PR triggers the prod (Vultr) deploy.\n"
@@ -589,6 +625,18 @@ def promote_release(
                 f"promote (or merge the PR yourself with gh pr merge --squash {ref}, "
                 f"then run: promote_release.py --cleanup-only {version})"
             )
+        # Babysit race check: re-verify origin/main hasn't moved during CI
+        if not allow_stale_main and _has_origin(repo):
+            try:
+                curr_main, _ = resolve_main_sha(repo, strict=True)
+                if not is_ancestor(rel_wt, curr_main, "HEAD"):
+                    raise Gate2FailedError(
+                        f"origin/main advanced to {curr_main[:12]} while PR checks were running!\n"
+                        f"Aborting merge to prevent deploying code unverified against the latest hotfix.\n"
+                        f"Re-run `psrw promote` to re-sync, re-gate, and merge."
+                    )
+            except MainUnreachableError as e:
+                raise Gate2FailedError(f"Could not verify origin/main freshness before merge: {e}")
         _finalize_and_push()
         merged = _merge_pr_squash(repo, ref, gh_runner)
         if merged.returncode != 0:
@@ -852,6 +900,8 @@ def _build_parser():
                         "as an approved split (lib.epic.set_split_approved) instead of "
                         "refusing G-E3 — disclosed in the PR body, and exempts the epic "
                         "from G-E3 in every later release too")
+    p.add_argument("--allow-stale-main", action="store_true", dest="allow_stale_main",
+                   help="proceed even if release/<v> does not contain the latest main")
     p.add_argument("--deploy", action="store_true",
                    help="run the repo-specific local deploy (scripts/deploy-local.sh) first "
                         "(default: off)")
@@ -883,6 +933,7 @@ def main() -> int:
                                      push=args.push, keep=args.keep, use_pr=args.use_pr,
                                      allow_missing_gate2=args.allow_missing_gate2,
                                      allow_split_epic=args.allow_split_epic,
+                                     allow_stale_main=args.allow_stale_main,
                                      babysit=args.babysit)
     except (NoReleaseInProgressError, Gate2FailedError,
             CatalogEntryNotFoundError, RuntimeError) as e:
