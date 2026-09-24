@@ -24,6 +24,13 @@ from lib.epic import epic_children, epic_completeness, epic_folder_path, try_beg
 from lib.epic_gate import run_and_record
 from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
 from lib.hooks import HookPathError, resolve_hook
+from lib.main_sync import (
+    MainSyncConflictError,
+    ProtectedPathSyncError,
+    render_sync_failure,
+    resolve_main_sha,
+    sync_main_into_release,
+)
 from lib.repo import is_ps_release_workflow_repo
 from lib.slug import slugify
 from lib.state import file_lock
@@ -74,7 +81,12 @@ def _find_marker(worktree: Path) -> dict:
     raise NotInFeatureWorktreeError(f"{worktree} has no working-feature.json marker")
 
 
-def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
+def ship_current_work(
+    worktree: Path,
+    *,
+    skip_readiness: bool = False,
+    no_sync_main: bool = False,
+) -> dict:
     worktree = Path(worktree).resolve()
     marker = _find_marker(worktree)
     feature_id = marker["feature"]
@@ -124,6 +136,9 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
     if rc is not None and rc != 0:
         raise GateFailedError(f"Gate 1 (scripts/precheck.sh) failed in {worktree}")
 
+    # Fetch origin/main (outside lock) to pin main_sha
+    main_sha, source = (None, None) if no_sync_main else resolve_main_sha(repo, strict=False)
+
     # Merge feat/<feature_id> into release/<v> in the _release worktree.
     # Serialize the whole merge → re-verify → rollback → mark critical section on
     # the shared _release worktree so two concurrent ships can't corrupt the tree
@@ -131,11 +146,19 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
     feat_branch = f"feat/{feature_id}"
     with file_lock(rel_wt):
         pre_sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
+        sync_res = None
+        if main_sha:
+            try:
+                sync_res = sync_main_into_release(repo, rel_wt, release_branch, main_sha, source)
+            except (MainSyncConflictError, ProtectedPathSyncError) as e:
+                raise GateFailedError(render_sync_failure(e, release_branch, feature_id))
+
         try:
             git_run(rel_wt, "merge", "--no-ff", "-m", f"merge {feat_branch} into {release_branch}", feat_branch)
         except GitError as e:
             # Abort any partial/conflicted merge before surfacing the failure.
             git_run(rel_wt, "merge", "--abort", check=False)
+            git_run(rel_wt, "reset", "--hard", pre_sha)
             raise GateFailedError(f"merge of {feat_branch} into {release_branch} failed: {e}")
 
         # Re-verify Gate 1 on the MERGED result — precheck resolved from the
@@ -149,9 +172,15 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
             git_run(rel_wt, "reset", "--hard", pre_sha)
             raise
         if rc is not None and rc != 0:
-            # Roll back the merge: hard reset to pre_sha
+            # Roll back the merge: hard reset to pre_sha (undoes feature AND sync)
             git_run(rel_wt, "reset", "--hard", pre_sha)
-            raise GateFailedError(f"Gate 1 failed on combined release after merge — rolled back")
+            msg = "Gate 1 failed on combined release after merge — rolled back"
+            if sync_res and sync_res.synced:
+                msg += (
+                    f" to {pre_sha[:12]} (undid feature and sync of {sync_res.behind} commit(s) from "
+                    f"{sync_res.source}@{sync_res.main_sha[:12]}; run psrw sync-main to isolate)"
+                )
+            raise GateFailedError(msg)
 
         # Mark catalog status=shipped IN PLACE in the _release worktree (D11/SR-1).
         # The populated catalog lives only here; main's is []. No copy step.
@@ -206,8 +235,18 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
                                      epic_dir, release_version)
         epic_outcome = {"epic": epic_id, "rc": rc, "sha": cas_sha}
 
+    main_sync_data = None
+    if sync_res:
+        main_sync_data = {
+            "synced": sync_res.synced,
+            "main_sha": sync_res.main_sha,
+            "source": sync_res.source,
+            "behind": sync_res.behind,
+        }
+
     return {"ok": True, "feature": feature_id, "release": release_version,
-            "rel_wt": str(rel_wt), "epic_outcome": epic_outcome}
+            "rel_wt": str(rel_wt), "epic_outcome": epic_outcome,
+            "main_sync": main_sync_data}
 
 
 def main() -> int:
@@ -226,17 +265,22 @@ def main() -> int:
                         "deploy once after the burst instead of racing rebuilds)")
     p.add_argument("--skip-readiness", action="store_true",
                    help="skip spec readiness check (for legacy migrations only)")
+    p.add_argument("--no-sync-main", action="store_true",
+                   help="skip automatic absorption of main into release branch")
     args = p.parse_args()
 
     cwd = Path.cwd()
     try:
-        result = ship_current_work(cwd, skip_readiness=args.skip_readiness)
+        result = ship_current_work(cwd, skip_readiness=args.skip_readiness, no_sync_main=args.no_sync_main)
     except (DirtyTreeError, GateFailedError, NotInFeatureWorktreeError,
             NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,
             FeatureNotReadyError, RuntimeError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result))
+    if result.get("main_sync") and result["main_sync"].get("synced"):
+        ms = result["main_sync"]
+        print(f"↻ Absorbed {ms['behind']} commit(s) from {ms['source']}@{ms['main_sha'][:12]} into release/{result['release']} before merging {result['feature']}.")
     print(f"\n✅ Shipped {result['feature']} to release/{result['release']}")
     # The epic outcome check is separate from Gate 1 (finding 12): ship must
     # never go silently green when it ran and failed — an operator reading

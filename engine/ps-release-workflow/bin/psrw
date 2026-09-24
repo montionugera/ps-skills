@@ -39,6 +39,8 @@ VERBS = {
     "status":      Verb("status.py", "One-screen report of what is in flight", True),
     "hotfix":      Verb("hotfix.py", "Create a sibling hotfix worktree", True),
     "epic":        Verb("epic.py", "Open an epic, fan it out, verify it, plan or sync an epic run", True),
+    "sync-main":   Verb("sync_main.py", "Absorb main into the active release branch", True),
+    "sync":        Verb("sync_feature.py", "Merge release/<v> into current feature worktree", True),
 }
 
 # Scripts with no verb, on purpose.

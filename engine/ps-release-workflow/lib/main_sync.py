@@ -111,9 +111,6 @@ def sync_main_into_release(
     On failure or conflict, the tree is cleanly restored with git merge --abort.
     """
     rel_wt = Path(rel_wt).resolve()
-    if is_dirty(rel_wt):
-        raise RuntimeError(f"_release worktree {rel_wt} has uncommitted changes")
-
     # If main_sha is already reachable from release HEAD, nothing to do
     if is_ancestor(rel_wt, main_sha, "HEAD"):
         return MainSyncResult(
@@ -123,6 +120,9 @@ def sync_main_into_release(
             behind=0,
             files=[],
         )
+
+    if is_dirty(rel_wt):
+        raise RuntimeError(f"_release worktree {rel_wt} has uncommitted changes")
 
     base_sha = git_run(rel_wt, "merge-base", "HEAD", main_sha).stdout.strip()
     changed_files = diff_names(rel_wt, base_sha, main_sha)
