@@ -236,7 +236,9 @@ def collect_status(repo: Path) -> dict:
     # CACHED main ref only — status is read-only and must never hit the network.
     behind_main, main_ref = 0, None
     rel_wt = release_worktree_path(repo)
-    if in_progress and rel_wt.is_dir():
+    # (rel_wt/.git must exist: a leftover plain dir would make git walk up and
+    # count the MAIN checkout's head instead.)
+    if in_progress and (rel_wt / ".git").exists():
         main_ref = cached_main_ref(repo)
         if main_ref:
             try:

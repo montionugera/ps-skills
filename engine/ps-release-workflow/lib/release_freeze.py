@@ -17,7 +17,8 @@ from lib.state import mutate_state, read_state
 
 
 class ReleaseFrozenError(Exception):
-    """ship was asked to merge into a release that is being / has been promoted."""
+    """A ship or sync-main tried to change a release that is being, or has
+    been, promoted."""
 
 
 def _freeze_file(repo: Path) -> Path:

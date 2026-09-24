@@ -17,7 +17,8 @@ Absorb `main` (squash-merged hotfixes) into `release/<v>` on demand.
     psrw sync-main            # merge main into release/<v>, then Gate 1
     psrw sync-main --deploy   # ...then run the local deploy from _release
 
-`psrw hotfix --sync-release` is an alias for the same code path.
+`psrw hotfix --sync-release [--deploy]` is an alias for the same code path. `--deploy`
+warns when Gate 1 did not run (no precheck script).
 
 ## What matters
 

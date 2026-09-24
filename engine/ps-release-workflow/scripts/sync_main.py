@@ -55,17 +55,24 @@ def sync_main(repo: Path) -> dict:
         synced = sync_main_into_release(repo, rel_wt, branch, main_ref)
         if not synced:
             return {"release": version, "synced": 0, "gate1": None}
+        # The sync stays ONLY if Gate 1 passed (or has no script): any other
+        # outcome — a failing gate, an unusable hooks value, an unrunnable
+        # script (OSError), Ctrl-C — resets to the pre-sync head.
+        kept = False
         try:
-            rc = _run_precheck(rel_wt)
-        except GateFailedError:
-            git_run(rel_wt, "reset", "--hard", pre_sha)
-            raise
-        if rc is not None and rc != 0:
-            git_run(rel_wt, "reset", "--hard", pre_sha)
-            raise GateFailedError(
-                f"Gate 1 failed on {branch} after syncing {main_ref} — rolled back. "
-                f"Fix main (or the release) so they integrate, then re-run psrw sync-main."
-            )
+            try:
+                rc = _run_precheck(rel_wt)
+            except GateFailedError as e:
+                raise GateFailedError(f"{e} — sync of {main_ref} into {branch} rolled back") from e
+            if rc is not None and rc != 0:
+                raise GateFailedError(
+                    f"Gate 1 failed on {branch} after syncing {main_ref} — rolled back. "
+                    f"Fix main (or the release) so they integrate, then re-run psrw sync-main."
+                )
+            kept = True
+        finally:
+            if not kept:
+                git_run(rel_wt, "reset", "--hard", pre_sha)
     return {"release": version, "synced": synced, "gate1": "skipped" if rc is None else "passed"}
 
 
@@ -83,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     repo = find_repo_root(Path.cwd())
     try:
         result = sync_main(repo)
-    except (MainSyncConflictError, ReleaseFrozenError, GateFailedError) as e:
+    except (MainSyncConflictError, ReleaseFrozenError, GateFailedError, OSError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     print(json.dumps({"ok": True, **result}))
@@ -102,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
         except HookPathError as e:
             print(f"\n❌ Local deploy REFUSED — {e}", file=sys.stderr)
             return 1
+        if result["gate1"] == "skipped":
+            print("\n⚠️  Gate 1 did not run on the synced tree (no precheck script) — "
+                  "deploying it unverified.", file=sys.stderr)
         if not deploy.exists():
             print("\nℹ️  Local deploy skipped: no local deploy configured: add "
                   "scripts/deploy-local.sh or hooks.deploy_local.")

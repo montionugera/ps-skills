@@ -49,15 +49,22 @@ def main() -> int:
     p.add_argument("--sync-release", action="store_true",
                    help="alias for `psrw sync-main`: merge main into the in-progress "
                         "release/<v> and run Gate 1")
+    p.add_argument("--deploy", action="store_true",
+                   help="with --sync-release: run the local deploy after the sync")
     args = p.parse_args()
+    if args.sync_release and args.desc:
+        p.error("--sync-release takes no description (it is `psrw sync-main`)")
     if not args.sync_release and not args.desc:
         p.error("a description is required (or pass --sync-release)")
+    if args.deploy and not args.sync_release:
+        p.error("--deploy only applies with --sync-release")
 
     repo = find_repo_root(Path.cwd())
     if args.sync_release:
         # One code path: the alias delegates to `psrw sync-main`.
-        from scripts.sync_main import main as sync_main_cli
-        return sync_main_cli([])
+        # One code path: the alias forwards its flags to `psrw sync-main`.
+        import scripts.sync_main as sync_main_mod
+        return sync_main_mod.main(["--deploy"] if args.deploy else [])
 
     try:
         result = create_hotfix_worktree(repo, args.desc)
