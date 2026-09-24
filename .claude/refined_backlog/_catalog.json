@@ -133,5 +133,14 @@
     "claimed_at": "2026-09-22T02:02:00.134487+00:00",
     "shipped_at": "2026-09-24T01:14:13.269885+00:00",
     "promoted_at": "2026-09-24T05:39:47.822942+00:00"
+  },
+  {
+    "id": "F-012",
+    "title": "hotfix to release auto sync",
+    "from_idea": "I-013",
+    "created_at": "2026-09-24T13:06:56.489006+00:00",
+    "claimed_by": null,
+    "status": "open",
+    "release_version": null
   }
 ]
