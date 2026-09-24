@@ -158,9 +158,40 @@ md="$ws/app/$doc"
 # a vacuous PASS on assert 7's interactivity check if that were the doc's
 # only diagram. All three files (renderer, lint.sh, verify.sh) must agree on
 # what counts as a drawio diagram.
+#
+# DELIBERATELY NOT stripping HTML comments here, unlike lint.sh:61-68's
+# strip_comments() -- checked empirically, not assumed (PS_COMMU_VERIFY_DOM
+# dump on a real served page), and lint.sh's premise does not hold for this
+# renderer: Cherry-Markdown here does not implement <!-- ... --> as an HTML
+# comment block at all -- a `<!--` line on its own renders as an ORDINARY
+# escaped-text paragraph (confirmed: the dumped DOM shows literal
+# `<p>&lt;!--</p>`, i.e. Cherry escaped it as plain text, which real
+# comment-block passthrough never would), and any ```drawio fence physically
+# positioned between `<!--`/`-->` lines still parses as a completely normal,
+# independent code fence and DOES get picked up and rendered live by
+# frameAndRunDrawio(). Stripping comments here would therefore UNDER-count a
+# diagram that genuinely renders -- the exact same false-FAIL failure class
+# this fix round exists to close, just pointed the other way (FAIL: 1 ...
+# svg=1 fences=0 on a page with no defect). See
+# test_verify_counts_html_commented_fence_because_it_still_renders in
+# lifecycle_test.sh for the reproduction. This is a real discrepancy with
+# lint.sh's own assumption (filed for the whole-branch review, not fixed here
+# -- out of this file's scope): a "commented-out" diagram is skipped by
+# lint.sh's validation but still renders live on the page, which is arguably
+# backwards.
+#
+# Any failure reading the file (permissions, unexpected encoding) prints a
+# plain error line instead of a raw traceback, and the bash-level guard below
+# turns that into this script's normal FAIL: line + exit 1, never an
+# unhandled ValueError from `int()` further down in the main heredoc.
 fences="$(python3 -c '
 import re, sys
-content = open(sys.argv[1]).read()
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        content = f.read()
+except Exception as e:
+    print(f"error reading {sys.argv[1]}: {e}")
+    sys.exit(0)
 DRAWIO_HEAD_RE = re.compile(r"^<mxGraphModel\b")
 n = 0
 for m in re.finditer(r"```([^\n`]*)\n(.*?)```", content, re.S):
@@ -169,6 +200,7 @@ for m in re.finditer(r"```([^\n`]*)\n(.*?)```", content, re.S):
         n += 1
 print(n)
 ' "$md")"
+[[ "$fences" =~ ^[0-9]+$ ]] || { echo "FAIL: could not count drawio fences in $md: $fences"; exit 1; }
 
 python3 - "$chrome" "$url" "$fences" "$dump_text" <<'PY'
 import os, re, select, shutil, signal, subprocess, sys, tempfile, time

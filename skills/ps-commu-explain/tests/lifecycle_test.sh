@@ -2004,16 +2004,51 @@ MD
   grep -q '^PASS: 1 drawio svg=2 fences=2 (mxgraph-divs=2 empty-render=0 no-svg=0)' <<<"$out" &&
   grep -q '^FAIL: 7 toolbar not initialized on 1/2 diagram(s)' <<<"$out"
 }
+test_verify_counts_html_commented_fence_because_it_still_renders() {  # fix round 2 correction:
+  # the reviewer's premise (mirror lint.sh's strip_comments() so a "commented-out" fence isn't
+  # counted) does NOT hold for this renderer -- checked empirically, not assumed. Cherry-Markdown
+  # does not implement <!-- ... --> as an HTML comment block: a bare `<!--` line renders as an
+  # ORDINARY escaped-text paragraph (confirmed via a real PS_COMMU_VERIFY_DOM dump: the DOM shows
+  # literal `<p>&lt;!--</p>`, i.e. Cherry escaped it as plain text -- real HTML-block passthrough
+  # never does that), and a ```drawio fence physically between `<!--`/`-->` lines parses as a
+  # completely normal, independent fence and genuinely renders. So verify.sh must COUNT it (and
+  # it does, deliberately NOT stripping comments -- see the comment above the fence-count snippet
+  # in verify.sh) or it would under-count a diagram that's really on the page: exactly the same
+  # false-FAIL failure class this fix round exists to close, just pointed the other way.
+  local port; port="$(meta_get t-verify port)"
+  cat > /tmp/ps-commu/t-verify/app/drawio-commented.md <<'MD'
+An attempt to mark an example as NOT live, using an HTML comment:
+
+<!--
+```drawio
+<mxGraphModel><root><mxCell id="0" /><mxCell id="1" parent="0" />
+<mxCell id="A" value="x" style="rounded=1;html=1;" vertex="1" parent="1">
+<mxGeometry x="10" y="10" width="60" height="30" as="geometry" /></mxCell>
+</root></mxGraphModel>
+```
+-->
+
+The comment markers do not stop it from rendering live.
+MD
+  local out rc; out="$(verify_run t-verify --url "http://127.0.0.1:$port/?doc=drawio-commented.md")"; rc=$?
+  echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 0 )) &&
+  grep -q '^PASS: 1 drawio svg=1 fences=1 (mxgraph-divs=1 empty-render=0 no-svg=0)' <<<"$out" &&
+  grep -q '^PASS: 7 drawio interactivity: GraphViewer loaded, toolbar initialized on 1/1 diagram(s)' <<<"$out" &&
+  ! grep -q '^FAIL' <<<"$out"
+}
 test_verify_help() { "$S/verify.sh" --help | grep -q 'Usage: verify.sh' && ! "$S/verify.sh" >/dev/null 2>&1; }
 
-check_or_skip verify_passes_template           test_verify_passes_template
-check_or_skip verify_dump_text                 test_verify_dump_text
-check_or_skip verify_fails_on_leak             test_verify_fails_on_leak
-check_or_skip verify_passes_drawio_template    test_verify_passes_drawio_template
-check_or_skip verify_fails_drawio_empty_render test_verify_fails_drawio_empty_render
-check_or_skip verify_counts_xml_fenced_drawio  test_verify_counts_xml_fenced_drawio
-check_or_skip verify_fails_partial_toolbar     test_verify_fails_partial_toolbar
-check verify_help                              test_verify_help
+check_or_skip verify_passes_template               test_verify_passes_template
+check_or_skip verify_dump_text                     test_verify_dump_text
+check_or_skip verify_fails_on_leak                 test_verify_fails_on_leak
+check_or_skip verify_passes_drawio_template        test_verify_passes_drawio_template
+check_or_skip verify_fails_drawio_empty_render     test_verify_fails_drawio_empty_render
+check_or_skip verify_counts_xml_fenced_drawio      test_verify_counts_xml_fenced_drawio
+check_or_skip verify_fails_partial_toolbar         test_verify_fails_partial_toolbar
+check_or_skip verify_counts_html_commented_fence   test_verify_counts_html_commented_fence_because_it_still_renders
+check verify_help                                  test_verify_help
 "$S/stop.sh" t-verify >/dev/null 2>&1
 
 # --- list.sh / clean.sh ---
