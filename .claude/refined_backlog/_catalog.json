@@ -149,8 +149,9 @@
     "title": "Add pan/zoom to ps-commu-explain Mermaid diagrams",
     "from_idea": "I-012",
     "created_at": "2026-09-24T13:12:28.331087+00:00",
-    "claimed_by": null,
-    "status": "open",
-    "release_version": null
+    "claimed_by": "claude-a6c35399",
+    "status": "claimed",
+    "release_version": null,
+    "claimed_at": "2026-09-24T13:23:57.940474+00:00"
   }
 ]
