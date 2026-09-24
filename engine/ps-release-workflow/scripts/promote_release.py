@@ -13,7 +13,9 @@ from pathlib import Path
 
 from lib.backlog_paths import NoReleaseInProgressError as PathsNoReleaseInProgressError
 from lib.backlog_paths import get_backlog_catalog_path, read_release_state
-from lib.catalog import CatalogEntryNotFoundError, find_entry, list_entries, mark_promoted_to_main
+from lib.catalog import (
+    CatalogEntryNotFoundError, find_entry, list_entries, mark_promoted_to_main, update_entry,
+)
 from lib.epic import (
     epic_children, epic_completeness, epic_folder_path, mark_epic_failed,
     mark_epic_promoted, set_split_approved, try_begin_verification,
@@ -26,8 +28,9 @@ from lib.git_ops import (
 from lib.hooks import resolve_hook
 from lib.main_sync import MainSyncConflictError, resolve_main_ref, sync_main_into_release
 from lib.owner import resolve_owner_id
+from lib.release_freeze import freeze_release, unfreeze_release
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
-from lib.state import file_lock, mutate_state
+from lib.state import file_lock, mutate_state, read_state
 
 
 class NoReleaseInProgressError(Exception): pass
@@ -443,9 +446,28 @@ def _epic_split_disclosure_lines(rel_wt: Path, version: str) -> list[str]:
     return lines
 
 
-def promote_release(
+def promote_release(repo: Path, **kwargs) -> dict:
+    """Promote the in-progress release (see _promote_release).
+
+    The release is FROZEN from the start (ship refuses it), so the tree Gate 2
+    verifies and the PR merges is exactly what shipped. A promote that fails
+    lifts the freeze again, so fixes can ship and promote can be re-run — the
+    open PR, if any, is refreshed by that re-run's push. On success the freeze
+    stays until cleanup.
+    """
+    frozen: list[str] = []
+    try:
+        return _promote_release(repo, _frozen=frozen, **kwargs)
+    except BaseException:
+        for version in frozen:
+            unfreeze_release(Path(repo).resolve(), version)
+        raise
+
+
+def _promote_release(
     repo: Path,
     *,
+    _frozen: list,
     run_gate2: bool = True,
     run_deploy: bool = True,
     push: bool = True,
@@ -486,6 +508,10 @@ def promote_release(
     # conflict refuses here, release untouched, with the manual command.
     main_ref = resolve_main_ref(repo)
     with file_lock(rel_wt):
+        # Freeze under the lock ship merges under: from here on, no ship can
+        # add to the tree this promote verifies and pushes.
+        freeze_release(repo, version)
+        _frozen.append(version)
         sync_main_into_release(repo, rel_wt, release_branch, main_ref)
 
     check_epics(repo, rel_wt, version, allow_split_epic)
@@ -540,6 +566,7 @@ def promote_release(
             git_run(repo, "push", "-u", "origin", release_branch)
         except GitError as e:
             raise Gate2FailedError(f"failed to push {release_branch} to origin: {e}")
+        pushed_head = git_run(repo, "rev-parse", release_branch).stdout.strip()
         gate2_line = (
             f"- Gate 2 (`integration.sh`{' + local prod-style deploy' if run_deploy else ''}) passed at promote."
             if gate2_ran else
@@ -598,6 +625,18 @@ def promote_release(
                 f"promote (or merge the PR yourself with gh pr merge --squash {ref}, "
                 f"then run: promote_release.py --cleanup-only {version})"
             )
+        # The checks just verified the head pushed above. If the local release
+        # gained commits since (anything that bypassed the freeze), merging would
+        # either strand them or land them unchecked — refuse; a re-run re-pushes
+        # and re-checks.
+        local_head = git_run(repo, "rev-parse", release_branch).stdout.strip()
+        if local_head != pushed_head:
+            raise Gate2FailedError(
+                f"the PR head CI checked for {release_branch} ({pushed_head[:12]}) "
+                f"differs from the local release head ({local_head[:12]}) — NOT "
+                f"merging: the PR would not carry exactly what shipped. Re-run "
+                f"promote (it re-pushes and re-checks)."
+            )
         _finalize_and_push()
         merged = _merge_pr_squash(repo, ref, gh_runner)
         if merged.returncode != 0:
@@ -633,6 +672,94 @@ def promote_release(
         cleanup(repo, version=version, verify_pr=False)
 
     return {"ok": True, "version": version, "mode": "direct"}
+
+
+def _remote_branch_head(repo: Path, branch: str) -> str | None:
+    """sha of refs/heads/<branch> on origin, or None (no origin / no branch)."""
+    if not _has_origin(repo):
+        return None
+    out = git_run(repo, "ls-remote", "origin", f"refs/heads/{branch}", check=False).stdout.split()
+    return out[0] if out else None
+
+
+def _stranded_features(repo: Path, version: str) -> list[dict]:
+    """Features the release branch's catalog marks shipped on `version` whose
+    shipped commit is NOT in the release head that actually merged.
+
+    The merged head is origin's release/<v> (what the PR merged); without an
+    origin (--direct mode, local-only repos) it is the local release branch,
+    which is what --direct squashes, so nothing can be stranded. Must run
+    before cleanup deletes the _release worktree and the release branches.
+    """
+    rel_cat = repo / ".claude" / "worktrees" / "_release" / ".claude" / "refined_backlog" / "_catalog.json"
+    if not rel_cat.exists():
+        return []
+    branch = f"release/{version}"
+    merged_head = _remote_branch_head(repo, branch)
+    if merged_head is None:
+        return []
+    git_run(repo, "fetch", "-q", "origin", f"refs/heads/{branch}", check=False)
+    stranded = []
+    for entry in list_entries(rel_cat):
+        if entry.get("release_version") != version or entry.get("status") != "shipped":
+            continue
+        sha = entry.get("shipped_sha")
+        if not sha:
+            cp = git_run(repo, "rev-parse", "--verify", "-q", f"feat/{entry['id']}", check=False)
+            sha = cp.stdout.strip()
+        if not sha:
+            continue  # nothing to check against; the catalog is all we have
+        rc = git_run(repo, "merge-base", "--is-ancestor", sha, merged_head, check=False).returncode
+        if rc == 1:
+            stranded.append(entry)
+        elif rc != 0:
+            print(f"⚠️ cleanup: cannot verify {entry['id']} ({sha[:12]}) reached "
+                  f"{branch} — check it by hand", file=sys.stderr)
+    return stranded
+
+
+def _reopen_stranded(repo: Path, version: str, stranded: list[dict]) -> None:
+    """Put each stranded feature back into MAIN's catalog (which the next
+    release is cut from) as not-shipped, keeping its folder, branch and
+    worktree, and say so loudly."""
+    main_cat = repo / ".claude" / "refined_backlog" / "_catalog.json"
+    rel_backlog = repo / ".claude" / "worktrees" / "_release" / ".claude" / "refined_backlog"
+    claims = read_state(repo / ".claude" / "state" / "claims.json", default={}) or {}
+
+    for entry in stranded:
+        fid = entry["id"]
+        ledger = claims.get(fid) or {}
+        still_claimed = bool(ledger) and Path(ledger.get("worktree", "")).is_dir()
+
+        def reset(e: dict) -> None:
+            e["status"] = "claimed" if still_claimed else "open"
+            e["claimed_by"] = ledger.get("owner") if still_claimed else None
+            e["release_version"] = None
+            e.pop("shipped_at", None)
+            e.pop("shipped_sha", None)
+            e["stranded_from"] = version
+
+        if find_entry(main_cat, fid) is None:
+            # The refine/claim commits never reached main either: carry the entry over.
+            def append(entries: list) -> list:
+                entries.append(dict(entry))
+                return entries
+            mutate_state(main_cat, append, default=[])
+        update_entry(main_cat, fid, reset)
+        for src in rel_backlog.glob(f"{fid}-*"):
+            dst = main_cat.parent / src.name
+            if src.is_dir() and not dst.exists():
+                shutil.copytree(src, dst)
+        print(
+            f"\n❌ {fid} was marked shipped on {version} but its commit is NOT in the "
+            f"merged release/{version} (it landed after the PR head was pushed). It is "
+            f"NOT on main. Reset to '{'claimed' if still_claimed else 'open'}' in main's "
+            f"catalog; branch feat/{fid} is kept. Ship it into the next release: "
+            f"`psrw new-release`, then "
+            + (f"`cd {ledger['worktree']} && psrw ship`." if still_claimed
+               else f"`psrw claim {fid}` and `psrw ship`."),
+            file=sys.stderr,
+        )
 
 
 def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
@@ -686,6 +813,13 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
                 )
             git_run(repo, "checkout", "main")
             git_run(repo, "reset", "--hard", "origin/main")
+
+    # Before anything is deleted: every feature the release branch says it
+    # shipped must be in the head that merged. Stragglers are flagged and put
+    # back in main's catalog instead of vanishing with the _release worktree.
+    stranded = _stranded_features(repo, version)
+    if stranded:
+        _reopen_stranded(repo, version, stranded)
 
     refined_cat = repo / ".claude" / "refined_backlog" / "_catalog.json"
     idea_cat = repo / ".claude" / "idea_backlog" / "_catalog.json"
@@ -841,7 +975,8 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
                     f"then re-run: promote_release.py --cleanup-only {version}"
                 )
 
-    return {"ok": True, "version": version}
+    unfreeze_release(repo, version)
+    return {"ok": True, "version": version, "stranded": [e["id"] for e in stranded]}
 
 
 def _build_parser():

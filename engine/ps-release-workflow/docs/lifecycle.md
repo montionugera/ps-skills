@@ -175,6 +175,24 @@ so its `hooks` block legitimately differs per branch.
    It verifies the PR is merged first and refuses otherwise, because deleting the
    remote release branch would auto-close an open PR.
 
+**The release is frozen from the moment promote starts.** Promote records the freeze
+in `.claude/state/release-freeze.json` under the `_release` lock, and `ship` checks it
+under that same lock, so a ship either lands before promote starts (and is in the PR) or
+is refused and told to ship into the next release. A finalized release (in-progress set
+to false) is refused the same way. A promote that fails lifts the freeze, so fixes can
+ship and promote can be re-run. That includes red checks under `--babysit`. On success the
+freeze lasts until cleanup. `--babysit` also refuses to merge when the local release head
+differs from the head it pushed for CI.
+
+**Cleanup verifies what landed.** Before deleting anything, it checks every feature that
+the release branch's catalog marks `shipped` on `<v>`. The feature's `shipped_sha`
+(recorded by `ship`, else the `feat/F-NNN` tip) must be an ancestor of `origin`'s
+`release/<v>`, the head the PR merged. A feature that fails this check is stranded.
+Cleanup flags it loudly and resets it in `main`'s catalog to `claimed` (the worktree
+survives) or `open`, with `release_version` cleared and `stranded_from: <v>` set. Its
+branch and folder are kept, so the next release can ship it. Cleanup returns the list as
+`stranded`.
+
 Until cleanup runs, the next `psrw new-release` is blocked by the stale `_release`
 worktree. `--babysit` performs steps 2-4 in one go: watch checks, finalize, merge,
 clean up.
@@ -197,6 +215,7 @@ clean up.
     E-NNN-<slug>/spec.md verification.md
     _archive/<v>/                     # epics archived by cleanup
   state/claims.json                   # gitignored — F-NNN -> owner (+ session_id) map
+  state/release-freeze.json           # gitignored — versions being promoted (ship refuses)
   worktrees/                          # gitignored
     _release/                         # long-lived, on release/<v>
     F-NNN-<slug>/                     # claimed feature worktree (owner marker)

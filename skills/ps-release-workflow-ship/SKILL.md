@@ -48,7 +48,8 @@ Claim the next feature, or `psrw promote` when the release is full.
 
 ## Refuses if
 
-Not inside a feature worktree · dirty tree · `main` cannot merge cleanly into
+Not inside a feature worktree · dirty tree · the release is **frozen** (promote has
+started or its PR is open or merged: ship into the next release instead) · `main` cannot merge cleanly into
 `release/<v>` (ship first absorbs any hotfix on `main`; a conflict prints the exact
 `git merge` to run) · Gate 1 (`precheck.sh`) fails. Gate 1 runs
 twice — pre-merge on the feature worktree, then again post-merge on `_release`, where a

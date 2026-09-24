@@ -37,6 +37,8 @@ by itself — cleanup is.
   It verifies the PR is MERGED first and **refuses while the PR is unmerged** (deleting
   the remote release branch would auto-close an open PR); `--force-cleanup` is the
   explicit override. Until cleanup runs, the next `psrw new-release` is wedged.
+- Promote **freezes** the release (`ship` refuses it) until cleanup; a failed promote
+  lifts it. Cleanup loudly re-opens any "shipped" feature missing from the merged head.
 
 ## Then
  

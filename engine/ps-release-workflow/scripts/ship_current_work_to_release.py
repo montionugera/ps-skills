@@ -18,8 +18,9 @@ from lib.backlog_paths import (
     get_backlog_catalog_path,
     get_release_worktree,
     read_release_state,
+    release_worktree_path,
 )
-from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped
+from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped, update_entry
 from lib.epic import epic_children, epic_completeness, epic_folder_path, try_begin_verification
 from lib.epic_gate import run_and_record
 from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
@@ -27,6 +28,7 @@ from lib.hooks import HookPathError, resolve_hook
 from lib.main_sync import (
     MainSyncConflictError, missing_main_commits, resolve_main_ref, sync_main_into_release,
 )
+from lib.release_freeze import ReleaseFrozenError, frozen_error, frozen_since
 from lib.repo import is_ps_release_workflow_repo
 from lib.slug import slugify
 from lib.state import file_lock
@@ -97,6 +99,13 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
     # (fix #2 source of truth), not main — main carries only last-promoted state.
     state = read_release_state(repo)
     if state is None:
+        # A finalized-but-uncleaned release (promote already opened its PR)
+        # is frozen, not absent: say so, and where the feature should go.
+        rj = release_worktree_path(repo) / ".release.json"
+        if rj.exists():
+            version = json.loads(rj.read_text()).get("version")
+            if version:
+                raise frozen_error(version, feature_id, "promoted: its PR is open or merged")
         raise NoReleaseInProgressError("No release in progress")
     release_version = state["version"]
     release_branch = f"release/{release_version}"
@@ -135,6 +144,12 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
     # Fetch outside the lock (network); the merge itself happens under it.
     main_ref = resolve_main_ref(repo)
     with file_lock(rel_wt):
+        # Checked under the lock promote freezes under: a ship either lands
+        # before promote starts (and is in the PR) or is refused here.
+        since = frozen_since(repo, release_version)
+        if since:
+            raise frozen_error(release_version, feature_id, f"promote started at {since}")
+        shipped_sha = git_run(rel_wt, "rev-parse", feat_branch).stdout.strip()
         # Every rollback below resets to the pre-ship head: after a main sync
         # plus the feature merge, HEAD~1 would leave the untested sync standing.
         pre_sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
@@ -175,7 +190,12 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
         # that crashed between mark_shipped and commit_all left the change
         # uncommitted — "no change now" must not strand it forever.
         refined_cat = get_backlog_catalog_path(repo, "refined")
-        if mark_shipped(refined_cat, feature_id, release_version) or is_dirty(rel_wt):
+        # shipped_sha is the exact feature commit merged, so cleanup can prove
+        # it reached main (a feature branch may move on after the ship).
+        def record_sha(e: dict) -> None:
+            e["shipped_sha"] = shipped_sha
+        marked = mark_shipped(refined_cat, feature_id, release_version)
+        if update_entry(refined_cat, feature_id, record_sha) or marked or is_dirty(rel_wt):
             commit_all(rel_wt, f"chore(catalog): {feature_id} status=shipped on {release_version}")
 
         # G-E2 CAS: decide, under this same lock (HEAD is stable here), whether
@@ -247,7 +267,8 @@ def main() -> int:
         result = ship_current_work(cwd, skip_readiness=args.skip_readiness)
     except (DirtyTreeError, GateFailedError, NotInFeatureWorktreeError,
             NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,
-            FeatureNotReadyError, MainSyncConflictError, RuntimeError) as e:
+            FeatureNotReadyError, MainSyncConflictError, ReleaseFrozenError,
+            RuntimeError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result))
