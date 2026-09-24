@@ -156,6 +156,65 @@ def _squash_merge_origin_release_into_origin_main(repo: Path) -> None:
     git(clone, "push", "-q", "origin", "HEAD:main")
 
 
+def _late_ship_then_merge(repo: Path, f2: str, *, shipped_sha: bool = True,
+                          delete_remote_branch: bool = False) -> None:
+    """Out-of-band late ship of f2 into the LOCAL release after promote pushed,
+    then the host squash-merges the pushed head."""
+    rel = _rel(repo)
+    git(rel, "merge", "--no-ff", "-q", "-m", "late merge", f"feat/{f2}")
+    cat = rel / ".claude" / "refined_backlog" / "_catalog.json"
+    entries = json.loads(cat.read_text())
+    for e in entries:
+        if e["id"] == f2:
+            e.update(status="shipped", release_version="1.1")
+            if shipped_sha:
+                e["shipped_sha"] = git(repo, "rev-parse", f"feat/{f2}")
+    cat.write_text(json.dumps(entries, indent=2))
+    git(rel, "commit", "-q", "-am", "late ship")
+    _squash_merge_origin_release_into_origin_main(repo)
+    if delete_remote_branch:  # GitHub "auto-delete head branches"
+        git(repo, "push", "-q", "origin", "--delete", "release/1.1")
+
+
+MERGED = {"view": lambda: (0, "MERGED\n", "")}
+
+
+def test_cleanup_catches_a_straggler_even_when_the_host_deleted_the_branch(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    repo = tmp_repo_with_release
+    (_f1, _), (f2, _wt2) = _release_with_two_claims(repo, fixed_owner)
+    promote_release(repo, run_gate2=False, run_deploy=False, gh_runner=Gh())
+    _late_ship_then_merge(repo, f2, delete_remote_branch=True)
+    assert cleanup(repo, version="1.1", gh_runner=Gh(MERGED))["stranded"] == [f2]
+
+
+def test_cleanup_never_resets_a_legacy_entry_without_shipped_sha(
+    tmp_repo_with_release: Path, fixed_owner: str, capsys
+):
+    """No shipped_sha = cannot prove it missing (its branch may have moved on
+    after a ship that did land): warn, never reset."""
+    repo = tmp_repo_with_release
+    (_f1, _), (f2, _wt2) = _release_with_two_claims(repo, fixed_owner)
+    promote_release(repo, run_gate2=False, run_deploy=False, gh_runner=Gh())
+    _late_ship_then_merge(repo, f2, shipped_sha=False)
+    assert cleanup(repo, version="1.1", gh_runner=Gh(MERGED))["stranded"] == []
+    assert "no shipped_sha" in capsys.readouterr().err
+
+
+def test_cleanup_rerun_after_a_stranded_reset_is_a_no_op(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    repo = tmp_repo_with_release
+    (_f1, _), (f2, _wt2) = _release_with_two_claims(repo, fixed_owner)
+    promote_release(repo, run_gate2=False, run_deploy=False, gh_runner=Gh())
+    _late_ship_then_merge(repo, f2)
+    assert cleanup(repo, version="1.1", gh_runner=Gh(MERGED))["stranded"] == [f2]
+    assert cleanup(repo, version="1.1", gh_runner=Gh(MERGED))["stranded"] == []
+    entry = next(e for e in _main_catalog(repo) if e["id"] == f2)
+    assert entry["stranded_from"] == "1.1" and entry.get("release_version") is None
+
+
 def test_cleanup_flags_and_resets_a_feature_shipped_after_the_pr_head(
     tmp_repo_with_release: Path, fixed_owner: str, capsys
 ):

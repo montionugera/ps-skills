@@ -40,6 +40,21 @@ def unfreeze_release(repo: Path, version: str) -> None:
     mutate_state(_freeze_file(repo), drop, default={})
 
 
+def record_pushed_head(repo: Path, version: str, sha: str) -> None:
+    """Remember the exact release head promote handed to main (pushed for the
+    PR, or squashed by --direct). cleanup checks shipped features against it,
+    which still works when the host auto-deletes the merged head branch."""
+    def put(d: dict) -> dict:
+        d.setdefault(version, {})["pushed_head"] = sha
+        return d
+    mutate_state(_freeze_file(repo), put, default={})
+
+
+def recorded_pushed_head(repo: Path, version: str) -> str | None:
+    entry = (read_state(_freeze_file(repo), default={}) or {}).get(version) or {}
+    return entry.get("pushed_head")
+
+
 def frozen_since(repo: Path, version: str) -> str | None:
     """ISO timestamp the release was frozen at, or None if it is not frozen."""
     entry = (read_state(_freeze_file(repo), default={}) or {}).get(version)

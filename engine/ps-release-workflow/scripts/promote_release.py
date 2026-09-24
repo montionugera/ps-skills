@@ -5,6 +5,7 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,9 @@ from lib.git_ops import (
 from lib.hooks import resolve_hook
 from lib.main_sync import MainSyncConflictError, resolve_main_ref, sync_main_into_release
 from lib.owner import resolve_owner_id
-from lib.release_freeze import freeze_release, unfreeze_release
+from lib.release_freeze import (
+    freeze_release, record_pushed_head, recorded_pushed_head, unfreeze_release,
+)
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
 from lib.state import file_lock, mutate_state, read_state
 
@@ -567,6 +570,7 @@ def _promote_release(
         except GitError as e:
             raise Gate2FailedError(f"failed to push {release_branch} to origin: {e}")
         pushed_head = git_run(repo, "rev-parse", release_branch).stdout.strip()
+        record_pushed_head(repo, version, pushed_head)
         gate2_line = (
             f"- Gate 2 (`integration.sh`{' + local prod-style deploy' if run_deploy else ''}) passed at promote."
             if gate2_ran else
@@ -595,6 +599,8 @@ def _promote_release(
             if _finalize_release_state(rel_wt, version):
                 try:
                     git_run(repo, "push", "origin", release_branch)
+                    record_pushed_head(repo, version, git_run(
+                        repo, "rev-parse", release_branch).stdout.strip())
                 except GitError as e:
                     raise Gate2FailedError(
                         f"PR created ({pr_url}) but pushing the finalize commit to "
@@ -621,9 +627,10 @@ def _promote_release(
         if _watch_pr_checks(repo, ref, gh_runner) != 0:
             raise Gate2FailedError(
                 f"PR checks FAILED for {ref} — NOT merging.\n"
-                f"The release is still in progress: fix the failures and re-run "
-                f"promote (or merge the PR yourself with gh pr merge --squash {ref}, "
-                f"then run: promote_release.py --cleanup-only {version})"
+                f"The release is still in progress (and unfrozen, so fixes can "
+                f"ship): fix the failures and re-run promote, which re-pushes and "
+                f"re-checks. Do not merge the PR by hand: its head may lack what "
+                f"ships next."
             )
         # The checks just verified the head pushed above. If the local release
         # gained commits since (anything that bypassed the freeze), merging would
@@ -654,6 +661,8 @@ def _promote_release(
 
     # ── Direct mode (--direct) ─────────────────────────────────────────
     # Legacy path: squash-merge release/<v> into main locally + push + cleanup.
+    # --direct squashes exactly the local release head: that is what landed.
+    record_pushed_head(repo, version, git_run(repo, "rev-parse", release_branch).stdout.strip())
     try:
         git_run(repo, "merge", "--squash", release_branch)
         git_run(repo, "commit", "-m", f"release {version}")
@@ -682,39 +691,71 @@ def _remote_branch_head(repo: Path, branch: str) -> str | None:
     return out[0] if out else None
 
 
-def _stranded_features(repo: Path, version: str) -> list[dict]:
+def _merged_release_head(repo: Path, version: str, gh_runner) -> tuple[str | None, str]:
+    """(sha, source) of the release head that actually reached main.
+
+    Preference: the head promote recorded when it pushed (or --direct
+    squashed) it; else the PR's headRefOid from gh; else origin's release/<v>.
+    The first two survive a host that auto-deletes merged head branches.
+    """
+    branch = f"release/{version}"
+    recorded = recorded_pushed_head(repo, version)
+    if recorded:
+        return recorded, "the head promote pushed"
+    if _has_origin(repo):
+        try:
+            cp = gh_runner(["gh", "pr", "view", branch, "--json", "headRefOid",
+                            "-q", ".headRefOid"], cwd=repo, capture_output=True, text=True)
+            sha = (cp.stdout or "").strip() if cp.returncode == 0 else ""
+        except (FileNotFoundError, OSError):
+            sha = ""
+        if re.fullmatch(r"[0-9a-f]{40}", sha):
+            return sha, "the PR head"
+        remote = _remote_branch_head(repo, branch)
+        if remote:
+            return remote, f"origin/{branch}"
+    return None, ""
+
+
+def _stranded_features(repo: Path, version: str, gh_runner) -> list[dict]:
     """Features the release branch's catalog marks shipped on `version` whose
     shipped commit is NOT in the release head that actually merged.
 
-    The merged head is origin's release/<v> (what the PR merged); without an
-    origin (--direct mode, local-only repos) it is the local release branch,
-    which is what --direct squashes, so nothing can be stranded. Must run
-    before cleanup deletes the _release worktree and the release branches.
+    Only a recorded `shipped_sha` can prove a feature missing: a legacy entry
+    without one is warned about, never reset (its branch may have moved on
+    after a ship that did land). Must run before cleanup deletes the _release
+    worktree and the release branches.
     """
     rel_cat = repo / ".claude" / "worktrees" / "_release" / ".claude" / "refined_backlog" / "_catalog.json"
     if not rel_cat.exists():
         return []
-    branch = f"release/{version}"
-    merged_head = _remote_branch_head(repo, branch)
-    if merged_head is None:
+    shipped = [e for e in list_entries(rel_cat)
+               if e.get("release_version") == version and e.get("status") == "shipped"]
+    if not shipped:
         return []
-    git_run(repo, "fetch", "-q", "origin", f"refs/heads/{branch}", check=False)
+    merged_head, source = _merged_release_head(repo, version, gh_runner)
+    if merged_head is None:
+        print(f"⚠️ cleanup: cannot find the release/{version} head that merged — "
+              f"CANNOT verify that {', '.join(e['id'] for e in shipped)} reached main. "
+              f"Check each by hand before starting the next release.", file=sys.stderr)
+        return []
+    if _has_origin(repo):
+        # Make sure the merged head's objects are local for the ancestry checks.
+        git_run(repo, "fetch", "-q", "origin", f"refs/heads/release/{version}", check=False)
     stranded = []
-    for entry in list_entries(rel_cat):
-        if entry.get("release_version") != version or entry.get("status") != "shipped":
-            continue
+    for entry in shipped:
         sha = entry.get("shipped_sha")
         if not sha:
-            cp = git_run(repo, "rev-parse", "--verify", "-q", f"feat/{entry['id']}", check=False)
-            sha = cp.stdout.strip()
-        if not sha:
-            continue  # nothing to check against; the catalog is all we have
+            print(f"⚠️ cleanup: {entry['id']} has no shipped_sha (shipped by an older "
+                  f"psrw) — cannot verify it is in {source}; check it by hand.",
+                  file=sys.stderr)
+            continue
         rc = git_run(repo, "merge-base", "--is-ancestor", sha, merged_head, check=False).returncode
         if rc == 1:
             stranded.append(entry)
         elif rc != 0:
-            print(f"⚠️ cleanup: cannot verify {entry['id']} ({sha[:12]}) reached "
-                  f"{branch} — check it by hand", file=sys.stderr)
+            print(f"⚠️ cleanup: cannot verify {entry['id']} ({sha[:12]}) is in {source} "
+                  f"({merged_head[:12]}) — check it by hand", file=sys.stderr)
     return stranded
 
 
@@ -817,7 +858,7 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
     # Before anything is deleted: every feature the release branch says it
     # shipped must be in the head that merged. Stragglers are flagged and put
     # back in main's catalog instead of vanishing with the _release worktree.
-    stranded = _stranded_features(repo, version)
+    stranded = _stranded_features(repo, version, gh_runner)
     if stranded:
         _reopen_stranded(repo, version, stranded)
 

@@ -53,11 +53,14 @@ when an origin exists) into `release/<v>` in the `_release` worktree, under its 
   Its post-merge deploy re-checks and **refuses** a release still behind `main`.
 - **`promote`** syncs first, before the epic gate, `--deploy` and Gate 2.
 - **`psrw hotfix --sync-release`** is the last step of the hotfix flow, once the PR merged.
+  It refuses while the release is frozen for promote, which syncs `main` itself.
 
 A conflict aborts the merge, leaves `release/<v>` untouched and prints the exact
 `cd <_release> && git merge origin/main` to run. So does a `main` change to release
 bookkeeping (`.release.json`, the backlog dirs, `.claude/state/`), which must never be
-auto-merged over the release's own copy.
+auto-merged over the release's own copy; its command keeps the release's copy of those
+paths (`git merge --no-commit`, then `git checkout HEAD -- <paths>`). A failed fetch warns
+that the comparison uses the last-fetched `origin/main`.
 
 ### Epic gates: G-E2 and G-E3
 
@@ -186,8 +189,11 @@ differs from the head it pushed for CI.
 
 **Cleanup verifies what landed.** Before deleting anything, it checks every feature that
 the release branch's catalog marks `shipped` on `<v>`. The feature's `shipped_sha`
-(recorded by `ship`, else the `feat/F-NNN` tip) must be an ancestor of `origin`'s
-`release/<v>`, the head the PR merged. A feature that fails this check is stranded.
+(recorded by `ship`) must be an ancestor of the head that reached `main`. That head is
+the one promote recorded when it pushed (or `--direct` squashed) the release, else the
+PR's `headRefOid`, else `origin`'s `release/<v>`, so a host that auto-deletes merged
+branches does not blind the check. An entry without `shipped_sha` (older psrw) is only
+warned about, never reset. A feature that fails this check is stranded.
 Cleanup flags it loudly and resets it in `main`'s catalog to `claimed` (the worktree
 survives) or `open`, with `release_version` cleared and `stranded_from: <v>` set. Its
 branch and folder are kept, so the next release can ship it. Cleanup returns the list as

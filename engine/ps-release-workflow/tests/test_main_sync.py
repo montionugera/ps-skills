@@ -194,3 +194,31 @@ def test_sync_refuses_when_main_touched_release_bookkeeping(tmp_repo_with_releas
         with pytest.raises(MainSyncConflictError, match="_catalog.json"):
             sync_main_into_release(repo, rel, "release/1.1")
     assert git(rel, "rev-parse", "HEAD") == pre
+
+
+def test_bookkeeping_refusal_offers_a_merge_that_keeps_the_release_copy(tmp_repo_with_release: Path):
+    from lib.state import file_lock
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    _land_on_origin_main(repo, ".release.json", "{}\n")
+    rel = _rel_wt(repo)
+    with file_lock(rel):
+        with pytest.raises(MainSyncConflictError) as ei:
+            sync_main_into_release(repo, rel, "release/1.1")
+    assert "git checkout HEAD -- .release.json" in str(ei.value)
+
+
+def test_hotfix_sync_release_refuses_while_the_release_is_being_promoted(
+    tmp_repo_with_release: Path,
+):
+    """promote runs Gate 2 and the push outside the _release lock; a sync under
+    it would ship a tree Gate 2 never verified."""
+    from lib.release_freeze import freeze_release
+    from scripts.hotfix import sync_release
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    freeze_release(repo, "1.1")
+    _land_on_origin_main(repo, "hotfix.txt", "urgent\n")
+    with pytest.raises(MainSyncConflictError, match="being promoted"):
+        sync_release(repo)
+    assert not (_rel_wt(repo) / "hotfix.txt").exists()

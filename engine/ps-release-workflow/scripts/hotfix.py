@@ -10,6 +10,7 @@ from pathlib import Path
 from lib.backlog_paths import read_release_state, release_worktree_path
 from lib.git_ops import add_worktree_new_branch
 from lib.main_sync import MainSyncConflictError, sync_main_into_release
+from lib.release_freeze import frozen_since
 from lib.repo import find_repo_root
 from lib.state import file_lock
 from lib.slug import slugify
@@ -55,6 +56,15 @@ def sync_release(repo: Path) -> dict:
     rel_wt = release_worktree_path(repo)
     branch = f"release/{state['version']}"
     with file_lock(rel_wt):
+        # Promote runs Gate 2 and the push outside this lock; changing the
+        # tree under it would ship something Gate 2 never verified. Promote
+        # syncs main itself, so a re-run of promote picks the hotfix up.
+        since = frozen_since(repo, state["version"])
+        if since:
+            raise MainSyncConflictError(
+                f"{branch} is being promoted (frozen since {since}); not syncing "
+                f"under it. Re-run psrw promote: it merges main in before its gates."
+            )
         synced = sync_main_into_release(repo, rel_wt, branch)
     return {"release": state["version"], "synced": synced}
 

@@ -9,6 +9,7 @@ _release worktree, or refuse loudly with the exact manual command.
 Callers MUST hold file_lock(rel_wt) around sync_main_into_release: it mutates
 the shared _release worktree exactly like ship's feature merge does.
 """
+import sys
 from pathlib import Path
 
 from lib.git_ops import GitError, _run as git_run
@@ -32,7 +33,11 @@ def resolve_main_ref(repo: Path) -> str:
     A failed fetch falls back to the last-fetched origin/main."""
     repo = Path(repo)
     if git_run(repo, "remote", "get-url", "origin", check=False).returncode == 0:
-        git_run(repo, "fetch", "-q", "origin", "main", check=False)
+        fetched = git_run(repo, "fetch", "-q", "origin", "main", check=False)
+        if fetched.returncode != 0:
+            print(f"⚠️  git fetch origin main failed — comparing against the last "
+                  f"fetched origin/main, which may miss a just-merged hotfix: "
+                  f"{fetched.stderr.strip()}", file=sys.stderr)
         if git_run(repo, "rev-parse", "--verify", "-q", "origin/main", check=False).returncode == 0:
             return "origin/main"
     return "main"
@@ -67,7 +72,9 @@ def sync_main_into_release(repo: Path, rel_wt: Path, release_branch: str,
         raise MainSyncConflictError(
             f"{release_branch} is {len(missing)} commit(s) behind {main_ref}, but main "
             f"changed release bookkeeping, which must not be auto-merged: "
-            f"{', '.join(touched)}.\nReconcile by hand: {manual}"
+            f"{', '.join(touched)}.\nMerge by hand keeping the release's copy of those "
+            f"paths: cd {rel_wt} && git merge --no-commit {main_ref}; "
+            f"git checkout HEAD -- {' '.join(touched)} && git commit --no-edit"
         )
 
     try:

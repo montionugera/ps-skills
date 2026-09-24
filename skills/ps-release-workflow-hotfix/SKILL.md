@@ -45,6 +45,7 @@ Saying "babysit + merge" authorizes steps 6-8 without re-asking.
 
 ## Refuses if
 
-The sibling directory already exists.
+The sibling directory already exists. `--sync-release`: the merge conflicts (exact
+command printed), or the release is frozen for promote (re-run promote instead).
 
 Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#guard-guarantees`
