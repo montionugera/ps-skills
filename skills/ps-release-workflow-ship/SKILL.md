@@ -34,7 +34,8 @@ Clean tree, run from inside the claimed feature worktree.
 Runs the repo's own local deploy script against `release/<v>`, so the local env
 reflects the integrated release: `scripts/deploy-local.sh`, or whatever
 `hooks.deploy_local` in `.release.json` points at (an unusable value refuses the
-deploy loudly and leaves the merge standing). That script is
+deploy loudly and leaves the merge standing). With no script at all, ship prints
+`no local deploy configured` instead of skipping silently. That script is
 responsible for refusing any non-local kubectl context, so ship can never touch prod.
 Prod stays untouched until `psrw promote`, whose `--deploy` runs against the `_release`
 worktree — the release tree, not `main` — because the local DB may already be migrated
@@ -47,9 +48,12 @@ Claim the next feature, or `psrw promote` when the release is full.
 
 ## Refuses if
 
-Not inside a feature worktree · dirty tree · Gate 1 (`precheck.sh`) fails. Gate 1 runs
+Not inside a feature worktree · dirty tree · the release is **frozen** (promote has
+started or its PR is open or merged: ship into the next release instead) · `main` cannot merge cleanly into
+`release/<v>` (ship first absorbs any hotfix on `main`; a conflict prints the exact
+`git merge` to run) · Gate 1 (`precheck.sh`) fails. Gate 1 runs
 twice — pre-merge on the feature worktree, then again post-merge on `_release`, where a
-failure rolls the merge back.
+failure rolls the sync and merge back. The deploy refuses a release still behind `main`.
 
 Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#gates`
 Flags: `psrw ship --help`

@@ -15,6 +15,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **ps-release-workflow-refine** | Promote a solid, approved idea into the refined backlog (`F-NNN`). |
 | **ps-release-workflow-claim** | Claim a refined feature and cut an isolated per-feature worktree. |
 | **ps-release-workflow-ship** | Merge a finished feature into the in-progress release (Gate 1). |
+| **ps-release-workflow-sync-main** | Absorb commits from `main` (squash-merged hotfixes) into the in-progress release on demand (Gate 1). |
 | **ps-release-workflow-new-release** | Open a new release cycle and its `_release` worktree. |
 | **ps-release-workflow-promote** | Squash-merge a full release to main and deploy (Gate 2). |
 | **ps-release-workflow-guard** | The PreToolUse guard that blocks edits on `main` / foreign worktrees. |
@@ -27,7 +28,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **agy-worker** | Offloads coding tasks to Antigravity CLI (`agy`) or Codex (`gpt-5.6-terra`) with proactive quota checking (`>30%` 5h, `>10%` weekly), auto-routing, fallback to Claude Sonnet, and standard ≤15-line reports. Binaries: `dispatch-agy-worker`, `dispatch-codex-worker`, `dispatch-worker`. |
 | **url-state-resilience** | Enforces URL-as-State, deep-linking, and reload resilience across web dashboards and SPAs; provides `check-url-state.sh` linter and `url-state-guard.py` hook for non-regression. |
 
-The thirteen `ps-release-workflow-*` skills are thin wrappers over a shared Python engine
+The `ps-release-workflow-*` skills are thin wrappers over a shared Python engine
 ([`engine/ps-release-workflow`](engine/ps-release-workflow)) — they call its scripts at runtime, so the
 engine is installed alongside them.
 
@@ -168,7 +169,11 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
 - **ps-interactive-learning-builder** — invoke `/ps-interactive-learning-builder <topic>` to create a
   source-backed course, explorable reference, or hybrid learning project with gated audit and verification.
 - **ps-release-workflow** — start with `ps-release-workflow-init` in a repo, then
-  idea → refine → claim → ship → promote. Each skill's `SKILL.md` documents its preconditions.
+  idea → refine → claim → ship → promote. Hotfixes merged to `main` are merged into
+  `release/<v>` automatically by `psrw ship` and `psrw promote` before they gate or deploy
+  (a conflict refuses with the exact command); `psrw sync-main` does it on demand, and
+  `psrw status` flags a release that is behind `main`. Each skill's `SKILL.md` documents
+  its preconditions.
 
 ## Development
 

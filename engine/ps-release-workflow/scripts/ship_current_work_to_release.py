@@ -18,12 +18,17 @@ from lib.backlog_paths import (
     get_backlog_catalog_path,
     get_release_worktree,
     read_release_state,
+    release_worktree_path,
 )
-from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped
+from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped, update_entry
 from lib.epic import epic_children, epic_completeness, epic_folder_path, try_begin_verification
 from lib.epic_gate import run_and_record
 from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
 from lib.hooks import HookPathError, resolve_hook
+from lib.main_sync import (
+    MainSyncConflictError, missing_main_commits, resolve_main_ref, sync_main_into_release,
+)
+from lib.release_freeze import ReleaseFrozenError, frozen_error, frozen_since
 from lib.repo import is_ps_release_workflow_repo
 from lib.slug import slugify
 from lib.state import file_lock
@@ -94,6 +99,13 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
     # (fix #2 source of truth), not main — main carries only last-promoted state.
     state = read_release_state(repo)
     if state is None:
+        # A finalized-but-uncleaned release (promote already opened its PR)
+        # is frozen, not absent: say so, and where the feature should go.
+        rj = release_worktree_path(repo) / ".release.json"
+        if rj.exists():
+            version = json.loads(rj.read_text()).get("version")
+            if version:
+                raise frozen_error(version, feature_id, "promoted: its PR is open or merged")
         raise NoReleaseInProgressError("No release in progress")
     release_version = state["version"]
     release_branch = f"release/{release_version}"
@@ -129,12 +141,29 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
     # the shared _release worktree so two concurrent ships can't corrupt the tree
     # or roll back the wrong commit.
     feat_branch = f"feat/{feature_id}"
+    # Fetch outside the lock (network); the merge itself happens under it.
+    main_ref = resolve_main_ref(repo)
     with file_lock(rel_wt):
+        # Checked under the lock promote freezes under: a ship either lands
+        # before promote starts (and is in the PR) or is refused here.
+        since = frozen_since(repo, release_version)
+        if since:
+            raise frozen_error(release_version, feature_id, f"promote started at {since}")
+        shipped_sha = git_run(rel_wt, "rev-parse", feat_branch).stdout.strip()
+        # Every rollback below resets to the pre-ship head: after a main sync
+        # plus the feature merge, HEAD~1 would leave the untested sync standing.
+        pre_sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
+        # A hotfix merged to main while this release is open must be in the
+        # release BEFORE the feature lands, so Gate 1 and the local deploy see
+        # release + hotfix + feature. A conflict refuses the whole ship loudly,
+        # release untouched (sync_main_into_release aborts its own merge).
+        main_synced = sync_main_into_release(repo, rel_wt, release_branch, main_ref)
         try:
             git_run(rel_wt, "merge", "--no-ff", "-m", f"merge {feat_branch} into {release_branch}", feat_branch)
         except GitError as e:
             # Abort any partial/conflicted merge before surfacing the failure.
             git_run(rel_wt, "merge", "--abort", check=False)
+            git_run(rel_wt, "reset", "--hard", pre_sha)
             raise GateFailedError(f"merge of {feat_branch} into {release_branch} failed: {e}")
 
         # Re-verify Gate 1 on the MERGED result — precheck resolved from the
@@ -145,11 +174,11 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
             # A bad hooks.precheck path must not leave the merge standing: the
             # raise would otherwise skip the rollback below and escape the lock
             # with the feature merged on release/<v> while ship reports failure.
-            git_run(rel_wt, "reset", "--hard", "HEAD~1")
+            git_run(rel_wt, "reset", "--hard", pre_sha)
             raise
         if rc is not None and rc != 0:
-            # Roll back the merge: hard reset to release HEAD~1
-            git_run(rel_wt, "reset", "--hard", "HEAD~1")
+            # Roll back the merge (and any main sync): back to the pre-ship head.
+            git_run(rel_wt, "reset", "--hard", pre_sha)
             raise GateFailedError(f"Gate 1 failed on combined release after merge — rolled back")
 
         # Mark catalog status=shipped IN PLACE in the _release worktree (D11/SR-1).
@@ -161,7 +190,12 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
         # that crashed between mark_shipped and commit_all left the change
         # uncommitted — "no change now" must not strand it forever.
         refined_cat = get_backlog_catalog_path(repo, "refined")
-        if mark_shipped(refined_cat, feature_id, release_version) or is_dirty(rel_wt):
+        # shipped_sha is the exact feature commit merged, so cleanup can prove
+        # it reached main (a feature branch may move on after the ship).
+        def record_sha(e: dict) -> None:
+            e["shipped_sha"] = shipped_sha
+        marked = mark_shipped(refined_cat, feature_id, release_version)
+        if update_entry(refined_cat, feature_id, record_sha) or marked or is_dirty(rel_wt):
             commit_all(rel_wt, f"chore(catalog): {feature_id} status=shipped on {release_version}")
 
         # G-E2 CAS: decide, under this same lock (HEAD is stable here), whether
@@ -181,7 +215,7 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
                     # verification's write is a plain, uncommitted filesystem
                     # change (mutate_state does tmp-write + replace, no git);
                     # left uncommitted, a concurrent ship's Gate-1 rollback
-                    # (`git reset --hard HEAD~1`, above) wipes it and reverts
+                    # (`git reset --hard <pre-ship head>`, above) wipes it and reverts
                     # the epic to "open" while this run's multi-minute check
                     # is still in flight — the exact double-run the CAS exists
                     # to prevent (finding 1/7).
@@ -206,7 +240,8 @@ def ship_current_work(worktree: Path, *, skip_readiness: bool = False) -> dict:
         epic_outcome = {"epic": epic_id, "rc": rc, "sha": cas_sha}
 
     return {"ok": True, "feature": feature_id, "release": release_version,
-            "rel_wt": str(rel_wt), "epic_outcome": epic_outcome}
+            "rel_wt": str(rel_wt), "epic_outcome": epic_outcome,
+            "main_synced": main_synced}
 
 
 def main() -> int:
@@ -232,11 +267,15 @@ def main() -> int:
         result = ship_current_work(cwd, skip_readiness=args.skip_readiness)
     except (DirtyTreeError, GateFailedError, NotInFeatureWorktreeError,
             NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,
-            FeatureNotReadyError, RuntimeError) as e:
+            FeatureNotReadyError, MainSyncConflictError, ReleaseFrozenError,
+            RuntimeError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result))
     print(f"\n✅ Shipped {result['feature']} to release/{result['release']}")
+    if result.get("main_synced"):
+        print(f"   Synced {result['main_synced']} commit(s) from main into "
+              f"release/{result['release']} first (hotfixes).")
     # The epic outcome check is separate from Gate 1 (finding 12): ship must
     # never go silently green when it ran and failed — an operator reading
     # only the checkmark below would not learn about it until G-E3 blocks
@@ -276,18 +315,38 @@ def main() -> int:
         )
         print(f"\n   Continue with next feature, or promote: psrw promote")
         return 0
-    if deploy_script.exists():
+    # Never deploy a release that is missing commits on main: a hotfix that
+    # landed after the merge above would vanish from the local cluster.
+    behind = missing_main_commits(rel_wt, resolve_main_ref(rel_wt))
+    if behind and not args.no_deploy:
+        print(
+            f"\n❌ Post-merge local deploy REFUSED — release/{result['release']} is "
+            f"{len(behind)} commit(s) behind main (a hotfix landed after this ship's "
+            f"sync).\n   The merge SUCCEEDED; only the deploy was skipped. Sync and "
+            f"deploy: psrw sync-main --deploy",
+            file=sys.stderr,
+        )
+    elif args.no_deploy:
+        # An explicit choice — reported as such, never as "not configured".
+        hint = (f" Run it manually when ready: cd {rel_wt} && {deploy_script}"
+                if deploy_script.exists() else "")
+        print(f"\n⏭️  Local deploy skipped (--no-deploy).{hint}")
+    elif not deploy_script.exists():
+        # Never skip silently: a repo without a deploy script otherwise leaves
+        # the local cluster on stale code with no hint that nothing deployed.
+        print(f"\nℹ️  Local deploy skipped: no local deploy configured: add "
+              f"scripts/deploy-local.sh or hooks.deploy_local "
+              f"(looked for {deploy_script}).")
+    else:
         # Deploy-local is a DEFAULT step of ship (treat merge-to-release like an
-        # MR merge that triggers a staging deploy). Precedence UNCHANGED:
-        #   --no-deploy      -> skip (concurrent-session burst; batch the deploy)
+        # MR merge that triggers a staging deploy). Precedence (--no-deploy is
+        # handled above, before the existence check):
         #   --deploy         -> force deploy
         #   interactive tty  -> prompt (Enter = yes)
         #   non-interactive  -> deploy by default
         # deploy-local.sh itself refuses any non-local kubectl context, so this
         # can never touch prod even when it runs unattended.
-        if args.no_deploy:                      # was: "--no-deploy" in sys.argv
-            deploy_now = False
-        elif args.deploy:                       # was: "--deploy" in sys.argv
+        if args.deploy:                         # was: "--deploy" in sys.argv
             deploy_now = True
         elif sys.stdin.isatty():
             deploy_now = False

@@ -98,3 +98,15 @@ def self_ids(payload_session_id: str | None = None, *, generate: bool = True) ->
         # Nothing known at all: generate + cache one (same as claim creation).
         ids.add(resolve_owner_id())
     return ids
+
+
+def current_session_id() -> str | None:
+    """The harness session id of THIS process, or None when none is exported.
+
+    Unlike resolve_owner_id(), never falls back to the machine-cached id: every
+    local session shares that one, so it cannot tell two sessions apart. Claims
+    record this value so a later unclaim can warn when it comes from a
+    different session than the one that claimed.
+    """
+    return (os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or os.environ.get("CLAUDE_SESSION_ID") or None)

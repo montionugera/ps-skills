@@ -403,3 +403,74 @@ def test_unpromoted_slice_stays_idea_with_no_warning(
     st = collect_status(tmp_repo_with_release)
     assert [s["status"] for s in st["epics"][0]["slices"]] == ["idea", "idea"]
     assert st["warnings"] == []
+
+
+# ── Hotfix pending sync: status flags a release behind main (cached, no fetch) ─
+
+
+def test_status_reports_release_behind_origin_main(tmp_repo_in_release: Path):
+    repo = tmp_repo_in_release
+    (repo / "hotfix.txt").write_text("critical patch\n")
+    subprocess.run(["git", "add", "hotfix.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fix: hotfix"], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=repo, check=True)  # updates origin/main
+
+    st = collect_status(repo)
+    assert st["release"]["behind_main"] == 1
+    assert st["release"]["main_ref"] == "origin/main"
+    for text in (render_brief(st), render_full(st)):
+        assert "1 behind origin/main (hotfix pending sync; run psrw sync-main)" in text
+
+
+def test_status_behind_main_uses_the_cached_ref_and_never_fetches(tmp_repo_in_release: Path):
+    """status is read-only and offline: a commit that only exists on the remote
+    (not yet fetched) must not be seen, and nothing may be fetched."""
+    repo = tmp_repo_in_release
+    clone = repo.parent / "other-clone"
+    subprocess.run(["git", "clone", "-q", "-b", "main", str(repo.parent / "origin.git"), str(clone)],
+                   check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=T", "commit", "-q",
+                    "--allow-empty", "-m", "remote-only"], cwd=clone, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "HEAD:main"], cwd=clone, check=True)
+    before = subprocess.run(["git", "rev-parse", "origin/main"], cwd=repo,
+                            capture_output=True, text=True).stdout
+
+    st = collect_status(repo)
+    assert st["release"]["behind_main"] == 0
+    assert "behind" not in render_brief(st)
+    assert subprocess.run(["git", "rev-parse", "origin/main"], cwd=repo,
+                          capture_output=True, text=True).stdout == before
+
+
+def test_status_behind_main_without_any_main_ref(tmp_repo_in_release: Path):
+    repo = tmp_repo_in_release
+    subprocess.run(["git", "update-ref", "-d", "refs/remotes/origin/main"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "-q", "-m", "main", "trunk"], cwd=repo, check=True)
+    st = collect_status(repo)
+    assert st["release"]["behind_main"] == 0 and st["release"]["main_ref"] is None
+
+
+def test_status_behind_main_survives_a_git_error(tmp_repo_in_release: Path, monkeypatch):
+    import scripts.status as status_mod
+    from lib.git_ops import GitError
+
+    def boom(*a, **k):
+        raise GitError("broken")
+    monkeypatch.setattr(status_mod, "missing_main_commits", boom)
+    assert collect_status(tmp_repo_in_release)["release"]["behind_main"] == 0
+
+
+def test_status_ignores_a_release_dir_that_is_not_a_worktree(tmp_repo_in_release: Path):
+    """A leftover plain _release dir would make git walk up to the main
+    checkout and count ITS head against origin/main — a wrong number."""
+    repo = tmp_repo_in_release
+    rel = repo / ".claude" / "worktrees" / "_release"
+    (rel / ".git").unlink()
+    (repo / "hotfix.txt").write_text("x\n")
+    subprocess.run(["git", "add", "hotfix.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "hotfix"], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=repo, check=True)
+    # Main checkout now 1 behind origin/main: exactly what a walk-up would count.
+    subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=repo, check=True)
+    st = collect_status(repo)
+    assert st["release"]["behind_main"] == 0

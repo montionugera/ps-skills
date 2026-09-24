@@ -34,7 +34,7 @@ from lib.git_ops import (
     is_dirty,
     remove_worktree,
 )
-from lib.owner import resolve_owner_id
+from lib.owner import current_session_id, resolve_owner_id
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
 from lib.slug import slugify
 from lib.state import file_lock, mutate_state
@@ -123,6 +123,9 @@ def claim_feature(
             "owner": owner,
             "worktree": str(worktree_path),
             "claimed_at": _now(),
+            # Distinguishes local sessions that share one owner id (unclaim warns
+            # when a different session abandons this claim).
+            "session_id": current_session_id(),
         }
         return claims
 
@@ -156,7 +159,8 @@ def claim_feature(
         marker = wt_meta / "working-feature.json"
         marker.write_text(
             json.dumps(
-                {"feature": feature_id, "owner": owner, "claimed_at": _now()}, indent=2
+                {"feature": feature_id, "owner": owner, "claimed_at": _now(),
+                 "session_id": current_session_id()}, indent=2
             )
         )
 
@@ -282,14 +286,16 @@ def resume_feature(repo: Path, feature_id: str, *, owner: str) -> dict:
     # the catalog-only drift), both owned by the resuming session.
     marker.write_text(
         json.dumps(
-            {"feature": feature_id, "owner": owner, "claimed_at": _now()}, indent=2
+            {"feature": feature_id, "owner": owner, "claimed_at": _now(),
+                 "session_id": current_session_id()}, indent=2
         )
     )
 
     def upsert(claims: dict) -> dict:
         entry = claims.get(feature_id) or {}
         entry.setdefault("claimed_at", _now())
-        entry.update({"owner": owner, "worktree": str(worktree_path), "resumed_at": _now()})
+        entry.update({"owner": owner, "worktree": str(worktree_path), "resumed_at": _now(),
+                      "session_id": current_session_id()})
         claims[feature_id] = entry
         return claims
 

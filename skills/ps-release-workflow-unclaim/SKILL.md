@@ -26,11 +26,14 @@ Release a claimed feature: put it back to `open` without losing committed work.
 - **Drift cleanup** — if the worktree was already deleted out-of-band (stale claim),
   unclaim still prunes the dangling metadata and cleans the ledger + catalog.
 - To take over a claim instead of abandoning it: `psrw claim --resume F-NNN`.
+- **Never `--force` another session's claim blind.** Local sessions share one owner id;
+  unclaim warns when the claim recorded a different session id. Uncommitted and
+  untracked files are listed in the refusal, and `--force` deletes exactly those.
 
 ## Refuses if
 
 No release in progress · the feature does not exist or is not status `claimed` · the
-worktree has uncommitted changes and `--force` was not given.
+worktree has uncommitted or untracked changes (listed) and `--force` was not given.
 
 Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#state-layout`
 Flags: `psrw unclaim --help`

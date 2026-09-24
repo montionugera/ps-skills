@@ -34,7 +34,37 @@ proceeds UNVERIFIED, for repos that never had one.
 
 `--deploy` (local prod-style deploy) is opt-in and repo-specific. It runs from the
 `_release` worktree, because the shared local DB may already be migrated ahead of
-`main` by the release's own migrations.
+`main` by the release's own migrations. `ship`'s post-merge deploy never
+skips silently: with no deploy script at `hooks.deploy_local` (default
+`scripts/deploy-local.sh`) it prints `no local deploy configured: add
+scripts/deploy-local.sh or hooks.deploy_local`, a notice distinct from the
+`--no-deploy` one.
+
+### Main sync: hotfixes reach the open release
+<a id="main-sync"></a>
+
+A hotfix squash-merged to `main` while `release/<v>` is open does not reach the release
+by itself, so anything run from `_release` (Gate 1, the local deploy, Gate 2, the promote
+PR) would run without it. `lib/main_sync.py` merges `main` (`origin/main` after a fetch
+when an origin exists) into `release/<v>` in the `_release` worktree, under its file lock:
+
+- **`ship`** syncs before merging the feature, so Gate 1 verifies release + hotfix +
+  feature. Any failure resets to the pre-ship head, undoing sync and merge together.
+  Its post-merge deploy re-checks and **refuses** a release still behind `main`.
+- **`promote`** syncs first, before the epic gate, `--deploy` and Gate 2.
+- **`psrw sync-main`** (alias `psrw hotfix --sync-release`) syncs on demand, e.g. as the
+  last step of the hotfix flow, then runs Gate 1 from `_release` on the synced tree and
+  rolls the sync back if it fails. `--deploy` then runs the local deploy. It refuses while
+  the release is frozen for promote, which syncs `main` itself.
+- **`psrw status`** shows `N behind origin/main (hotfix pending sync; run psrw sync-main)`
+  against the cached ref, without fetching.
+
+A conflict aborts the merge, leaves `release/<v>` untouched and prints the exact
+`cd <_release> && git merge origin/main` to run. So does a `main` change to release
+bookkeeping (`.release.json`, the backlog dirs, `.claude/state/`), which must never be
+auto-merged over the release's own copy; its command keeps the release's copy of those
+paths (`git merge --no-commit`, then `git checkout HEAD -- <paths>`). A failed fetch warns
+that the comparison uses the last-fetched `origin/main`.
 
 ### Epic gates: G-E2 and G-E3
 
@@ -140,7 +170,8 @@ so its `hooks` block legitimately differs per branch.
 
 `psrw promote` is PR-based by default and is **not** the terminal step:
 
-1. Gate 2 runs, then `--deploy` if given.
+1. `main` is synced into `release/<v>` (see [main sync](#main-sync)), then Gate 2 runs,
+   then `--deploy` if given.
 2. `release/<v>` is pushed and a PR to `main` is opened. Release state is finalized on
    the release branch only *after* the PR exists, so a failed `gh` call leaves the
    release in progress and promote can simply be re-run.
@@ -150,6 +181,27 @@ so its `hooks` block legitimately differs per branch.
    `_release` worktrees and branches, and finalizes `.release.json` on `main`.
    It verifies the PR is merged first and refuses otherwise, because deleting the
    remote release branch would auto-close an open PR.
+
+**The release is frozen from the moment promote starts.** Promote records the freeze
+in `.claude/state/release-freeze.json` under the `_release` lock, and `ship` checks it
+under that same lock, so a ship either lands before promote starts (and is in the PR) or
+is refused and told to ship into the next release. A finalized release (in-progress set
+to false) is refused the same way. A promote that fails lifts the freeze, so fixes can
+ship and promote can be re-run. That includes red checks under `--babysit`. On success the
+freeze lasts until cleanup. `--babysit` also refuses to merge when the local release head
+differs from the head it pushed for CI.
+
+**Cleanup verifies what landed.** Before deleting anything, it checks every feature that
+the release branch's catalog marks `shipped` on `<v>`. The feature's `shipped_sha`
+(recorded by `ship`) must be an ancestor of the head that reached `main`. That head is
+the one promote recorded when it pushed (or `--direct` squashed) the release, else the
+PR's `headRefOid`, else `origin`'s `release/<v>`, so a host that auto-deletes merged
+branches does not blind the check. An entry without `shipped_sha` (older psrw) is only
+warned about, never reset. A feature that fails this check is stranded.
+Cleanup flags it loudly and resets it in `main`'s catalog to `claimed` (the worktree
+survives) or `open`, with `release_version` cleared and `stranded_from: <v>` set. Its
+branch and folder are kept, so the next release can ship it. Cleanup returns the list as
+`stranded`.
 
 Until cleanup runs, the next `psrw new-release` is blocked by the stale `_release`
 worktree. `--babysit` performs steps 2-4 in one go: watch checks, finalize, merge,
@@ -172,7 +224,8 @@ clean up.
     _catalog.json                     # E-NNN registry (committed on release/<v>)
     E-NNN-<slug>/spec.md verification.md
     _archive/<v>/                     # epics archived by cleanup
-  state/claims.json                   # gitignored — F-NNN -> owner map
+  state/claims.json                   # gitignored — F-NNN -> owner (+ session_id) map
+  state/release-freeze.json           # gitignored — versions being promoted (ship refuses)
   worktrees/                          # gitignored
     _release/                         # long-lived, on release/<v>
     F-NNN-<slug>/                     # claimed feature worktree (owner marker)
@@ -217,6 +270,11 @@ It does **not** provide per-session isolation between two Claude sessions on the
 machine: claims are created with a machine-cached fallback id, so local sessions
 normally resolve to the same owner. The ownership check protects against
 cross-machine claims and hand-edited markers, not against two local sessions.
+To narrow that gap, `claim` (and `claim --resume`) also records the harness session id
+(`$CLAUDE_CODE_SESSION_ID`, else `$CLAUDE_SESSION_ID`) as `session_id` in
+`claims.json` and the marker. `unclaim` warns when that id differs from the current
+session's, and refuses a worktree with uncommitted or untracked changes — listing
+each path — unless `--force` is given.
 
 The guard is a read path: it never generates or persists an identity as a side effect.
 It bypasses entirely when `PS_RELEASE_WORKFLOW_SCRIPTED=1`, warns but allows on a
