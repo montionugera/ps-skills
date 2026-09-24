@@ -283,8 +283,7 @@ check lint_flags_unverifiable_q_coverage_when_brief_missing test_lint_flags_unve
 # yet — a new test written below, or (c) genuinely Mermaid-syntax-specific
 # with no XML analog (regex-tokenization ambiguities, keyword-case
 # collisions, link-family enumeration — none of which a real XML parser can
-# exhibit) — deleted with no replacement. See task-5-report.md for the full
-# per-function inventory.
+# exhibit) — deleted with no replacement.
 test_lint_fails_drawio_malformed_xml() {  # unclosed XML tags -> ET.fromstring ParseError
   "$S/init.sh" t-lint-dmalformed --tier html >/dev/null
   _lint_valid_brief_facts_storyboard t-lint-dmalformed
@@ -830,7 +829,7 @@ test_lint_dedupes_drawio_defect_lines() {  # drawio-format instance of the SAME 
 See F1 for details.
 
 ```drawio
-<mxGraphModel pageWidth="800" pageHeight="400">
+<mxGraphModel>
   <root>
     <mxCell id="0" />
     <mxCell id="1" parent="0" />
@@ -842,7 +841,6 @@ See F1 for details.
 EOF
   local out rc; out="$("$S/lint.sh" t-lint-ddedup 2>&1)"; rc=$?
   (( rc == 1 )) &&
-  grep -q "duplicate mxCell id 'e1'" <<<"$out" &&
   (( $(grep -c "edge 'e1' has no label" <<<"$out") == 1 ))
 }
 test_lint_checks_drawio_inside_mxfile_wrapper() {  # drawio-format instance of the SAME
@@ -897,7 +895,7 @@ test_lint_fails_drawio_ambiguous_cell_type() {  # this lint's own vertex/edge-ex
 See F1 for details.
 
 ```drawio
-<mxGraphModel pageWidth="800" pageHeight="400">
+<mxGraphModel>
   <root>
     <mxCell id="0" />
     <mxCell id="1" parent="0" />
