@@ -2,10 +2,25 @@
 # verify.sh — render gate for a ps-commu workspace (infographic tier).
 # Usage: verify.sh <slug> [--url URL]
 #   Loads the served page in headless Google Chrome (--dump-dom under a virtual
-#   time budget, so the client-side fetch() + Markdown + Mermaid render has
+#   time budget, so the client-side fetch() + Markdown + draw.io render has
 #   completed before the DOM is dumped; console output is captured from Chrome's
 #   stderr log) and prints one PASS/FAIL/SKIP line per assert:
-#     1  rendered Mermaid <svg> count == fenced ```mermaid count in the doc
+#     1  rendered draw.io diagram count == fenced ```drawio count in the doc.
+#        COUNT-based, not id-based: draw.io's static viewer has no id link
+#        between a rendered shape and its source mxCell (confirmed in
+#        task-0-report.md). FAILs on either of two failure modes, both
+#        confirmed empirically against the pinned viewer build (never
+#        assumed): (a) fewer rendered `<div class="mxgraph">` than fences —
+#        the viewer script never loaded (CDN miss), so cherry-setup.js's
+#        frameAndRunDrawio() bails out at its `typeof GraphViewer ===
+#        "undefined"` guard before creating any div at all; (b) a
+#        `.mxgraph` div whose `<svg>` is present but holds no shape content
+#        (no `<rect>`/`<path>`/`<foreignObject>`) — the spec's documented
+#        "malformed-but-JSON-valid XML renders an empty graph, zero console
+#        errors" failure mode (reproduced with a well-formed-XML,
+#        zero-vertex `<mxGraphModel>`: it renders `<svg><g><g/><g/><g/><g/>
+#        </g></svg>` and nothing else, no console output whatsoever — a
+#        naive "a nested <svg> exists" check would false-PASS this).
 #     2  body text has no `~~CODE` placeholder leak
 #     3  body text has no raw `data-nav` attribute text
 #     4  zero page-origin console errors (chrome-extension:// ignored)
@@ -19,6 +34,23 @@
 #        SKIP, so defect 1 keeps a scripted gate even while assert 5 can't run.
 #        Assert 6 needs neither Chrome nor a live server, so it still runs —
 #        and can still FAIL — even when Chrome is missing; see below)
+#     7  draw.io pan/zoom interactivity actually initialized. A static DOM
+#        proxy check, never a permanent SKIP the way assert 5's click check
+#        is (per the spec's explicit "not deferred" requirement for
+#        interactivity). FAILs (whenever Chrome is available, i.e. whenever
+#        this assert runs at all) if either: no `.mxgraph` div rendered at
+#        all for >=1 ```drawio fence (same GraphViewer-never-loaded signal
+#        as assert 1's failure mode (a), checked here as its own named
+#        assertion); or no `.mxgraph` div shows the `margin-top` inline-style
+#        side effect that GraphViewer's addToolbar() sets unconditionally
+#        the instant a div's `toolbar` config key is honored — confirmed
+#        empirically (render the same diagram with and without
+#        `"toolbar":"zoom"` in data-mxgraph) to appear ONLY when the key is
+#        set. The zoom-in/out/fit BUTTONS themselves are NOT usable evidence
+#        here: confirmed empirically that GraphViewer only appends them to
+#        the DOM on a live `mouseenter` over the graph container, which a
+#        --dump-dom capture can never trigger — the same hover/click
+#        limitation that makes assert 5 a permanent SKIP.
 #   --url  page URL to load (default: http://127.0.0.1:<port> from meta.json;
 #          requires a live marker-verified server). A ?doc=X query selects
 #          which app/X markdown file the fence count is taken from.
@@ -27,7 +59,7 @@
 #          .cherry-previewer extractor the asserts use internally — this is
 #          the reader gate's input, NOT a raw --dump-dom: that would return
 #          duplicated toolbar/source-pane/preview copies plus raw data-nav
-#          markup and unrendered ```mermaid fences). Exit 1 if the page never
+#          markup and unrendered ```drawio fences). Exit 1 if the page never
 #          rendered a .cherry-previewer subtree; 2 if Chrome/server is
 #          unavailable, same as the normal run.
 #   Chrome: $CHROME_BIN, else google-chrome/chromium on PATH, else the macOS app.
@@ -111,7 +143,7 @@ fi
 doc="$(python3 -c 'import sys,urllib.parse as u; q=u.parse_qs(u.urlparse(sys.argv[1]).query); print(q.get("doc",["content.md"])[0])' "$url")"
 md="$ws/app/$doc"
 [[ -f "$md" ]] || { echo "FAIL: doc not found: $md"; exit 1; }
-fences="$(grep -cE '^[[:space:]]*```[[:space:]]*mermaid' "$md" || true)"
+fences="$(grep -cE '^[[:space:]]*```[[:space:]]*drawio' "$md" || true)"
 
 python3 - "$chrome" "$url" "$fences" "$dump_text" <<'PY'
 import os, re, select, shutil, signal, subprocess, sys, tempfile, time
@@ -194,6 +226,38 @@ class Preview(HTMLParser):
         if self.depth and not self.skip:
             self.text.append(data)
             if not self.code: self.prose.append(data)   # samples in <code> are legit
+# Count-based draw.io inspection (assert 1 + assert 7's GraphViewer/toolbar
+# checks) — depth-tracked like Preview above, NOT a naive "close on the first
+# </div>": Task 0's DOM notes show a diagram's foreignObject label text is
+# itself wrapped in nested <div>s (for centering), so a shallow close-on-
+# </div> would end a diagram's capture at its own first label, silently
+# truncating everything the label's sibling shapes/edges render after it.
+_VOID_TAGS = {"br", "img", "input", "hr", "meta", "link", "area", "base",
+              "col", "embed", "source", "track", "wbr"}
+class MxGraphCount(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.divs = []       # finished {"svg": bool, "content": bool, "style": str}
+        self.capture = None  # the in-progress record for the .mxgraph div being walked
+        self.depth = 0       # tag-nesting depth *inside* that div (the div itself = 1)
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if self.capture is None:
+            if tag == "div" and "mxgraph" in a.get("class", "").split():
+                self.capture = {"svg": False, "content": False, "style": a.get("style", "")}
+                self.depth = 1
+            return
+        if tag == "svg": self.capture["svg"] = True
+        if tag in ("rect", "path", "ellipse", "foreignobject"): self.capture["content"] = True
+        if tag not in _VOID_TAGS: self.depth += 1
+    def handle_endtag(self, tag):
+        if self.capture is None: return
+        self.depth -= 1
+        if self.depth <= 0:
+            self.divs.append(self.capture)
+            self.capture = None
+mx = MxGraphCount(); mx.feed(dom)
+
 pv = Preview(); pv.feed(dom)
 text, prose = "".join(pv.text), "".join(pv.prose)
 no_preview_msg = "no .cherry-previewer subtree in the dump (page did not render)"
@@ -206,12 +270,12 @@ if dump_text:
     sys.stdout.write(text)
     sys.exit(0)
 if not pv.text: report("FAIL", 0, no_preview_msg)
-frames = len(re.findall(r'class="mermaid-frame', dom))
-roles = re.findall(r'<svg[^>]*aria-roledescription="([^"]+)"', dom)
-err_svgs = roles.count("error")
-svgs = len([r for r in roles if r != "error"])
-report("PASS" if svgs == fences else "FAIL", 1,
-       f"mermaid svg={svgs} fences={fences} (frames={frames} error-svgs={err_svgs})")
+rendered = sum(1 for d in mx.divs if d["svg"] and d["content"])
+empty = sum(1 for d in mx.divs if d["svg"] and not d["content"])
+no_svg = sum(1 for d in mx.divs if not d["svg"])
+report("PASS" if rendered == fences and empty == 0 and no_svg == 0 else "FAIL", 1,
+       f"drawio svg={rendered} fences={fences} "
+       f"(mxgraph-divs={len(mx.divs)} empty-render={empty} no-svg={no_svg})")
 report("FAIL" if "~~CODE" in text else "PASS", 2, "~~CODE placeholder " + ("LEAKED in body text" if "~~CODE" in text else "absent"))
 report("FAIL" if "data-nav" in prose else "PASS", 3, "raw data-nav text " + ("LEAKED in body text" if "data-nav" in prose else "absent"))
 # Console: Chrome's stderr log lines look like
@@ -224,6 +288,24 @@ for ln in log.splitlines():
 report("FAIL" if errs else "PASS", 4, f"console errors={len(errs)}")
 for t, u in errs[:10]: lines.append(f"      {t[:200]}  [{u}]")
 report("SKIP", 5, "nav click: --dump-dom cannot dispatch clicks and DevTools Runtime.evaluate hangs on this Chrome build after page load")
+# Assert 7 — see the header comment above for the full empirically-confirmed
+# rationale. Never SKIP here (this code only runs once Chrome already
+# produced a DOM dump, i.e. the same "Chrome available" condition asserts
+# 1-5 run under) — a vacuous PASS only when the doc has no ```drawio fences
+# to begin with, matching assert 1's own fences==0 behavior.
+mxgraph_total = len(mx.divs)
+toolbar_init = sum(1 for d in mx.divs if "margin-top" in d["style"])
+if fences == 0:
+    report("PASS", 7, "drawio interactivity: no ```drawio fences in doc, nothing to check")
+elif mxgraph_total == 0:
+    report("FAIL", 7, f"GraphViewer global absent: zero .mxgraph divs rendered for {fences} "
+           "```drawio fence(s) (CDN miss, or frameAndRunDrawio bailed before wrapping)")
+elif toolbar_init == 0:
+    report("FAIL", 7, "toolbar not initialized: no .mxgraph div shows the addToolbar() "
+           "margin-top side effect (pan/zoom toolbar did not take effect)")
+else:
+    report("PASS", 7, f"drawio interactivity: GraphViewer loaded, toolbar initialized on "
+           f"{toolbar_init}/{mxgraph_total} diagram(s)")
 print("\n".join(lines))
 sys.exit(1 if failed else 0)
 PY

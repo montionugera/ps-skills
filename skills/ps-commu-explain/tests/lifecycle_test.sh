@@ -1768,8 +1768,14 @@ test_verify_passes_template() {
   local out rc; out="$(verify_run t-verify)"; rc=$?
   echo "$out"
   (( rc == 2 )) && return 2
+  # The shipped content.md still carries its pre-migration ```mermaid fence
+  # (F-013's content migration is a separate, later task) — cherry-setup.js
+  # no longer processes that language at all, so it renders as an inert,
+  # unconverted code block: zero ```drawio fences, zero .mxgraph divs,
+  # assert 1 PASSes vacuously (0==0). test_verify_passes_drawio_template
+  # below is the real positive-path drawio render-gate coverage.
   (( rc == 0 )) &&
-  grep -q '^PASS: 1 mermaid svg=1 fences=1' <<<"$out" &&
+  grep -q '^PASS: 1 drawio svg=0 fences=0 (mxgraph-divs=0 empty-render=0 no-svg=0)' <<<"$out" &&
   ! grep -q '^FAIL' <<<"$out"
 }
 test_verify_dump_text() {  # --dump-text: clean reader-visible text on stdout, exit 0, no raw markup leaks
@@ -1782,7 +1788,7 @@ test_verify_dump_text() {  # --dump-text: clean reader-visible text on stdout, e
   ! grep -q '```mermaid' <<<"$out" &&
   ! grep -qE '^(PASS|FAIL|SKIP):' <<<"$out"
 }
-test_verify_fails_on_leak() {  # literal ~~CODE$ in prose + a Mermaid fence that cannot render
+test_verify_fails_on_leak() {  # literal ~~CODE$ in prose + a drawio fence that renders empty
   local port; port="$(meta_get t-verify port)"
   cat > /tmp/ps-commu/t-verify/app/leak.md <<'MD'
 <div class="section-head cat-coral" data-nav="Intro" data-cat="coral" id="intro">
@@ -1791,24 +1797,139 @@ test_verify_fails_on_leak() {  # literal ~~CODE$ in prose + a Mermaid fence that
 
 A literal ~~CODE$ placeholder stays in prose.
 
-```mermaid
-flowchart LR
-  A --> B --> (((
+```drawio
+<mxGraphModel><root><mxCell id="0" /><mxCell id="1" parent="0" /></root></mxGraphModel>
 ```
 MD
   local out rc; out="$(verify_run t-verify --url "http://127.0.0.1:$port/?doc=leak.md")"; rc=$?
   echo "$out"
   (( rc == 2 )) && return 2
   (( rc == 1 )) &&
-  grep -q '^FAIL: 1 mermaid svg=0 fences=1' <<<"$out" &&
+  grep -q '^FAIL: 1 drawio svg=0 fences=1 (mxgraph-divs=1 empty-render=1 no-svg=0)' <<<"$out" &&
   grep -q '^FAIL: 2 ~~CODE placeholder LEAKED' <<<"$out"
+}
+test_verify_passes_drawio_template() {  # Task 0's own verified diagram-v2.xml (task-0-report.md)
+  # renders cleanly: assert 1's drawio-count PASSes, and assert 7's
+  # interactivity proxy PASSes (GraphViewer loaded, toolbar's margin-top
+  # side effect present) — served via a dedicated ?doc= fixture, same
+  # workspace-reuse/isolation pattern leak.md already established above,
+  # rather than overwriting the shared content.md.
+  local port; port="$(meta_get t-verify port)"
+  cat > /tmp/ps-commu/t-verify/app/drawio-good.md <<'MD'
+A well-formed diagram.
+
+```drawio
+<mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1"
+    connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400"
+    pageHeight="400" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="init.sh" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="40" y="140" width="160" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="B" value="00-brief / 01-facts / 02-storyboard + app/"
+        style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="240" y="140" width="200" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="C" value="serve.sh" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="480" y="140" width="160" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="D" value="lint clean?" style="rhombus;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="680" y="130" width="140" height="80" as="geometry" />
+    </mxCell>
+    <mxCell id="E" value="live at 127.0.0.1:PORT"
+        style="rounded=1;whiteSpace=wrap;html=1;role=check;" vertex="1" parent="1">
+      <mxGeometry x="860" y="140" width="200" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="F" value="6 PASS/FAIL/SKIP asserts"
+        style="rounded=1;whiteSpace=wrap;html=1;role=check;" vertex="1" parent="1">
+      <mxGeometry x="1100" y="140" width="220" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="e1" value="scaffold workspace + advisory port" style="html=1;"
+        edge="1" parent="1" source="A" target="B">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e2" value="author edits content.md" style="html=1;" edge="1" parent="1"
+        source="B" target="C">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e3" value="run lint.sh gate" style="html=1;" edge="1" parent="1"
+        source="C" target="D">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e4" value="no: exit 1" style="html=1;role=pitfall;" edge="1" parent="1"
+        source="D" target="B">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points"><mxPoint x="750" y="60" /></Array>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e5" value="yes: bind 127.0.0.1 + watchdog" style="html=1;role=check;"
+        edge="1" parent="1" source="D" target="E">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e6" value="verify.sh: headless Chrome" style="html=1;" edge="1" parent="1"
+        source="E" target="F">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+  </root>
+</mxGraphModel>
+```
+MD
+  local out rc; out="$(verify_run t-verify --url "http://127.0.0.1:$port/?doc=drawio-good.md")"; rc=$?
+  echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 0 )) &&
+  grep -q '^PASS: 1 drawio svg=1 fences=1 (mxgraph-divs=1 empty-render=0 no-svg=0)' <<<"$out" &&
+  grep -q '^PASS: 7 drawio interactivity: GraphViewer loaded, toolbar initialized on 1/1 diagram(s)' <<<"$out" &&
+  ! grep -q '^FAIL' <<<"$out"
+}
+test_verify_fails_drawio_empty_render() {  # the spec's documented failure mode: well-formed XML,
+  # zero vertex/edge cells -> GraphViewer renders <svg><g><g/><g/><g/><g/></g></svg> and NOTHING
+  # else, with ZERO console output (confirmed empirically — this is genuinely NOT a case lint.sh's
+  # structural XML validator would reject pre-serve: the XML parses fine, it's just contentless).
+  # Served via --url on a raw fixture file (same --no-lint-equivalent bypass leak.md/drawio-good.md
+  # above use), so lint.sh never gets a chance to see it either way.
+  local port; port="$(meta_get t-verify port)"
+  cat > /tmp/ps-commu/t-verify/app/drawio-empty.md <<'MD'
+A diagram that parses but renders nothing.
+
+```drawio
+<mxGraphModel><root><mxCell id="0" /><mxCell id="1" parent="0" /></root></mxGraphModel>
+```
+MD
+  local out rc; out="$(verify_run t-verify --url "http://127.0.0.1:$port/?doc=drawio-empty.md")"; rc=$?
+  echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) &&
+  grep -q '^FAIL: 1 drawio svg=0 fences=1 (mxgraph-divs=1 empty-render=1 no-svg=0)' <<<"$out" &&
+  # Assert 7 (interactivity) legitimately still PASSes here: GraphViewer DID
+  # load and DID call addToolbar() for this div — the graph is just empty,
+  # a content defect assert 1 alone catches. Confirmed empirically the two
+  # assert numbers are independent, not redundant.
+  grep -q '^PASS: 7 drawio interactivity: GraphViewer loaded, toolbar initialized on 1/1 diagram(s)' <<<"$out"
 }
 test_verify_help() { "$S/verify.sh" --help | grep -q 'Usage: verify.sh' && ! "$S/verify.sh" >/dev/null 2>&1; }
 
-check_or_skip verify_passes_template test_verify_passes_template
-check_or_skip verify_dump_text       test_verify_dump_text
-check_or_skip verify_fails_on_leak   test_verify_fails_on_leak
-check verify_help                     test_verify_help
+check_or_skip verify_passes_template           test_verify_passes_template
+check_or_skip verify_dump_text                 test_verify_dump_text
+check_or_skip verify_fails_on_leak             test_verify_fails_on_leak
+check_or_skip verify_passes_drawio_template    test_verify_passes_drawio_template
+check_or_skip verify_fails_drawio_empty_render test_verify_fails_drawio_empty_render
+check verify_help                              test_verify_help
 "$S/stop.sh" t-verify >/dev/null 2>&1
 
 # --- list.sh / clean.sh ---
