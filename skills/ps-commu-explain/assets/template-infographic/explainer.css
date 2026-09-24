@@ -1,35 +1,25 @@
-/* ============================================================================
-   explainer.css — COMPONENT LIBRARY  (Cream Infographic)
-   ----------------------------------------------------------------------------
-   On-theme component classes, scoped under .cherry-markdown.theme__explainer.
-   EVERY color / size / font value references a var(--token) from theme.css.
-   The only raw values permitted here are @media breakpoint px, 0, structural
-   1px hairlines, and geometry (transforms / % / fr) — never a color or type
-   size literal.
+/* ---- THE COLOR RULE (theme.css) --------------------------------------------
+   Components read ONE component-local hue: --hue (solid), --hue-weak (dim),
+   --hue-tint (wash). It defaults to the structural accent for everything —
+   section heads, steps, chips, nav, links. Only the reserved kinds may
+   re-point it: .callout.pitfall / .callout.check, and .wrong-without (always
+   pitfall — "what breaks if you skip this" IS the pitfall case, so it never
+   varies). There is NO per-section / per-tile rotation: section order is
+   never colored.
+   Declared on :root (not scoped to .cherry-markdown.theme__explainer): the
+   sticky nav (`.explainer-nav` / `.nav-link`) is injected by cherry-setup.js's
+   buildNav() as a SIBLING of .cherry-markdown.theme__explainer, both direct
+   children of <body> — so a scoped declaration never inherits into the nav's
+   subtree, and every var(--hue*) there resolves to nothing (transparent nav
+   icons / active-rail). :root is an ancestor of both, so both see the same
+   default, and .callout.pitfall/.callout.check (which ARE inside the content
+   scope) still override locally exactly as before. ------------------------ */
+:root { --hue: var(--accent); --hue-weak: var(--accent-weak); --hue-tint: var(--accent-tint); }
 
-   CATEGORY SYSTEM — a component tinted to a category color sets three vars on
-   itself: --cat (solid), --cat-weak (dim), --cat-tint (soft wash). Utility
-   classes .cat-coral / .cat-amber / .cat-teal / .cat-blue / .cat-violet /
-   .cat-magenta assign those from the palette. Components then read var(--cat*)
-   so one class recolors icon chip, accent bar, rail, number, etc. together.
-   ============================================================================ */
-
-/* ---- category color assignment ------------------------------------------- */
-.cat-coral   { --cat: var(--coral);   --cat-weak: var(--coral-weak);   --cat-tint: var(--coral-tint);   }
-.cat-amber   { --cat: var(--amber);   --cat-weak: var(--amber-weak);   --cat-tint: var(--amber-tint);   }
-.cat-teal    { --cat: var(--teal);    --cat-weak: var(--teal-weak);    --cat-tint: var(--teal-tint);    }
-.cat-blue    { --cat: var(--blue);    --cat-weak: var(--blue-weak);    --cat-tint: var(--blue-tint);    }
-.cat-violet  { --cat: var(--violet);  --cat-weak: var(--violet-weak);  --cat-tint: var(--violet-tint);  }
-.cat-magenta { --cat: var(--magenta); --cat-weak: var(--magenta-weak); --cat-tint: var(--magenta-tint); }
-/* sensible default so components used bare still have a category color */
-.cherry-markdown.theme__explainer { --cat: var(--coral); --cat-weak: var(--coral-weak); --cat-tint: var(--coral-tint); }
-
-/* smooth click-to-jump for the sticky nav — the JS handler scrolls by absolute
-   offset (reliable everywhere), and THIS animates it. Auto-off under reduced
-   motion, so no JS motion guard is needed. */
-@media (prefers-reduced-motion: no-preference) {
-  html { scroll-behavior: smooth; }
-}
+/* NOTE: no `html { scroll-behavior: smooth }` here. It made the nav's
+   window.scrollTo() a compositor animation that never advances in a hidden or
+   headless tab, so click-to-jump silently did nothing. The nav now jumps with
+   an instant scrollIntoView (cherry-setup.js). */
 
 /* ---- page canvas ---------------------------------------------------------- */
 body {
@@ -104,30 +94,28 @@ body::before {
    that lands as a direct child of any layout component. This is a pure display
    fix; it does not touch the render flow or the callout hook. */
 .section-head > br,
-.hero > br,
+.reader-questions .rq-list > br,
 .steps > br,
 .step > br,
 .step-body > br,
-.card-grid > br,
-.card > br,
-.stat-grid > br,
-.stat-tile > br,
-.stat-tile .stat-head > br,
-.metric-grid > br,
 .compare > br,
 .compare-panel > br,
 .compare-panel .cmp-head > br,
 .compare-panel .cmp-body > br,
 .legend > br,
 .row > br,
-.meter > br,
 .callout > br,
 .co-body > br,
+.claim-card .claim-meta > br,
+.wrong-without > br,
+.before-after > br,
+.worked-example .we-flow > br,
+.receipts .receipts-list > br,
 .icon-chip > br,
 .nav-brand > br { display: none; }
 
 /* icon chip — colored rounded square that carries a Lucide icon, tinted to
-   the nearest category (--cat). Used across headers, cards, callouts, steps. */
+   the nearest category (--hue). Used across headers, cards, callouts, steps. */
 .icon-chip {
   display: inline-flex;
   align-items: center;
@@ -135,9 +123,9 @@ body::before {
   width: var(--chip);
   height: var(--chip);
   border-radius: var(--radius-sm);
-  background: var(--cat-tint);
-  color: var(--cat);
-  border: 1px solid color-mix(in srgb, var(--cat) 22%, transparent);
+  background: var(--hue-tint);
+  color: var(--hue);
+  border: 1px solid color-mix(in srgb, var(--hue) 22%, transparent);
   flex: none;
 }
 .icon-chip.lg { width: var(--chip-lg); height: var(--chip-lg); border-radius: var(--radius); }
@@ -187,21 +175,21 @@ body::before {
 .cherry-markdown.theme__explainer h3 + p { color: var(--text); }
 
 .cherry-markdown.theme__explainer a {
-  color: var(--blue);
-  text-decoration-color: color-mix(in srgb, var(--blue) 40%, transparent);
+  color: var(--accent);
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
   text-underline-offset: 3px;
   transition: color var(--dur-1) var(--ease-standard),
               text-decoration-color var(--dur-1) var(--ease-standard);
 }
 .cherry-markdown.theme__explainer a:hover {
-  color: var(--blue-weak);
-  text-decoration-color: var(--blue);
+  color: var(--accent-weak);
+  text-decoration-color: var(--accent);
 }
 .cherry-markdown.theme__explainer strong { color: var(--text); font-weight: var(--w-semibold); }
 .cherry-markdown.theme__explainer em { color: var(--text); }
 .cherry-markdown.theme__explainer mark {
   background: var(--tint-mark);
-  color: var(--amber-weak);
+  color: var(--accent-weak);
   padding: var(--pad-mark);
   border-radius: var(--radius-sm);
   font-weight: var(--w-medium);
@@ -211,7 +199,7 @@ body::before {
 .cherry-markdown.theme__explainer ul,
 .cherry-markdown.theme__explainer ol { padding-left: var(--space-6); margin: 0 0 var(--space-4); color: var(--text-2); }
 .cherry-markdown.theme__explainer li { margin: var(--space-2) 0; }
-.cherry-markdown.theme__explainer li::marker { color: var(--cat); }
+.cherry-markdown.theme__explainer li::marker { color: var(--hue); }
 
 /* ============================================================================
    STICKY NAVIGATION — left sidebar (wide) → sticky top strip (narrow)
@@ -238,7 +226,6 @@ body::before {
   gap: var(--space-3);
   margin-bottom: var(--space-5);
 }
-.explainer-nav .nav-brand .icon-chip { --cat: var(--coral); --cat-tint: var(--coral-tint); }
 .explainer-nav .nav-brand .nav-title {
   font-family: var(--font-display);
   font-weight: var(--w-bold);
@@ -287,8 +274,8 @@ body::before {
   width: var(--chip-sm);
   height: var(--chip-sm);
   border-radius: var(--radius-sm);
-  background: var(--cat-tint);
-  color: var(--cat);
+  background: var(--hue-tint);
+  color: var(--hue);
   flex: none;
   transition: transform var(--dur-1) var(--ease-emphasized);
 }
@@ -296,7 +283,7 @@ body::before {
 .nav-link:hover { background: var(--surface-overlay); color: var(--text); }
 .nav-link:hover .nav-ico { transform: scale(1.08); }
 .nav-link.is-active {
-  background: var(--cat-tint);
+  background: var(--hue-tint);
   color: var(--text);
   font-weight: var(--w-semibold);
 }
@@ -306,14 +293,16 @@ body::before {
   left: -1px; top: 20%; bottom: 20%;
   width: 3px;
   border-radius: var(--radius-pill);
-  background: var(--cat);
+  background: var(--hue);
 }
 .nav-link.is-bookend { color: var(--text); }
 .nav-link.is-bookend .nav-label { font-weight: var(--w-semibold); }
 
-/* content offset so it doesn't sit under the fixed sidebar */
+/* content offset so it doesn't sit under the fixed sidebar. Padding on <body>
+   (not margin-left on the column) keeps the column's `margin: 0 auto`, so
+   --maxw is centered inside the post-sidebar area. */
 @media (min-width: 1060px) {
-  body.has-nav .cherry-markdown.theme__explainer { margin-left: var(--nav-w); }
+  body.has-nav { padding-left: var(--nav-w); }
 }
 /* narrow: nav becomes a sticky horizontal strip at the top */
 @media (max-width: 1059px) {
@@ -346,22 +335,24 @@ body::before {
 }
 
 /* ============================================================================
-   HERO — big display title + lede + KPI stat row (the infographic centerpiece)
+   READER QUESTIONS — top-of-page box: the exact Q1-Q3 this explainer answers
+   (mirrors 00-brief.md's own three numbered reader questions in the
+   ps-commu-explain authoring chain). Carries the data-nav-title/data-nav-sub
+   that used to live on the removed .hero — buildNav() in cherry-setup.js
+   reads them from here now.
    ============================================================================ */
-.hero {
+.reader-questions {
   margin: 0 0 var(--space-7);
-  padding: var(--space-6) var(--space-6) var(--space-6);
+  padding: var(--space-6);
   position: relative;
   background:
-    radial-gradient(120% 140% at 100% 0%, var(--coral-tint), transparent 55%),
-    radial-gradient(110% 120% at 0% 100%, var(--amber-tint), transparent 55%),
+    radial-gradient(120% 140% at 100% 0%, var(--accent-tint), transparent 55%),
     var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-2);
-  overflow: hidden;
 }
-.hero .eyebrow {
+.reader-questions .rq-kicker {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
@@ -370,63 +361,42 @@ body::before {
   font-weight: var(--w-medium);
   letter-spacing: var(--track-eyebrow);
   text-transform: uppercase;
-  color: var(--coral-weak);
-  background: var(--n-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2);
-  margin: 0 0 var(--space-4);
-  box-shadow: var(--shadow-1);
-}
-.hero .eyebrow svg { width: 1em; height: 1em; color: var(--coral); }
-.hero .title {
-  font-family: var(--font-display);
-  font-size: var(--fs-display);
-  font-weight: var(--w-black);
-  line-height: var(--lh-tight);
-  letter-spacing: var(--track-display);
-  color: var(--text);
+  color: var(--accent-weak);
   margin: 0 0 var(--space-5);
-  max-width: 18ch;
-  text-wrap: balance;
 }
-.hero .title .hl { color: var(--coral); }
-.hero .lede {
-  font-size: calc(var(--fs-body) * 1.18);
-  font-weight: var(--w-regular);
-  color: var(--text-2);
-  max-width: 60ch;
-  line-height: var(--lh-body);
-  margin: 0 0 var(--space-6);
-  text-wrap: pretty;
-}
-/* meta grid (legacy hero meta — kept for components.md hero demo) */
-.hero .meta {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+.reader-questions .rq-kicker svg { width: 1em; height: 1em; color: var(--accent); }
+.reader-questions .rq-list {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-4);
-  margin-top: var(--space-6);
-  padding-top: var(--space-5);
-  border-top: 1px solid var(--border);
 }
-.hero .meta > div {
-  border-left: 3px solid var(--cat, var(--coral));
-  padding-left: var(--space-4);
+.reader-questions .rq-q {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
 }
-.hero .meta > div:nth-child(1) { border-left-color: var(--coral); }
-.hero .meta > div:nth-child(2) { border-left-color: var(--amber); }
-.hero .meta > div:nth-child(3) { border-left-color: var(--teal); }
-.hero .meta > div:nth-child(4) { border-left-color: var(--blue); }
-.hero .meta .k {
+.reader-questions .rq-num {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chip-sm);
+  height: var(--chip-sm);
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--n-4);
   font-family: var(--font-mono);
-  font-size: var(--fs-caption);
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-  color: var(--text-3);
-  display: block;
-  margin-bottom: var(--space-1);
+  font-weight: var(--w-semibold);
+  font-size: var(--fs-sm);
 }
-.hero .meta .v { color: var(--text); font-weight: var(--w-semibold); letter-spacing: var(--track-body); }
+.reader-questions .rq-text {
+  font-family: var(--font-display);
+  font-size: var(--fs-h3);
+  font-weight: var(--w-semibold);
+  letter-spacing: var(--track-h);
+  line-height: var(--lh-snug);
+  color: var(--text);
+}
 
 /* ============================================================================
    SECTION HEADER — colored icon chip + kicker + title (icon-carrying header)
@@ -439,6 +409,19 @@ body::before {
   padding-top: var(--space-5);
   border-top: 1px solid var(--border);
 }
+.section-head { scroll-margin-top: var(--space-4); }
+/* Below 1060px the nav collapses into a sticky top strip (see the
+   max-width: 1059px block above) that overlays content at scroll position
+   0, so a click-to-jump target must clear the strip's rendered height —
+   measured 132px (space-3 padding top/bottom + the nav-brand row + the
+   nav-link row + the ul's space-1 padding-bottom) — or it lands hidden
+   underneath it, reintroducing the exact bug Task 1 fixed. 9.5rem (152px)
+   clears the measured strip with ~20px of breathing room. This must stay
+   below the unconditioned .section-head rule above: same specificity, so
+   source order (not media-query position) decides the winner. */
+@media (max-width: 1059px) {
+  .section-head { scroll-margin-top: 9.5rem; }
+}
 .section-head .icon-chip { box-shadow: var(--shadow-1); }
 .section-head .sh-text { min-width: 0; }
 .section-head .sh-kicker {
@@ -448,7 +431,7 @@ body::before {
   font-weight: var(--w-medium);
   letter-spacing: var(--track-label);
   text-transform: uppercase;
-  color: var(--cat);
+  color: var(--hue);
   margin-bottom: var(--space-1);
 }
 .section-head .sh-title {
@@ -461,21 +444,19 @@ body::before {
 }
 .section-head.bookend {
   border-top: 0;
-  background: var(--cat-tint);
-  border: 1px solid color-mix(in srgb, var(--cat) 22%, transparent);
+  background: var(--hue-tint);
+  border: 1px solid color-mix(in srgb, var(--hue) 22%, transparent);
   border-radius: var(--radius);
   padding: var(--space-4) var(--space-5);
   box-shadow: var(--shadow-1);
 }
 
-/* ---- SEMANTIC HUE LOCK ----------------------------------------------------
-   Each category color owns a meaning AND a section:
-     coral=lead/overview/danger · amber=warning/action · teal=success/system ·
-     blue=info/data · violet=idea/authoring · magenta=metric/summary.
-   Component recoloring flows through --cat/.cat-* — never hardcode a hue. ---- */
+/* ---- RESERVED HUES ---------------------------------------------------------
+   pitfall = what goes wrong · check = what is verified. Used ONLY by the two
+   callout kinds below (and error surfaces). Everything else is accent. ---- */
 
 /* ============================================================================
-   CALLOUTS — warm colored panels, icon in a colored rounded chip; 7 kinds
+   CALLOUTS — warm panels, icon in a rounded chip; 3 kinds: note | pitfall | check
    ============================================================================ */
 .callout {
   position: relative;
@@ -483,9 +464,9 @@ body::before {
   gap: var(--space-4);
   margin: var(--space-5) 0;
   padding: var(--space-4) var(--space-5);
-  background: var(--cat-tint);
-  border: 1px solid color-mix(in srgb, var(--cat) 26%, transparent);
-  border-left: 4px solid var(--cat);
+  background: var(--hue-tint);
+  border: 1px solid color-mix(in srgb, var(--hue) 26%, transparent);
+  border-left: 4px solid var(--hue);
   border-radius: var(--radius);
   box-shadow: var(--shadow-1);
   transition: transform var(--dur-2) var(--ease-emphasized),
@@ -496,7 +477,7 @@ body::before {
 .callout > .co-body > :last-child { margin-bottom: 0; }
 .callout p { color: var(--text-2); }
 .callout p strong, .callout strong { color: var(--text); }
-/* icon chip — a Lucide icon injected by cherry-setup.js per kind, tinted --cat */
+/* icon chip — a Lucide icon injected by cherry-setup.js per kind, tinted --hue */
 .callout::before { content: none; }   /* replace old glyph pseudo with real chip */
 .callout > .co-ico {
   display: inline-flex;
@@ -506,8 +487,8 @@ body::before {
   height: var(--chip);
   border-radius: var(--radius-sm);
   background: var(--n-4);
-  color: var(--cat);
-  border: 1px solid color-mix(in srgb, var(--cat) 24%, transparent);
+  color: var(--hue);
+  border: 1px solid color-mix(in srgb, var(--hue) 24%, transparent);
   flex: none;
   box-shadow: var(--shadow-1);
 }
@@ -517,137 +498,259 @@ body::before {
   box-shadow: var(--shadow-2);
 }
 
-/* kind → category color + default icon name (icon rendered by JS via data-ico) */
-.callout.info    { --cat: var(--blue);    --cat-weak: var(--blue-weak);    --cat-tint: var(--blue-tint);    }
-.callout.warn    { --cat: var(--amber);   --cat-weak: var(--amber-weak);   --cat-tint: var(--amber-tint);   }
-.callout.success { --cat: var(--teal);    --cat-weak: var(--teal-weak);    --cat-tint: var(--teal-tint);    }
-.callout.danger  { --cat: var(--coral);   --cat-weak: var(--coral-weak);   --cat-tint: var(--coral-tint);   }
-.callout.idea    { --cat: var(--violet);  --cat-weak: var(--violet-weak);  --cat-tint: var(--violet-tint);  }
-.callout.metric  { --cat: var(--magenta); --cat-weak: var(--magenta-weak); --cat-tint: var(--magenta-tint); }
-.callout.action  { --cat: var(--amber);   --cat-weak: var(--amber-weak);   --cat-tint: var(--amber-tint);   }
+.callout.note    { --hue: var(--accent);  --hue-weak: var(--accent-weak);  --hue-tint: var(--accent-tint);  }
+.callout.pitfall { --hue: var(--pitfall); --hue-weak: var(--pitfall-weak); --hue-tint: var(--pitfall-tint); }
+.callout.check   { --hue: var(--check);   --hue-weak: var(--check-weak);   --hue-tint: var(--check-tint);   }
 
 /* ============================================================================
-   KPI / STAT TILES — the infographic centerpiece
+   CLAIM CARD — a claim, its F<n> citation + source, and how to check it
    ============================================================================ */
-.metric-grid,
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: var(--space-4);
-  margin: var(--space-5) 0;
-}
-.metric-tile,
-.stat-tile {
+.claim-card {
   position: relative;
   background: var(--surface-raised);
   border: 1px solid var(--border);
+  border-left: 4px solid var(--hue);
   border-radius: var(--radius);
   padding: var(--space-5);
-  overflow: hidden;
+  margin: var(--space-5) 0;
   box-shadow: var(--shadow-1);
   transition: transform var(--dur-2) var(--ease-emphasized),
               box-shadow var(--dur-2) var(--ease-standard);
 }
-/* colored top accent bar */
-.metric-tile::before,
-.stat-tile::before {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 4px;
-  background: var(--cat, var(--coral));
+.claim-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); }
+.claim-card .claim-text {
+  font-family: var(--font-display);
+  font-size: var(--fs-h3);
+  font-weight: var(--w-semibold);
+  letter-spacing: var(--track-h);
+  line-height: var(--lh-snug);
+  color: var(--text);
+  margin: 0 0 var(--space-3);
 }
-.metric-tile:hover,
-.stat-tile:hover {
-  transform: translateY(-4px);
-  box-shadow: var(--shadow-2);
-}
-.stat-tile .stat-head {
+.claim-card .claim-meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-4);
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
 }
-.stat-tile .icon-chip { --cat-tint: var(--cat-tint); box-shadow: var(--shadow-1); }
-.stat-tile .stat-delta {
+.claim-card .claim-fact {
   font-family: var(--font-mono);
   font-size: var(--fs-caption);
-  font-weight: var(--w-medium);
+  font-weight: var(--w-semibold);
   letter-spacing: var(--track-label);
-  color: var(--cat);
-  background: var(--cat-tint);
+  color: var(--hue);
+  background: var(--hue-tint);
+  border: 1px solid color-mix(in srgb, var(--hue) 24%, transparent);
   border-radius: var(--radius-pill);
   padding: var(--space-1) var(--space-3);
+}
+.claim-card .claim-source {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+/* the "check it" line always reads in the reserved check hue — regardless of
+   the card's own --hue — because it names the verified-outcome mechanism,
+   the one thing that hue is reserved for. Not a rotation: every claim-card
+   gets exactly this one fixed accent on exactly this one line. */
+.claim-card .claim-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--check);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-soft);
+}
+.claim-card .claim-check svg { width: 1em; height: 1em; }
+
+/* ============================================================================
+   WRONG WITHOUT — what breaks if you skip the mechanism. Reserved pitfall hue.
+   ============================================================================ */
+.wrong-without {
+  --hue: var(--pitfall); --hue-weak: var(--pitfall-weak); --hue-tint: var(--pitfall-tint);
+  position: relative;
+  display: flex;
+  gap: var(--space-4);
+  background: var(--hue-tint);
+  border: 1px solid color-mix(in srgb, var(--hue) 26%, transparent);
+  border-left: 4px solid var(--hue);
+  border-radius: var(--radius);
+  padding: var(--space-4) var(--space-5);
+  margin: var(--space-5) 0;
+  box-shadow: var(--shadow-1);
+}
+.wrong-without .ww-ico {
   display: inline-flex;
   align-items: center;
-  gap: 0.3em;
+  justify-content: center;
+  width: var(--chip);
+  height: var(--chip);
+  border-radius: var(--radius-sm);
+  background: var(--n-4);
+  color: var(--hue);
+  border: 1px solid color-mix(in srgb, var(--hue) 24%, transparent);
+  flex: none;
+  box-shadow: var(--shadow-1);
 }
-.stat-tile .stat-delta svg { width: 0.9em; height: 0.9em; }
-.metric-value,
-.stat-value {
+.wrong-without .ww-ico svg { width: 1.25em; height: 1.25em; }
+.wrong-without .ww-body { min-width: 0; }
+.wrong-without .ww-title {
   font-family: var(--font-display);
-  font-size: var(--fs-stat);
-  font-weight: var(--w-black);
+  font-weight: var(--w-semibold);
+  letter-spacing: var(--track-h);
   color: var(--text);
-  line-height: 0.95;
-  letter-spacing: var(--track-display);
-  font-variant-numeric: tabular-nums;
+  margin: 0 0 var(--space-2);
 }
-.stat-value .unit { font-size: 0.5em; color: var(--cat); font-weight: var(--w-bold); margin-left: 0.15em; }
-.metric-label,
-.stat-label {
+.wrong-without .ww-body p { color: var(--text-2); margin: 0; }
+
+/* ============================================================================
+   BEFORE / AFTER — two panels, real values (not a percentage meter)
+   ============================================================================ */
+.before-after {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--space-4);
+  margin: var(--space-5) 0;
+}
+.ba-panel {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-5);
+  box-shadow: var(--shadow-1);
+}
+.ba-panel .ba-label {
+  display: block;
   font-family: var(--font-mono);
   font-size: var(--fs-caption);
   letter-spacing: var(--track-label);
   text-transform: uppercase;
   color: var(--text-3);
-  margin-top: var(--space-3);
+  margin-bottom: var(--space-2);
 }
-.stat-sub { color: var(--text-2); font-size: var(--fs-sm); margin-top: var(--space-2); }
-/* legacy .alarm flag → amber category */
-.metric-tile.alarm { --cat: var(--amber); }
-.metric-tile.alarm .metric-value { color: var(--amber-weak); }
+.ba-panel .ba-value {
+  font-family: var(--font-display);
+  font-size: var(--fs-h2);
+  font-weight: var(--w-black);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--track-display);
+  margin-bottom: var(--space-2);
+}
+.ba-panel p { color: var(--text-2); margin: 0; font-size: var(--fs-sm); }
+.ba-arrow { color: var(--accent); width: 1.4em; height: 1.4em; flex: none; }
+@media (max-width: 720px) {
+  .before-after { grid-template-columns: 1fr; }
+  .ba-arrow { transform: rotate(90deg); justify-self: center; }
+}
 
 /* ============================================================================
-   FEATURE CARDS — icon chip + title + text, colored top accent, hover lift
+   WORKED EXAMPLE — one concrete input → mechanism → output walkthrough
    ============================================================================ */
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: var(--space-4);
+.worked-example {
+  background: var(--surface-well);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  padding: var(--space-5) var(--space-6);
   margin: var(--space-5) 0;
+  box-shadow: var(--shadow-1);
 }
-.card {
-  position: relative;
+.worked-example .we-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  font-weight: var(--w-medium);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-weak);
+  margin-bottom: var(--space-4);
+}
+.worked-example .we-label svg { width: 1em; height: 1em; color: var(--accent); }
+.worked-example .we-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.worked-example .we-stage {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+}
+.worked-example .we-stage-k {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-bottom: var(--space-1);
+}
+.worked-example .we-stage-v {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.worked-example .we-arrow { color: var(--accent); width: 1.1em; height: 1.1em; flex: none; }
+.worked-example p { color: var(--text-2); margin: 0; }
+
+/* ============================================================================
+   RECEIPTS — footer list of every citation used above (F<n> + source)
+   ============================================================================ */
+.receipts {
+  margin: var(--space-7) 0 var(--space-5);
+  padding: var(--space-5) var(--space-6);
   background: var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: var(--space-5);
-  overflow: hidden;
   box-shadow: var(--shadow-1);
-  transition: transform var(--dur-2) var(--ease-emphasized),
-              box-shadow var(--dur-2) var(--ease-standard);
 }
-.card::before {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 4px;
-  background: var(--cat, var(--coral));
+.receipts .receipts-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  font-weight: var(--w-medium);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-bottom: var(--space-3);
 }
-.card:hover { transform: translateY(-4px); box-shadow: var(--shadow-2); }
-.card .icon-chip { margin-bottom: var(--space-4); box-shadow: var(--shadow-1); }
-.card .card-title {
-  font-family: var(--font-display);
-  font-size: var(--fs-h3);
+.receipts .receipts-label svg { width: 1em; height: 1em; color: var(--accent); }
+.receipts .receipts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.receipts .receipts-list li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.receipts .receipts-fact {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
   font-weight: var(--w-semibold);
-  letter-spacing: var(--track-h);
-  color: var(--text);
-  margin: 0 0 var(--space-2);
-  line-height: var(--lh-snug);
+  color: var(--accent);
+  background: var(--accent-tint);
+  border-radius: var(--radius-pill);
+  padding: 0.15em 0.6em;
+  flex: none;
 }
-.card p { color: var(--text-2); margin: 0; }
-.card .card-title + p { color: var(--text-2); }
 
 /* ============================================================================
    STEPS / TIMELINE — numbered colored circles + connectors + icon + title
@@ -678,7 +781,7 @@ body::before {
   width: var(--chip-lg);
   height: var(--chip-lg);
   border-radius: var(--radius-pill);
-  background: var(--cat, var(--coral));
+  background: var(--hue);
   color: var(--n-4);
   font-family: var(--font-display);
   font-weight: var(--w-bold);
@@ -709,7 +812,19 @@ body::before {
   margin: 0 0 var(--space-1);
   line-height: var(--lh-snug);
 }
-.step .step-title svg { width: 1em; height: 1em; color: var(--cat); }
+.step .step-title svg { width: 1em; height: 1em; color: var(--hue); }
+/* ordinal ramp — ONE hue, descending value. Never a hue rotation. Light number
+   text stays ≥3:1 (large bold) on every mix: 9.95 / 7.73 / 5.49 / 4.31 / 3.60.
+   :nth-of-type, NOT :nth-child: Cherry injects <br> as a direct child of
+   .steps between each .step (see the ".step > br { display:none }" rule
+   above) — those hidden <br> siblings still count for :nth-child, shifting
+   every step's ramp position by one in the rendered DOM. :nth-of-type only
+   counts same-tag (.step) siblings, so it ignores the interspersed <br>s. */
+.step:nth-of-type(1) .step-num { background: var(--accent-weak); }
+.step:nth-of-type(2) .step-num { background: var(--accent); }
+.step:nth-of-type(3) .step-num { background: color-mix(in srgb, var(--accent) 86%, var(--n-4)); }
+.step:nth-of-type(4) .step-num { background: color-mix(in srgb, var(--accent) 76%, var(--n-4)); }
+.step:nth-of-type(n+5) .step-num { background: color-mix(in srgb, var(--accent) 68%, var(--n-4)); }
 .step .step-body p { margin: 0; color: var(--text-2); }
 
 /* ============================================================================
@@ -733,14 +848,14 @@ body::before {
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
-  background: var(--cat-tint);
-  border-bottom: 1px solid color-mix(in srgb, var(--cat) 24%, transparent);
+  background: var(--hue-tint);
+  border-bottom: 1px solid color-mix(in srgb, var(--hue) 24%, transparent);
   font-family: var(--font-display);
   font-weight: var(--w-semibold);
   letter-spacing: var(--track-h);
   color: var(--text);
 }
-.compare-panel .cmp-head .icon-chip { --cat-tint: var(--n-4); box-shadow: var(--shadow-1); }
+.compare-panel .cmp-head .icon-chip { --hue-tint: var(--n-4); box-shadow: var(--shadow-1); }
 .compare-panel .cmp-body { padding: var(--space-4) var(--space-5); }
 .compare-panel .cmp-body > :first-child { margin-top: 0; }
 .compare-panel .cmp-body > :last-child { margin-bottom: 0; }
@@ -749,7 +864,7 @@ body::before {
 @media (max-width: 720px) { .compare { grid-template-columns: 1fr; } }
 
 /* ============================================================================
-   BADGES / PILLS with status dots · METERS / PROGRESS · LEGEND
+   BADGES / PILLS with status dots · LEGEND
    ============================================================================ */
 .badge {
   display: inline-flex;
@@ -760,44 +875,16 @@ body::before {
   font-weight: var(--w-medium);
   letter-spacing: var(--track-label);
   text-transform: uppercase;
-  color: var(--cat);
-  background: var(--cat-tint);
-  border: 1px solid color-mix(in srgb, var(--cat) 24%, transparent);
+  color: var(--hue);
+  background: var(--hue-tint);
+  border: 1px solid color-mix(in srgb, var(--hue) 24%, transparent);
   border-radius: var(--radius-pill);
   padding: 0.25em 0.7em 0.25em 0.55em;
 }
 .badge .dot {
   width: 0.5em; height: 0.5em; border-radius: var(--radius-pill);
-  background: var(--cat); flex: none;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cat) 20%, transparent);
-}
-
-.meter { margin: var(--space-3) 0; }
-.meter .meter-label {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  color: var(--text-2);
-  margin-bottom: var(--space-2);
-}
-.meter .meter-label .meter-val {
-  color: var(--cat);
-  font-weight: var(--w-medium);
-  font-variant-numeric: tabular-nums;
-}
-.meter .meter-track {
-  height: 0.6rem;
-  background: var(--surface-overlay);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  overflow: hidden;
-}
-.meter .meter-fill {
-  height: 100%;
-  border-radius: var(--radius-pill);
-  background: linear-gradient(90deg, color-mix(in srgb, var(--cat) 72%, var(--n-4)), var(--cat));
+  background: var(--hue); flex: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hue) 20%, transparent);
 }
 
 .legend {
@@ -820,8 +907,8 @@ body::before {
 }
 .legend .legend-swatch {
   width: 0.9rem; height: 0.9rem; border-radius: var(--radius-sm);
-  background: var(--cat); flex: none;
-  border: 1px solid color-mix(in srgb, var(--cat) 40%, transparent);
+  background: var(--hue); flex: none;
+  border: 1px solid color-mix(in srgb, var(--hue) 40%, transparent);
 }
 
 /* ---- schematic (mono box-drawing) — light code well ----------------------- */
@@ -833,7 +920,7 @@ body::before {
   overflow-x: auto;
   background: var(--surface-well);
   border: 1px solid var(--border);
-  border-left: 4px solid var(--teal);
+  border-left: 4px solid var(--accent);
   border-radius: var(--radius);
   padding: var(--space-5) var(--space-6);
   margin: var(--space-5) 0;
@@ -871,10 +958,10 @@ body::before {
               border-color var(--dur-1) var(--ease-standard),
               transform var(--dur-1) var(--ease-emphasized);
 }
-.topic-chip::before { content: "#"; color: var(--coral); margin-right: 0.15em; }
+.topic-chip::before { content: "#"; color: var(--accent); margin-right: 0.15em; }
 .topic-chip:hover {
   color: var(--text);
-  border-color: var(--coral);
+  border-color: var(--accent);
   transform: translateY(-2px);
 }
 
@@ -889,13 +976,13 @@ body::before {
 }
 .chip-row .topic-chip { margin: 0; }
 
-/* ---- pull quote ----------------------------------------------------------- */
-.cherry-markdown.theme__explainer blockquote,
-.pull-quote {
+/* ---- blockquote (native markdown '>' quotes; the old named .pull-quote
+   component is removed — plain blockquote carries the same look) ----------- */
+.cherry-markdown.theme__explainer blockquote {
   margin: var(--space-6) 0;
   padding: var(--space-4) var(--space-5) var(--space-4) var(--space-6);
-  border-left: 4px solid var(--violet);
-  background: var(--violet-tint);
+  border-left: 4px solid var(--accent);
+  background: var(--accent-tint);
   border-radius: var(--radius);
   font-family: var(--font-display);
   font-size: var(--fs-h3);
@@ -951,7 +1038,7 @@ body::before {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: var(--pad-code);
-  color: var(--coral-weak);
+  color: var(--accent-weak);
 }
 .cherry-markdown.theme__explainer pre {
   background: var(--surface-well) !important;
@@ -977,7 +1064,7 @@ body::before {
   margin: var(--space-6) 0;
   padding: var(--space-6);
   background:
-    radial-gradient(120% 90% at 50% -10%, var(--amber-tint), transparent 60%),
+    radial-gradient(120% 90% at 50% -10%, var(--accent-tint), transparent 60%),
     var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -991,7 +1078,7 @@ body::before {
   .mermaid-frame.is-pending { opacity: 0; }
 }
 .cherry-markdown.theme__explainer pre.mermaid-error {
-  border-left: 4px solid var(--danger);
+  border-left: 4px solid var(--pitfall);
 }
 
 /* ---- built-in nav: [toc] + detail/panel ----------------------------------- */
@@ -1016,7 +1103,7 @@ body::before {
   color: var(--text-2);
   transition: color var(--dur-1) var(--ease-standard);
 }
-.cherry-markdown.theme__explainer .toc a:hover { color: var(--coral); }
+.cherry-markdown.theme__explainer .toc a:hover { color: var(--accent); }
 
 .cherry-markdown.theme__explainer details {
   background: var(--surface-raised);
@@ -1034,7 +1121,7 @@ body::before {
   color: var(--text-2);
   transition: color var(--dur-1) var(--ease-standard);
 }
-.cherry-markdown.theme__explainer summary:hover { color: var(--coral); }
+.cherry-markdown.theme__explainer summary:hover { color: var(--accent); }
 
 /* ---- gallery helper (used by components.md cheat-sheet) ------------------- */
 .gallery-item {
@@ -1061,7 +1148,7 @@ body::before {
 .cherry-markdown.theme__explainer a:focus-visible,
 .cherry-markdown.theme__explainer summary:focus-visible,
 .nav-link:focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
@@ -1094,7 +1181,7 @@ body::before {
   padding: var(--space-7);
   background: var(--surface-raised);
   border: 1px solid var(--border);
-  border-left: 4px solid var(--danger);
+  border-left: 4px solid var(--pitfall);
   border-radius: var(--radius);
   font-family: var(--font-body);
   color: var(--text-2);
@@ -1105,7 +1192,7 @@ body::before {
   font-size: var(--fs-sm);
   letter-spacing: var(--track-eyebrow);
   text-transform: uppercase;
-  color: var(--danger);
+  color: var(--pitfall);
   margin: 0 0 var(--space-4);
 }
 .explainer-error h1 {
@@ -1118,10 +1205,10 @@ body::before {
 }
 .explainer-error code {
   font-family: var(--font-mono);
-  color: var(--magenta-weak);
-  background: var(--magenta-tint);
+  color: var(--pitfall-weak);
+  background: var(--pitfall-tint);
   border-radius: var(--radius-sm);
   padding: var(--pad-code);
 }
 .explainer-error ul { padding-left: var(--space-6); }
-.explainer-error a { color: var(--blue); }
+.explainer-error a { color: var(--accent); }

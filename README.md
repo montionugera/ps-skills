@@ -8,7 +8,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 
 | Skill | What it does |
 |-------|--------------|
-| **ps-commu-explain** | Turns "explain X" into a fact-checked, visually rich web explanation (diagrams, animation, interactivity) served from `/tmp` and handed back as a verified localhost URL. Self-contained: lifecycle scripts + HTML and React+TS templates. |
+| **ps-commu-explain** | Turns "explain X" into a fact-checked, visually rich web explanation (diagrams, animation, interactivity) served from `/tmp` and handed back as a verified localhost URL. Six-stage chain — brief → facts → storyboard → author → verify (render gate + reader gate) → handoff — gated by `scripts/lint.sh` and `scripts/verify.sh`. Self-contained: lifecycle scripts + HTML and React+TS templates. |
 | **ps-interactive-learning-builder** | Orchestrates research, learning design, interactive builds, independent audits, and durable verification for traceable courses and explorable references. |
 | **ps-release-workflow-init** | Opt a repo into the ship-the-release workflow (`.release.json`, backlogs, routing convention). |
 | **ps-release-workflow-idea** | Capture a new idea (`I-NNN`) in the idea backlog. |
@@ -136,8 +136,14 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
 ## Using the skills
 
 - **ps-commu-explain** — say *"explain X"* / *"show me how X works"*, or invoke `/ps-commu-explain <topic>`.
-  Modes: `/ps-commu-explain list`, `/ps-commu-explain clean`. Built explanations live under
-  `/tmp/ps-commu/<slug>/` and self-destruct after 24h.
+  `init.sh <slug>` scaffolds a workspace with `00-brief.md` (3 reader questions + section budget),
+  `01-facts.md` (`F<n> | statement | source` rows), and `02-storyboard.md` (section → question → facts) —
+  sibling to `app/`, never served. `scripts/lint.sh` gates all four authoring files (brief placeholders,
+  fact citations, storyboard coverage, `app/content.md`'s component rules); `serve.sh` runs it
+  automatically and refuses to serve on failure. `scripts/verify.sh` is the render gate (headless
+  Chrome asserts); a reader-gate subagent, given only the rendered page text, must then answer the
+  brief's 3 questions with citations. Modes: `/ps-commu-explain list`, `/ps-commu-explain clean`.
+  Built explanations live under `/tmp/ps-commu/<slug>/` and self-destruct after 24h.
 - **ps-interactive-learning-builder** — invoke `/ps-interactive-learning-builder <topic>` to create a
   source-backed course, explorable reference, or hybrid learning project with gated audit and verification.
 - **ps-release-workflow** — start with `ps-release-workflow-init` in a repo, then
