@@ -1750,7 +1750,7 @@ PY
 check_or_skip drawio_fence_detection_and_role_substitution test_drawio_fence_detection_and_role_substitution
 
 # --- verify.sh (render gate; needs Google Chrome — SKIPs visibly without it) ---
-# A verify run is ~45s on macOS (Chrome start + CDN load + Mermaid render).
+# A verify run is ~45s on macOS (Chrome start + CDN load + draw.io render).
 verify_run() {           # args... → verify.sh output on stdout; rc 2 = cannot run (Chrome/server)
   if command -v timeout >/dev/null; then timeout 150 "$S/verify.sh" "$@"; else "$S/verify.sh" "$@"; fi
 }

@@ -294,14 +294,18 @@ _VOID_TAGS = {"br", "img", "input", "hr", "meta", "link", "area", "base",
 class MxGraphCount(HTMLParser):
     def __init__(self):
         super().__init__()
-        self.divs = []       # finished {"svg": bool, "content": bool, "style": str}
+        self.divs = []       # finished {"svg": bool, "content": bool, "toolbar_init": bool}
         self.capture = None  # the in-progress record for the .mxgraph div being walked
         self.depth = 0       # tag-nesting depth *inside* that div (the div itself = 1)
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
         if self.capture is None:
             if tag == "div" and "mxgraph" in a.get("class", "").split():
-                self.capture = {"svg": False, "content": False, "style": a.get("style", "")}
+                # "margin-top" is the addToolbar() side effect assert 7 checks for
+                # (see the header comment above) — computed once at capture time
+                # rather than carrying the raw style string forward for one check.
+                self.capture = {"svg": False, "content": False,
+                                 "toolbar_init": "margin-top" in a.get("style", "")}
                 self.depth = 1
             return
         if tag == "svg": self.capture["svg"] = True
@@ -351,7 +355,7 @@ report("SKIP", 5, "nav click: --dump-dom cannot dispatch clicks and DevTools Run
 # 1-5 run under) — a vacuous PASS only when the doc has no ```drawio fences
 # to begin with, matching assert 1's own fences==0 behavior.
 mxgraph_total = len(mx.divs)
-toolbar_init = sum(1 for d in mx.divs if "margin-top" in d["style"])
+toolbar_init = sum(1 for d in mx.divs if d["toolbar_init"])
 if fences == 0:
     report("PASS", 7, "drawio interactivity: no ```drawio fences in doc, nothing to check")
 elif mxgraph_total == 0:
