@@ -120,7 +120,7 @@ plan proceed to ripping out Mermaid.
 **Authoring skeleton**: because two structural cells (`id="0"`, `id="1" parent="0"`)
 are easy to omit and their absence isn't obvious from a broken render, `components.md`/
 `SKILL.md` ship a copy-and-fill skeleton: the two mandatory root cells pre-filled, a
-fixed left-to-right grid recipe (`x = 40 + 200*i`, consistent row height) so authors
+a running left-to-right coordinate recipe (each node's x = previous node's x + width + 40px gap, not a fixed step) so authors
 don't have to invent coordinates from scratch, and `role=` style tokens (not hex) in
 the example. This is the same "author copies the template, fills in content" model
 `00-brief.md`/`01-facts.md`/`02-storyboard.md` already use.
@@ -136,9 +136,9 @@ above), wraps each in a `data-mxgraph`-configured div, and triggers the viewer's
 pass after Cherry-Markdown inserts the fence into the DOM (today's `mermaid.run()` call
 point is the direct analog).
 
-**Validation** (`scripts/lint.sh`, 640 lines total): lines 1-192 (frontmatter/citation
+**Validation** (`scripts/lint.sh`, 640 lines total): lines 1-191 (frontmatter/citation
 checks for `00-brief.md`/`01-facts.md`/`02-storyboard.md`, including `F<n>` citation
-validation) are NOT Mermaid-specific and must survive untouched. Lines ~193-640 are the
+validation) are NOT Mermaid-specific and must survive untouched. Lines ~192-640 are the
 Mermaid-grammar parser (`parse_flowchart()` and friends — the product of 4 fix rounds
 hardening it during F-011); this is the part to replace. The implementation plan must
 name the exact preserved line range/functions explicitly so no implementer treats the
@@ -179,7 +179,7 @@ Mermaid fence (confirmed by grep) — trivial in size, not a large migration sur
 `SKILL.md`'s mechanism-diagram rules (today: "LR, ≤7 nodes, every edge labeled, real
 identifiers") translated to the XML format's equivalent constraints.
 
-**Test migration**: `lifecycle_test.sh` is 1159 lines; ~38 of its 59 `test_` functions
+**Test migration**: `lifecycle_test.sh` is 1159 lines; ~30 of its 59 `test_` functions
 (lines 243-1063) are Mermaid-grammar regression tests from the 4-fix-round hardening
 saga. This IS the largest line-count item in the implementation plan — budget
 accordingly, and budget 1-2 fix-loop rounds for the new XML validator even though it's
@@ -259,10 +259,10 @@ engine swap, not a scope expansion).
   that `html`/`react` each vendor independent Mermaid integrations with their own node
   caps); corrected the pan/zoom/toolbar claim from "automatic" to "requires an explicit
   `data-mxgraph` config key"; corrected `lint.sh`'s line accounting (640 total, only
-  ~193-640 is Mermaid-specific and replaceable, lines 1-192 are non-Mermaid
+  ~192-640 is Mermaid-specific and replaceable, lines 1-191 are non-Mermaid
   citation/frontmatter checks that must survive); corrected the unreproducible "~628"
   line count; corrected the content-migration framing from "large surface" to "1 fence
-  each, trivial" while confirming the test-migration surface genuinely is large (~38 of
+  each, trivial" while confirming the test-migration surface genuinely is large (~30 of
   59 `lifecycle_test.sh` functions). draw.io's embed API and AI-authoring-XML claims
   were independently re-verified against the live docs and hold. Open: none — all
   CRITICAL/HIGH findings fixed inline above.
@@ -276,3 +276,12 @@ engine swap, not a scope expansion).
   the original spec's "defer to implementation" framing for this was wrong), a
   fail-on-empty-render requirement for the render gate, and a committed (not-SKIP)
   interactivity assert. Open: none.
+- 2026-09-24 self-grill-audit of the PLAN (F-013): while auditing the plan's fidelity
+  to this spec, the auditor found two errors that originated here and were copied into
+  the plan — corrected in both documents. (1) The `lint.sh` preservation boundary was
+  off by one line (spec said 1-192/~193-640; the live file's boundary is 1-191/~192-640
+  — line 191 is blank, line 192 starts the Mermaid-checking comment block). (2) The
+  authoring-skeleton grid recipe (`x = 40 + 200*i`) contradicted the actual worked XML
+  (variable-width nodes), corrected to a running-cursor recipe. (3) The test-migration
+  count was corrected from ~38 to ~30 (the stated range included at least one non-
+  Mermaid test). Open: none.

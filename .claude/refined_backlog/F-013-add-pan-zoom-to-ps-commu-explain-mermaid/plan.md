@@ -336,10 +336,11 @@ had returned NO-GO, this task would not be dispatched at all.
       `` `​``mermaid` `` regex with `` `​``drawio` ``, calling `parse_drawio_xml` per
       match, same defect-collection pattern as the retired code.
 - [ ] **Step 5: Run the tests, confirm all pass.**
-- [ ] **Step 6: Confirm lines 1-191 are byte-identical to before this task** (`git diff`
-      the file, visually confirm no changes above the boundary) — this is the Global
-      Constraint's hard requirement, verify it explicitly, don't just trust you didn't
-      touch it.
+- [ ] **Step 6: Confirm lines 1-191 are byte-identical to before this task** — mechanical
+      check, not visual inspection: `sed -n '1,191p' scripts/lint.sh | sha256sum` run
+      BEFORE you start editing (record the hash) and again after you're done; the two
+      hashes must match exactly. This is the Global Constraint's hard requirement —
+      verify it with a command, don't self-certify by eyeballing a diff.
 - [ ] **Step 7: Commit.**
 - [ ] **Step 8: Phase gate** — verify → independent review (`code-reviewer` +
       `python-reviewer`, `model: opus` — this is the validator every later task's
@@ -404,8 +405,9 @@ had returned NO-GO, this task would not be dispatched at all.
 **Files:**
 - Modify: `skills/ps-commu-explain/assets/template-infographic/content.md:32-40`
   (replace the Mermaid flowchart with Task 0's verified `` `​``drawio` `` fence).
-- Modify: `skills/ps-commu-explain/assets/template-infographic/components.md:93-106`
-  (replace the Mermaid sequenceDiagram gallery example).
+- Modify: `skills/ps-commu-explain/assets/template-infographic/components.md:93-107`
+  (replace the Mermaid sequenceDiagram gallery example — re-check the exact fence
+  boundary fresh before editing, Tasks 1-3 may have shifted surrounding content).
 - Modify: `skills/ps-commu-explain/assets/workspace/example/01-facts.md` (if any fact
   cites a line number inside the Mermaid-era `lint.sh`/`verify.sh` sections that moved —
   re-verify every `F<n>` citation the same way F-011's own final-review adjudication
@@ -428,17 +430,24 @@ had returned NO-GO, this task would not be dispatched at all.
       Decision (already made, not a new fork): if Task 0's spike found flowchart
       authoring reasonably tractable, attempt the sequence diagram with the same
       grid-coordinate approach (lifelines as tall thin vertices, messages as horizontal
-      edges at increasing Y); if it proves meaningfully harder within a focused attempt
-      (not open-ended), substitute an equivalent FLOWCHART-shaped diagram covering the
-      same four components and their interaction order instead — the gallery's
-      requirement is "a real diagram demonstrating the chain," not "must specifically be
-      a sequence diagram" (that was a Mermaid-specific gallery-ordering rule from F-011's
-      own spec, which does not need to carry over verbatim to a different diagram
-      engine). State which path you took in your task report.
+      edges at increasing Y), time-boxed to 2 iterations of render-and-inspect; if it
+      still doesn't render cleanly after that, substitute an equivalent FLOWCHART-shaped
+      diagram covering the same four components and their interaction order instead —
+      the gallery's requirement is "a real diagram demonstrating the chain," not "must
+      specifically be a sequence diagram" (that was a Mermaid-specific gallery-ordering
+      rule from F-011's own spec, which does not need to carry over verbatim to a
+      different diagram engine). State which path you took, and how many iterations it
+      took, in your task report.
 - [ ] **Step 3: Add the authoring skeleton** to `components.md`'s gallery: the two
-      mandatory root cells pre-filled, Task 0's grid-coordinate recipe
-      (`x = 40 + 200*i`, consistent row height) documented as the "start here" pattern,
-      one `role=` example. Mirror the tone/format `00-brief.md`'s own skeleton uses.
+      mandatory root cells pre-filled, and a coordinate recipe documented as the "start
+      here" pattern — NOT a fixed-width formula like `x = 40 + 200*i` (Task 0's own
+      worked example uses variable-width nodes: 160/200/160/140/200/220px, which a fixed
+      200px step does not match past the second node and would produce overlapping or
+      gapped geometry the new lint.sh AABB check then rejects). Document it instead as
+      `x = <previous vertex's x> + <previous vertex's width> + 40` (a running
+      cursor, not a multiple), with one worked example showing 2-3 nodes of different
+      widths computed this way, plus one `role=` example. Mirror the tone/format
+      `00-brief.md`'s own skeleton uses.
 - [ ] **Step 4: Run `lint.sh` against both files**, confirm exit 0 for the content.md
       diagram and the gallery's sample(s).
 - [ ] **Step 5: Serve and Chrome-verify** both pages render correctly (`?doc=components.md`
@@ -458,27 +467,39 @@ had returned NO-GO, this task would not be dispatched at all.
 
 ### Task 5: Test migration — `lifecycle_test.sh`
 
-The single largest task in this plan by line count (~38 of 59 `test_` functions,
-`lifecycle_test.sh:243-1063`, are Mermaid-grammar regression tests from F-011's 4-fix-round
-hardening saga). Budget real time for this; do not treat it as mechanical
-find-and-replace — many of these tests encode a specific historical bug (a regex
-edge case, a parser ambiguity) that has a DIFFERENT XML-format analog worth preserving
-the spirit of, not a literal 1:1 translation.
+The single largest task in this plan by line count. `lifecycle_test.sh:243-1063` holds
+roughly 30 `test_` functions from F-011's 4-fix-round Mermaid-grammar hardening saga —
+**not all of them are actually Mermaid-specific**: `test_lint_fails_uncited_fact` in
+this range tests the fact-citation logic that lives in the PRESERVED lines 1-191 of
+`lint.sh` and must NOT be touched by this task, and the range's own upper boundary lands
+inside a `verify.sh` smoke test, not a lint.sh Mermaid test — re-verify the true
+boundary and membership by reading each function body (Step 1), never by trusting a
+line-range count, including this plan's own. Budget real time for this; do not treat it
+as mechanical find-and-replace — many genuinely-Mermaid tests encode a specific
+historical bug (a regex edge case, a parser ambiguity) that has a DIFFERENT XML-format
+analog worth preserving the spirit of, not a literal 1:1 translation.
 
 **Files:**
-- Modify: `skills/ps-commu-explain/tests/lifecycle_test.sh:243-1063` — remove Mermaid-
+- Modify: `skills/ps-commu-explain/tests/lifecycle_test.sh` (roughly lines 243-1063, but
+  confirm the true boundary in Step 1 rather than trusting this range) — remove Mermaid-
   grammar-specific tests already superseded by Task 2's own new tests (avoid duplicate
-  coverage of the same rule under two different test names); for each RETIRED Mermaid
-  test that encoded a genuine, still-relevant lesson (e.g. "don't silently skip on
-  unrecognized input" — a lesson Task 2's `parse_drawio_xml` must also honor), write an
-  XML-format equivalent rather than just deleting it.
+  coverage of the same rule under two different test names); LEAVE
+  `test_lint_fails_uncited_fact` and any other non-Mermaid test in this range untouched;
+  for each RETIRED Mermaid test that encoded a genuine, still-relevant lesson (e.g.
+  "don't silently skip on unrecognized input" — a lesson Task 2's `parse_drawio_xml`
+  must also honor), write an XML-format equivalent rather than just deleting it.
 
 **Interfaces:**
 - Consumes: Task 2's `parse_drawio_xml` behavior contract, Task 3's `verify.sh` assert
   behavior.
 
-- [ ] **Step 1: Inventory.** List all ~38 Mermaid-specific `test_` functions
-      (`lifecycle_test.sh:243-1063`) with a one-line note per test: what specific defect
+- [ ] **Step 1: Inventory by reading, not by line range.** Walk every `test_` function
+      in `lifecycle_test.sh` in and around the 243-1063 span, reading each function body
+      to confirm what it actually tests — do not assume membership from the stated line
+      range (this plan's own range estimate was found to be imprecise during review; the
+      range includes at least one function testing preserved, non-Mermaid `lint.sh`
+      logic and its upper bound lands inside a `verify.sh` test, not a lint.sh test).
+      For each genuinely Mermaid-grammar-specific function, note: what specific defect
       class it guards against, and whether that defect class (a) has a direct XML
       analog Task 2 already covers (dedupe — Task 2's own new tests already cover it,
       just delete the old one), (b) has an XML analog NOT yet covered (write a new test
@@ -565,3 +586,21 @@ plan.
       from F-011 (though the user's "run full chain" instruction for this feature may
       supersede that — confirm before running if there's any ambiguity by the time this
       gate is reached, since this instruction predates the final-gate's own findings).
+
+## Appendix — audit trail
+
+- 2026-09-24 self-grill-audit: verdict safe-with-fixes. Corrected: Task 5's test-count
+  claim (was ~38, actually ~30, and the stated line range included at least one
+  non-Mermaid test — `test_lint_fails_uncited_fact` tests the PRESERVED lines-1-191
+  citation logic and must not be touched; Task 5 Step 1 now inventories by reading
+  function bodies, never by trusting a line-range count); the authoring-skeleton grid
+  recipe (`x = 40 + 200*i` contradicted Task 0's own worked XML, which uses
+  variable-width nodes — corrected to a running-cursor recipe: x = previous x + previous
+  width + 40); the `lint.sh` preservation-boundary check (was "visually confirm no
+  changes," now a mechanical `sha256sum` of lines 1-191 before/after); the
+  `components.md` fence's line range (93-106 → 93-107, re-verify-before-edit note
+  added); Task 4's sequence-diagram fallback given a concrete 2-iteration time-box
+  instead of an unbounded "if it proves meaningfully harder." All other file:line
+  citations, the Task-0-gates-Task-1 sequencing, and cross-task interface contracts
+  (`frameAndRunDrawio`, `parse_drawio_xml`) were independently verified against the live
+  repo and hold. Open: none.
