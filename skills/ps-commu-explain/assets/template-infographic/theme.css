@@ -22,9 +22,10 @@
        JetBrains Mono (labels + tabular numbers).
      • Motion: staggered entrance (fade+rise), hover lift, colored accents.
 
-   The Mermaid themeVariables that pair with this file live in cherry-setup.js
-   (raw hex there because Mermaid reads a JS object, not CSS custom properties —
-   each key is annotated with the token it mirrors).
+   cherry-setup.js's readRoleColors() reads --accent/--pitfall/--check straight
+   off :root here via getComputedStyle — no duplicated hex, no themeVariables
+   object; draw.io's mxGraph style strings just get the live computed values
+   substituted in at render time.
    ============================================================================ */
 
 :root {

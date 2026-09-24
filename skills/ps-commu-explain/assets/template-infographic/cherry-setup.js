@@ -62,20 +62,42 @@ function readRoleColors() {
    shape, or a missing CSS var all fail SILENTLY otherwise (mxGraph just
    ignores the unknown key), which is exactly the kind of silent-pass bug the
    plan's Global Constraints call out as the thing to never repeat. */
+const ROLE_KINDS = ["accent", "pitfall", "check"];
 const ROLE_TOKEN = /\brole=(accent|pitfall|check)\b;?/g;
 function substituteRoleTokens(xml, colors) {
   const substituted = xml.replace(/style=(["'])([^"']*)\1/g, (whole, quote, body) => {
     const swapped = body.replace(ROLE_TOKEN, (token, kind) => {
       const hex = colors[kind];
-      return hex ? `strokeColor=${hex};` : "";
+      if (!hex) {
+        // Fail LOUD, not silent: leave the token in place (instead of
+        // deleting it) so the failure shows up as literal `role=<kind>` text
+        // in the rendered SVG label/style — never throw, a missing var must
+        // not break rendering.
+        console.warn(
+          `[explainer-kit] role=${kind} could not be substituted: CSS custom property --${kind} is missing or empty on :root (check theme.css)`
+        );
+        return token;
+      }
+      return `strokeColor=${hex};`;
     });
     return `style=${quote}${swapped}${quote}`;
   });
-  // A fresh non-global regex literal here (not the shared, stateful ROLE_TOKEN
-  // above) so this check never depends on ROLE_TOKEN's lastIndex bookkeeping.
-  if (/\brole=(accent|pitfall|check)\b/.test(substituted)) {
+  // A fresh regex here (not the shared, stateful ROLE_TOKEN above) so this
+  // check never depends on ROLE_TOKEN's lastIndex bookkeeping. Widened to
+  // match ANY role=<word> survivor, not just the 3 known-good kinds, so an
+  // unsupported/misspelled kind (role=pitfal, role=danger, ...) — which
+  // ROLE_TOKEN never matches in the first place, so it passes through the
+  // replace above completely untouched — is still caught and reported
+  // instead of staying silently inert. Known-kind survivors (missing CSS
+  // var) are already warned above, in the substitution step itself, so skip
+  // those here to avoid a duplicate warning for the same failure.
+  const SURVIVOR_TOKEN = /\brole=([A-Za-z0-9_-]+)\b/g;
+  let match;
+  while ((match = SURVIVOR_TOKEN.exec(substituted))) {
+    const kind = match[1];
+    if (ROLE_KINDS.includes(kind)) continue;
     console.warn(
-      "[explainer-kit] a role= token survived substitution (typo, single/double-quote mismatch, or compressed <mxfile> export?):",
+      `[explainer-kit] unrecognized role=${kind} token found (expected one of: ${ROLE_KINDS.join(", ")}):`,
       substituted
     );
   }
