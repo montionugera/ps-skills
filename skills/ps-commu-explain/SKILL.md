@@ -97,13 +97,13 @@ Report: the URL, the brief's 3 questions with the reader-gate's answers + citati
 | Excuse | Reality |
 |---|---|
 | "I read the code, a fact sheet is overhead" | `lint.sh` rejects any `F<n>` *cited* with no matching row in 01-facts.md — but it does NOT require citations to exist; content with zero `F<n>` citations lints clean. The reader gate (Stage 5) is what actually fails a page that cites nothing, so both gates are needed. |
-| "Console is clean, ship it" | Console errors are 1 of 6 `verify.sh` asserts, and a clean render gate still isn't a reader gate — it must independently answer the brief's 3 questions with citations. |
+| "Console is clean, ship it" | Console errors are 1 of 7 `verify.sh` asserts, and a clean render gate still isn't a reader gate — it must independently answer the brief's 3 questions with citations. |
 | "--no-lint gets past the gate" | `--no-lint` skips `lint.sh` entirely, on any tier — it turns off fact-citation checking, forbidden-component checks, drawio/mxGraph XML validation, and the brief/facts/storyboard checks all at once. It's meant for the html/react dev loops, not a safe way to skip the infographic chain. |
 | "I'll skip 00-brief.md, the diagram speaks for itself" | `lint.sh` rejects unfilled `(...)` placeholders, a wrong count of Q1-Q3, or a missing section budget — `serve.sh` won't serve until it's clean. |
 | "I'll just python -m http.server it quickly" | Baselines exposed all of /tmp on all interfaces, forever. `serve.sh`: loopback-only, scoped doc root, watchdog self-destruct. |
 | "React would look more impressive" | Animation and diagrams live in the HTML tier too. State or HTML — react is opt-in, only for sections that need it. |
 | "Cycle 6 will definitely fix it" | ≤5 cycles, then an honest defect list. Never claim unverified success. |
-| "I'll write app/index.html fresh — faster than the template" | You drop the pinned draw.io viewer script and `cherry-setup.js`'s wiring; every diagram renders as raw text. `init.sh` scaffolds it — edit in place. |
+| "I'll write app/index.html fresh — faster than the template" | You drop the tier's diagram library — the pinned draw.io viewer + `cherry-setup.js` wiring (infographic) or `mermaid.min.js` (html) — and every diagram renders as raw text. `init.sh` scaffolds it — edit in place. |
 | "The reader-gate subagent can peek at 01-facts.md to check its own answers" | Defeats the point — it must answer from page text alone, like a real reader, or the gate proves nothing. |
 
 ## Red flags — STOP
