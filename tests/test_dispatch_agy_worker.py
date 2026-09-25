@@ -1256,12 +1256,12 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("to claude with claude-opus-5-5", proc.stdout)
 
-    def test_thinking_mode_defaults_to_high_effort(self):
+    def test_thinking_mode_defaults_to_medium_effort(self):
         self._fake("claude")
         self._codex_quota(100.0, 100.0)
         proc = self._run("--dry-run")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("(effort: high)", proc.stdout)
+        self.assertIn("(effort: medium)", proc.stdout)
 
     def test_thinking_mode_effort_override_cli(self):
         self._fake("claude")
@@ -1273,9 +1273,9 @@ class TestThinkerRouting(unittest.TestCase):
     def test_thinking_mode_effort_override_env(self):
         self._fake("claude")
         self._codex_quota(100.0, 100.0)
-        proc = self._run("--dry-run", env_extra={"THINK_EFFORT": "medium"})
+        proc = self._run("--dry-run", env_extra={"THINK_EFFORT": "high"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("(effort: medium)", proc.stdout)
+        self.assertIn("(effort: high)", proc.stdout)
 
     def test_claude_run_passes_effort_flag(self):
         self._fake("claude")
@@ -1284,7 +1284,7 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         args = self._args("claude")
         self.assertIn("--effort", args)
-        self.assertEqual(args[args.index("--effort") + 1], "high")
+        self.assertEqual(args[args.index("--effort") + 1], "medium")
 
     def test_claude_run_custom_effort_flag(self):
         self._fake("claude")
@@ -1295,6 +1295,18 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertIn("--effort", args)
         self.assertEqual(args[args.index("--effort") + 1], "xhigh")
 
+    def test_fable_model_is_strictly_forbidden(self):
+        self._fake("claude")
+        proc = self._run("--dry-run", "--model", "fable")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("strictly forbidden", proc.stderr)
+
+    def test_claude_fable_model_is_strictly_forbidden(self):
+        self._fake("claude")
+        proc = self._run("--dry-run", "--model", "claude-fable-5-1")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("strictly forbidden", proc.stderr)
+
     def test_codex_run_passes_reasoning_effort_config(self):
         self._fake("claude")
         self._fake("codex", output="sol-ok")
@@ -1304,7 +1316,7 @@ class TestThinkerRouting(unittest.TestCase):
         calls = self.calls_log.read_text(encoding="utf-8").splitlines()
         self.assertTrue(calls[0].startswith("codex exec"), calls)
         args = self._args("codex")
-        self.assertIn('model_reasoning_effort="high"', args)
+        self.assertIn('model_reasoning_effort="medium"', args)
 
     def test_codex_run_normalizes_max_effort_to_high(self):
         self._fake("claude")
@@ -1321,7 +1333,7 @@ class TestThinkerRouting(unittest.TestCase):
         proc = self._run()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
-        self.assertEqual(attestation["effort"], "high")
+        self.assertEqual(attestation["effort"], "medium")
 
 
 class TestEffortHelpers(unittest.TestCase):

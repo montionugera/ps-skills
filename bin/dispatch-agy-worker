@@ -47,7 +47,7 @@ DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKL
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 DEFAULT_CLAUDE_THINK_MODEL = os.environ.get("CLAUDE_THINK_MODEL", "claude-opus-5-5")
-DEFAULT_THINK_EFFORT = os.environ.get("THINK_EFFORT") or os.environ.get("DISPATCH_THINK_EFFORT") or "high"
+DEFAULT_THINK_EFFORT = os.environ.get("THINK_EFFORT") or os.environ.get("DISPATCH_THINK_EFFORT") or "medium"
 DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "900")
 
 DEFAULT_VERIFY_TIMEOUT = int(os.environ.get("DISPATCH_VERIFY_TIMEOUT") or "600")
@@ -367,7 +367,7 @@ def route_priority_chain(chain, allow_on_demand=False, min_5h=DEFAULT_MIN_5H, mi
     return fb_agent, fb_model, False, 0.0, 0.0, f"Chain exhausted: {summary}"
 
 
-CLAUDE_THINK_MODEL_NAMES = ("claude-opus-5-5", "opus", "claude-fable", "fable")
+CLAUDE_THINK_MODEL_NAMES = ("claude-opus-5-5", "opus")
 
 
 def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H, min_weekly=DEFAULT_THINK_MIN_WEEKLY,
@@ -1569,7 +1569,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
     parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Claude Opus 5.5 first, then Codex gpt-5.6-sol (enforces 5h > 80%%, weekly > 20%% quota)")
     parser.add_argument("--capability", type=str, default=None, choices=["deep-design-v1"],
-                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Claude Opus 5.5 / Fable or GPT-5.6-Sol and fails closed with exit code 12)")
+                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Claude Opus 5.5 or GPT-5.6-Sol and fails closed with exit code 12)")
     parser.add_argument("--attestation-file", type=str, default=None, help="Explicit path to write Thinker attestation JSON (.thinker.json)")
     parser.add_argument("--context", nargs="+", dest="context_files", help="Paths to context/reference files or directories")
     parser.add_argument("--output-file", type=str, default=None, help="File path where worker must write primary deliverable")
@@ -1677,12 +1677,16 @@ def main():
     chosen_agent = args.agent
     chosen_model = args.model
 
+    if chosen_model and any(fb in chosen_model.lower() for fb in ("fable", "claude-fable")):
+        print(f"FAILED: model '{chosen_model}' is strictly forbidden. Use 'claude-opus-5-5' (effort medium) instead.", file=sys.stderr)
+        sys.exit(12)
+
     # If --capability deep-design-v1 or --think is set, adjust thresholds and models
     is_deep_design = (args.capability == "deep-design-v1")
     if is_deep_design:
         args.think = True
-        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 / Fable or GPT-5.6-Sol
-        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "claude-fable", "fable", "gpt-5.6-sol", "sol"]
+        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 or GPT-5.6-Sol
+        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "gpt-5.6-sol", "sol"]
         if chosen_model and chosen_model.lower() not in ALLOWED_DEEP_DESIGN_MODELS:
             print(f"FAILED: capability 'deep-design-v1' strictly forbids model '{chosen_model}'. Allowed models: {ALLOWED_DEEP_DESIGN_MODELS}", file=sys.stderr)
             sys.exit(12)  # Fail-closed: THINKER_UNAVAILABLE / FORBIDDEN_MODEL
