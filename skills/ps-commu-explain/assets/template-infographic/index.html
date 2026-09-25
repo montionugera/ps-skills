@@ -38,16 +38,23 @@
 <body>
   <div id="app"><div class="booting">Loading explainer…</div></div>
 
-  <!-- mermaid (pinned v11) + cherry engine, then our setup.
+  <!-- draw.io static viewer (pinned v31.5.2, resolved from the jgraph/drawio
+       repo's actual latest tagged release via jsdelivr's `gh` CDN mode — NOT
+       @latest/main) + cherry engine, then our setup.
+       CAVEAT (carried from Task 0's spike, not fixed here — no simpler
+       alternative found): this pinned script itself unconditionally runs
+       Editor.initMath() at load, which fetches additional UNPINNED
+       viewer.diagrams.net JS at runtime (math typesetting support). The
+       primary viewer script is pinned; this secondary runtime fetch is not.
        NOTE: we load the *core* build, NOT cherry-markdown.min.js. The full
        (.min.js) build auto-registers its own mermaid addon with a hardcoded
-       light `theme:"default"` that cannot be overridden and that consumes the
-       fenced ```mermaid blocks into <figure><svg> — so our locked dark theme
-       and our .mermaid-frame would both be bypassed. The core build leaves
-       fenced mermaid as <pre><code class="language-mermaid">, which is exactly
-       what cherry-setup.js's Path B expects: we frame it and run our own
-       mermaid.run() with the locked spec-style themeVariables. -->
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+       light `theme:"default"` that cannot be overridden and that would consume
+       fenced code blocks before we ever see them. The core build leaves fenced
+       ```drawio blocks as <pre><code class="language-drawio">, which is
+       exactly what cherry-setup.js's Path B expects: we frame it, substitute
+       role= tokens for real theme hex, and trigger
+       GraphViewer.processElements() ourselves. -->
+  <script src="https://cdn.jsdelivr.net/gh/jgraph/drawio@v31.5.2/src/main/webapp/js/viewer-static.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/cherry-markdown@0.8.58/dist/cherry-markdown.core.js"></script>
   <!-- Lucide line icons (UMD, global `lucide`). cherry-setup.js guards on
        window.lucide, so a CDN failure degrades to no-icons rather than error. -->
@@ -102,8 +109,8 @@
           showError("Engine failed to load", "cherry-markdown did not load from the CDN. Check your network / the pinned CDN URL.", doc);
           return;
         }
-        if (typeof mermaid === "undefined") {
-          showError("Diagram engine failed to load", "Mermaid did not load from the CDN. Diagrams cannot render. Check your network / the pinned CDN URL.", doc);
+        if (typeof GraphViewer === "undefined") {
+          showError("Diagram engine failed to load", "draw.io's viewer did not load from the CDN. Diagrams cannot render. Check your network / the pinned CDN URL.", doc);
           return;
         }
 

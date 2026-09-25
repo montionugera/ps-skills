@@ -190,448 +190,299 @@ if content is not None:
                 defects.append(f"app/content.md: forbidden class '{c}' used")
 
     # ------------------------------------------------------------------
-    # Mermaid flowchart checking (fix round 4: single-pass scanner).
+    # draw.io / mxGraph XML checking (replaces the retired Mermaid-grammar
+    # scanner as of F-013's Mermaid -> draw.io migration; fix round 1 closed
+    # 5 Important findings from independent code-reviewer + python-reviewer
+    # passes -- see task-2-review-general.md / task-2-review-python.md).
     #
-    # The block is read ONCE, left to right, by a scanner modelled on
-    # Mermaid's own flowchart lexer (packages/mermaid/src/diagrams/flowchart/
-    # parser/flow.jison) and checked against Mermaid 11.15's real parser for
-    # every syntax form named below. At every position the scanner knows
-    # whether it is inside a quoted string, a node-shape label ("[...]",
-    # "(...)", "{...}" and the double/stadium/cylinder/trapezoid/odd forms),
-    # an inline edge label ("-- text -->") or a "|text|" label, and only
-    # treats ';', '%%', a link operator or a directive keyword as meaningful
-    # OUTSIDE all of those. Earlier rounds split each line with a sequence
-    # of independent regexes; every fix moved the ambiguity to a different
-    # form (a silent skip each time). Facts this scanner relies on, all
-    # verified against the real parser rather than assumed:
-    #   * Keywords are CASE-SENSITIVE: "Graph TD" is not a diagram at all,
-    #     "classdef" is a parse error, "End" is an ordinary node id and does
-    #     not close a subgraph, lowercase "end"/"style"/... cannot be ids.
-    #   * ';' and '%%' are literal inside every label form, and quoted
-    #     labels, edge text and |labels| may span lines.
-    #   * '%%' comments are only legal on their own line.
-    #   * "style"/"classDef"/"linkStyle" arguments run to END OF LINE (';'
-    #     is a style token), so "style A fill:#f00; B --> C" is an error;
-    #     "class"/"click"/"subgraph"/"end" statements end at ';'.
-    #   * Link vocabulary: [xo<]?--+[-xo>], [xo<]?==+[=xo>],
-    #     [xo<]?-?.+-[xo>]?, ~~~ (invisible), each bare, with "-- text -->"
-    #     inline text, or with a trailing |text| label — never both.
+    # xml.etree.ElementTree is a real parser -- not hand-rolled regex-based
+    # tokenization the way the retired Mermaid scanner had to be, since
+    # Mermaid has no formal machine-readable grammar to lean on. A
+    # malformed ```drawio fence is caught by ET.fromstring() itself, not by
+    # lint code trying to reimplement XML's own well-formedness rules.
+    #
+    # Empirically verified (live python3 xml.etree.ElementTree, not
+    # assumed -- this is exactly the kind of distinction that burned 4 fix
+    # rounds on the retired Mermaid scanner, so it is checked here rather
+    # than guessed, and independently re-verified by both reviewers):
+    #   * A literal, unescaped '<' OR a bare '&' (one not starting amp;/
+    #     lt;/gt;/quot;/apos;/a numeric character ref) inside an mxCell
+    #     attribute value is REJECTED BY xml.etree.ElementTree ITSELF as
+    #     not-well-formed (raises ParseError) -- it never reaches the
+    #     per-cell checks below, so this lint does not need its own regex
+    #     for either half of that case; the try/except on ET.fromstring()
+    #     below already reports it as malformed XML (pinned by
+    #     test_lint_fails_drawio_bare_ampersand).
+    #   * What DOES survive parsing -- and is exactly the case this lint
+    #     must catch itself -- is a value that is valid XML but decodes to
+    #     a literal '<', e.g. value="F&lt;n&gt; cites this" (or a numeric
+    #     ref like &#60;/&#x3C;). ET happily decodes any of those to the
+    #     Python string "F<n> cites this". draw.io's viewer renders
+    #     html=1 labels via innerHTML, and a *raw* '<' character reaching
+    #     the browser's HTML tokenizer there opens a bogus tag and
+    #     corrupts the label -- so any literal '<' surviving in a decoded
+    #     value is rejected below.
+    #   * A literal '&' surviving decode (e.g. value="Q&amp;A" decoding to
+    #     "Q&A") is, by contrast, SAFE for that same innerHTML render path:
+    #     the WHATWG HTML tokenizer's "ambiguous ampersand" rule treats a
+    #     '&' that does not complete a recognised named/numeric character
+    #     reference as literal text, and even a fully entity-shaped
+    #     substring surviving decode (e.g. a doubly-escaped value that
+    #     decodes to literal text "&lt;") is consumed as ordinary text by
+    #     a second HTML-entity pass, not re-opened as a tag, because HTML
+    #     entity decoding of a text node never re-triggers tag-boundary
+    #     detection. Flagging a plain decoded '&' here would therefore be
+    #     a FALSE POSITIVE against completely ordinary, safe label text
+    #     ("Sales & Marketing"). This lint deliberately does NOT flag a
+    #     bare '&' post-decode -- a design choice, not an oversight.
     # ------------------------------------------------------------------
-    FLOW_RESERVED = {  # exact-case whole tokens that can never be a node id
-        'graph', 'flowchart', 'flowchart-elk', 'subgraph', 'end', 'style',
-        'linkStyle', 'classDef', 'class', 'click', 'interpolate', 'href', 'call',
-    }
-    # Node id: word chars, '.', '#', a single ':' (not the ':::' class
-    # separator) and Mermaid's own dash rule (a '-' not followed by '>', '-'
-    # or '.'), so "a.b", "c-d", "node#1", "ก" are ids while "A-->B" is not.
-    ID_RE = re.compile(r'(?:[\w.#]|:(?!::)|-(?=[^>\-.\s]))+')
-    LINK_RE = re.compile(r'[xo<]?-{2,}[-xo>]|[xo<]?={2,}[=xo>]|[xo<]?-?\.+-[xo>]?|~{2,}')
-    START_LINK_RE = re.compile(r'[xo<]?(?:--|==|-\.)')      # opens "-- text -->"
-    LINK_CLOSER = {                                          # keyed by family char
-        '-': re.compile(r'[xo<]?-{2,}[-xo>]'),
-        '=': re.compile(r'[xo<]?={2,}[=xo>]'),
-        '.': re.compile(r'[xo<]?-?\.+-[xo>]?'),
-    }
-    EDGE_ID_RE = re.compile(r'[\w-]+@(?=[xo<]?[-=.~])')     # "A e1@--> B"
-    CLASS_TAG_RE = re.compile(r':::[\w-]+')
-    HEADER_RE = re.compile(
-        r'(?:flowchart-elk|flowchart|graph)(?:[ \t]+(?:TB|TD|BT|RL|LR|BR|[<>^v]))?[ \t\r]*(?=;|\n|$)'
-    )
-    DIRECTION_RE = re.compile(r'direction[ \t]+(?:TB|TD|BT|RL|LR)\b')
-    ACC_RE = re.compile(r'acc(?:Title|Descr)[ \t]*[:{]')
-    SHAPE_OPENERS = [  # longest opener first; each maps to its legal closer(s)
-        ('(((', (')))',)), ('([', ('])',)), ('[(', (')]',)), ('[[', (']]',)),
-        ('[/', ('/]', '\\]')), ('[\\', ('\\]', '/]')), ('((', ('))',)),
-        ('{{', ('}}',)), ('(-', ('-)',)), ('[', (']',)), ('(', (')',)),
-        ('{', ('}',)), ('>', (']',)),
-    ]
-    seq_edge_re = re.compile(
-        r'(?m)^\s*[\w".]+\s*(?:-{1,2}>{1,2}|-{1,2}[x)])\s*[\w".]+\s*:\s*(?P<text>.*)$'
-    )
+    import xml.etree.ElementTree as ET
+    import math
 
-    class Bad(Exception):
-        """A statement this lint cannot classify. Carries the offending
-        position and the reason; the caller turns it into a defect."""
-        def __init__(self, pos, why):
-            super().__init__(why)
-            self.pos, self.why = pos, why
+    DRAWIO_HEX_RE = re.compile(r'(fill|stroke)Color=#[0-9a-fA-F]{3,6}')
+    DRAWIO_HEAD_RE = re.compile(r'^<mxGraphModel\b')
+    DRAWIO_MAX_VERTICES = 7
 
-    def has_link(text, strip_brackets=False):
-        text = re.sub(r'"[^"]*"', '', text)
-        if strip_brackets:
-            text = re.sub(r'\[[^\]]*\]', '', text)
-        return bool(LINK_RE.search(text) or START_LINK_RE.search(text))
+    def parse_drawio_xml(block, idx):
+        """Validate one draw.io diagram block's mxGraph XML. Every defect
+        found is appended to `defects`; nothing is silently accepted. A
+        block that fails to parse at all is reported once and no further
+        checks run against it -- there is no tree left to walk."""
 
-    def parse_flowchart(block, idx):
-        """Return (node_ids, unlabeled_edges) for one flowchart/graph block.
+        def report(msg):
+            defects.append(f"app/content.md: drawio diagram #{idx} {msg}")
 
-        Guarantee: every statement is either understood and checked (node
-        ids counted, every link's label checked, subgraph nesting balanced)
-        or reported as a defect with its line number. Nothing is dropped
-        from validation without a defect saying so.
+        try:
+            model = ET.fromstring(block)
+        except ET.ParseError as e:
+            report(f"has unparseable/malformed XML: {e}")
+            return
 
-        Deliberate, documented limits (each is a VISIBLE outcome, never a
-        silent skip):
-          * The lint is stricter than Mermaid on labels: a whitespace-only
-            "|  |" label counts as unlabeled; the invisible link "~~~" is
-            exempt because it carries no information.
-          * Arguments of style/classDef/linkStyle/class/click/accTitle/
-            accDescr and subgraph titles are not validated beyond their
-            shape and the absence of a link operator; a CSS-level mistake
-            there surfaces at render time (verify.sh), not here.
-          * Node ids outside [\\w.#:-] (e.g. containing '&', '/', '"'), ids
-            ending in '-' ("A- --> B" is legal Mermaid) and the "[|...|]"
-            props form are reported as not understood rather than parsed.
-          * A block headed by a diagram type this lint has no rules for
-            (classDiagram, pie, ...) passes without any check, by design;
-            any other unrecognised first line is reported.
-          * Trailing "%% comments" (illegal in Mermaid) are reported, but the
-            statement in front of them is still checked so a real defect
-            there is not masked.
-          * The lint does not track whether an id used by class/click/style
-            was declared, or whether a "[quoted]" label form renders."""
-        n = len(block)
-        nodes, unlabeled, open_subgraphs = set(), [], []
+        seen_ids = set()
+        has_root0 = has_root1 = False
+        vertex_count = 0
+        geom_by_id = {}    # cid -> (x, y, w, h), OWN (parent-relative) geometry
+        parent_by_id = {}  # cid -> parent id, vertices only
 
-        def line_of(p):
-            return block.count('\n', 0, min(p, n)) + 1
-
-        def eol(p):
-            e = block.find('\n', p)
-            return n if e < 0 else e
-
-        def at_line_start(p):
-            return block[block.rfind('\n', 0, p) + 1:p].strip() == ''
-
-        def skip_ws(p):  # inline whitespace only: a newline ends a statement
-            while p < n and block[p] in ' \t\r':
-                p += 1
-            return p
-
-        def report(p, msg):
-            defects.append(f"app/content.md: flowchart diagram #{idx} line {line_of(p)} {msg}")
-
-        def stmt_text(start, err_pos):
-            text = block[start:eol(max(start, err_pos))]
-            return re.sub(r'\s+', ' ', text).strip()[:120]
-
-        def expect_terminator(p, what):
-            p = skip_ws(p)
-            if p < n and block[p] not in ';\n' and not block.startswith('%%', p):
-                raise Bad(p, f"unexpected text after {what}")
-            return p
-
-        def skip_quoted(p, what):  # p is on the opening '"'
-            e = block.find('"', p + 1)
-            if e < 0:
-                raise Bad(p, f"unterminated quote in {what}")
-            return e + 1
-
-        def scan_to_stmt_end(p, brackets):
-            """Advance to the first top-level ';' or newline, skipping quoted
-            strings and (optionally) bracketed text."""
-            depth = 0
-            while p < n:
-                ch = block[p]
-                if ch == '"':
-                    p = skip_quoted(p, 'statement')
-                    continue
-                if brackets and ch in '[({':
-                    depth += 1
-                elif brackets and ch in '])}':
-                    depth = max(0, depth - 1)
-                elif depth == 0 and ch in ';\n':
-                    return p
-                p += 1
-            return p
-
-        def scan_label(p, closers, what):
-            """p is just past a shape opener; returns the position just past
-            its closer. Mirrors Mermaid's text state: quotes protect
-            anything, unquoted brackets and '|' are errors."""
-            while p < n:
-                ch = block[p]
-                if ch == '"':
-                    p = skip_quoted(p, what)
-                    continue
-                for c in closers:
-                    if block.startswith(c, p):
-                        return p + len(c)
-                if ch in '[](){}|':
-                    raise Bad(p, f"unquoted '{ch}' inside {what} (wrap the label in double quotes)")
-                p += 1
-            raise Bad(p, f"unterminated {what}")
-
-        def scan_shape_data(p, nid):  # p is just past '@{'
-            while p < n:
-                ch = block[p]
-                if ch == '"':
-                    p = skip_quoted(p, f"the @{{...}} data of node '{nid}'")
-                    continue
-                if ch == '}':
-                    return p + 1
-                p += 1
-            raise Bad(p, f"unterminated @{{...}} data on node '{nid}'")
-
-        def parse_node(p):
-            m = ID_RE.match(block, p)
-            if not m:
-                found = f" (found '{block[p]}')" if p < n else ''
-                raise Bad(p, 'expected a node id' + found)
-            nid, p = m.group(), m.end()
-            if nid in FLOW_RESERVED:
-                raise Bad(m.start(), f"reserved word '{nid}' used as a node id — Mermaid keywords "
-                                     f"are case-sensitive, so 'End'/'Style' are node ids but '{nid}' is not")
-            for opener, closers in SHAPE_OPENERS:
-                if block.startswith(opener, p):
-                    p = scan_label(p + len(opener), closers, f"the '{opener}' label of node '{nid}'")
-                    break
-            tagged = False
-            while True:
-                if block.startswith(':::', p):
-                    if tagged:
-                        raise Bad(p, f"node '{nid}' has two ':::' class tags")
-                    c = CLASS_TAG_RE.match(block, p)
-                    if not c:
-                        raise Bad(p, "':::' must be followed by a class name")
-                    p, tagged = c.end(), True
-                elif block.startswith('@{', p):
-                    p = scan_shape_data(p + 2, nid)
-                else:
-                    return nid, p
-
-        def parse_node_group(p):  # "A", or "A & B & C" (spaces around '&')
-            ids = []
-            while True:
-                nid, p = parse_node(p)
-                ids.append(nid)
-                q = skip_ws(p)
-                if q > p and q < n and block[q] == '&' and (q + 1 >= n or block[q + 1] in ' \t\r\n'):
-                    p = skip_ws(q + 1)
-                    continue
-                return ids, p
-
-        def parse_link(p):
-            """Returns (operator text, labeled, position past the link and
-            any |label|)."""
-            m = LINK_RE.match(block, p)
-            if m:
-                op, p, inline = m.group(), m.end(), ''
-            else:
-                s = START_LINK_RE.match(block, p)
-                if not s:
-                    raise Bad(p, f"expected a link operator or end of statement (found '{block[p]}')")
-                closer = LINK_CLOSER[s.group()[-1]].search(block, s.end())
-                if not closer:
-                    raise Bad(p, f"inline edge label opened by '{s.group()}' is never closed by a link operator")
-                inline = block[s.end():closer.start()]
-                op = re.sub(r'\s+', ' ', block[p:closer.end()]).strip()
-                p = closer.end()
-            pipe = None
-            q = skip_ws(p)
-            if q < n and block[q] == '|':
-                if inline.strip():
-                    raise Bad(q, "a link cannot carry both an inline '-- text -->' label and a '|text|' label")
-                r = q + 1
-                while True:
-                    if r >= n:
-                        raise Bad(q, "'|' label is never closed")
-                    if block[r] == '"':
-                        r = skip_quoted(r, '|label|')
-                        continue
-                    if block[r] == '|':
-                        break
-                    r += 1
-                pipe, p = block[q + 1:r], r + 1
-            labeled = bool(inline.replace('"', '').strip()) or bool(pipe is not None and pipe.replace('"', '').strip())
-            return op, labeled, p
-
-        def parse_vertex_statement(p):
-            groups, links = [], []
-            while True:
-                ids, p = parse_node_group(p)
-                groups.append(ids)
-                p = skip_ws(p)
-                if p >= n or block[p] in ';\n' or block.startswith('%%', p):
-                    break
-                e = EDGE_ID_RE.match(block, p)
-                if e:
-                    p = e.end()
-                op, labeled, p = parse_link(p)
-                links.append((op, labeled))
-                p = skip_ws(p)
-                if p >= n or block[p] in ';\n':
-                    raise Bad(p, f"link '{op}' has no target node")
-            for ids in groups:
-                nodes.update(ids)
-            for i, (op, labeled) in enumerate(links):
-                if labeled or op.startswith('~'):
-                    continue
-                for src in groups[i]:
-                    for dst in groups[i + 1]:
-                        unlabeled.append((src, op, dst))
-            return p
-
-        def parse_statement(p):
-            m = ID_RE.match(block, p)
-            word = m.group() if m else ''
-            if word in ('graph', 'flowchart', 'flowchart-elk'):
-                h = HEADER_RE.match(block, p)
-                if not h:
-                    raise Bad(p, f"'{word}' header must be followed by an optional direction, then ';' or end of line")
-                return h.end()
-            if word == 'subgraph':
-                end = scan_to_stmt_end(m.end(), brackets=True)
-                title = block[m.end():end].strip()
-                if has_link(title, strip_brackets=True):
-                    raise Bad(m.end(), 'link operator inside a subgraph title')
-                name = re.split(r'[\[\s]', title.strip('"'), maxsplit=1)[0]
-                open_subgraphs.append((p, name or title))
-                return end
-            if word == 'end':
-                if open_subgraphs:
-                    open_subgraphs.pop()
-                else:
-                    report(p, "has an 'end' that closes no open subgraph")
-                return expect_terminator(m.end(), "'end'")
-            if word in ('style', 'classDef', 'linkStyle'):
-                end = eol(p)
-                args = block[m.end():end]
-                if not re.match(r'[ \t]+\S', args):
-                    raise Bad(p, f"'{word}' needs arguments")
-                if has_link(args):
-                    report(p, f"has a link operator inside a '{word}' statement — Mermaid reads the rest of "
-                              f"the line as style arguments and rejects '--'/'=='/'-.' there "
-                              f"(so CSS var(--x) cannot be used; put any edge on its own line)")
-                return end
-            if word in ('class', 'click'):
-                end = scan_to_stmt_end(m.end(), brackets=False)
-                args = block[m.end():end]
-                if not re.match(r'[ \t]+\S+[ \t]+\S', args):
-                    raise Bad(p, f"'{word}' needs a node id followed by a "
-                                 f"{'class name' if word == 'class' else 'link or callback'}")
-                if has_link(args):
-                    report(p, f"has a link operator inside a '{word}' statement")
-                return end
-            d = DIRECTION_RE.match(block, p)
-            if d:  # otherwise "direction" is an ordinary node id (legal Mermaid)
-                end = eol(p)
-                if block[d.end():end].strip():
-                    # Mermaid's lexer takes the WHOLE line as the direction
-                    # token, so anything after it (an edge, a ';'-joined
-                    # statement, a comment) silently never exists.
-                    report(p, f"has text after '{d.group()}' that Mermaid silently ignores — "
-                              f"put it on its own line")
-                return end
-            a = ACC_RE.match(block, p)
-            if a:
-                if block[a.end() - 1] == '{':
-                    close = block.find('}', a.end())
-                    if close < 0:
-                        raise Bad(p, 'unterminated accDescr { ... }')
-                    return close + 1
-                return eol(p)
-            return parse_vertex_statement(p)
-
-        pos = 0
-        while pos < n:
-            ch = block[pos]
-            if ch in ' \t\r\n;':
-                pos += 1
+        for cell in model.findall('.//mxCell'):
+            cid = cell.get('id')
+            if cid is None:
+                report("has an <mxCell> with no id attribute")
                 continue
-            if block.startswith('%%', pos):
-                if not at_line_start(pos):
-                    report(pos, "has a trailing '%%' comment — Mermaid only accepts comments on their own line")
-                pos = eol(pos)
+            if cid in seen_ids:
+                report(f"has a duplicate mxCell id '{cid}'")
+            seen_ids.add(cid)
+
+            if cid == '0':
+                has_root0 = True
                 continue
-            start = pos
+            if cid == '1':
+                if cell.get('parent') == '0':
+                    has_root1 = True
+                continue
+
+            is_vertex = cell.get('vertex') == '1'
+            is_edge = cell.get('edge') == '1'
+            if is_vertex == is_edge:
+                report(
+                    f"cell '{cid}' has "
+                    + ("both vertex=\"1\" and edge=\"1\"" if is_vertex
+                       else "neither vertex=\"1\" nor edge=\"1\"")
+                    + " set — every non-root mxCell must be exactly one"
+                )
+                continue
+
+            value = cell.get('value')
+            if value and '<' in value:
+                report(
+                    f"cell '{cid}' value contains a literal '<' after XML-decoding "
+                    "(from &lt; or a numeric character ref) — this corrupts the html=1 "
+                    "label once the browser re-parses it as HTML"
+                )
+
+            style = cell.get('style') or ''
+            hexm = DRAWIO_HEX_RE.search(style)
+            if hexm:
+                report(
+                    f"cell '{cid}' style uses a raw hex color '{hexm.group()}' — use a "
+                    "role=accent/pitfall/check token instead (substituted for real theme "
+                    "hex at render time)"
+                )
+
+            if is_edge:
+                if not (value and value.strip()):
+                    report(f"edge '{cid}' has no label")
+                continue
+
+            # vertex
+            vertex_count += 1
+            geom = cell.find('mxGeometry')
+            if geom is None:
+                report(f"vertex '{cid}' has no <mxGeometry> child")
+                continue
             try:
-                pos = parse_statement(pos)
-            except Bad as bad:
-                report(start, f"not understood by lint: '{stmt_text(start, bad.pos)}' ({bad.why})")
-                pos = eol(bad.pos)  # resync at the end of the offending line
-        for p, name in open_subgraphs:
-            report(p, f"opens subgraph '{name}' that is never closed — only lowercase 'end' closes a "
-                      f"subgraph ('End' is a node id; keywords are case-sensitive)")
-        return nodes, unlabeled
-
-    FLOWCHART_HEADS = {'flowchart', 'graph', 'flowchart-elk'}
-    CHECKED_HEADS = FLOWCHART_HEADS | {'sequenceDiagram'}
-    # Mermaid diagram types this lint has no rules for. A block headed by
-    # one of these passes silently BY DESIGN (the brief names flowchart and
-    # sequenceDiagram only). Any other first line is reported, so a typo
-    # ("flowchat"), a body line before the header, or an unknown type can
-    # never leave a block silently unchecked.
-    OTHER_DIAGRAM_HEADS = {
-        # Some of these have a plain form alongside (or instead of) their
-        # '-beta' form — verified against mermaid-js/mermaid's own detector
-        # regexes (each diagram's detector.ts), not guessed:
-        # classDiagram-v2 (classDetector-V2.ts: /^\s*classDiagram/, comment says
-        # "Both classDiagram and classDiagram-v2 render with the unified class
-        # diagram"), sankey/sankey-beta and packet/packet-beta (both detectors:
-        # /^\s*<name>(-beta)?/), block/block-beta and xychart/xychart-beta
-        # (same (-beta)? pattern), architecture/architecture-beta (detector:
-        # /^\s*architecture/, a bare prefix match), treemap/treemap-beta
-        # (detector: /^\s*treemap/, also a bare prefix match). radar has NO
-        # plain form — its detector requires the literal 'radar-beta'.
-        'classDiagram', 'classDiagram-v2', 'stateDiagram', 'stateDiagram-v2', 'erDiagram',
-        'journey', 'gantt', 'pie', 'quadrantChart', 'requirementDiagram', 'gitGraph',
-        'mindmap', 'timeline', 'zenuml', 'sankey', 'sankey-beta', 'xychart-beta', 'xychart',
-        'block-beta', 'block', 'packet-beta', 'packet', 'kanban', 'architecture-beta',
-        'architecture', 'radar-beta', 'treemap-beta', 'treemap', 'C4Context', 'C4Container',
-        'C4Component', 'C4Dynamic', 'C4Deployment', 'info', 'agentflow-beta', 'swimlane-beta',
-    }
-
-    def split_front_matter(block):
-        """Returns (block with any leading '---' YAML front-matter blanked
-        out so line numbers are preserved, the first real line's keyword).
-        The header search skips blank lines, the front-matter and %% lines."""
-        lines = block.splitlines()
-        i = 0
-        while i < len(lines) and not lines[i].strip():
-            i += 1
-        if i < len(lines) and lines[i].strip() == '---':
-            j = i + 1
-            while j < len(lines) and lines[j].strip() != '---':
-                j += 1
-            for k in range(i, min(j + 1, len(lines))):
-                lines[k] = ''
-            i = j + 1
-        while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith('%%')):
-            i += 1
-        head = re.split(r'[\s;]', lines[i].strip(), maxsplit=1)[0] if i < len(lines) else ''
-        return '\n'.join(lines), head
-
-    for idx, block_m in enumerate(re.finditer(r'```mermaid\s*\n(.*?)```', content, re.S), start=1):
-        block, head = split_front_matter(block_m.group(1))
-        if head in FLOWCHART_HEADS:
-            nodes, unlabeled = parse_flowchart(block, idx)
-            for src, op_text, dst in unlabeled:
-                defects.append(
-                    f"app/content.md: flowchart diagram #{idx} edge "
-                    f"'{src} {op_text} {dst}' has no label"
+                # mxCodec (draw.io's own export codec) omits x/y entirely when
+                # they equal mxGeometry's template default of 0 -- a real,
+                # valid export of an origin-positioned shape has no x=/y=
+                # attribute at all. width/height are never legitimately
+                # omitted (a vertex must have a size), so only x/y get the
+                # "absent means 0" leniency; present-but-garbage (e.g. x="abc")
+                # still fails below, same as width/height always do.
+                x = float(geom.get('x') or 0)
+                y = float(geom.get('y') or 0)
+                w = float(geom.get('width'))
+                h = float(geom.get('height'))
+            except (TypeError, ValueError):
+                report(
+                    f"vertex '{cid}' geometry has a missing or non-numeric width/height, "
+                    "or a non-numeric x/y (x/y default to 0 only when the attribute is "
+                    "absent, not when it is present but invalid)"
                 )
-            if len(nodes) > 7:
-                defects.append(
-                    f"app/content.md: flowchart diagram #{idx} has {len(nodes)} nodes (max 7)"
+                continue
+            if not all(math.isfinite(v) for v in (x, y, w, h)):
+                report(f"vertex '{cid}' geometry has a non-finite x/y/width/height (nan/inf)")
+                continue
+            if w <= 0 or h <= 0:
+                report(
+                    f"vertex '{cid}' has non-positive geometry (width={w:g}, height={h:g}) "
+                    "— a vertex must have positive size"
                 )
-        elif head == 'sequenceDiagram':
-            for em in seq_edge_re.finditer(block):
-                if not em.group('text').strip():
-                    defects.append(
-                        f"app/content.md: sequenceDiagram diagram #{idx} arrow has no text after the colon"
+                continue
+            geom_by_id[cid] = (x, y, w, h)
+            parent_by_id[cid] = cell.get('parent')
+
+        if not has_root0:
+            report('is missing the required root mxCell id="0"')
+        if not has_root1:
+            report('is missing the required root mxCell id="1" parent="0"')
+
+        if vertex_count > DRAWIO_MAX_VERTICES:
+            report(f"has {vertex_count} vertex cells (max {DRAWIO_MAX_VERTICES})")
+
+        # mxGraph child geometry is PARENT-RELATIVE, not absolute: a vertex
+        # whose parent is not the default layer ("1") has x/y measured from
+        # its parent's own origin (e.g. a group/container's children), so
+        # overlap/bounds must run on ABSOLUTE position -- resolved by walking
+        # the parent chain and summing each ancestor's own (parent-relative)
+        # offset until reaching the default layer. A chain that cycles, or
+        # passes through a cell with no geometry of its own to resolve,
+        # cannot be verified: fail closed (report a defect, exclude from
+        # overlap/bounds) rather than silently trusting the cell's own x/y
+        # as though it were already absolute.
+        def resolve_absolute(cid, chain):
+            if cid in chain or cid not in geom_by_id:
+                return None
+            chain = chain | {cid}
+            x, y, w, h = geom_by_id[cid]
+            parent = parent_by_id.get(cid)
+            if parent in (None, '0', '1'):
+                return (x, y, w, h)
+            base = resolve_absolute(parent, chain)
+            if base is None:
+                return None
+            return (base[0] + x, base[1] + y, w, h)
+
+        vertex_boxes = []  # (id, x1, y1, x2, y2) -- ABSOLUTE page coordinates
+        for cid in geom_by_id:
+            resolved = resolve_absolute(cid, frozenset())
+            if resolved is None:
+                report(
+                    f"vertex '{cid}' position cannot be resolved (its parent chain is "
+                    "cyclic, or passes through a cell with no geometry of its own) — "
+                    "overlap/bounds cannot be verified for it"
+                )
+                continue
+            ax, ay, aw, ah = resolved
+            vertex_boxes.append((cid, ax, ay, ax + aw, ay + ah))
+
+        # A group/container vertex is EXPECTED to geometrically contain its own
+        # descendants (that is the entire point of nesting) -- their absolute
+        # boxes overlapping is correct, not a defect. Only pairs with no
+        # ancestor/descendant relationship are genuine candidates for the
+        # overlap check; walk each vertex's own parent chain (bounded, since
+        # every id here already resolved successfully above -- a cycle or an
+        # unresolvable ancestor already excluded it from vertex_boxes) to
+        # find its ancestor ids and skip any pair related that way.
+        def ancestor_ids(cid):
+            ids, cur, seen = set(), parent_by_id.get(cid), set()
+            while cur not in (None, '0', '1') and cur not in seen:
+                seen.add(cur)
+                ids.add(cur)
+                cur = parent_by_id.get(cur)
+            return ids
+
+        ancestors = {cid: ancestor_ids(cid) for cid, *_ in vertex_boxes}
+
+        for i, (aid, ax1, ay1, ax2, ay2) in enumerate(vertex_boxes):
+            for bid, bx1, by1, bx2, by2 in vertex_boxes[i + 1:]:
+                if bid in ancestors[aid] or aid in ancestors[bid]:
+                    continue
+                if not (ax2 <= bx1 or bx2 <= ax1 or ay2 <= by1 or by2 <= ay1):
+                    report(f"vertex '{aid}' overlaps vertex '{bid}'")
+
+        # <mxGraphModel> is the bare root the spec's authoring convention asks
+        # for, but draw.io's own export codec sometimes wraps it in
+        # <mxfile><diagram><mxGraphModel>...</mxGraphModel></diagram></mxfile>
+        # -- unwrap to find the real model either way, rather than reading
+        # pageWidth/pageHeight off the wrong (<mxfile>) element and finding
+        # nothing.
+        graph_model = model if model.tag == 'mxGraphModel' else model.find('.//mxGraphModel')
+        page_w = page_h = None
+        if graph_model is not None:
+            raw_w, raw_h = graph_model.get('pageWidth'), graph_model.get('pageHeight')
+            if raw_w is not None and raw_h is not None:
+                try:
+                    cand_w, cand_h = float(raw_w), float(raw_h)
+                except ValueError:
+                    cand_w = cand_h = None
+                if (
+                    cand_w is not None
+                    and math.isfinite(cand_w)
+                    and math.isfinite(cand_h)
+                ):
+                    page_w, page_h = cand_w, cand_h
+
+        if page_w is None or page_h is None:
+            # A bounds check that cannot positively confirm correctness must
+            # not stay silent -- the same fail-closed discipline as every
+            # other rule here. Covers all of: pageWidth/pageHeight missing,
+            # non-numeric, only one of the two present, non-finite, or no
+            # <mxGraphModel> found at all (e.g. an <mxfile> wrapper with
+            # nothing nested inside it).
+            report(
+                "declares no usable pageWidth/pageHeight (missing, non-numeric, or no "
+                "<mxGraphModel> element found), so vertex bounds cannot be verified"
+            )
+        else:
+            for cid, x1, y1, x2, y2 in vertex_boxes:
+                if x1 < 0 or y1 < 0 or x2 > page_w or y2 > page_h:
+                    report(
+                        f"vertex '{cid}' extends beyond the declared page bounds "
+                        f"(0,0)-({page_w:g},{page_h:g})"
                     )
-        elif head.lower() in {h.lower() for h in CHECKED_HEADS}:
-            defects.append(
-                f"app/content.md: diagram #{idx} header '{head}' is not a Mermaid diagram type — "
-                f"diagram keywords are case-sensitive (use 'flowchart', 'graph' or 'sequenceDiagram')"
-            )
-        elif head not in OTHER_DIAGRAM_HEADS:
-            defects.append(
-                f"app/content.md: diagram #{idx} header '{head}' is not a Mermaid diagram type this "
-                f"lint knows, so the block was NOT checked — the diagram keyword must be the first "
-                f"line after any '---' front-matter or '%%' lines"
-            )
+
+    # cherry-setup.js's frameAndRunDrawio() renders a fenced code block as a
+    # diagram when EITHER it is explicitly labelled ```drawio (the
+    # "isLabelled" branch there, which renders unconditionally regardless of
+    # content -- e.g. an <mxfile>-wrapped export) OR -- mirroring its
+    # content-sniff fallback over its "pre code" candidate scan, which
+    # inspects every code block regardless of language tag -- the block's
+    # trimmed body starts with "<mxGraphModel" (cherry-setup.js's own
+    # DRAWIO_HEAD = /^<mxGraphModel\b/, deliberately NOT <mxfile> or <?xml --
+    # see that file's own comment on why those two are excluded from content-
+    # sniffing there). Matching only ```drawio here would leave a real, live-
+    # rendered diagram (e.g. a ```xml fence, or an untagged fence, whose body
+    # happens to start with <mxGraphModel) with zero lint coverage; widened
+    # to genuinely mirror the renderer, not just approximate it.
+    drawio_idx = 0
+    for block_m in re.finditer(r'```([^\n`]*)\n(.*?)```', content, re.S):
+        lang = block_m.group(1).strip()
+        body = block_m.group(2)
+        is_labelled = lang == 'drawio'
+        if not is_labelled and not DRAWIO_HEAD_RE.match(body.strip()):
+            continue
+        drawio_idx += 1
+        parse_drawio_xml(body, drawio_idx)
 
 if defects:
     seen = set()

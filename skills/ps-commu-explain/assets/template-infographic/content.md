@@ -17,7 +17,7 @@
   </div>
 </div>
 
-This page describes the exact mechanism it went through to reach your browser. `ps-commu-explain` is always served through `scripts/serve.sh` — never an ad-hoc server (F1) — and its default look is the infographic tier: run `init.sh <slug>` with no `--tier` flag and you get a cream, Markdown-driven explainer rendered by cherry-markdown, Mermaid and Lucide (F2). Nothing below is invented: every fact traces to a real line in `SKILL.md` or `scripts/`, and every one of them is listed in the Receipts footer.
+This page describes the exact mechanism it went through to reach your browser. `ps-commu-explain` is always served through `scripts/serve.sh` — never an ad-hoc server (F1) — and its default look is the infographic tier: run `init.sh <slug>` with no `--tier` flag and you get a cream, Markdown-driven explainer rendered by cherry-markdown, draw.io and Lucide (F2). Nothing below is invented: every fact traces to a real line in `SKILL.md` or `scripts/`, and every one of them is listed in the Receipts footer.
 
 <div class="section-head" data-nav="Mechanism" data-nav-icon="git-branch" id="mechanism">
   <span class="icon-chip lg"><i data-lucide="git-branch"></i></span>
@@ -29,14 +29,75 @@ This page describes the exact mechanism it went through to reach your browser. `
 
 `init.sh` first rejects any slug that isn't kebab-case (F3), then scaffolds a fresh workspace: the authoring-chain docs — `00-brief.md`, `01-facts.md`, `02-storyboard.md` — land in the workspace root, sibling to `app/`, so they are never served to a reader (F4). It also probes ports 7700–7799 with `lsof` for an advisory candidate (F5), and only sweeps a workspace that has sat idle more than 3 days *and* has no live, marker-verified server (F7). `serve.sh` then takes over: it runs the lint gate detailed in Claims below, and its own bind attempt is the one that actually matters — on failure it walks forward to the next port, up to 7799 (F6).
 
-```mermaid
-flowchart LR
-    A["init.sh"] -->|scaffold workspace + advisory port| B["00-brief / 01-facts / 02-storyboard + app/"]
-    B -->|author edits content.md| C["serve.sh"]
-    C -->|run lint.sh gate| D{"lint clean?"}
-    D -->|no: exit 1| B
-    D -->|yes: bind 127.0.0.1 + watchdog| E["live at 127.0.0.1:PORT"]
-    E -->|verify.sh: headless Chrome| F["6 PASS/FAIL/SKIP asserts"]
+```drawio
+<mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1"
+    connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400"
+    pageHeight="400" math="0" shadow="0">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="init.sh" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="40" y="140" width="160" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="B" value="00-brief / 01-facts / 02-storyboard + app/"
+        style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="240" y="140" width="200" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="C" value="serve.sh" style="rounded=1;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="480" y="140" width="160" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="D" value="lint clean?" style="rhombus;whiteSpace=wrap;html=1;role=accent;"
+        vertex="1" parent="1">
+      <mxGeometry x="680" y="130" width="140" height="80" as="geometry" />
+    </mxCell>
+    <mxCell id="E" value="live at 127.0.0.1:PORT"
+        style="rounded=1;whiteSpace=wrap;html=1;role=check;" vertex="1" parent="1">
+      <mxGeometry x="860" y="140" width="200" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="F" value="6 PASS/FAIL/SKIP asserts"
+        style="rounded=1;whiteSpace=wrap;html=1;role=check;" vertex="1" parent="1">
+      <mxGeometry x="1100" y="140" width="220" height="60" as="geometry" />
+    </mxCell>
+    <mxCell id="e1" value="scaffold workspace + advisory port" style="html=1;"
+        edge="1" parent="1" source="A" target="B">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e2" value="author edits content.md" style="html=1;" edge="1" parent="1"
+        source="B" target="C">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e3" value="run lint.sh gate" style="html=1;" edge="1" parent="1"
+        source="C" target="D">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e4" value="no: exit 1" style="html=1;role=pitfall;" edge="1" parent="1"
+        source="D" target="B">
+      <mxGeometry relative="1" as="geometry">
+        <Array as="points"><mxPoint x="750" y="60" /></Array>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e5" value="yes: bind 127.0.0.1 + watchdog" style="html=1;role=check;"
+        edge="1" parent="1" source="D" target="E">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="e6" value="verify.sh: headless Chrome" style="html=1;" edge="1" parent="1"
+        source="E" target="F">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="0" y="-24" as="offset" />
+      </mxGeometry>
+    </mxCell>
+  </root>
+</mxGraphModel>
 ```
 
 <div class="schematic">/tmp/ps-commu/&lt;slug&gt;/
@@ -80,7 +141,7 @@ flowchart LR
     <i class="we-arrow" data-lucide="arrow-right"></i>
     <div class="we-stage"><span class="we-stage-k">Output</span><div class="we-stage-v">one PASS/FAIL/SKIP line per assert</div></div>
   </div>
-  <p>Assert 1 counts rendered Mermaid SVG elements against the fenced <code>mermaid</code> blocks in this very doc (F13); without Chrome the run still exits 2 for asserts 1&ndash;5, but assert 6's static <code>scroll-behavior</code> check needs no browser and can still fail the run (F15).</p>
+  <p>Assert 1 counts rendered draw.io diagrams against the fenced <code>drawio</code> blocks in this very doc (F13); without Chrome the run still exits 2 for asserts 1&ndash;5, but assert 6's static <code>scroll-behavior</code> check needs no browser and can still fail the run (F15).</p>
 </div>
 
 <div class="section-head" data-nav="Claims" data-nav-icon="badge-check" id="claims">
@@ -116,15 +177,15 @@ flowchart LR
 </div>
 
 <div class="claim-card">
-  <div class="claim-text">Every unlabeled Mermaid flowchart edge in app/content.md is reported as its own lint defect, not just the first one found.</div>
-  <div class="claim-meta"><span class="claim-fact">F17</span><span class="claim-source">scripts/lint.sh:612</span></div>
+  <div class="claim-text">Every unlabeled draw.io edge in app/content.md is reported as its own lint defect, not just the first one found.</div>
+  <div class="claim-meta"><span class="claim-fact">F17</span><span class="claim-source">scripts/lint.sh:314</span></div>
   <div class="claim-check"><i data-lucide="search"></i> Check it: run <code>grep -n "has no label" scripts/lint.sh</code></div>
 </div>
 
 <div class="claim-card">
-  <div class="claim-text">A single Mermaid flowchart may declare at most 7 nodes — the diagram in the Mechanism section above stops at 6 for exactly this reason.</div>
-  <div class="claim-meta"><span class="claim-fact">F18</span><span class="claim-source">scripts/lint.sh:616</span></div>
-  <div class="claim-check"><i data-lucide="search"></i> Check it: run <code>grep -n "max 7" scripts/lint.sh</code></div>
+  <div class="claim-text">A single draw.io diagram may declare at most 7 vertex cells — the diagram in the Mechanism section above stops at 6 for exactly this reason.</div>
+  <div class="claim-meta"><span class="claim-fact">F18</span><span class="claim-source">scripts/lint.sh:359</span></div>
+  <div class="claim-check"><i data-lucide="search"></i> Check it: run <code>grep -n DRAWIO_MAX_VERTICES scripts/lint.sh</code></div>
 </div>
 
 <div class="section-head" data-nav="Wrong, without this" data-nav-icon="triangle-alert" id="wrongwithout">
@@ -198,12 +259,12 @@ That's the difference between an ad-hoc server (F19) and the one this skill mand
     <li><span class="receipts-fact">F10</span> scripts/common.sh:13 — marker-verified kill</li>
     <li><span class="receipts-fact">F11</span> scripts/serve.sh:136 — self-destruct watchdog</li>
     <li><span class="receipts-fact">F12</span> scripts/verify.sh:4 — headless Chrome dump-dom</li>
-    <li><span class="receipts-fact">F13</span> scripts/verify.sh:212 — Mermaid svg-count assert</li>
-    <li><span class="receipts-fact">F14</span> scripts/verify.sh:71 — scroll-behavior regression gate</li>
-    <li><span class="receipts-fact">F15</span> scripts/verify.sh:92 — no-Chrome exit 2 for asserts 1-5, assert 6 still runs</li>
+    <li><span class="receipts-fact">F13</span> scripts/verify.sh:337 — draw.io diagram-count assert</li>
+    <li><span class="receipts-fact">F14</span> scripts/verify.sh:98 — scroll-behavior regression gate</li>
+    <li><span class="receipts-fact">F15</span> scripts/verify.sh:135 — no-Chrome exit 2 for asserts 1-5, assert 6 still runs</li>
     <li><span class="receipts-fact">F16</span> scripts/lint.sh:186 — forbidden CSS classes</li>
-    <li><span class="receipts-fact">F17</span> scripts/lint.sh:612 — unlabeled edge, per-edge defect</li>
-    <li><span class="receipts-fact">F18</span> scripts/lint.sh:616 — 7-node flowchart cap</li>
+    <li><span class="receipts-fact">F17</span> scripts/lint.sh:314 — unlabeled edge, per-edge defect</li>
+    <li><span class="receipts-fact">F18</span> scripts/lint.sh:359 — 7-vertex diagram cap</li>
     <li><span class="receipts-fact">F19</span> SKILL.md:103 — the ad-hoc server it replaced</li>
   </ul>
 </div>
