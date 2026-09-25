@@ -650,3 +650,71 @@ def test_ship_main_no_deploy_flag_is_not_reported_as_unconfigured(
     text = captured.out + captured.err
     assert "no local deploy configured" not in text
     assert "--no-deploy" in text
+
+
+# ── Rollback precision and the --no-sync-main emergency bypass (release/1.6) ───
+
+
+def test_ship_post_merge_gate1_failure_rolls_back_to_exact_pre_sha(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """A Gate 1 failure after the merge resets release/<v> to the exact head
+    recorded at the start of the lock (not HEAD~1)."""
+    feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
+    wt = Path(claim["worktree"])
+    _commit_feature_file(wt)
+
+    rel_wt = tmp_repo_with_release / ".claude" / "worktrees" / "_release"
+    precheck = rel_wt / "scripts" / "precheck.sh"
+    precheck.parent.mkdir(parents=True, exist_ok=True)
+    precheck.write_text("#!/bin/sh\nexit 1\n")
+    precheck.chmod(0o755)
+    subprocess.run(["git", "add", "scripts/precheck.sh"], cwd=rel_wt, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "failing precheck on release"], cwd=rel_wt, check=True)
+
+    head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rel_wt,
+                                 capture_output=True, text=True, check=True).stdout.strip()
+
+    with pytest.raises(GateFailedError):
+        ship_current_work(wt)
+
+    head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rel_wt,
+                                capture_output=True, text=True, check=True).stdout.strip()
+    assert head_after == head_before
+
+
+def test_ship_no_sync_main_skips_absorbing_main(tmp_repo_with_release: Path, fixed_owner: str):
+    """--no-sync-main: the feature lands on release/<v> AS IS; a hotfix on
+    origin/main is NOT merged in, and the result says the sync was skipped
+    (None), not that the release was up to date (0)."""
+    feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
+    wt = Path(claim["worktree"])
+    _commit_feature_file(wt)
+
+    repo = tmp_repo_with_release
+    rel_wt = repo / ".claude" / "worktrees" / "_release"
+    (repo / "hotfix.txt").write_text("emergency fix\n")
+    subprocess.run(["git", "add", "hotfix.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "hotfix on main"], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=repo, check=True)
+
+    res = ship_current_work(wt, no_sync_main=True)
+    assert res["ok"]
+    assert res["main_synced"] is None
+    assert not (rel_wt / "hotfix.txt").exists(), "--no-sync-main must not absorb main"
+    assert (rel_wt / "feature.txt").exists()
+
+
+def test_ship_main_no_sync_main_flag_is_wired_and_announced(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, capsys
+):
+    """The CLI flag reaches ship_current_work, and the skipped sync is said out
+    loud — an operator must not mistake a bypassed ship for a synced one.
+    (Whether main is actually left unabsorbed is proven at the function level
+    above; _ship_main opens the release itself, so a hotfix cannot be landed
+    in between here.)"""
+    assert _ship_main(tmp_repo_with_release, fixed_owner, monkeypatch,
+                      "--no-sync-main", "--no-deploy") == 0
+    text = "".join(capsys.readouterr())
+    assert "Main sync SKIPPED (--no-sync-main)" in text and "psrw sync-main" in text
+    assert '"main_synced": null' in text

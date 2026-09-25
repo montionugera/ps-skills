@@ -279,3 +279,66 @@ each path — unless `--force` is given.
 The guard is a read path: it never generates or persists an identity as a side effect.
 It bypasses entirely when `PS_RELEASE_WORKFLOW_SCRIPTED=1`, warns but allows on a
 marker-less legacy worktree, and allows the `_release` worktree silently.
+
+## Main sync mechanics (Hotfix absorption)
+<a id="main-sync-mechanics"></a>
+
+Hotfixes merge directly to `main` via `psrw hotfix` and GitHub squash-merge. To prevent
+branch divergence and avoid shipping stale or conflicting releases, `ps-release-workflow`
+implements automated absorption from `main` into `release/<v>` under **Option D (Defense in Depth)**.
+
+### Shared primitive (`lib/main_sync.py`)
+
+- **`resolve_main_ref(repo, *, strict=False)`**: Fetches `origin/main` outside the lock (if a
+  remote exists) and returns the ref to sync from (`origin/main`, or `main` without a remote).
+  Never touches the main checkout. A failed fetch warns and falls back to the last-fetched
+  `origin/main`; with `strict=True` (`psrw sync-main --strict`) it raises `MainUnreachableError`.
+- **`cached_main_ref(repo)`** / **`missing_main_commits(tree, main_ref)`**: offline helpers —
+  `status` uses them to report `N behind origin/main` without fetching.
+- **`sync_main_into_release(repo, rel_wt, release_branch, main_ref=None)`** → commits absorbed:
+  - Must be called under `file_lock(rel_wt)`.
+  - **No-op check**: returns `0` when `release/<v>` already contains `main_ref`.
+  - **Bookkeeping check**: inspects `git diff --name-only <merge-base> <main_ref>`. If `main`
+    changed `.release.json`, `.claude/*_backlog/` or `.claude/state/`, raises
+    `MainSyncConflictError` with a manual merge that keeps the release's copy.
+  - **Merge**: `git merge --no-ff --no-edit -m "chore(release): sync <main_ref> into <branch>"`.
+  - **Conflict handling**: aborts cleanly with `git merge --abort` and raises
+    `MainSyncConflictError` listing the conflicting files and the exact manual command.
+
+### Automated local ship (`psrw ship`)
+
+1. Fetches `origin/main` outside the lock (`resolve_main_ref`).
+2. Under `file_lock(rel_wt)`:
+   - Refuses if the release is frozen (a promote is running).
+   - Records `pre_sha = rev-parse HEAD`.
+   - Calls `sync_main_into_release()`.
+   - Merges `feat/F-NNN` into `release/<v>`.
+   - Runs Gate 1 (`precheck.sh`) on the combined tree (`release + hotfix + feature`).
+   - **Atomic rollback**: If Gate 1 fails or any error occurs, resets to `pre_sha` (`git reset --hard pre_sha`),
+     cleanly undoing both the main sync and the feature merge.
+3. After the merge, the local deploy is refused if a hotfix landed on `main` in the meantime
+   (`psrw sync-main --deploy` absorbs and deploys it).
+4. Emergency bypass: `--no-sync-main` skips the sync (and the post-merge behind-main deploy
+   refusal), announces the skip, and reports `main_synced: null`.
+
+### Promote parity enforcement & babysit race guard (`psrw promote`)
+
+1. Freezes the release, then syncs `origin/main` into `release/<v>` before the epic gate, the
+   deploy and Gate 2 (`integration.sh`), so every gate verifies the tree the PR will land.
+2. Epic freshness check (`_verification_is_fresh`) recognizes the new content from `main` and
+   triggers epic re-verification.
+3. Sync disclosure is recorded in the PR body: `- Synced with origin/main@<sha> before Gate 2 (<N> commit(s) from main absorbed)`.
+4. **Babysit race guard**: Under `--babysit`, after the CI checks pass, promote fetches
+   `origin/main` again and refuses to merge if `release/<v>` is behind it (a hotfix
+   squash-merged during CI), with instructions to re-run `promote`.
+5. Emergency bypass: `--allow-stale-main` skips the sync and the race guard; the release goes
+   to `main` exactly as it is.
+
+### Standalone verbs
+
+- **`psrw sync-main`**: On-demand sync of `main` into `release/<v>` with Gate 1 verification and atomic rollback.
+  Supports `--deploy` and `--strict`; refuses while the release is frozen for promote.
+- **`psrw sync`**: Generalizes `psrw epic sync` to allow any feature worktree to pull `release/<v>` into its branch.
+- **`psrw status`**: Checks cached ref (without network fetch) and warns if `release/<v>` is behind `origin/main`.
+- **`psrw hotfix`**: Checklist prints step 8 hint pointing to auto-sync and `psrw sync-main` when release is in progress.
+

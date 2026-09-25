@@ -11,7 +11,7 @@ from tests.test_main_sync import _land_on_origin_main, _rel_wt
 from scripts.init_work_new_release import new_release
 from scripts.ship_current_work_to_release import GateFailedError
 from scripts.sync_main import sync_main
-from lib.main_sync import MainSyncConflictError
+from lib.main_sync import MainSyncConflictError, MainUnreachableError
 from lib.release_freeze import ReleaseFrozenError, freeze_release
 
 PSRW = Path(__file__).resolve().parent.parent / "bin" / "psrw"
@@ -202,3 +202,28 @@ def test_hotfix_alias_rejects_a_description(tmp_repo_with_release, monkeypatch):
     with pytest.raises(SystemExit) as ei:
         hotfix_main()
     assert ei.value.code == 2
+
+
+# ── --strict (ported from release/1.6): refuse to sync from a stale origin/main ─
+
+
+def test_sync_main_strict_refuses_when_origin_main_cannot_be_fetched(tmp_repo_with_release: Path):
+    repo = tmp_repo_with_release
+    _release_with_precheck(repo, "exit 0")
+    git(repo, "remote", "set-url", "origin", str(repo.parent / "gone.git"))
+    pre = git(_rel_wt(repo), "rev-parse", "HEAD")
+    with pytest.raises(MainUnreachableError):
+        sync_main(repo, strict=True)
+    assert git(_rel_wt(repo), "rev-parse", "HEAD") == pre
+    # Default mode keeps working from the last-fetched origin/main (with a warning).
+    assert sync_main(repo) == {"release": "1.1", "synced": 0, "gate1": None}
+
+
+def test_psrw_sync_main_strict_exits_1_when_origin_is_unreachable(tmp_repo_with_release: Path):
+    repo = tmp_repo_with_release
+    _release_with_precheck(repo, "exit 0")
+    git(repo, "remote", "set-url", "origin", str(repo.parent / "gone.git"))
+    proc = _psrw(repo, "sync-main", "--strict")
+    assert proc.returncode == 1, proc.stderr
+    assert "MainUnreachableError" in proc.stderr and "Traceback" not in proc.stderr
+    assert _psrw(repo, "sync-main").returncode == 0, "without --strict the stale ref is used"

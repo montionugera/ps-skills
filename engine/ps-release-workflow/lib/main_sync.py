@@ -19,6 +19,12 @@ class MainSyncConflictError(Exception):
     """main could not be merged into release/<v> automatically."""
 
 
+class MainUnreachableError(Exception):
+    """origin/main could not be fetched and the caller asked for strict
+    freshness (`psrw sync-main --strict`): syncing from the last-fetched
+    origin/main could silently miss a just-merged hotfix."""
+
+
 # Paths main and release/<v> legitimately disagree on (D11: backlog metadata and
 # release state live on the release branch). A change to them on main must be
 # reconciled by a human, never auto-merged over the release's copy.
@@ -27,17 +33,24 @@ _BOOKKEEPING_DIRS = (".claude/idea_backlog/", ".claude/refined_backlog/",
                      ".claude/epic_backlog/", ".claude/state/")
 
 
-def resolve_main_ref(repo: Path) -> str:
+def resolve_main_ref(repo: Path, *, strict: bool = False) -> str:
     """The freshest main available: origin/main after a fetch when an origin
     exists (a PR squash-merge advances only the remote), else local main.
-    A failed fetch falls back to the last-fetched origin/main."""
+    A failed fetch falls back to the last-fetched origin/main with a warning —
+    or, with strict=True, raises MainUnreachableError instead."""
     repo = Path(repo)
     if git_run(repo, "remote", "get-url", "origin", check=False).returncode == 0:
         fetched = git_run(repo, "fetch", "-q", "origin", "main", check=False)
         if fetched.returncode != 0:
+            detail = fetched.stderr.strip() or "git fetch origin main exited non-zero"
+            if strict:
+                raise MainUnreachableError(
+                    f"cannot fetch origin/main ({detail}); refusing to sync from a "
+                    f"possibly stale origin/main under --strict"
+                )
             print(f"⚠️  git fetch origin main failed — comparing against the last "
                   f"fetched origin/main, which may miss a just-merged hotfix: "
-                  f"{fetched.stderr.strip()}", file=sys.stderr)
+                  f"{detail}", file=sys.stderr)
         if git_run(repo, "rev-parse", "--verify", "-q", "origin/main", check=False).returncode == 0:
             return "origin/main"
     return "main"

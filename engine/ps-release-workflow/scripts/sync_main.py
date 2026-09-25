@@ -19,20 +19,23 @@ from pathlib import Path
 from lib.backlog_paths import read_release_state, release_worktree_path
 from lib.git_ops import _run as git_run
 from lib.hooks import HookPathError, resolve_hook
-from lib.main_sync import MainSyncConflictError, resolve_main_ref, sync_main_into_release
+from lib.main_sync import (
+    MainSyncConflictError, MainUnreachableError, resolve_main_ref, sync_main_into_release,
+)
 from lib.release_freeze import ReleaseFrozenError, frozen_since
 from lib.repo import find_repo_root
 from lib.state import file_lock
 from scripts.ship_current_work_to_release import GateFailedError, _run_precheck
 
 
-def sync_main(repo: Path) -> dict:
+def sync_main(repo: Path, *, strict: bool = False) -> dict:
     """Merge main into the in-progress release/<v>, then run Gate 1 on it.
 
     Returns {"release": <v>|None, "synced": <commits absorbed>, "gate1":
     "passed" | "skipped" (no precheck script) | None (nothing synced)}.
-    Raises MainSyncConflictError (release untouched), ReleaseFrozenError, or
-    GateFailedError (sync rolled back).
+    Raises MainSyncConflictError (release untouched), ReleaseFrozenError,
+    GateFailedError (sync rolled back), or — with strict=True —
+    MainUnreachableError when origin/main cannot be fetched (nothing done).
     """
     repo = Path(repo)
     state = read_release_state(repo)
@@ -41,7 +44,7 @@ def sync_main(repo: Path) -> dict:
     version = state["version"]
     rel_wt = release_worktree_path(repo)
     branch = f"release/{version}"
-    main_ref = resolve_main_ref(repo)  # network, outside the lock
+    main_ref = resolve_main_ref(repo, strict=strict)  # network, outside the lock
     with file_lock(rel_wt):
         # Promote runs Gate 2 and the push outside this lock; syncing under it
         # would ship a tree Gate 2 never verified. Promote syncs main itself.
@@ -85,12 +88,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--deploy", action="store_true",
                    help="run the local deploy from the _release worktree after a sync")
+    p.add_argument("--strict", action="store_true",
+                   help="refuse (exit 1, nothing done) if origin/main cannot be fetched, "
+                        "instead of syncing from the last-fetched origin/main with a warning")
     args = p.parse_args(argv)
 
     repo = find_repo_root(Path.cwd())
     try:
-        result = sync_main(repo)
-    except (MainSyncConflictError, ReleaseFrozenError, GateFailedError, OSError) as e:
+        result = sync_main(repo, strict=args.strict)
+    except (MainSyncConflictError, MainUnreachableError, ReleaseFrozenError,
+            GateFailedError, OSError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     print(json.dumps({"ok": True, **result}))

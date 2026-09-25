@@ -1058,8 +1058,11 @@ body::before {
   padding: 0;
 }
 
-/* ---- mermaid frame — one look for every diagram (light) ------------------- */
-.mermaid-frame {
+/* ---- diagram frame — one look for every diagram (light), format-agnostic --
+   Renamed from .mermaid-frame (F-013: draw.io replaced Mermaid as the
+   infographic tier's diagram engine). Same visual treatment, now wraps the
+   draw.io viewer's .mxgraph/data-mxgraph div instead of a .mermaid holder. */
+.diagram-frame {
   position: relative;
   margin: var(--space-6) 0;
   padding: var(--space-6);
@@ -1072,13 +1075,10 @@ body::before {
   overflow-x: auto;
   text-align: center;
 }
-.mermaid-frame svg { max-width: 100%; height: auto; }
+.diagram-frame svg { max-width: 100%; height: auto; }
 @media (prefers-reduced-motion: no-preference) {
-  .mermaid-frame { transition: opacity var(--dur-3) var(--ease-emphasized); }
-  .mermaid-frame.is-pending { opacity: 0; }
-}
-.cherry-markdown.theme__explainer pre.mermaid-error {
-  border-left: 4px solid var(--pitfall);
+  .diagram-frame { transition: opacity var(--dur-3) var(--ease-emphasized); }
+  .diagram-frame.is-pending { opacity: 0; }
 }
 
 /* ---- built-in nav: [toc] + detail/panel ----------------------------------- */

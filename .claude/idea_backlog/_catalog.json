@@ -67,5 +67,17 @@
     "title": "Redesign ps-commu-explain: dedupe, engine fixes, evidence-first chain",
     "created_at": "2026-09-22T02:00:51.190871+00:00",
     "promoted_to": "F-011"
+  },
+  {
+    "id": "I-012",
+    "title": "Add pan/zoom to ps-commu-explain Mermaid diagrams",
+    "created_at": "2026-09-24T11:22:48.751649+00:00",
+    "promoted_to": "F-013"
+  },
+  {
+    "id": "I-013",
+    "title": "hotfix to release auto sync",
+    "created_at": "2026-09-24T13:06:20.121112+00:00",
+    "promoted_to": "F-012"
   }
 ]

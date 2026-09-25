@@ -174,9 +174,12 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
 - **ps-release-workflow** — start with `ps-release-workflow-init` in a repo, then
   idea → refine → claim → ship → promote. Hotfixes merged to `main` are merged into
   `release/<v>` automatically by `psrw ship` and `psrw promote` before they gate or deploy
-  (a conflict refuses with the exact command); `psrw sync-main` does it on demand, and
-  `psrw status` flags a release that is behind `main`. Each skill's `SKILL.md` documents
-  its preconditions.
+  (a conflict refuses with the exact command, and `promote --babysit` refuses to merge if
+  `main` advanced while CI ran); `psrw sync-main` does it on demand (`--strict` refuses
+  when `origin/main` cannot be fetched), `psrw sync` pulls `release/<v>` into an in-flight
+  feature worktree, and `psrw status` flags a release that is behind `main`. Emergency
+  bypasses: `--no-sync-main` (ship) and `--allow-stale-main` (promote). Each skill's
+  `SKILL.md` documents its preconditions.
 
 ## Development
 

@@ -16,9 +16,11 @@ Absorb `main` (squash-merged hotfixes) into `release/<v>` on demand.
 
     psrw sync-main            # merge main into release/<v>, then Gate 1
     psrw sync-main --deploy   # ...then run the local deploy from _release
+    psrw sync-main --strict   # refuse (nothing done) if origin/main cannot be fetched
 
 `psrw hotfix --sync-release [--deploy]` is an alias for the same code path. `--deploy`
-warns when Gate 1 did not run (no precheck script).
+warns when Gate 1 did not run (no precheck script). Without `--strict`, a failed fetch
+warns and syncs from the last-fetched `origin/main`, which may miss a just-merged hotfix.
 
 ## What matters
 
@@ -32,7 +34,17 @@ warns when Gate 1 did not run (no precheck script).
 
 The merge conflicts, or `main` changed release bookkeeping (`.release.json`, backlog
 dirs); both print the exact manual `git merge` · the release is frozen for promote
-(re-run promote instead) · Gate 1 fails (rolled back).
+(re-run promote instead) · Gate 1 fails (rolled back) · `--strict` and `origin/main`
+cannot be fetched.
 
-Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#gates`
+## Feature branches
+
+The sync lands on `release/<v>` only. To pull it into your in-flight feature worktree:
+
+    psrw sync
+
+Emergency bypasses of the automatic sync live on the callers: `psrw ship --no-sync-main`
+and `psrw promote --allow-stale-main`.
+
+Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#main-sync-mechanics`
 Flags: `psrw sync-main --help`

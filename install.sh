@@ -97,6 +97,7 @@ for h in "$REPO"/skills/*/hooks/*; do
   if [[ -f "$h" ]]; then link "$h" "$CLAUDE_HOME/hooks/$(basename "$h")"; fi
 done
 link "$REPO/engine/ps-release-workflow" "$CLAUDE_HOME/ps-release-workflow"
+link "$REPO/engine/ps-release-workflow/bin/psrw" "$BIN_HOME/psrw"
 link "$REPO/bin/ps-skills-sync" "$BIN_HOME/ps-skills-sync"
 link "$REPO/bin/mesh" "$BIN_HOME/mesh"
 link "$REPO/bin/mesh-run" "$BIN_HOME/mesh-run"

@@ -18,10 +18,10 @@ commit hash, or the literal `user said`.
 | F10 | a live server is only ever killed if its own process command line contains the workspace path | scripts/common.sh:13 |
 | F11 | serve.sh's watchdog self-destructs the server once its keep-alive TTL, default 24h, expires | scripts/serve.sh:136 |
 | F12 | verify.sh loads the served page in headless Chrome with --dump-dom under a virtual-time budget | scripts/verify.sh:4 |
-| F13 | verify.sh's assert 1 compares the rendered Mermaid svg count against the fenced mermaid block count in the doc | scripts/verify.sh:212 |
-| F14 | verify.sh's assert 6 statically greps the served explainer.css for scroll-behavior, a permanent regression gate | scripts/verify.sh:71 |
-| F15 | verify.sh exits 2 (SKIP) for asserts 1-5 when Chrome is missing or no live server exists, but assert 6's static check still runs and can exit 1 (FAIL) even without Chrome | scripts/verify.sh:92 |
+| F13 | verify.sh's assert 1 compares the rendered draw.io diagram count against the fenced drawio block count in the doc | scripts/verify.sh:337 |
+| F14 | verify.sh's assert 6 statically greps the served explainer.css for scroll-behavior, a permanent regression gate | scripts/verify.sh:98 |
+| F15 | verify.sh exits 2 (SKIP) for asserts 1-5 when Chrome is missing or no live server exists, but assert 6's static check still runs and can exit 1 (FAIL) even without Chrome | scripts/verify.sh:135 |
 | F16 | lint.sh rejects 5 exact forbidden classes plus any class prefixed cat- in app/content.md | scripts/lint.sh:186 |
-| F17 | lint.sh reports every unlabeled flowchart edge in app/content.md as its own defect | scripts/lint.sh:612 |
-| F18 | lint.sh caps flowchart node count at 7 per diagram | scripts/lint.sh:616 |
+| F17 | lint.sh reports every unlabeled draw.io edge in app/content.md as its own defect | scripts/lint.sh:314 |
+| F18 | lint.sh caps draw.io vertex cell count at 7 per diagram | scripts/lint.sh:359 |
 | F19 | the old python -m http.server habit exposes all of /tmp on all interfaces, forever | SKILL.md:103 |

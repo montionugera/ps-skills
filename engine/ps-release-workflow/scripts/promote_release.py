@@ -27,7 +27,9 @@ from lib.git_ops import (
     delete_branch_local, delete_branch_remote, push, remove_worktree,
 )
 from lib.hooks import resolve_hook
-from lib.main_sync import MainSyncConflictError, resolve_main_ref, sync_main_into_release
+from lib.main_sync import (
+    MainSyncConflictError, missing_main_commits, resolve_main_ref, sync_main_into_release,
+)
 from lib.owner import resolve_owner_id
 from lib.release_freeze import (
     freeze_release, record_pushed_head, recorded_pushed_head, unfreeze_release,
@@ -478,6 +480,7 @@ def _promote_release(
     use_pr: bool = True,
     allow_missing_gate2: bool = False,
     allow_split_epic: bool = False,
+    allow_stale_main: bool = False,
     babysit: bool = False,
     gh_runner=subprocess.run,
 ) -> dict:
@@ -509,13 +512,20 @@ def _promote_release(
     # gate, the deploy and Gate 2: all of them must verify and run the tree the
     # PR will actually land, never a release missing main's commits. A
     # conflict refuses here, release untouched, with the manual command.
-    main_ref = resolve_main_ref(repo)
+    # --allow-stale-main is the EMERGENCY BYPASS: no fetch, no sync, and no
+    # babysit race guard below — the release goes to main exactly as it is.
+    main_ref = None if allow_stale_main else resolve_main_ref(repo)
+    main_synced = 0
     with file_lock(rel_wt):
         # Freeze under the lock ship merges under: from here on, no ship can
         # add to the tree this promote verifies and pushes.
         freeze_release(repo, version)
         _frozen.append(version)
-        sync_main_into_release(repo, rel_wt, release_branch, main_ref)
+        if main_ref is not None:
+            main_synced = sync_main_into_release(repo, rel_wt, release_branch, main_ref)
+        else:
+            print(f"⚠️  --allow-stale-main: NOT syncing main into {release_branch}; "
+                  f"it may lack hotfixes on main.", file=sys.stderr)
 
     check_epics(repo, rel_wt, version, allow_split_epic)
 
@@ -578,9 +588,17 @@ def _promote_release(
         )
         split_lines = _epic_split_disclosure_lines(rel_wt, version)
         split_block = ("\n".join(split_lines) + "\n") if split_lines else ""
+        # Disclose an absorbed hotfix: reviewers see the PR carries more than
+        # the shipped features.
+        sync_line = ""
+        if main_synced:
+            main_sha = git_run(repo, "rev-parse", main_ref).stdout.strip()
+            sync_line = (f"- Synced with {main_ref}@{main_sha[:12]} before Gate 2 "
+                         f"({main_synced} commit(s) from main absorbed).\n")
         pr_body = (
             f"Promote `{release_branch}` → `main`.\n\n"
             f"- Gate 1 (`precheck.sh`) passed at ship.\n"
+            f"{sync_line}"
             f"{gate2_line}\n"
             f"{split_block}\n"
             f"Squash-merging this PR triggers the prod (Vultr) deploy.\n"
@@ -644,6 +662,19 @@ def _promote_release(
                 f"merging: the PR would not carry exactly what shipped. Re-run "
                 f"promote (it re-pushes and re-checks)."
             )
+        # Race guard: a hotfix squash-merged to main WHILE the checks ran was
+        # never part of the tree CI verified. Refuse; a re-run syncs it in,
+        # re-gates, re-pushes and re-checks. Skipped under --allow-stale-main.
+        if not allow_stale_main:
+            fresh_main = resolve_main_ref(repo)
+            raced = missing_main_commits(rel_wt, fresh_main)
+            if raced:
+                raise Gate2FailedError(
+                    f"{fresh_main} advanced by {len(raced)} commit(s) while PR checks were "
+                    f"running (a hotfix landed during CI) — NOT merging: the checked head "
+                    f"was never verified against it. Re-run promote: it syncs main into "
+                    f"{release_branch}, re-gates, re-pushes and re-checks."
+                )
         _finalize_and_push()
         merged = _merge_pr_squash(repo, ref, gh_runner)
         if merged.returncode != 0:
@@ -1037,6 +1068,10 @@ def _build_parser():
                         "as an approved split (lib.epic.set_split_approved) instead of "
                         "refusing G-E3 — disclosed in the PR body, and exempts the epic "
                         "from G-E3 in every later release too")
+    p.add_argument("--allow-stale-main", action="store_true", dest="allow_stale_main",
+                   help="EMERGENCY BYPASS: promote release/<v> as it is, without syncing "
+                        "main (hotfixes) into it first and without the --babysit check that "
+                        "main did not advance during CI")
     p.add_argument("--deploy", action="store_true",
                    help="run the repo-specific local deploy (scripts/deploy-local.sh) first "
                         "(default: off)")
@@ -1068,6 +1103,7 @@ def main() -> int:
                                      push=args.push, keep=args.keep, use_pr=args.use_pr,
                                      allow_missing_gate2=args.allow_missing_gate2,
                                      allow_split_epic=args.allow_split_epic,
+                                     allow_stale_main=args.allow_stale_main,
                                      babysit=args.babysit)
     except (NoReleaseInProgressError, Gate2FailedError, MainSyncConflictError,
             CatalogEntryNotFoundError, RuntimeError) as e:

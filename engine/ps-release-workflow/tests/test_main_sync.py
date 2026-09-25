@@ -13,7 +13,9 @@ from scripts.new_idea import new_idea
 from scripts.promote_idea_to_refined import promote_idea_to_refined
 from scripts.init_work_refined_backlog import claim_feature
 from scripts.ship_current_work_to_release import ship_current_work, GateFailedError
-from lib.main_sync import MainSyncConflictError, sync_main_into_release
+from lib.main_sync import (
+    MainSyncConflictError, MainUnreachableError, resolve_main_ref, sync_main_into_release,
+)
 
 
 def _land_on_origin_main(repo: Path, path: str, content: str, msg: str = "hotfix") -> str:
@@ -192,3 +194,74 @@ def test_bookkeeping_refusal_offers_a_merge_that_keeps_the_release_copy(tmp_repo
         with pytest.raises(MainSyncConflictError) as ei:
             sync_main_into_release(repo, rel, "release/1.1")
     assert "git checkout HEAD -- .release.json" in str(ei.value)
+
+
+# ── Primitive-level behaviour (ported from the release/1.6 unit tests) ─────────
+
+
+def test_resolve_main_ref_prefers_a_fetched_origin_main(tmp_repo_with_release: Path):
+    assert resolve_main_ref(tmp_repo_with_release) == "origin/main"
+
+
+def test_resolve_main_ref_falls_back_to_local_main_without_an_origin(tmp_path: Path):
+    repo = tmp_path / "solo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "t@t")
+    git(repo, "config", "user.name", "T")
+    (repo / "README.md").write_text("solo\n")
+    git(repo, "add", "README.md")
+    git(repo, "commit", "-q", "-m", "init")
+    assert resolve_main_ref(repo) == "main"
+
+
+def test_resolve_main_ref_strict_refuses_when_origin_main_cannot_be_fetched(
+    tmp_repo_with_release: Path, capsys
+):
+    """Default: a failed fetch warns and uses the last-fetched origin/main (it
+    may miss a just-merged hotfix). --strict turns that into a refusal."""
+    repo = tmp_repo_with_release
+    git(repo, "remote", "set-url", "origin", str(repo.parent / "gone.git"))
+    with pytest.raises(MainUnreachableError, match="cannot fetch origin/main"):
+        resolve_main_ref(repo, strict=True)
+    assert resolve_main_ref(repo) == "origin/main"
+    assert "git fetch origin main failed" in capsys.readouterr().err
+
+
+def test_sync_main_into_release_absorbs_main_and_is_idempotent(tmp_repo_with_release: Path):
+    from lib.state import file_lock
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    rel = _rel_wt(repo)
+    hotfix_sha = _land_on_origin_main(repo, "hotfix.txt", "urgent\n")
+    assert not (rel / "hotfix.txt").exists()
+
+    with file_lock(rel):
+        assert sync_main_into_release(repo, rel, "release/1.1") == 1
+    assert (rel / "hotfix.txt").read_text() == "urgent\n"
+    assert git(rel, "status", "--porcelain") == "", "the sync must be committed"
+    subprocess.run(["git", "merge-base", "--is-ancestor", hotfix_sha, "HEAD"], cwd=rel, check=True)
+
+    with file_lock(rel):
+        assert sync_main_into_release(repo, rel, "release/1.1") == 0, "second sync is a no-op"
+
+
+def test_sync_main_into_release_conflict_aborts_and_restores_the_tree(tmp_repo_with_release: Path):
+    from lib.state import file_lock
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    rel = _rel_wt(repo)
+    (rel / "README.md").write_text("release side\n")
+    git(rel, "commit", "-q", "-am", "release edits README")
+    _land_on_origin_main(repo, "README.md", "hotfix side\n")
+    pre = git(rel, "rev-parse", "HEAD")
+
+    with file_lock(rel):
+        with pytest.raises(MainSyncConflictError, match="README.md"):
+            sync_main_into_release(repo, rel, "release/1.1")
+
+    assert git(rel, "rev-parse", "HEAD") == pre
+    assert git(rel, "status", "--porcelain") == ""
+    in_merge = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                              cwd=rel, capture_output=True)
+    assert in_merge.returncode != 0, "the conflicted merge must have been aborted"
