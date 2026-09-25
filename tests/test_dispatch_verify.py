@@ -66,7 +66,7 @@ class VerifyTestBase(unittest.TestCase):
 
     def _fake_worker(self, script="true"):
         """Patches build_agent_command with a fake shell worker that logs each invocation."""
-        def _build(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=None):
+        def _build(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=None, **kwargs):
             self.prompts.append(wrapped_task)
             return ["sh", "-c", f"echo call >> '{self.worker_calls}'; {script}"]
         return mock.patch.object(dispatch_mod, "build_agent_command", side_effect=_build)
