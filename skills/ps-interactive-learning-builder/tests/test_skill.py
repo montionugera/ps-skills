@@ -40,6 +40,7 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             **os.environ,
             "CLAUDE_HOME": str(root / ".claude"),
             "AGENTS_HOME": str(root / ".agents"),
+            "BIN_HOME": str(root / ".local" / "bin"),
         }
         return subprocess.run(
             ["bash", str(REPO / "install.sh"), *arguments],
