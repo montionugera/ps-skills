@@ -1,0 +1,19 @@
+{
+  "capability": "deep-design-v1",
+  "model": "claude-opus-5-5",
+  "agent": "claude",
+  "timestamp": "2026-09-24T12:59:24.196960+00:00",
+  "prompt_sha256": "e42232aa8e998879759b9487080afa7653dfa1d396f4ac2a50cc06bf7266ecf5",
+  "output_sha256": "07a88dbd7752a2d109c4bbf7a1e2e35aea6808e3ece88d99fe7957616146441c",
+  "context_sha256": {
+    "engine/ps-release-workflow/scripts/hotfix.py": "ff417a3f1ed41d8fdb08f4b4ef3de1963f352f8736907d29f0eb435fdb0146d8",
+    "engine/ps-release-workflow/scripts/ship_current_work_to_release.py": "531287c1109b4db9aaa9bd0ac2432dc1e3d1f21b12d1b0f3c7697d52a2350eb7",
+    "engine/ps-release-workflow/scripts/promote_release.py": "2a5ecd9edcb3b408714e420cc90632f2c9158585a78bfc7c4fcf1ddbd3fe1f58",
+    "engine/ps-release-workflow/docs/lifecycle.md": "a95d48e6975015652b3af1ee2f2d141abfaf54c4dbb7179b04cda2d4f889ce01",
+    "skills/ps-release-workflow-hotfix/SKILL.md": "7895e166f5a1450b3560bee1deda0e6e56379edd4703ea24018c143fedc7836d",
+    "skills/ps-release-workflow-ship/SKILL.md": "0d432d3ccd4fdef6f0e2efea8cce2e3ca2f0a97100e8334e972e9328e8c2351d",
+    "skills/ps-release-workflow-promote/SKILL.md": "de1a6f3c1646262eb035577fb9bfe57a6631c8e4ba889a690e868e6131eaec76"
+  },
+  "exit_code": 0,
+  "status": "ATTESTED"
+}
