@@ -14,10 +14,10 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **ps-release-workflow-idea** | Capture a new idea (`I-NNN`) in the idea backlog. |
 | **ps-release-workflow-refine** | Promote a solid, approved idea into the refined backlog (`F-NNN`). |
 | **ps-release-workflow-claim** | Claim a refined feature and cut an isolated per-feature worktree. |
-| **ps-release-workflow-ship** | Merge a finished feature into the in-progress release (Gate 1) with automated main/hotfix sync. |
-| **ps-release-workflow-sync-main** | Absorb commits from main (squash-merged hotfixes) into the active release branch on demand (Gate 1). |
+| **ps-release-workflow-ship** | Merge a finished feature into the in-progress release (Gate 1). |
+| **ps-release-workflow-sync-main** | Absorb commits from `main` (squash-merged hotfixes) into the in-progress release on demand (Gate 1). |
 | **ps-release-workflow-new-release** | Open a new release cycle and its `_release` worktree. |
-| **ps-release-workflow-promote** | Squash-merge a full release to main and deploy (Gate 2, parity check, babysit race guard). |
+| **ps-release-workflow-promote** | Squash-merge a full release to main and deploy (Gate 2). |
 | **ps-release-workflow-guard** | The PreToolUse guard that blocks edits on `main` / foreign worktrees. |
 | **ps-release-workflow-cleanup-legacy** | Housekeeping for marker-less legacy worktrees. |
 | **ps-release-workflow-full-promote** | Whole release turnover in one shot: promote, babysit CI, merge, watch deploy, clean up, open the next release. |
@@ -169,12 +169,14 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
 - **ps-interactive-learning-builder** — invoke `/ps-interactive-learning-builder <topic>` to create a
   source-backed course, explorable reference, or hybrid learning project with gated audit and verification.
 - **ps-release-workflow** — start with `ps-release-workflow-init` in a repo, then
-  idea → refine → claim → ship → promote. Hotfixes merged to `main` are automatically
-  absorbed into `release/<v>` during `psrw ship` (with atomic rollback to `pre_sha` on Gate 1 failure)
-  and parity is strictly enforced before Gate 2 during `psrw promote` (with a CI babysit race guard).
-  Use `psrw sync-main` to absorb `main` into the release branch on demand, or `psrw sync` to pull
-  `release/<v>` into any in-flight feature worktree. Emergency bypasses: `--no-sync-main` (ship)
-  and `--allow-stale-main` (promote). Each skill's `SKILL.md` documents its preconditions.
+  idea → refine → claim → ship → promote. Hotfixes merged to `main` are merged into
+  `release/<v>` automatically by `psrw ship` and `psrw promote` before they gate or deploy
+  (a conflict refuses with the exact command, and `promote --babysit` refuses to merge if
+  `main` advanced while CI ran); `psrw sync-main` does it on demand (`--strict` refuses
+  when `origin/main` cannot be fetched), `psrw sync` pulls `release/<v>` into an in-flight
+  feature worktree, and `psrw status` flags a release that is behind `main`. Emergency
+  bypasses: `--no-sync-main` (ship) and `--allow-stale-main` (promote). Each skill's
+  `SKILL.md` documents its preconditions.
 
 ## Development
 

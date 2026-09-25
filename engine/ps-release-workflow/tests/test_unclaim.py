@@ -311,3 +311,58 @@ def test_unclaim_main_reports_unknown_feature_cleanly(
     err = capsys.readouterr().err
     assert "F-999" in err
     assert "Traceback" not in err
+
+
+# ── Unclaim must never destroy uncommitted work silently ───────────────────────
+
+
+def test_unclaim_refusal_lists_modified_and_untracked_files(tmp_repo_with_release: Path):
+    """The refusal names every uncommitted path so the operator can see what a
+    --force would destroy, instead of a bare 'has uncommitted changes'."""
+    repo = tmp_repo_with_release
+    feat, claimed = _setup_claimed_feature(repo)
+    wt = Path(claimed["worktree"])
+    (wt / "README.md").write_text("edited but not committed\n")
+    (wt / "new_module.py").write_text("print('precious')\n")
+
+    with pytest.raises(DirtyWorktreeError) as ei:
+        unclaim_feature(repo, feat["id"])
+    msg = str(ei.value)
+    assert "README.md" in msg and "new_module.py" in msg
+    assert "--force" in msg
+    assert (wt / "new_module.py").exists()
+
+
+def test_claim_records_the_claiming_session(tmp_repo_with_release: Path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-claimer")
+    repo = tmp_repo_with_release
+    feat, claimed = _setup_claimed_feature(repo)
+    assert _read_claims(repo)[feat["id"]]["session_id"] == "sess-claimer"
+
+
+def test_unclaim_warns_when_the_claim_belongs_to_another_session(
+    tmp_repo_with_release: Path, monkeypatch, capsys
+):
+    """Local sessions share one machine-cached owner id, so an owner match does
+    not prove it is YOUR claim. When the claim recorded a different session id,
+    unclaim must say so loudly."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-claimer")
+    repo = tmp_repo_with_release
+    feat, _claimed = _setup_claimed_feature(repo)
+    capsys.readouterr()
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-other")
+    unclaim_feature(repo, feat["id"])
+    err = capsys.readouterr().err
+    assert "different session" in err and "sess-claimer" in err
+
+
+def test_unclaim_by_the_claiming_session_does_not_warn(
+    tmp_repo_with_release: Path, monkeypatch, capsys
+):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-claimer")
+    repo = tmp_repo_with_release
+    feat, _claimed = _setup_claimed_feature(repo)
+    capsys.readouterr()
+    unclaim_feature(repo, feat["id"])
+    assert "different session" not in capsys.readouterr().err

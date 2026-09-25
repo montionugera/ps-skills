@@ -18,19 +18,17 @@ from lib.backlog_paths import (
     get_backlog_catalog_path,
     get_release_worktree,
     read_release_state,
+    release_worktree_path,
 )
-from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped
+from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped, update_entry
 from lib.epic import epic_children, epic_completeness, epic_folder_path, try_begin_verification
 from lib.epic_gate import run_and_record
 from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
 from lib.hooks import HookPathError, resolve_hook
 from lib.main_sync import (
-    MainSyncConflictError,
-    ProtectedPathSyncError,
-    render_sync_failure,
-    resolve_main_sha,
-    sync_main_into_release,
+    MainSyncConflictError, missing_main_commits, resolve_main_ref, sync_main_into_release,
 )
+from lib.release_freeze import ReleaseFrozenError, frozen_error, frozen_since
 from lib.repo import is_ps_release_workflow_repo
 from lib.slug import slugify
 from lib.state import file_lock
@@ -87,6 +85,13 @@ def ship_current_work(
     skip_readiness: bool = False,
     no_sync_main: bool = False,
 ) -> dict:
+    """Gate 1, then merge this feature worktree into release/<v>.
+
+    no_sync_main (CLI --no-sync-main) is the emergency bypass for the automatic
+    absorption of main: the feature merges onto the release AS IS, so the tree
+    Gate 1 verifies and the deploy runs may lack hotfixes on main. The result's
+    "main_synced" is then None (vs 0 = up to date, N = commits absorbed).
+    """
     worktree = Path(worktree).resolve()
     marker = _find_marker(worktree)
     feature_id = marker["feature"]
@@ -106,6 +111,13 @@ def ship_current_work(
     # (fix #2 source of truth), not main — main carries only last-promoted state.
     state = read_release_state(repo)
     if state is None:
+        # A finalized-but-uncleaned release (promote already opened its PR)
+        # is frozen, not absent: say so, and where the feature should go.
+        rj = release_worktree_path(repo) / ".release.json"
+        if rj.exists():
+            version = json.loads(rj.read_text()).get("version")
+            if version:
+                raise frozen_error(version, feature_id, "promoted: its PR is open or merged")
         raise NoReleaseInProgressError("No release in progress")
     release_version = state["version"]
     release_branch = f"release/{release_version}"
@@ -136,23 +148,32 @@ def ship_current_work(
     if rc is not None and rc != 0:
         raise GateFailedError(f"Gate 1 (scripts/precheck.sh) failed in {worktree}")
 
-    # Fetch origin/main (outside lock) to pin main_sha
-    main_sha, source = (None, None) if no_sync_main else resolve_main_sha(repo, strict=False)
-
     # Merge feat/<feature_id> into release/<v> in the _release worktree.
     # Serialize the whole merge → re-verify → rollback → mark critical section on
     # the shared _release worktree so two concurrent ships can't corrupt the tree
     # or roll back the wrong commit.
     feat_branch = f"feat/{feature_id}"
+    # Fetch outside the lock (network); the merge itself happens under it.
+    # --no-sync-main skips the fetch too: the bypass exists for when main (or
+    # origin) must not be consulted at all.
+    main_ref = None if no_sync_main else resolve_main_ref(repo)
     with file_lock(rel_wt):
+        # Checked under the lock promote freezes under: a ship either lands
+        # before promote starts (and is in the PR) or is refused here.
+        since = frozen_since(repo, release_version)
+        if since:
+            raise frozen_error(release_version, feature_id, f"promote started at {since}")
+        shipped_sha = git_run(rel_wt, "rev-parse", feat_branch).stdout.strip()
+        # Every rollback below resets to the pre-ship head: after a main sync
+        # plus the feature merge, HEAD~1 would leave the untested sync standing.
         pre_sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
-        sync_res = None
-        if main_sha:
-            try:
-                sync_res = sync_main_into_release(repo, rel_wt, release_branch, main_sha, source)
-            except (MainSyncConflictError, ProtectedPathSyncError) as e:
-                raise GateFailedError(render_sync_failure(e, release_branch, feature_id))
-
+        # A hotfix merged to main while this release is open must be in the
+        # release BEFORE the feature lands, so Gate 1 and the local deploy see
+        # release + hotfix + feature. A conflict refuses the whole ship loudly,
+        # release untouched (sync_main_into_release aborts its own merge).
+        main_synced = None
+        if main_ref is not None:
+            main_synced = sync_main_into_release(repo, rel_wt, release_branch, main_ref)
         try:
             git_run(rel_wt, "merge", "--no-ff", "-m", f"merge {feat_branch} into {release_branch}", feat_branch)
         except GitError as e:
@@ -172,14 +193,13 @@ def ship_current_work(
             git_run(rel_wt, "reset", "--hard", pre_sha)
             raise
         if rc is not None and rc != 0:
-            # Roll back the merge: hard reset to pre_sha (undoes feature AND sync)
+            # Roll back the merge (and any main sync): back to the pre-ship head.
             git_run(rel_wt, "reset", "--hard", pre_sha)
             msg = "Gate 1 failed on combined release after merge — rolled back"
-            if sync_res and sync_res.synced:
-                msg += (
-                    f" to {pre_sha[:12]} (undid feature and sync of {sync_res.behind} commit(s) from "
-                    f"{sync_res.source}@{sync_res.main_sha[:12]}; run psrw sync-main to isolate)"
-                )
+            if main_synced:
+                msg += (f" to {pre_sha[:12]} (undid the feature merge AND the sync of "
+                        f"{main_synced} commit(s) from {main_ref}; run psrw sync-main to "
+                        f"test the sync on its own)")
             raise GateFailedError(msg)
 
         # Mark catalog status=shipped IN PLACE in the _release worktree (D11/SR-1).
@@ -191,7 +211,12 @@ def ship_current_work(
         # that crashed between mark_shipped and commit_all left the change
         # uncommitted — "no change now" must not strand it forever.
         refined_cat = get_backlog_catalog_path(repo, "refined")
-        if mark_shipped(refined_cat, feature_id, release_version) or is_dirty(rel_wt):
+        # shipped_sha is the exact feature commit merged, so cleanup can prove
+        # it reached main (a feature branch may move on after the ship).
+        def record_sha(e: dict) -> None:
+            e["shipped_sha"] = shipped_sha
+        marked = mark_shipped(refined_cat, feature_id, release_version)
+        if update_entry(refined_cat, feature_id, record_sha) or marked or is_dirty(rel_wt):
             commit_all(rel_wt, f"chore(catalog): {feature_id} status=shipped on {release_version}")
 
         # G-E2 CAS: decide, under this same lock (HEAD is stable here), whether
@@ -211,7 +236,7 @@ def ship_current_work(
                     # verification's write is a plain, uncommitted filesystem
                     # change (mutate_state does tmp-write + replace, no git);
                     # left uncommitted, a concurrent ship's Gate-1 rollback
-                    # (`git reset --hard HEAD~1`, above) wipes it and reverts
+                    # (`git reset --hard <pre-ship head>`, above) wipes it and reverts
                     # the epic to "open" while this run's multi-minute check
                     # is still in flight — the exact double-run the CAS exists
                     # to prevent (finding 1/7).
@@ -235,18 +260,9 @@ def ship_current_work(
                                      epic_dir, release_version)
         epic_outcome = {"epic": epic_id, "rc": rc, "sha": cas_sha}
 
-    main_sync_data = None
-    if sync_res:
-        main_sync_data = {
-            "synced": sync_res.synced,
-            "main_sha": sync_res.main_sha,
-            "source": sync_res.source,
-            "behind": sync_res.behind,
-        }
-
     return {"ok": True, "feature": feature_id, "release": release_version,
             "rel_wt": str(rel_wt), "epic_outcome": epic_outcome,
-            "main_sync": main_sync_data}
+            "main_synced": main_synced}
 
 
 def main() -> int:
@@ -265,23 +281,29 @@ def main() -> int:
                         "deploy once after the burst instead of racing rebuilds)")
     p.add_argument("--skip-readiness", action="store_true",
                    help="skip spec readiness check (for legacy migrations only)")
-    p.add_argument("--no-sync-main", action="store_true",
-                   help="skip automatic absorption of main into release branch")
+    p.add_argument("--no-sync-main", action="store_true", dest="no_sync_main",
+                   help="EMERGENCY BYPASS: do not absorb main (hotfixes) into release/<v> "
+                        "before merging; the release may then lag main until psrw sync-main")
     args = p.parse_args()
 
     cwd = Path.cwd()
     try:
-        result = ship_current_work(cwd, skip_readiness=args.skip_readiness, no_sync_main=args.no_sync_main)
+        result = ship_current_work(cwd, skip_readiness=args.skip_readiness,
+                                   no_sync_main=args.no_sync_main)
     except (DirtyTreeError, GateFailedError, NotInFeatureWorktreeError,
             NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,
-            FeatureNotReadyError, RuntimeError) as e:
+            FeatureNotReadyError, MainSyncConflictError, ReleaseFrozenError,
+            RuntimeError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     print(json.dumps(result))
-    if result.get("main_sync") and result["main_sync"].get("synced"):
-        ms = result["main_sync"]
-        print(f"↻ Absorbed {ms['behind']} commit(s) from {ms['source']}@{ms['main_sha'][:12]} into release/{result['release']} before merging {result['feature']}.")
     print(f"\n✅ Shipped {result['feature']} to release/{result['release']}")
+    if result.get("main_synced"):
+        print(f"   Synced {result['main_synced']} commit(s) from main into "
+              f"release/{result['release']} first (hotfixes).")
+    elif args.no_sync_main:
+        print(f"\n⚠️  Main sync SKIPPED (--no-sync-main): release/{result['release']} may "
+              f"lack hotfixes on main. Absorb them with: psrw sync-main", file=sys.stderr)
     # The epic outcome check is separate from Gate 1 (finding 12): ship must
     # never go silently green when it ran and failed — an operator reading
     # only the checkmark below would not learn about it until G-E3 blocks
@@ -321,18 +343,40 @@ def main() -> int:
         )
         print(f"\n   Continue with next feature, or promote: psrw promote")
         return 0
-    if deploy_script.exists():
+    # Never deploy a release that is missing commits on main: a hotfix that
+    # landed after the merge above would vanish from the local cluster.
+    # --no-sync-main opted out of consulting main altogether (and was warned
+    # above), so the refusal is skipped along with the sync.
+    behind = [] if args.no_sync_main else missing_main_commits(rel_wt, resolve_main_ref(rel_wt))
+    if behind and not args.no_deploy:
+        print(
+            f"\n❌ Post-merge local deploy REFUSED — release/{result['release']} is "
+            f"{len(behind)} commit(s) behind main (a hotfix landed after this ship's "
+            f"sync).\n   The merge SUCCEEDED; only the deploy was skipped. Sync and "
+            f"deploy: psrw sync-main --deploy",
+            file=sys.stderr,
+        )
+    elif args.no_deploy:
+        # An explicit choice — reported as such, never as "not configured".
+        hint = (f" Run it manually when ready: cd {rel_wt} && {deploy_script}"
+                if deploy_script.exists() else "")
+        print(f"\n⏭️  Local deploy skipped (--no-deploy).{hint}")
+    elif not deploy_script.exists():
+        # Never skip silently: a repo without a deploy script otherwise leaves
+        # the local cluster on stale code with no hint that nothing deployed.
+        print(f"\nℹ️  Local deploy skipped: no local deploy configured: add "
+              f"scripts/deploy-local.sh or hooks.deploy_local "
+              f"(looked for {deploy_script}).")
+    else:
         # Deploy-local is a DEFAULT step of ship (treat merge-to-release like an
-        # MR merge that triggers a staging deploy). Precedence UNCHANGED:
-        #   --no-deploy      -> skip (concurrent-session burst; batch the deploy)
+        # MR merge that triggers a staging deploy). Precedence (--no-deploy is
+        # handled above, before the existence check):
         #   --deploy         -> force deploy
         #   interactive tty  -> prompt (Enter = yes)
         #   non-interactive  -> deploy by default
         # deploy-local.sh itself refuses any non-local kubectl context, so this
         # can never touch prod even when it runs unattended.
-        if args.no_deploy:                      # was: "--no-deploy" in sys.argv
-            deploy_now = False
-        elif args.deploy:                       # was: "--deploy" in sys.argv
+        if args.deploy:                         # was: "--deploy" in sys.argv
             deploy_now = True
         elif sys.stdin.isatty():
             deploy_now = False

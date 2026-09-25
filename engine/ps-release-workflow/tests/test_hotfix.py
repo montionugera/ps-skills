@@ -48,23 +48,21 @@ def test_does_not_commit_or_install(tmp_repo_with_release):
     assert not (Path(result["worktree"]) / "node_modules").exists()
 
 
-def test_hotfix_cli_prints_release_sync_hint(tmp_repo_in_release, capsys, monkeypatch):
+def test_hotfix_cli_hints_how_the_open_release_gets_the_hotfix(tmp_repo_in_release, capsys, monkeypatch):
     from scripts.hotfix import main
     monkeypatch.chdir(tmp_repo_in_release)
     monkeypatch.setattr(sys, "argv", ["hotfix", "cli-test"])
-    ret = main()
-    assert ret == 0
-    captured = capsys.readouterr().out
-    assert "8. release/1.1 is in progress" in captured
-    assert "psrw sync-main" in captured
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert "release/1.1 is in progress" in out
+    assert "next psrw ship / psrw promote" in out
+    assert "psrw sync-main" in out
 
 
-def test_hotfix_cli_omits_hint_when_no_release(tmp_repo_with_release, capsys, monkeypatch):
+def test_hotfix_cli_omits_the_release_hint_when_no_release(tmp_repo_with_release, capsys, monkeypatch):
     from scripts.hotfix import main
     monkeypatch.chdir(tmp_repo_with_release)
     monkeypatch.setattr(sys, "argv", ["hotfix", "no-rel-test"])
-    ret = main()
-    assert ret == 0
-    captured = capsys.readouterr().out
-    assert "8. release/" not in captured
-
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert "is in progress" not in out and "sync-main" not in out

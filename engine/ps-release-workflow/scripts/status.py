@@ -21,7 +21,8 @@ import sys
 from pathlib import Path
 
 from lib.backlog_paths import read_release_state, release_worktree_path
-from lib.git_ops import has_origin, rev_count, rev_parse
+from lib.git_ops import GitError
+from lib.main_sync import cached_main_ref, missing_main_commits
 from lib.owner import self_ids
 from lib.repo import RepoNotFoundError, find_repo_root, is_ps_release_workflow_repo
 from lib.state import read_state
@@ -231,25 +232,19 @@ def collect_status(repo: Path) -> dict:
 
     epic_rollup = _epic_rollup(epics, ideas, features)
 
-    # Check cached behind count vs origin/main without network fetch
-    behind_main = 0
-    main_ref = None
-    if in_progress:
-        rel_wt = release_worktree_path(repo)
-        if rel_wt.is_dir():
-            candidate = "origin/main" if has_origin(repo) else "main"
+    # A hotfix merged to main but not yet in release/<v>: count it against the
+    # CACHED main ref only — status is read-only and must never hit the network.
+    behind_main, main_ref = 0, None
+    rel_wt = release_worktree_path(repo)
+    # (rel_wt/.git must exist: a leftover plain dir would make git walk up and
+    # count the MAIN checkout's head instead.)
+    if in_progress and (rel_wt / ".git").exists():
+        main_ref = cached_main_ref(repo)
+        if main_ref:
             try:
-                rev_parse(repo, candidate)
-                main_ref = candidate
-            except Exception:
-                if candidate == "origin/main":
-                    try:
-                        rev_parse(repo, "main")
-                        main_ref = "main"
-                    except Exception:
-                        pass
-            if main_ref:
-                behind_main = rev_count(rel_wt, f"HEAD..{main_ref}")
+                behind_main = len(missing_main_commits(rel_wt, main_ref))
+            except GitError:
+                behind_main = 0
 
     return {
         "opted_in": True,
@@ -290,9 +285,9 @@ def _release_line(st: dict) -> str:
         if rel.get("started_by"):
             line += f" by {rel['started_by']}"
         line += ")"
-        if rel.get("behind_main", 0) > 0:
-            ref_name = rel.get("main_ref") or "origin/main"
-            line += f" — {rel['behind_main']} behind {ref_name} (hotfix pending sync)"
+        if rel.get("behind_main"):
+            line += (f" — {rel['behind_main']} behind {rel.get('main_ref') or 'main'} "
+                     f"(hotfix pending sync; run psrw sync-main)")
     else:
         line = "no release in progress"
     if rel.get("last_promoted_version"):

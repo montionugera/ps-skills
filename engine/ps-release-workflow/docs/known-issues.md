@@ -51,3 +51,11 @@ One line per issue. Filed here rather than chased, so they are not lost.
 - ~~11 slash-command references in script output~~ — **fixed 2026-08-15** (`824074d`). All of
   `status.py`'s "Next:" hints, `guard_check.py`'s recovery text, `new_idea.py` and
   `lib/backlog_paths.py` now print `psrw <verb>`.
+
+## Release sync / freeze follow-ups (filed 2026-09-24, fix/psrw-release-sync)
+
+- **Overlaps in-flight F-012 (hotfix-to-release auto-sync, `feat/F-012`).** `lib/main_sync.py` here and F-012's `main_sync` primitive solve the same problem; reconcile before either merges.
+- **`promote --deploy` still skips silently when no deploy script exists** (the `deploy.exists()` gate in `_promote_release`); only `ship` got the "no local deploy configured" notice.
+- **`unclaim --force` discards with no backup.** It now lists what it deletes; saving a patch under `.claude/state/` first would make the loss recoverable.
+- **Gitignored files in a worktree (`.env`, local config) are deleted by `unclaim` without a mention,** even without `--force` — `git worktree remove` does not count them as dirty.
+- **The `tmp_repo_with_release` fixture commits `.claude/state/`** (a real `psrw init` gitignores it), so cleanup's reset-to-origin/main path is untestable with it; `tests/test_release_freeze.py` works around it locally.

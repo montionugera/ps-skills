@@ -45,10 +45,27 @@ def main() -> int:
         description="Create a sibling hotfix worktree. Does NOT install deps, "
                     "commit, or open a PR — it prints that checklist.",
     )
-    p.add_argument("desc", help="short description, e.g. 'mt5 idor'")
+    p.add_argument("desc", nargs="?", help="short description, e.g. 'mt5 idor'")
+    p.add_argument("--sync-release", action="store_true",
+                   help="alias for `psrw sync-main`: merge main into the in-progress "
+                        "release/<v> and run Gate 1")
+    p.add_argument("--deploy", action="store_true",
+                   help="with --sync-release: run the local deploy after the sync")
     args = p.parse_args()
+    if args.sync_release and args.desc:
+        p.error("--sync-release takes no description (it is `psrw sync-main`)")
+    if not args.sync_release and not args.desc:
+        p.error("a description is required (or pass --sync-release)")
+    if args.deploy and not args.sync_release:
+        p.error("--deploy only applies with --sync-release")
 
     repo = find_repo_root(Path.cwd())
+    if args.sync_release:
+        # One code path: the alias delegates to `psrw sync-main`.
+        # One code path: the alias forwards its flags to `psrw sync-main`.
+        import scripts.sync_main as sync_main_mod
+        return sync_main_mod.main(["--deploy"] if args.deploy else [])
+
     try:
         result = create_hotfix_worktree(repo, args.desc)
     except HotfixTargetExistsError as e:
@@ -68,12 +85,10 @@ def main() -> int:
     print("     6. push, open a PR to main, babysit CI, squash-merge")
     print(f"     7. clean up: git worktree remove {wt}")
     state = read_release_state(repo)
-    if state and state.get("version"):
-        v = state["version"]
-        print(
-            f"     8. release/{v} is in progress — the hotfix reaches it automatically "
-            f"at the next psrw ship / psrw promote. To absorb it now: psrw sync-main"
-        )
+    if state:
+        print(f"     8. release/{state['version']} is in progress — the hotfix reaches it "
+              f"automatically at the next psrw ship / psrw promote.")
+        print("        To absorb it now (e.g. to redeploy locally): psrw sync-main --deploy")
     return 0
 
 

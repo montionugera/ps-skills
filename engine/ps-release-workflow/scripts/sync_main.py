@@ -1,4 +1,12 @@
-"""ps-release-workflow:sync-main — absorb main into release/<v> and verify."""
+"""ps-release-workflow:sync-main — absorb main (hotfixes) into release/<v> now.
+
+ship and promote already sync main before they merge, deploy or gate; this
+verb is for when the release should carry a hotfix before the next of those
+(a local deploy, features that sync from release/<v>). It merges main via
+lib.main_sync in the _release worktree and verifies the result with Gate 1,
+rolling the sync back if Gate 1 fails. `psrw hotfix --sync-release` is an
+alias that calls main() here.
+"""
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
@@ -8,137 +16,120 @@ import subprocess
 import sys
 from pathlib import Path
 
-from lib.backlog_paths import (
-    NoReleaseInProgressError,
-    get_release_worktree,
-    read_release_state,
-)
+from lib.backlog_paths import read_release_state, release_worktree_path
 from lib.git_ops import _run as git_run
 from lib.hooks import HookPathError, resolve_hook
 from lib.main_sync import (
-    MainSyncConflictError,
-    MainSyncError,
-    ProtectedPathSyncError,
-    render_sync_failure,
-    resolve_main_sha,
-    sync_main_into_release,
+    MainSyncConflictError, MainUnreachableError, resolve_main_ref, sync_main_into_release,
 )
-from lib.repo import find_repo_root, is_ps_release_workflow_repo
+from lib.release_freeze import ReleaseFrozenError, frozen_since
+from lib.repo import find_repo_root
 from lib.state import file_lock
+from scripts.ship_current_work_to_release import GateFailedError, _run_precheck
 
 
-class Gate1FailedError(Exception):
-    pass
+def sync_main(repo: Path, *, strict: bool = False) -> dict:
+    """Merge main into the in-progress release/<v>, then run Gate 1 on it.
 
-
-def _run_gate1(rel_wt: Path) -> int | None:
-    try:
-        precheck = resolve_hook(rel_wt, "precheck")
-    except HookPathError as e:
-        print(f"❌ Gate 1 REFUSED — {e}", file=sys.stderr)
-        raise Gate1FailedError(str(e))
-    if not precheck.exists():
-        print(f"⚠️ Gate 1 SKIPPED — {precheck} not found in {rel_wt}", file=sys.stderr)
-        return None
-    return subprocess.run([str(precheck)], cwd=rel_wt).returncode
-
-
-def sync_main_command(
-    cwd: Path,
-    *,
-    strict: bool = False,
-    run_deploy: bool = False,
-    run_gate1: bool = True,
-) -> dict:
-    cwd = Path(cwd).resolve()
-    repo = find_repo_root(cwd)
-    if not is_ps_release_workflow_repo(repo):
-        raise RuntimeError(f"{repo} not opted into ps-release-workflow")
-
+    Returns {"release": <v>|None, "synced": <commits absorbed>, "gate1":
+    "passed" | "skipped" (no precheck script) | None (nothing synced)}.
+    Raises MainSyncConflictError (release untouched), ReleaseFrozenError,
+    GateFailedError (sync rolled back), or — with strict=True —
+    MainUnreachableError when origin/main cannot be fetched (nothing done).
+    """
+    repo = Path(repo)
     state = read_release_state(repo)
     if state is None:
-        raise NoReleaseInProgressError("No release in progress")
+        return {"release": None, "synced": 0, "gate1": None}
     version = state["version"]
-    release_branch = f"release/{version}"
-    rel_wt = get_release_worktree(repo)
-
-    main_sha, source = resolve_main_sha(repo, strict=strict)
-
+    rel_wt = release_worktree_path(repo)
+    branch = f"release/{version}"
+    main_ref = resolve_main_ref(repo, strict=strict)  # network, outside the lock
     with file_lock(rel_wt):
+        # Promote runs Gate 2 and the push outside this lock; syncing under it
+        # would ship a tree Gate 2 never verified. Promote syncs main itself.
+        since = frozen_since(repo, version)
+        if since:
+            raise ReleaseFrozenError(
+                f"{branch} is being promoted (frozen since {since}); not syncing "
+                f"under it. Re-run psrw promote: it merges main in before its gates."
+            )
         pre_sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
+        synced = sync_main_into_release(repo, rel_wt, branch, main_ref)
+        if not synced:
+            return {"release": version, "synced": 0, "gate1": None}
+        # The sync stays ONLY if Gate 1 passed (or has no script): any other
+        # outcome — a failing gate, an unusable hooks value, an unrunnable
+        # script (OSError), Ctrl-C — resets to the pre-sync head.
+        kept = False
         try:
-            sync_res = sync_main_into_release(repo, rel_wt, release_branch, main_sha, source)
-        except (MainSyncConflictError, ProtectedPathSyncError) as e:
-            raise RuntimeError(render_sync_failure(e, release_branch, "manual sync"))
-
-        if sync_res.synced and run_gate1:
             try:
-                rc = _run_gate1(rel_wt)
-            except Gate1FailedError:
-                git_run(rel_wt, "reset", "--hard", pre_sha)
-                raise
-            if rc not in (None, 0):
-                git_run(rel_wt, "reset", "--hard", pre_sha)
-                raise Gate1FailedError(
-                    f"Gate 1 failed after absorbing main@{main_sha[:12]} — rolled back to {pre_sha[:12]}"
+                rc = _run_precheck(rel_wt)
+            except GateFailedError as e:
+                raise GateFailedError(f"{e} — sync of {main_ref} into {branch} rolled back") from e
+            if rc is not None and rc != 0:
+                raise GateFailedError(
+                    f"Gate 1 failed on {branch} after syncing {main_ref} — rolled back. "
+                    f"Fix main (or the release) so they integrate, then re-run psrw sync-main."
                 )
-
-    if run_deploy and sync_res.synced:
-        try:
-            deploy_script = resolve_hook(rel_wt, "deploy_local")
-            if deploy_script.exists():
-                subprocess.run([str(deploy_script)], cwd=rel_wt, check=True)
-        except Exception as e:
-            print(f"⚠️ Local deploy failed: {e}", file=sys.stderr)
-
-    return {
-        "ok": True,
-        "release": version,
-        "synced": sync_res.synced,
-        "main_sha": sync_res.main_sha,
-        "source": sync_res.source,
-        "behind": sync_res.behind,
-        "files": sync_res.files,
-    }
+            kept = True
+        finally:
+            if not kept:
+                git_run(rel_wt, "reset", "--hard", pre_sha)
+    return {"release": version, "synced": synced, "gate1": "skipped" if rc is None else "passed"}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     import argparse
     p = argparse.ArgumentParser(
         prog="psrw sync-main",
-        description="Absorb main (e.g. squash-merged hotfixes) into the active release branch.",
+        description="Merge main (e.g. squash-merged hotfixes) into the in-progress "
+                    "release/<v> and verify it with Gate 1; rolls back on failure.",
     )
-    p.add_argument("--strict", action="store_true",
-                   help="fail if origin/main cannot be reached")
     p.add_argument("--deploy", action="store_true",
-                   help="run local deploy after successful sync")
-    p.add_argument("--no-gate1", action="store_true",
-                   help="skip running Gate 1 after sync")
-    p.add_argument("--json", action="store_true",
-                   help="output machine-readable JSON")
-    args = p.parse_args()
+                   help="run the local deploy from the _release worktree after a sync")
+    p.add_argument("--strict", action="store_true",
+                   help="refuse (exit 1, nothing done) if origin/main cannot be fetched, "
+                        "instead of syncing from the last-fetched origin/main with a warning")
+    args = p.parse_args(argv)
 
+    repo = find_repo_root(Path.cwd())
     try:
-        res = sync_main_command(
-            Path.cwd(),
-            strict=args.strict,
-            run_deploy=args.deploy,
-            run_gate1=not args.no_gate1,
-        )
-    except Exception as e:
+        result = sync_main(repo, strict=args.strict)
+    except (MainSyncConflictError, MainUnreachableError, ReleaseFrozenError,
+            GateFailedError, OSError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
-
-    if args.json:
-        print(json.dumps(res))
+    print(json.dumps({"ok": True, **result}))
+    if result["release"] is None:
+        print("\nNo release in progress — nothing to sync.")
+        return 0
+    if not result["synced"]:
+        print(f"\n✅ release/{result['release']} already contains main.")
     else:
-        if res["synced"]:
-            print(
-                f"✅ Absorbed {res['behind']} commit(s) from {res['source']}@{res['main_sha'][:12]} "
-                f"into release/{res['release']}."
-            )
+        print(f"\n✅ Merged {result['synced']} commit(s) from main into "
+              f"release/{result['release']} (Gate 1 {result['gate1']}).")
+    if args.deploy:
+        rel_wt = release_worktree_path(repo)
+        try:
+            deploy = resolve_hook(rel_wt, "deploy_local")
+        except HookPathError as e:
+            print(f"\n❌ Local deploy REFUSED — {e}", file=sys.stderr)
+            return 1
+        if result["gate1"] == "skipped":
+            print("\n⚠️  Gate 1 did not run on the synced tree (no precheck script) — "
+                  "deploying it unverified.", file=sys.stderr)
+        if not deploy.exists():
+            print("\nℹ️  Local deploy skipped: no local deploy configured: add "
+                  "scripts/deploy-local.sh or hooks.deploy_local.")
         else:
-            print(f"✅ release/{res['release']} is already up to date with {res['source']}.")
+            print("\n🚀 Running local deployment...")
+            rc = subprocess.run([str(deploy)], cwd=rel_wt).returncode
+            if rc != 0:
+                print(f"\n⚠️  {deploy.name} exited {rc}", file=sys.stderr)
+                return 1
+    elif result["synced"]:
+        print("   Re-deploy locally if you deploy: psrw sync-main --deploy")
     return 0
 
 

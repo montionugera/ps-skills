@@ -25,6 +25,7 @@ from lib.backlog_paths import (
 from lib.catalog import CatalogEntryNotFoundError, find_entry, update_entry
 from lib.epic import demote_epic
 from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty, remove_worktree
+from lib.owner import current_session_id
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
 from lib.slug import slugify
 from lib.state import file_lock, mutate_state, read_state
@@ -81,13 +82,33 @@ def unclaim_feature(repo: Path, feature_id: str, *, force: bool = False) -> dict
         worktree_path = matches[0] if matches else repo / ".claude" / "worktrees" / feature_id
     branch_name = f"feat/{feature_id}"
 
+    # Local sessions share one machine-cached owner id, so an owner match does
+    # not prove this is the caller's own claim. The claim records the harness
+    # session id; warn loudly when a DIFFERENT session is abandoning it.
+    claim_session = ledger.get("session_id")
+    this_session = current_session_id()
+    if claim_session and this_session and claim_session != this_session:
+        print(
+            f"⚠️  {feature_id} was claimed by a different session ({claim_session}); "
+            f"this is session {this_session}. Make sure that session is done with "
+            f"it — unclaim removes its worktree.",
+            file=sys.stderr,
+        )
+
     worktree_removed = False
     if worktree_path.is_dir():
-        if is_dirty(worktree_path) and not force:
-            raise DirtyWorktreeError(
-                f"{worktree_path} has uncommitted changes — commit them first, "
-                f"or re-run with --force to discard them"
-            )
+        if is_dirty(worktree_path):
+            # List every modified AND untracked path (porcelain includes both),
+            # so the operator sees exactly what --force would destroy.
+            dirty = git_run(worktree_path, "status", "--porcelain",
+                            "--untracked-files=all").stdout.rstrip()
+            if not force:
+                raise DirtyWorktreeError(
+                    f"{worktree_path} has uncommitted or untracked changes:\n{dirty}\n"
+                    f"Commit them first, or re-run with --force to DISCARD them"
+                )
+            print(f"⚠️  --force: discarding uncommitted changes in {worktree_path}:\n{dirty}",
+                  file=sys.stderr)
         remove_worktree(repo, worktree_path, force=force)
         worktree_removed = True
     else:

@@ -614,12 +614,52 @@ def test_second_ship_does_not_run_a_second_check(tmp_repo_with_release: Path, fi
     assert next(e for e in epic_cat if e["id"] == epic_id)["status"] == "verified"
 
 
+# ── Silent deploy skip: a missing deploy script must be announced ──────────────
+
+
+def _ship_main(repo: Path, fixed_owner: str, monkeypatch, *flags: str) -> int:
+    import sys as _sys
+    import scripts.ship_current_work_to_release as ship_mod
+    feat, claim = _make_repo_with_open_release_and_claim(repo, fixed_owner)
+    wt = Path(claim["worktree"])
+    _commit_feature_file(wt)
+    monkeypatch.chdir(wt)
+    monkeypatch.setattr(_sys, "argv", ["ship_current_work_to_release.py", *flags])
+    return ship_mod.main()
+
+
+def test_ship_main_announces_when_no_local_deploy_is_configured(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, capsys
+):
+    """No scripts/deploy-local.sh and no hooks.deploy_local: ship used to print
+    NOTHING about the deploy, so a stale local cluster went unnoticed."""
+    assert _ship_main(tmp_repo_with_release, fixed_owner, monkeypatch) == 0
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "no local deploy configured" in text
+    assert "scripts/deploy-local.sh" in text and "hooks.deploy_local" in text
+
+
+def test_ship_main_no_deploy_flag_is_not_reported_as_unconfigured(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, capsys
+):
+    """--no-deploy is an explicit choice: it must not print the 'not configured'
+    notice (the two reasons for skipping stay distinguishable)."""
+    assert _ship_main(tmp_repo_with_release, fixed_owner, monkeypatch, "--no-deploy") == 0
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "no local deploy configured" not in text
+    assert "--no-deploy" in text
+
+
+# ── Rollback precision and the --no-sync-main emergency bypass (release/1.6) ───
+
+
 def test_ship_post_merge_gate1_failure_rolls_back_to_exact_pre_sha(
     tmp_repo_with_release: Path, fixed_owner: str
 ):
-    """Proves that a Gate 1 failure after the merge resets release/<v> to the exact
-    pre_sha recorded at the start of the lock.
-    """
+    """A Gate 1 failure after the merge resets release/<v> to the exact head
+    recorded at the start of the lock (not HEAD~1)."""
     feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
     wt = Path(claim["worktree"])
     _commit_feature_file(wt)
@@ -630,7 +670,7 @@ def test_ship_post_merge_gate1_failure_rolls_back_to_exact_pre_sha(
     precheck.write_text("#!/bin/sh\nexit 1\n")
     precheck.chmod(0o755)
     subprocess.run(["git", "add", "scripts/precheck.sh"], cwd=rel_wt, check=True)
-    subprocess.run(["git", "commit", "-m", "failing precheck on release"], cwd=rel_wt, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "failing precheck on release"], cwd=rel_wt, check=True)
 
     head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rel_wt,
                                  capture_output=True, text=True, check=True).stdout.strip()
@@ -643,50 +683,38 @@ def test_ship_post_merge_gate1_failure_rolls_back_to_exact_pre_sha(
     assert head_after == head_before
 
 
-def test_ship_absorbs_hotfix_on_main(tmp_repo_with_release: Path, fixed_owner: str):
-    """Proves that ship automatically absorbs commits from main (e.g. squash hotfixes)."""
+def test_ship_no_sync_main_skips_absorbing_main(tmp_repo_with_release: Path, fixed_owner: str):
+    """--no-sync-main: the feature lands on release/<v> AS IS; a hotfix on
+    origin/main is NOT merged in, and the result says the sync was skipped
+    (None), not that the release was up to date (0)."""
     feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
     wt = Path(claim["worktree"])
     _commit_feature_file(wt)
 
     repo = tmp_repo_with_release
     rel_wt = repo / ".claude" / "worktrees" / "_release"
-
-    # Simulate hotfix landed on origin/main (via PR squash-merge)
     (repo / "hotfix.txt").write_text("emergency fix\n")
     subprocess.run(["git", "add", "hotfix.txt"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "hotfix on main"], cwd=repo, check=True)
-    subprocess.run(["git", "push", "origin", "main"], cwd=repo, check=True)
-
-    assert not (rel_wt / "hotfix.txt").exists()
-
-    res = ship_current_work(wt)
-    assert res["ok"]
-    assert res["main_sync"] is not None
-    assert res["main_sync"]["synced"] is True
-    assert res["main_sync"]["behind"] == 1
-    assert (rel_wt / "hotfix.txt").exists()
-    assert (rel_wt / "feature.txt").exists()
-
-
-def test_ship_no_sync_main_flag(tmp_repo_with_release: Path, fixed_owner: str):
-    """Proves that --no-sync-main skips absorbing main."""
-    feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
-    wt = Path(claim["worktree"])
-    _commit_feature_file(wt)
-
-    repo = tmp_repo_with_release
-    rel_wt = repo / ".claude" / "worktrees" / "_release"
-
-    # Commit hotfix on main
-    (repo / "hotfix.txt").write_text("emergency fix\n")
-    subprocess.run(["git", "add", "hotfix.txt"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "hotfix on main"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "hotfix on main"], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=repo, check=True)
 
     res = ship_current_work(wt, no_sync_main=True)
     assert res["ok"]
-    assert res["main_sync"] is None
-    assert not (rel_wt / "hotfix.txt").exists()
+    assert res["main_synced"] is None
+    assert not (rel_wt / "hotfix.txt").exists(), "--no-sync-main must not absorb main"
     assert (rel_wt / "feature.txt").exists()
 
 
+def test_ship_main_no_sync_main_flag_is_wired_and_announced(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, capsys
+):
+    """The CLI flag reaches ship_current_work, and the skipped sync is said out
+    loud — an operator must not mistake a bypassed ship for a synced one.
+    (Whether main is actually left unabsorbed is proven at the function level
+    above; _ship_main opens the release itself, so a hotfix cannot be landed
+    in between here.)"""
+    assert _ship_main(tmp_repo_with_release, fixed_owner, monkeypatch,
+                      "--no-sync-main", "--no-deploy") == 0
+    text = "".join(capsys.readouterr())
+    assert "Main sync SKIPPED (--no-sync-main)" in text and "psrw sync-main" in text
+    assert '"main_synced": null' in text

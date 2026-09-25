@@ -1,43 +1,50 @@
 ---
 name: ps-release-workflow-sync-main
 description: |
-  Use to absorb changes from `main` (such as squash-merged hotfixes) into
-  the active `release/<v>` branch on demand, verifying the combined tree
-  with Gate 1 (precheck.sh).
+  Use when a hotfix (or any commit) has landed on main while a release is in
+  progress in a ps-release-workflow repo, and release/<v> should carry it now
+  — before the next ship or promote, e.g. to redeploy locally or because
+  `psrw status` says "behind origin/main (hotfix pending sync)". Merges main
+  into release/<v> via the _release worktree and verifies it with Gate 1.
 ---
 
 # ps-release-workflow:sync-main
 
-Absorb commits from `main` (such as squash-merged hotfixes) into `release/<v>` under lock.
-
-## Precondition
-
-A release must be in progress (`.claude/worktrees/_release` exists).
+Absorb `main` (squash-merged hotfixes) into `release/<v>` on demand.
 
 ## Run
 
-    psrw sync-main              # sync origin/main into release/<v> and run Gate 1
-    psrw sync-main --deploy     # ...and run local deploy on success
-    psrw sync-main --strict     # fail if origin/main cannot be fetched over network
-    psrw sync-main --no-gate1   # skip Gate 1 verification (emergency only)
+    psrw sync-main            # merge main into release/<v>, then Gate 1
+    psrw sync-main --deploy   # ...then run the local deploy from _release
+    psrw sync-main --strict   # refuse (nothing done) if origin/main cannot be fetched
 
-## What it does
+`psrw hotfix --sync-release [--deploy]` is an alias for the same code path. `--deploy`
+warns when Gate 1 did not run (no precheck script). Without `--strict`, a failed fetch
+warns and syncs from the last-fetched `origin/main`, which may miss a just-merged hotfix.
 
-1. Resolves `origin/main` SHA (fetches remote `origin/main` if remote exists).
-2. Under `file_lock(_release)`:
-   - Records `pre_sha = rev-parse HEAD`.
-   - Checks ancestry: if `release/<v>` already contains `main`, no-ops cleanly.
-   - Checks protected paths: refuses if changes on `main` touch `.release.json` or `.claude/*_backlog`.
-   - Merges `main` into `release/<v>` (`--no-ff`).
-   - Runs Gate 1 (`precheck.sh`) on `_release`.
-   - **Atomic rollback**: If Gate 1 fails or merge errors occur, resets to `pre_sha`.
-3. If `--deploy` is passed, runs local deploy from `_release`.
+## What matters
+
+- `ship` and `promote` already sync `main` before they merge, deploy or gate; use this
+  when the release must carry the hotfix sooner (a local redeploy, for example).
+- Gate 1 (`precheck.sh`) runs from `_release` on the synced tree; a failure rolls the
+  sync back to the previous release head.
+- No-op when `release/<v>` already contains `main`, or when no release is in progress.
+
+## Refuses if
+
+The merge conflicts, or `main` changed release bookkeeping (`.release.json`, backlog
+dirs); both print the exact manual `git merge` · the release is frozen for promote
+(re-run promote instead) · Gate 1 fails (rolled back) · `--strict` and `origin/main`
+cannot be fetched.
 
 ## Feature branches
 
-To propagate the absorbed hotfix into your in-flight feature branch worktree:
+The sync lands on `release/<v>` only. To pull it into your in-flight feature worktree:
 
     psrw sync
+
+Emergency bypasses of the automatic sync live on the callers: `psrw ship --no-sync-main`
+and `psrw promote --allow-stale-main`.
 
 Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#main-sync-mechanics`
 Flags: `psrw sync-main --help`

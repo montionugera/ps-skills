@@ -34,7 +34,37 @@ proceeds UNVERIFIED, for repos that never had one.
 
 `--deploy` (local prod-style deploy) is opt-in and repo-specific. It runs from the
 `_release` worktree, because the shared local DB may already be migrated ahead of
-`main` by the release's own migrations.
+`main` by the release's own migrations. `ship`'s post-merge deploy never
+skips silently: with no deploy script at `hooks.deploy_local` (default
+`scripts/deploy-local.sh`) it prints `no local deploy configured: add
+scripts/deploy-local.sh or hooks.deploy_local`, a notice distinct from the
+`--no-deploy` one.
+
+### Main sync: hotfixes reach the open release
+<a id="main-sync"></a>
+
+A hotfix squash-merged to `main` while `release/<v>` is open does not reach the release
+by itself, so anything run from `_release` (Gate 1, the local deploy, Gate 2, the promote
+PR) would run without it. `lib/main_sync.py` merges `main` (`origin/main` after a fetch
+when an origin exists) into `release/<v>` in the `_release` worktree, under its file lock:
+
+- **`ship`** syncs before merging the feature, so Gate 1 verifies release + hotfix +
+  feature. Any failure resets to the pre-ship head, undoing sync and merge together.
+  Its post-merge deploy re-checks and **refuses** a release still behind `main`.
+- **`promote`** syncs first, before the epic gate, `--deploy` and Gate 2.
+- **`psrw sync-main`** (alias `psrw hotfix --sync-release`) syncs on demand, e.g. as the
+  last step of the hotfix flow, then runs Gate 1 from `_release` on the synced tree and
+  rolls the sync back if it fails. `--deploy` then runs the local deploy. It refuses while
+  the release is frozen for promote, which syncs `main` itself.
+- **`psrw status`** shows `N behind origin/main (hotfix pending sync; run psrw sync-main)`
+  against the cached ref, without fetching.
+
+A conflict aborts the merge, leaves `release/<v>` untouched and prints the exact
+`cd <_release> && git merge origin/main` to run. So does a `main` change to release
+bookkeeping (`.release.json`, the backlog dirs, `.claude/state/`), which must never be
+auto-merged over the release's own copy; its command keeps the release's copy of those
+paths (`git merge --no-commit`, then `git checkout HEAD -- <paths>`). A failed fetch warns
+that the comparison uses the last-fetched `origin/main`.
 
 ### Epic gates: G-E2 and G-E3
 
@@ -140,7 +170,8 @@ so its `hooks` block legitimately differs per branch.
 
 `psrw promote` is PR-based by default and is **not** the terminal step:
 
-1. Gate 2 runs, then `--deploy` if given.
+1. `main` is synced into `release/<v>` (see [main sync](#main-sync)), then Gate 2 runs,
+   then `--deploy` if given.
 2. `release/<v>` is pushed and a PR to `main` is opened. Release state is finalized on
    the release branch only *after* the PR exists, so a failed `gh` call leaves the
    release in progress and promote can simply be re-run.
@@ -150,6 +181,27 @@ so its `hooks` block legitimately differs per branch.
    `_release` worktrees and branches, and finalizes `.release.json` on `main`.
    It verifies the PR is merged first and refuses otherwise, because deleting the
    remote release branch would auto-close an open PR.
+
+**The release is frozen from the moment promote starts.** Promote records the freeze
+in `.claude/state/release-freeze.json` under the `_release` lock, and `ship` checks it
+under that same lock, so a ship either lands before promote starts (and is in the PR) or
+is refused and told to ship into the next release. A finalized release (in-progress set
+to false) is refused the same way. A promote that fails lifts the freeze, so fixes can
+ship and promote can be re-run. That includes red checks under `--babysit`. On success the
+freeze lasts until cleanup. `--babysit` also refuses to merge when the local release head
+differs from the head it pushed for CI.
+
+**Cleanup verifies what landed.** Before deleting anything, it checks every feature that
+the release branch's catalog marks `shipped` on `<v>`. The feature's `shipped_sha`
+(recorded by `ship`) must be an ancestor of the head that reached `main`. That head is
+the one promote recorded when it pushed (or `--direct` squashed) the release, else the
+PR's `headRefOid`, else `origin`'s `release/<v>`, so a host that auto-deletes merged
+branches does not blind the check. An entry without `shipped_sha` (older psrw) is only
+warned about, never reset. A feature that fails this check is stranded.
+Cleanup flags it loudly and resets it in `main`'s catalog to `claimed` (the worktree
+survives) or `open`, with `release_version` cleared and `stranded_from: <v>` set. Its
+branch and folder are kept, so the next release can ship it. Cleanup returns the list as
+`stranded`.
 
 Until cleanup runs, the next `psrw new-release` is blocked by the stale `_release`
 worktree. `--babysit` performs steps 2-4 in one go: watch checks, finalize, merge,
@@ -172,7 +224,8 @@ clean up.
     _catalog.json                     # E-NNN registry (committed on release/<v>)
     E-NNN-<slug>/spec.md verification.md
     _archive/<v>/                     # epics archived by cleanup
-  state/claims.json                   # gitignored — F-NNN -> owner map
+  state/claims.json                   # gitignored — F-NNN -> owner (+ session_id) map
+  state/release-freeze.json           # gitignored — versions being promoted (ship refuses)
   worktrees/                          # gitignored
     _release/                         # long-lived, on release/<v>
     F-NNN-<slug>/                     # claimed feature worktree (owner marker)
@@ -217,6 +270,11 @@ It does **not** provide per-session isolation between two Claude sessions on the
 machine: claims are created with a machine-cached fallback id, so local sessions
 normally resolve to the same owner. The ownership check protects against
 cross-machine claims and hand-edited markers, not against two local sessions.
+To narrow that gap, `claim` (and `claim --resume`) also records the harness session id
+(`$CLAUDE_CODE_SESSION_ID`, else `$CLAUDE_SESSION_ID`) as `session_id` in
+`claims.json` and the marker. `unclaim` warns when that id differs from the current
+session's, and refuses a worktree with uncommitted or untracked changes — listing
+each path — unless `--force` is given.
 
 The guard is a read path: it never generates or persists an identity as a side effect.
 It bypasses entirely when `PS_RELEASE_WORKFLOW_SCRIPTED=1`, warns but allows on a
@@ -231,47 +289,55 @@ implements automated absorption from `main` into `release/<v>` under **Option D 
 
 ### Shared primitive (`lib/main_sync.py`)
 
-- **`resolve_main_sha(repo, *, strict)`**: Fetches `origin/main` outside the lock (if remote
-  exists) and returns the pinned SHA and source label. Never touches the main checkout.
-  In strict mode (used by `promote`), fetch failures raise `MainUnreachableError`. In non-strict
-  mode (used by `ship`), fetch failures fall back to cached `origin/main` with a warning.
-- **`sync_main_into_release(repo, rel_wt, release_branch, main_sha, source)`**:
+- **`resolve_main_ref(repo, *, strict=False)`**: Fetches `origin/main` outside the lock (if a
+  remote exists) and returns the ref to sync from (`origin/main`, or `main` without a remote).
+  Never touches the main checkout. A failed fetch warns and falls back to the last-fetched
+  `origin/main`; with `strict=True` (`psrw sync-main --strict`) it raises `MainUnreachableError`.
+- **`cached_main_ref(repo)`** / **`missing_main_commits(tree, main_ref)`**: offline helpers —
+  `status` uses them to report `N behind origin/main` without fetching.
+- **`sync_main_into_release(repo, rel_wt, release_branch, main_ref=None)`** → commits absorbed:
   - Must be called under `file_lock(rel_wt)`.
-  - **No-op check**: If `main_sha` is already an ancestor of `release/<v>`'s `HEAD`, exits immediately (`synced=False`).
-  - **Protected path check**: Inspects `git diff --name-only <base> <main_sha>`. If changes intersect
-    `.release.json` or `.claude/*_backlog`, raises `ProtectedPathSyncError` and refuses auto-sync.
-  - **Merge**: Executes `git merge --no-ff --no-edit -m "chore(release): sync main@<sha> into <branch>"`.
-  - **Conflict handling**: On merge conflict, aborts cleanly with `git merge --abort` and raises
-    `MainSyncConflictError` listing conflicting files.
+  - **No-op check**: returns `0` when `release/<v>` already contains `main_ref`.
+  - **Bookkeeping check**: inspects `git diff --name-only <merge-base> <main_ref>`. If `main`
+    changed `.release.json`, `.claude/*_backlog/` or `.claude/state/`, raises
+    `MainSyncConflictError` with a manual merge that keeps the release's copy.
+  - **Merge**: `git merge --no-ff --no-edit -m "chore(release): sync <main_ref> into <branch>"`.
+  - **Conflict handling**: aborts cleanly with `git merge --abort` and raises
+    `MainSyncConflictError` listing the conflicting files and the exact manual command.
 
 ### Automated local ship (`psrw ship`)
 
-1. Fetches `origin/main` outside the lock and pins `main_sha`.
+1. Fetches `origin/main` outside the lock (`resolve_main_ref`).
 2. Under `file_lock(rel_wt)`:
+   - Refuses if the release is frozen (a promote is running).
    - Records `pre_sha = rev-parse HEAD`.
    - Calls `sync_main_into_release()`.
    - Merges `feat/F-NNN` into `release/<v>`.
    - Runs Gate 1 (`precheck.sh`) on the combined tree (`release + hotfix + feature`).
    - **Atomic rollback**: If Gate 1 fails or any error occurs, resets to `pre_sha` (`git reset --hard pre_sha`),
      cleanly undoing both the main sync and the feature merge.
-3. Emergency bypass: `--no-sync-main` skips main sync.
+3. After the merge, the local deploy is refused if a hotfix landed on `main` in the meantime
+   (`psrw sync-main --deploy` absorbs and deploys it).
+4. Emergency bypass: `--no-sync-main` skips the sync (and the post-merge behind-main deploy
+   refusal), announces the skip, and reports `main_synced: null`.
 
 ### Promote parity enforcement & babysit race guard (`psrw promote`)
 
-1. Strictly syncs `origin/main` into `release/<v>` before epic checks and Gate 2. If synced,
-   runs Gate 1 on `_release` to verify integration before running Gate 2 (`integration.sh`).
+1. Freezes the release, then syncs `origin/main` into `release/<v>` before the epic gate, the
+   deploy and Gate 2 (`integration.sh`), so every gate verifies the tree the PR will land.
 2. Epic freshness check (`_verification_is_fresh`) recognizes the new content from `main` and
    triggers epic re-verification.
-3. Sync disclosure is recorded in the PR body: `- Synced with <source>@<sha> before Gate 2 (<N> commits absorbed)`.
-4. **Babysit race guard**: Under `--babysit`, after watching CI checks, promote fetches `origin/main` again
-   and re-verifies that `origin/main` is still an ancestor of `release/<v>`. If a hotfix squash-merged
-   to `main` during CI execution, the merge is aborted with instructions to re-run `promote`.
-5. Emergency bypass: `--allow-stale-main` permits promote when `origin/main` cannot be reached or synced.
+3. Sync disclosure is recorded in the PR body: `- Synced with origin/main@<sha> before Gate 2 (<N> commit(s) from main absorbed)`.
+4. **Babysit race guard**: Under `--babysit`, after the CI checks pass, promote fetches
+   `origin/main` again and refuses to merge if `release/<v>` is behind it (a hotfix
+   squash-merged during CI), with instructions to re-run `promote`.
+5. Emergency bypass: `--allow-stale-main` skips the sync and the race guard; the release goes
+   to `main` exactly as it is.
 
 ### Standalone verbs
 
 - **`psrw sync-main`**: On-demand sync of `main` into `release/<v>` with Gate 1 verification and atomic rollback.
-  Supports `--strict`, `--deploy`, `--no-gate1`, and `--json`.
+  Supports `--deploy` and `--strict`; refuses while the release is frozen for promote.
 - **`psrw sync`**: Generalizes `psrw epic sync` to allow any feature worktree to pull `release/<v>` into its branch.
 - **`psrw status`**: Checks cached ref (without network fetch) and warns if `release/<v>` is behind `origin/main`.
 - **`psrw hotfix`**: Checklist prints step 8 hint pointing to auto-sync and `psrw sync-main` when release is in progress.

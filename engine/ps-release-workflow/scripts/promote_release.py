@@ -5,6 +5,7 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,24 +14,28 @@ from pathlib import Path
 
 from lib.backlog_paths import NoReleaseInProgressError as PathsNoReleaseInProgressError
 from lib.backlog_paths import get_backlog_catalog_path, read_release_state
-from lib.catalog import CatalogEntryNotFoundError, find_entry, list_entries, mark_promoted_to_main
+from lib.catalog import (
+    CatalogEntryNotFoundError, find_entry, list_entries, mark_promoted_to_main, update_entry,
+)
 from lib.epic import (
     epic_children, epic_completeness, epic_folder_path, mark_epic_failed,
     mark_epic_promoted, set_split_approved, try_begin_verification,
 )
 from lib.epic_gate import run_and_record
 from lib.git_ops import (
-    GitError, _run as git_run, commit_all, is_ancestor, is_dirty,
+    GitError, _run as git_run, commit_all, is_dirty,
     delete_branch_local, delete_branch_remote, push, remove_worktree,
 )
 from lib.hooks import resolve_hook
 from lib.main_sync import (
-    MainSyncConflictError, MainUnreachableError, ProtectedPathSyncError,
-    resolve_main_sha, sync_main_into_release,
+    MainSyncConflictError, missing_main_commits, resolve_main_ref, sync_main_into_release,
 )
 from lib.owner import resolve_owner_id
+from lib.release_freeze import (
+    freeze_release, record_pushed_head, recorded_pushed_head, unfreeze_release,
+)
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
-from lib.state import file_lock, mutate_state
+from lib.state import file_lock, mutate_state, read_state
 
 
 class NoReleaseInProgressError(Exception): pass
@@ -446,9 +451,28 @@ def _epic_split_disclosure_lines(rel_wt: Path, version: str) -> list[str]:
     return lines
 
 
-def promote_release(
+def promote_release(repo: Path, **kwargs) -> dict:
+    """Promote the in-progress release (see _promote_release).
+
+    The release is FROZEN from the start (ship refuses it), so the tree Gate 2
+    verifies and the PR merges is exactly what shipped. A promote that fails
+    lifts the freeze again, so fixes can ship and promote can be re-run — the
+    open PR, if any, is refreshed by that re-run's push. On success the freeze
+    stays until cleanup.
+    """
+    frozen: list[str] = []
+    try:
+        return _promote_release(repo, _frozen=frozen, **kwargs)
+    except BaseException:
+        for version in frozen:
+            unfreeze_release(Path(repo).resolve(), version)
+        raise
+
+
+def _promote_release(
     repo: Path,
     *,
+    _frozen: list,
     run_gate2: bool = True,
     run_deploy: bool = True,
     push: bool = True,
@@ -481,36 +505,28 @@ def promote_release(
     release_branch = f"release/{version}"
     rel_wt = repo / ".claude" / "worktrees" / "_release"
 
-    main_sync_result = None
-    if not allow_stale_main:
-        try:
-            main_sha, source = resolve_main_sha(repo, strict=use_pr)
-        except Exception as e:
-            raise Gate2FailedError(f"Main sync failed before promote: {e}")
-
-        with file_lock(rel_wt):
-            pre_sha = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
-            try:
-                sync_res = sync_main_into_release(repo, rel_wt, release_branch, main_sha, source)
-            except (MainSyncConflictError, ProtectedPathSyncError) as e:
-                raise Gate2FailedError(
-                    f"promote refused — release/{version} cannot absorb {source}@{main_sha[:12]}: {e}"
-                )
-            if sync_res.synced:
-                main_sync_result = sync_res
-                # Re-verify Gate 1 on the release branch after absorbing main
-                precheck = resolve_hook(rel_wt, "precheck")
-                if precheck.exists():
-                    rc = subprocess.run([str(precheck)], cwd=rel_wt).returncode
-                    if rc != 0:
-                        git_run(rel_wt, "reset", "--hard", pre_sha)
-                        raise Gate2FailedError(
-                            f"Gate 1 failed after absorbing {source}@{main_sha[:12]} — rolled back to {pre_sha[:12]}"
-                        )
-
     # G-E3: the completeness-and-freshness epic gate, before any other gate —
     # a release must not reach Gate 2 (let alone main) carrying an epic that
     # is incomplete or unverified at this release's HEAD.
+    # Absorb any hotfix merged to main since the last ship BEFORE the epic
+    # gate, the deploy and Gate 2: all of them must verify and run the tree the
+    # PR will actually land, never a release missing main's commits. A
+    # conflict refuses here, release untouched, with the manual command.
+    # --allow-stale-main is the EMERGENCY BYPASS: no fetch, no sync, and no
+    # babysit race guard below — the release goes to main exactly as it is.
+    main_ref = None if allow_stale_main else resolve_main_ref(repo)
+    main_synced = 0
+    with file_lock(rel_wt):
+        # Freeze under the lock ship merges under: from here on, no ship can
+        # add to the tree this promote verifies and pushes.
+        freeze_release(repo, version)
+        _frozen.append(version)
+        if main_ref is not None:
+            main_synced = sync_main_into_release(repo, rel_wt, release_branch, main_ref)
+        else:
+            print(f"⚠️  --allow-stale-main: NOT syncing main into {release_branch}; "
+                  f"it may lack hotfixes on main.", file=sys.stderr)
+
     check_epics(repo, rel_wt, version, allow_split_epic)
 
     if run_deploy:
@@ -563,16 +579,22 @@ def promote_release(
             git_run(repo, "push", "-u", "origin", release_branch)
         except GitError as e:
             raise Gate2FailedError(f"failed to push {release_branch} to origin: {e}")
+        pushed_head = git_run(repo, "rev-parse", release_branch).stdout.strip()
+        record_pushed_head(repo, version, pushed_head)
         gate2_line = (
             f"- Gate 2 (`integration.sh`{' + local prod-style deploy' if run_deploy else ''}) passed at promote."
             if gate2_ran else
             "- ⚠️ Gate 2 did NOT run at promote (skipped or `integration.sh` missing) — UNVERIFIED."
         )
-        sync_line = ""
-        if main_sync_result and main_sync_result.synced:
-            sync_line = f"- Synced with {main_sync_result.source}@{main_sync_result.main_sha[:12]} before Gate 2 ({main_sync_result.behind} commits absorbed).\n"
         split_lines = _epic_split_disclosure_lines(rel_wt, version)
         split_block = ("\n".join(split_lines) + "\n") if split_lines else ""
+        # Disclose an absorbed hotfix: reviewers see the PR carries more than
+        # the shipped features.
+        sync_line = ""
+        if main_synced:
+            main_sha = git_run(repo, "rev-parse", main_ref).stdout.strip()
+            sync_line = (f"- Synced with {main_ref}@{main_sha[:12]} before Gate 2 "
+                         f"({main_synced} commit(s) from main absorbed).\n")
         pr_body = (
             f"Promote `{release_branch}` → `main`.\n\n"
             f"- Gate 1 (`precheck.sh`) passed at ship.\n"
@@ -595,6 +617,8 @@ def promote_release(
             if _finalize_release_state(rel_wt, version):
                 try:
                     git_run(repo, "push", "origin", release_branch)
+                    record_pushed_head(repo, version, git_run(
+                        repo, "rev-parse", release_branch).stdout.strip())
                 except GitError as e:
                     raise Gate2FailedError(
                         f"PR created ({pr_url}) but pushing the finalize commit to "
@@ -621,22 +645,36 @@ def promote_release(
         if _watch_pr_checks(repo, ref, gh_runner) != 0:
             raise Gate2FailedError(
                 f"PR checks FAILED for {ref} — NOT merging.\n"
-                f"The release is still in progress: fix the failures and re-run "
-                f"promote (or merge the PR yourself with gh pr merge --squash {ref}, "
-                f"then run: promote_release.py --cleanup-only {version})"
+                f"The release is still in progress (and unfrozen, so fixes can "
+                f"ship): fix the failures and re-run promote, which re-pushes and "
+                f"re-checks. Do not merge the PR by hand: its head may lack what "
+                f"ships next."
             )
-        # Babysit race check: re-verify origin/main hasn't moved during CI
-        if not allow_stale_main and _has_origin(repo):
-            try:
-                curr_main, _ = resolve_main_sha(repo, strict=True)
-                if not is_ancestor(rel_wt, curr_main, "HEAD"):
-                    raise Gate2FailedError(
-                        f"origin/main advanced to {curr_main[:12]} while PR checks were running!\n"
-                        f"Aborting merge to prevent deploying code unverified against the latest hotfix.\n"
-                        f"Re-run `psrw promote` to re-sync, re-gate, and merge."
-                    )
-            except MainUnreachableError as e:
-                raise Gate2FailedError(f"Could not verify origin/main freshness before merge: {e}")
+        # The checks just verified the head pushed above. If the local release
+        # gained commits since (anything that bypassed the freeze), merging would
+        # either strand them or land them unchecked — refuse; a re-run re-pushes
+        # and re-checks.
+        local_head = git_run(repo, "rev-parse", release_branch).stdout.strip()
+        if local_head != pushed_head:
+            raise Gate2FailedError(
+                f"the PR head CI checked for {release_branch} ({pushed_head[:12]}) "
+                f"differs from the local release head ({local_head[:12]}) — NOT "
+                f"merging: the PR would not carry exactly what shipped. Re-run "
+                f"promote (it re-pushes and re-checks)."
+            )
+        # Race guard: a hotfix squash-merged to main WHILE the checks ran was
+        # never part of the tree CI verified. Refuse; a re-run syncs it in,
+        # re-gates, re-pushes and re-checks. Skipped under --allow-stale-main.
+        if not allow_stale_main:
+            fresh_main = resolve_main_ref(repo)
+            raced = missing_main_commits(rel_wt, fresh_main)
+            if raced:
+                raise Gate2FailedError(
+                    f"{fresh_main} advanced by {len(raced)} commit(s) while PR checks were "
+                    f"running (a hotfix landed during CI) — NOT merging: the checked head "
+                    f"was never verified against it. Re-run promote: it syncs main into "
+                    f"{release_branch}, re-gates, re-pushes and re-checks."
+                )
         _finalize_and_push()
         merged = _merge_pr_squash(repo, ref, gh_runner)
         if merged.returncode != 0:
@@ -654,6 +692,8 @@ def promote_release(
 
     # ── Direct mode (--direct) ─────────────────────────────────────────
     # Legacy path: squash-merge release/<v> into main locally + push + cleanup.
+    # --direct squashes exactly the local release head: that is what landed.
+    record_pushed_head(repo, version, git_run(repo, "rev-parse", release_branch).stdout.strip())
     try:
         git_run(repo, "merge", "--squash", release_branch)
         git_run(repo, "commit", "-m", f"release {version}")
@@ -672,6 +712,126 @@ def promote_release(
         cleanup(repo, version=version, verify_pr=False)
 
     return {"ok": True, "version": version, "mode": "direct"}
+
+
+def _remote_branch_head(repo: Path, branch: str) -> str | None:
+    """sha of refs/heads/<branch> on origin, or None (no origin / no branch)."""
+    if not _has_origin(repo):
+        return None
+    out = git_run(repo, "ls-remote", "origin", f"refs/heads/{branch}", check=False).stdout.split()
+    return out[0] if out else None
+
+
+def _merged_release_head(repo: Path, version: str, gh_runner) -> tuple[str | None, str]:
+    """(sha, source) of the release head that actually reached main.
+
+    Preference: the head promote recorded when it pushed (or --direct
+    squashed) it; else the PR's headRefOid from gh; else origin's release/<v>.
+    The first two survive a host that auto-deletes merged head branches.
+    """
+    branch = f"release/{version}"
+    recorded = recorded_pushed_head(repo, version)
+    if recorded:
+        return recorded, "the head promote pushed"
+    if _has_origin(repo):
+        try:
+            cp = gh_runner(["gh", "pr", "view", branch, "--json", "headRefOid",
+                            "-q", ".headRefOid"], cwd=repo, capture_output=True, text=True)
+            sha = (cp.stdout or "").strip() if cp.returncode == 0 else ""
+        except (FileNotFoundError, OSError):
+            sha = ""
+        if re.fullmatch(r"[0-9a-f]{40}", sha):
+            return sha, "the PR head"
+        remote = _remote_branch_head(repo, branch)
+        if remote:
+            return remote, f"origin/{branch}"
+    return None, ""
+
+
+def _stranded_features(repo: Path, version: str, gh_runner) -> list[dict]:
+    """Features the release branch's catalog marks shipped on `version` whose
+    shipped commit is NOT in the release head that actually merged.
+
+    Only a recorded `shipped_sha` can prove a feature missing: a legacy entry
+    without one is warned about, never reset (its branch may have moved on
+    after a ship that did land). Must run before cleanup deletes the _release
+    worktree and the release branches.
+    """
+    rel_cat = repo / ".claude" / "worktrees" / "_release" / ".claude" / "refined_backlog" / "_catalog.json"
+    if not rel_cat.exists():
+        return []
+    shipped = [e for e in list_entries(rel_cat)
+               if e.get("release_version") == version and e.get("status") == "shipped"]
+    if not shipped:
+        return []
+    merged_head, source = _merged_release_head(repo, version, gh_runner)
+    if merged_head is None:
+        print(f"⚠️ cleanup: cannot find the release/{version} head that merged — "
+              f"CANNOT verify that {', '.join(e['id'] for e in shipped)} reached main. "
+              f"Check each by hand before starting the next release.", file=sys.stderr)
+        return []
+    if _has_origin(repo):
+        # Make sure the merged head's objects are local for the ancestry checks.
+        git_run(repo, "fetch", "-q", "origin", f"refs/heads/release/{version}", check=False)
+    stranded = []
+    for entry in shipped:
+        sha = entry.get("shipped_sha")
+        if not sha:
+            print(f"⚠️ cleanup: {entry['id']} has no shipped_sha (shipped by an older "
+                  f"psrw) — cannot verify it is in {source}; check it by hand.",
+                  file=sys.stderr)
+            continue
+        rc = git_run(repo, "merge-base", "--is-ancestor", sha, merged_head, check=False).returncode
+        if rc == 1:
+            stranded.append(entry)
+        elif rc != 0:
+            print(f"⚠️ cleanup: cannot verify {entry['id']} ({sha[:12]}) is in {source} "
+                  f"({merged_head[:12]}) — check it by hand", file=sys.stderr)
+    return stranded
+
+
+def _reopen_stranded(repo: Path, version: str, stranded: list[dict]) -> None:
+    """Put each stranded feature back into MAIN's catalog (which the next
+    release is cut from) as not-shipped, keeping its folder, branch and
+    worktree, and say so loudly."""
+    main_cat = repo / ".claude" / "refined_backlog" / "_catalog.json"
+    rel_backlog = repo / ".claude" / "worktrees" / "_release" / ".claude" / "refined_backlog"
+    claims = read_state(repo / ".claude" / "state" / "claims.json", default={}) or {}
+
+    for entry in stranded:
+        fid = entry["id"]
+        ledger = claims.get(fid) or {}
+        still_claimed = bool(ledger) and Path(ledger.get("worktree", "")).is_dir()
+
+        def reset(e: dict) -> None:
+            e["status"] = "claimed" if still_claimed else "open"
+            e["claimed_by"] = ledger.get("owner") if still_claimed else None
+            e["release_version"] = None
+            e.pop("shipped_at", None)
+            e.pop("shipped_sha", None)
+            e["stranded_from"] = version
+
+        if find_entry(main_cat, fid) is None:
+            # The refine/claim commits never reached main either: carry the entry over.
+            def append(entries: list) -> list:
+                entries.append(dict(entry))
+                return entries
+            mutate_state(main_cat, append, default=[])
+        update_entry(main_cat, fid, reset)
+        for src in rel_backlog.glob(f"{fid}-*"):
+            dst = main_cat.parent / src.name
+            if src.is_dir() and not dst.exists():
+                shutil.copytree(src, dst)
+        print(
+            f"\n❌ {fid} was marked shipped on {version} but its commit is NOT in the "
+            f"merged release/{version} (it landed after the PR head was pushed). It is "
+            f"NOT on main. Reset to '{'claimed' if still_claimed else 'open'}' in main's "
+            f"catalog; branch feat/{fid} is kept. Ship it into the next release: "
+            f"`psrw new-release`, then "
+            + (f"`cd {ledger['worktree']} && psrw ship`." if still_claimed
+               else f"`psrw claim {fid}` and `psrw ship`."),
+            file=sys.stderr,
+        )
 
 
 def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
@@ -725,6 +885,13 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
                 )
             git_run(repo, "checkout", "main")
             git_run(repo, "reset", "--hard", "origin/main")
+
+    # Before anything is deleted: every feature the release branch says it
+    # shipped must be in the head that merged. Stragglers are flagged and put
+    # back in main's catalog instead of vanishing with the _release worktree.
+    stranded = _stranded_features(repo, version, gh_runner)
+    if stranded:
+        _reopen_stranded(repo, version, stranded)
 
     refined_cat = repo / ".claude" / "refined_backlog" / "_catalog.json"
     idea_cat = repo / ".claude" / "idea_backlog" / "_catalog.json"
@@ -880,7 +1047,8 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
                     f"then re-run: promote_release.py --cleanup-only {version}"
                 )
 
-    return {"ok": True, "version": version}
+    unfreeze_release(repo, version)
+    return {"ok": True, "version": version, "stranded": [e["id"] for e in stranded]}
 
 
 def _build_parser():
@@ -901,7 +1069,9 @@ def _build_parser():
                         "refusing G-E3 — disclosed in the PR body, and exempts the epic "
                         "from G-E3 in every later release too")
     p.add_argument("--allow-stale-main", action="store_true", dest="allow_stale_main",
-                   help="proceed even if release/<v> does not contain the latest main")
+                   help="EMERGENCY BYPASS: promote release/<v> as it is, without syncing "
+                        "main (hotfixes) into it first and without the --babysit check that "
+                        "main did not advance during CI")
     p.add_argument("--deploy", action="store_true",
                    help="run the repo-specific local deploy (scripts/deploy-local.sh) first "
                         "(default: off)")
@@ -935,7 +1105,7 @@ def main() -> int:
                                      allow_split_epic=args.allow_split_epic,
                                      allow_stale_main=args.allow_stale_main,
                                      babysit=args.babysit)
-    except (NoReleaseInProgressError, Gate2FailedError,
+    except (NoReleaseInProgressError, Gate2FailedError, MainSyncConflictError,
             CatalogEntryNotFoundError, RuntimeError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1

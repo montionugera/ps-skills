@@ -37,14 +37,15 @@ main checkout and carries no claim marker, so edits are allowed.
 5. Commit — a **new commit**, never `git commit --amend`.
 6. Push, open a PR to `main`, babysit CI, squash-merge.
 7. `git worktree remove <path>` and delete the remote branch.
-8. If a release is in progress (`release/<v>`), the hotfix will be absorbed automatically
-   at the next `psrw ship` or `psrw promote`. To sync it immediately into the release branch:
-   `psrw sync-main`.
+8. If a release is in progress, the hotfix reaches `release/<v>` automatically at the
+   next `psrw ship` / `psrw promote`. To absorb it now (e.g. to redeploy locally):
+   `psrw sync-main --deploy`.
 
-Saying "babysit + merge" authorizes steps 6-7 without re-asking.
+Saying "babysit + merge" authorizes steps 6-8 without re-asking.
 
 ## Refuses if
 
-The sibling directory already exists.
+The sibling directory already exists. (`--sync-release` is an alias for
+`psrw sync-main`; see that skill.)
 
 Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#guard-guarantees`
