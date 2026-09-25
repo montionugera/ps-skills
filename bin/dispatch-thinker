@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # dispatch-thinker: Front-end for dispatch-worker with --capability deep-design-v1
 # Routes thinking / architecture tasks to Claude Opus 5.5 first, GPT-5.6-Sol (Codex) fallback.
+# Defaults reasoning effort to 'high' (--effort overrides, or THINK_EFFORT env var).
 # Fails closed with exit code 12 only if both thinkers are unavailable.
 
 set -euo pipefail

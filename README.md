@@ -97,12 +97,15 @@ export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3
 
 ### Thinking tasks (`dispatch-thinker`)
 
-`dispatch-thinker` (= `dispatch-worker --capability deep-design-v1`; `--think` uses the same routing) sends deep-reasoning work to **Claude Opus 5.5 first** (`claude -p --model claude-opus-5-5`, available when `claude` is on `PATH`), then **Codex `gpt-5.6-sol`** (quota 5h > 80%, weekly > 20%). Claude runs least-privilege (read tools + Write/Edit only; no Bash or web). If the Claude run fails, it retries once on Codex when eligible; outside `--isolated`, a partial `--output-file` is discarded first, and if Claude left any other changes the retry is refused (exit 12) and those files are listed — the working tree is never reset. Exit `12` (fail closed) only when neither is available or a non-thinker model is requested. `--agent claude` / `--agent codex` pins one provider.
+`dispatch-thinker` (= `dispatch-worker --capability deep-design-v1`; `--think` uses the same routing) sends deep-reasoning work to **Claude Opus 5.5 first** (`claude -p --model claude-opus-5-5`, available when `claude` is on `PATH`), then **Codex `gpt-5.6-sol`** (quota 5h > 80%, weekly > 20%). Reasoning effort defaults to **`high`** (`--effort` on CLI overrides). Claude runs least-privilege (read tools + Write/Edit only; no Bash or web). If the Claude run fails, it retries once on Codex when eligible; outside `--isolated`, a partial `--output-file` is discarded first, and if Claude left any other changes the retry is refused (exit 12) and those files are listed — the working tree is never reset. Exit `12` (fail closed) only when neither is available or a non-thinker model is requested. `--agent claude` / `--agent codex` pins one provider.
 
 | Env var | Default | Purpose |
 | :--- | :--- | :--- |
 | `CLAUDE_THINK_MODEL` | `claude-opus-5-5` | Claude thinker model id |
 | `CODEX_THINK_MODEL` | `gpt-5.6-sol` | Codex fallback thinker model id |
+| `THINK_EFFORT` | `high` | Default reasoning effort for thinking tasks (`--effort` overrides) |
+| `CLAUDE_THINK_EFFORT` | unset | Claude-specific thinker effort override |
+| `CODEX_THINK_EFFORT` | unset | Codex-specific thinker effort override |
 | `DISPATCH_THINKER_SKIP_CLAUDE` | unset | `1` skips Claude and routes straight to Codex |
 
 ## Plugin Bridge & Antigravity (agy) Context Budget (`ps-plugin-bridge`)

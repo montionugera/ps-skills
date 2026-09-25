@@ -47,6 +47,7 @@ DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKL
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 DEFAULT_CLAUDE_THINK_MODEL = os.environ.get("CLAUDE_THINK_MODEL", "claude-opus-5-5")
+DEFAULT_THINK_EFFORT = os.environ.get("THINK_EFFORT") or os.environ.get("DISPATCH_THINK_EFFORT") or "medium"
 DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "900")
 
 DEFAULT_VERIFY_TIMEOUT = int(os.environ.get("DISPATCH_VERIFY_TIMEOUT") or "600")
@@ -276,6 +277,37 @@ def normalize_model_name(agent, model):
     return clean
 
 
+def normalize_effort(agent, effort):
+    if not effort:
+        return None
+    clean = str(effort).strip().lower()
+    if agent == "codex":
+        # Codex model_reasoning_effort standard values: low, medium, high
+        if clean in ("max", "xhigh"):
+            return "high"
+        return clean
+    if agent == "agy":
+        # agy CLI supports low, medium, high, max
+        if clean == "xhigh":
+            return "high"
+        return clean
+    if agent == "cursor":
+        # cursor-agent CLI does not have an effort option
+        return None
+    return clean
+
+
+def resolve_agent_effort(agent, effort, is_thinking=False):
+    if is_thinking:
+        if agent == "claude" and os.environ.get("CLAUDE_THINK_EFFORT"):
+            effort = os.environ.get("CLAUDE_THINK_EFFORT")
+        elif agent == "codex" and os.environ.get("CODEX_THINK_EFFORT"):
+            effort = os.environ.get("CODEX_THINK_EFFORT")
+    if not effort:
+        return None
+    return normalize_effort(agent, effort)
+
+
 def parse_priority_chain(chain_str):
     """
     Parses strings like 'cursor:gemini-3.8-flash > agy > codex'
@@ -335,7 +367,7 @@ def route_priority_chain(chain, allow_on_demand=False, min_5h=DEFAULT_MIN_5H, mi
     return fb_agent, fb_model, False, 0.0, 0.0, f"Chain exhausted: {summary}"
 
 
-CLAUDE_THINK_MODEL_NAMES = ("claude-opus-5-5", "opus", "claude-fable", "fable")
+CLAUDE_THINK_MODEL_NAMES = ("claude-opus-5-5", "opus")
 
 
 def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H, min_weekly=DEFAULT_THINK_MIN_WEEKLY,
@@ -1010,15 +1042,20 @@ CLAUDE_ALLOWED_TOOLS = "Read,Grep,Glob,Write,Edit"
 CLAUDE_DISALLOWED_TOOLS = "Bash,WebFetch,WebSearch"
 
 
-def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=None):
+def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=None, effort=None):
     if chosen_agent == "codex":
         model = chosen_model or DEFAULT_CODEX_MODEL
-        return [
+        cmd = [
             "codex", "exec",
             "-c", f"model=\"{model}\"",
+        ]
+        if effort:
+            cmd.extend(["-c", f"model_reasoning_effort=\"{effort}\""])
+        cmd.extend([
             "--dangerously-bypass-approvals-and-sandbox",
             wrapped_task
-        ]
+        ])
+        return cmd
     elif chosen_agent == "claude":
         # Least privilege: read + Write/Edit only (the deliverable file), no shell or web access.
         # The tool/dir flags are variadic, so they take one comma-joined value each and never sit right before the prompt.
@@ -1028,6 +1065,8 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, ou
             if out_dir not in dirs:
                 dirs.append(out_dir)
         cmd = ["claude", "-p", "--model", chosen_model or DEFAULT_CLAUDE_THINK_MODEL]
+        if effort:
+            cmd.extend(["--effort", effort])
         for d in dirs:
             cmd.extend(["--add-dir", d])
         cmd.extend([
@@ -1048,6 +1087,8 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, ou
         cmd = ["agy", "--add-dir", target_dir, "-p", wrapped_task, "--dangerously-skip-permissions"]
         if chosen_model:
             cmd.extend(["--model", chosen_model])
+        if effort:
+            cmd.extend(["--effort", effort])
         return cmd
 
 
@@ -1072,7 +1113,7 @@ def verify_opts_from(source):
 
 
 def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, context_files=None, output_file=None,
-                    is_thinking=False, verify_opts=None, verify_info=None):
+                    is_thinking=False, verify_opts=None, verify_info=None, effort=None):
     """
     Runs the worker, then (worker exit 0 only) the verify command inside target_dir. On verify failure the same
     worker is re-invoked exactly once with the failure output; a second failure returns VERIFY_FAILED_EXIT_CODE,
@@ -1113,7 +1154,8 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
             verify_cmd=verify_cmd,
             acceptance=opts.get("acceptance"),
         )
-        cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=output_file)
+        resolved_effort = resolve_agent_effort(chosen_agent, effort, is_thinking=is_thinking)
+        cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=output_file, effort=resolved_effort)
         return execute_worker_process(cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent)
 
     def _own_exit(code):
@@ -1369,6 +1411,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     task = state.get("task", "")
     agent = state.get("agent", "auto")
     model = state.get("model", None)
+    effort = state.get("effort", None)
     timeout = state.get("timeout", DEFAULT_TIMEOUT)
     isolated = state.get("isolated", False)
 
@@ -1386,7 +1429,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
         return run_single_task(
             task, target_dir, agent, model, timeout,
             context_files=context_files, output_file=output_file, is_thinking=is_thinking,
-            verify_opts=verify_opts_from(state), verify_info=verify_info,
+            verify_opts=verify_opts_from(state), verify_info=verify_info, effort=effort,
         )
 
     try:
@@ -1434,7 +1477,7 @@ def spawn_detached_process(job_id, cwd, log_file, job_dir=DEFAULT_JOB_DIR, scrip
     return proc.pid
 
 
-def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, timeout_seconds, max_parallel=4):
+def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, timeout_seconds, max_parallel=4, chosen_effort=None):
     results = [None] * len(tasks)
     merge_lock = threading.Lock()
 
@@ -1443,6 +1486,7 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
         t_cwd = item.get("cwd") or base_repo_dir
         t_agent = item.get("agent") or chosen_agent
         t_model = item.get("model") or chosen_model
+        t_effort = item.get("effort") or chosen_effort
         t_timeout = item.get("timeout") or timeout_seconds
         t_context_files = item.get("context_files")
         t_output_file = item.get("output_file")
@@ -1453,7 +1497,7 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
             return run_single_task(
                 t_task, target_dir, t_agent, t_model, t_timeout,
                 context_files=t_context_files, output_file=t_output_file, is_thinking=t_is_thinking,
-                verify_opts=verify_opts_from(item), verify_info=t_verify_info,
+                verify_opts=verify_opts_from(item), verify_info=t_verify_info, effort=t_effort,
             )
 
         try:
@@ -1494,6 +1538,8 @@ def main():
                         help=f"External agent to dispatch to (default: {default_agent}); 'claude' runs `claude -p`")
     parser.add_argument("--model", type=str, default=None,
                         help=f"Model override (for codex defaults to {DEFAULT_CODEX_MODEL})")
+    parser.add_argument("--effort", type=str, default=None,
+                        help="Reasoning effort level (e.g. low, medium, high, max). Thinking mode defaults to 'high'.")
     parser.add_argument("--priority", type=str, default=default_preference,
                         help="Priority chain preference (e.g. 'cursor:gemini-3.8-flash > agy > codex')")
     parser.add_argument("--mode", choices=["subscription_quota_remaining", "on_demand"], default=default_mode_str,
@@ -1523,7 +1569,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
     parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Claude Opus 5.5 first, then Codex gpt-5.6-sol (enforces 5h > 80%%, weekly > 20%% quota)")
     parser.add_argument("--capability", type=str, default=None, choices=["deep-design-v1"],
-                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Claude Opus 5.5 / Fable or GPT-5.6-Sol and fails closed with exit code 12)")
+                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Claude Opus 5.5 or GPT-5.6-Sol and fails closed with exit code 12)")
     parser.add_argument("--attestation-file", type=str, default=None, help="Explicit path to write Thinker attestation JSON (.thinker.json)")
     parser.add_argument("--context", nargs="+", dest="context_files", help="Paths to context/reference files or directories")
     parser.add_argument("--output-file", type=str, default=None, help="File path where worker must write primary deliverable")
@@ -1631,12 +1677,16 @@ def main():
     chosen_agent = args.agent
     chosen_model = args.model
 
+    if chosen_model and any(fb in chosen_model.lower() for fb in ("fable", "claude-fable")):
+        print(f"FAILED: model '{chosen_model}' is strictly forbidden. Use 'claude-opus-5-5' (effort medium) instead.", file=sys.stderr)
+        sys.exit(12)
+
     # If --capability deep-design-v1 or --think is set, adjust thresholds and models
     is_deep_design = (args.capability == "deep-design-v1")
     if is_deep_design:
         args.think = True
-        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 / Fable or GPT-5.6-Sol
-        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "claude-fable", "fable", "gpt-5.6-sol", "sol"]
+        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 or GPT-5.6-Sol
+        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "gpt-5.6-sol", "sol"]
         if chosen_model and chosen_model.lower() not in ALLOWED_DEEP_DESIGN_MODELS:
             print(f"FAILED: capability 'deep-design-v1' strictly forbids model '{chosen_model}'. Allowed models: {ALLOWED_DEEP_DESIGN_MODELS}", file=sys.stderr)
             sys.exit(12)  # Fail-closed: THINKER_UNAVAILABLE / FORBIDDEN_MODEL
@@ -1654,6 +1704,13 @@ def main():
     if chosen_agent == "claude":
         chosen_model = normalize_model_name("claude", chosen_model) or DEFAULT_CLAUDE_THINK_MODEL
     think_chain = args.think and chosen_agent == "auto" and "--agent" not in sys.argv
+
+    chosen_effort = args.effort
+    if not chosen_effort:
+        if args.think or is_deep_design:
+            chosen_effort = DEFAULT_THINK_EFFORT
+        else:
+            chosen_effort = os.environ.get("DISPATCH_EFFORT")
 
     eligible = False
     rem_5h, rem_weekly = 0.0, 0.0
@@ -1757,14 +1814,15 @@ def main():
         model_info = f" with {model}"
     elif args.model:
         model_info = f" with {args.model}"
+    effort_info = f" (effort: {chosen_effort})" if chosen_effort else ""
 
     # Dry-run check
     if args.dry_run:
         if is_batch:
-            print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch {len(batch_tasks)} task(s) in parallel to {chosen_agent}{model_info} in {cwd} [isolated worktrees]. Verify: {verify_plan}")
+            print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch {len(batch_tasks)} task(s) in parallel to {chosen_agent}{model_info}{effort_info} in {cwd} [isolated worktrees]. Verify: {verify_plan}")
         else:
             iso_str = " [isolated worktree]" if args.isolated else ""
-            print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch to {chosen_agent}{model_info} in {cwd}{iso_str}. Verify: {verify_plan}")
+            print(f"DRY_RUN: Quota healthy ({msg}). Would dispatch to {chosen_agent}{model_info}{effort_info} in {cwd}{iso_str}. Verify: {verify_plan}")
         sys.exit(0)
 
     # Detached / Background mode
@@ -1777,6 +1835,7 @@ def main():
                     "job_id": jid,
                     "agent": item.get("agent") or chosen_agent,
                     "model": item.get("model") or chosen_model,
+                    "effort": item.get("effort") or chosen_effort,
                     "task": item.get("task", ""),
                     "cwd": os.path.abspath(item.get("cwd") or args.cwd),
                     "isolated": True,
@@ -1806,6 +1865,7 @@ def main():
                 "job_id": jid,
                 "agent": chosen_agent,
                 "model": chosen_model,
+                "effort": chosen_effort,
                 "task": args.task,
                 "cwd": cwd,
                 "isolated": args.isolated,
@@ -1830,7 +1890,7 @@ def main():
 
     # Synchronous Batch Execution
     if is_batch:
-        print(f"Dispatching {len(batch_tasks)} task(s) in parallel to {chosen_agent.upper()}{model_info} in {cwd} ({msg})...")
+        print(f"Dispatching {len(batch_tasks)} task(s) in parallel to {chosen_agent.upper()}{model_info}{effort_info} in {cwd} ({msg})...")
         # Propagate context_files and is_thinking to batch items if not already present
         for b_item in batch_tasks:
             if "context_files" not in b_item and args.context_files:
@@ -1839,6 +1899,8 @@ def main():
                 b_item["is_thinking"] = args.think
             if "output_file" not in b_item and args.output_file:
                 b_item["output_file"] = args.output_file
+            if "effort" not in b_item and chosen_effort:
+                b_item["effort"] = chosen_effort
             for v_key, v_val in cli_verify_opts.items():
                 if b_item.get(v_key) is None:
                     b_item[v_key] = v_val
@@ -1850,13 +1912,14 @@ def main():
             chosen_model=chosen_model,
             timeout_seconds=args.timeout,
             max_parallel=args.max_parallel,
+            chosen_effort=chosen_effort,
         )
         report = format_batch_report(results)
         print(report)
         sys.exit(batch_overall_exit(results))
 
     # Synchronous Single Task Execution
-    print(f"Dispatching to {chosen_agent.upper()}{model_info} in {cwd} ({msg})...")
+    print(f"Dispatching to {chosen_agent.upper()}{model_info}{effort_info} in {cwd} ({msg})...")
 
     verify_info = {}
 
@@ -1865,7 +1928,7 @@ def main():
             return run_single_task(
                 args.task, target_dir, agent, model, args.timeout,
                 context_files=args.context_files, output_file=args.output_file, is_thinking=args.think,
-                verify_opts=cli_verify_opts, verify_info=verify_info,
+                verify_opts=cli_verify_opts, verify_info=verify_info, effort=chosen_effort,
             )
 
         if not args.isolated:
@@ -1941,10 +2004,12 @@ def main():
                         except Exception:
                             pass
 
+            resolved_attestation_effort = resolve_agent_effort(chosen_agent, chosen_effort, is_thinking=args.think)
             attestation_data = {
                 "capability": args.capability or "deep-design-v1",
                 "model": chosen_model,
                 "agent": chosen_agent,
+                "effort": resolved_attestation_effort or chosen_effort,
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "prompt_sha256": p_hash,
                 "output_sha256": out_hash,
