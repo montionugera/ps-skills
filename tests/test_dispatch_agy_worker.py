@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1103,7 +1104,8 @@ class TestThinkerRouting(unittest.TestCase):
 
     def _run(self, *extra, env_extra=None, capability=True):
         env = {k: v for k, v in os.environ.items()
-               if k not in ("DISPATCH_THINKER_SKIP_CLAUDE", "CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL")}
+               if k not in ("DISPATCH_THINKER_SKIP_CLAUDE", "CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL",
+                            "THINK_EFFORT", "CLAUDE_THINK_EFFORT", "CODEX_THINK_EFFORT", "DISPATCH_EFFORT")}
         env["PATH"] = f"{self.fake_bin}:/usr/bin:/bin"
         env.update(env_extra or {})
         return subprocess.run(
@@ -1253,6 +1255,123 @@ class TestThinkerRouting(unittest.TestCase):
         proc = self._run("--dry-run", capability=False)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+
+    def test_thinking_mode_defaults_to_high_effort(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("(effort: high)", proc.stdout)
+
+    def test_thinking_mode_effort_override_cli(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--effort", "max")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("(effort: max)", proc.stdout)
+
+    def test_thinking_mode_effort_override_env(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", env_extra={"THINK_EFFORT": "medium"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("(effort: medium)", proc.stdout)
+
+    def test_claude_run_passes_effort_flag(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        args = self._args("claude")
+        self.assertIn("--effort", args)
+        self.assertEqual(args[args.index("--effort") + 1], "high")
+
+    def test_claude_run_custom_effort_flag(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--effort", "xhigh")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        args = self._args("claude")
+        self.assertIn("--effort", args)
+        self.assertEqual(args[args.index("--effort") + 1], "xhigh")
+
+    def test_codex_run_passes_reasoning_effort_config(self):
+        self._fake("claude")
+        self._fake("codex", output="sol-ok")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--agent", "codex")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        calls = self.calls_log.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(calls[0].startswith("codex exec"), calls)
+        args = self._args("codex")
+        self.assertIn('model_reasoning_effort="high"', args)
+
+    def test_codex_run_normalizes_max_effort_to_high(self):
+        self._fake("claude")
+        self._fake("codex", output="sol-ok")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--agent", "codex", "--effort", "max")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        args = self._args("codex")
+        self.assertIn('model_reasoning_effort="high"', args)
+
+    def test_attestation_records_effort(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
+        self.assertEqual(attestation["effort"], "high")
+
+
+class TestEffortHelpers(unittest.TestCase):
+    def test_normalize_effort_codex(self):
+        self.assertEqual(dispatch_mod.normalize_effort("codex", "low"), "low")
+        self.assertEqual(dispatch_mod.normalize_effort("codex", "medium"), "medium")
+        self.assertEqual(dispatch_mod.normalize_effort("codex", "high"), "high")
+        self.assertEqual(dispatch_mod.normalize_effort("codex", "max"), "high")
+        self.assertEqual(dispatch_mod.normalize_effort("codex", "xhigh"), "high")
+
+    def test_normalize_effort_agy(self):
+        self.assertEqual(dispatch_mod.normalize_effort("agy", "low"), "low")
+        self.assertEqual(dispatch_mod.normalize_effort("agy", "medium"), "medium")
+        self.assertEqual(dispatch_mod.normalize_effort("agy", "high"), "high")
+        self.assertEqual(dispatch_mod.normalize_effort("agy", "max"), "max")
+        self.assertEqual(dispatch_mod.normalize_effort("agy", "xhigh"), "high")
+
+    def test_normalize_effort_cursor(self):
+        self.assertIsNone(dispatch_mod.normalize_effort("cursor", "high"))
+
+    def test_normalize_effort_claude(self):
+        self.assertEqual(dispatch_mod.normalize_effort("claude", "xhigh"), "xhigh")
+        self.assertEqual(dispatch_mod.normalize_effort("claude", "max"), "max")
+
+    def test_resolve_agent_effort_env_overrides(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_THINK_EFFORT": "max", "CODEX_THINK_EFFORT": "medium"}):
+            self.assertEqual(dispatch_mod.resolve_agent_effort("claude", "high", is_thinking=True), "max")
+            self.assertEqual(dispatch_mod.resolve_agent_effort("codex", "high", is_thinking=True), "medium")
+            # Not in thinking mode, env overrides do not take effect:
+            self.assertEqual(dispatch_mod.resolve_agent_effort("claude", "high", is_thinking=False), "high")
+
+    def test_build_agent_command_effort_flags(self):
+        # Codex
+        cmd_c = dispatch_mod.build_agent_command("codex", "gpt-5.6-sol", "task", "/tmp", effort="high")
+        self.assertIn('-c', cmd_c)
+        self.assertIn('model_reasoning_effort="high"', cmd_c)
+
+        # Claude
+        cmd_cl = dispatch_mod.build_agent_command("claude", "claude-opus-5-5", "task", "/tmp", effort="high")
+        self.assertIn('--effort', cmd_cl)
+        self.assertEqual(cmd_cl[cmd_cl.index('--effort') + 1], "high")
+
+        # AGY
+        cmd_a = dispatch_mod.build_agent_command("agy", "gemini-3.8-flash", "task", "/tmp", effort="high")
+        self.assertIn('--effort', cmd_a)
+        self.assertEqual(cmd_a[cmd_a.index('--effort') + 1], "high")
+
+        # Cursor - no effort flag
+        cmd_cur = dispatch_mod.build_agent_command("cursor", "gemini-3.8-flash", "task", "/tmp", effort=None)
+        self.assertNotIn('--effort', cmd_cur)
 
 
 if __name__ == "__main__":
