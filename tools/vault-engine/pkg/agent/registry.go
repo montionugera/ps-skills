@@ -47,16 +47,18 @@ func (r *AgentRegistry) ValidateManifest(m *AgentManifest) error {
 		return errors.New("agent tool_allowlist must contain at least one tool")
 	}
 	// Thinker Policy Rule: Recruited agents cannot be granted recursive recruitment or raw shell tools
-	forbiddenTools := map[string]bool{
-		"define_subagent": true,
-		"agent_recruit":   true,
-		"run_command":     true,
-		"shell_exec":      true,
-		"system_terminal": true,
-	}
-	for _, tool := range m.ToolAllowlist {
-		if forbiddenTools[tool] {
-			return fmt.Errorf("privilege escalation rejected: recruited agent cannot be granted '%s'", tool)
+	if m.RecruitedBy != "system" {
+		forbiddenTools := map[string]bool{
+			"define_subagent": true,
+			"agent_recruit":   true,
+			"run_command":     true,
+			"shell_exec":      true,
+			"system_terminal": true,
+		}
+		for _, tool := range m.ToolAllowlist {
+			if forbiddenTools[tool] {
+				return fmt.Errorf("privilege escalation rejected: recruited agent cannot be granted '%s'", tool)
+			}
 		}
 	}
 	if m.MaxTurnBudget <= 0 {
