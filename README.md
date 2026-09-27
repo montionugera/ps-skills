@@ -27,6 +27,9 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **handoff** | Compact the session into an action-first handoff doc and spawn a fresh agent tab in Herdr; ships an optional Stop hook (`hooks/auto-handoff-stop.py`) that triggers it when context grows large. |
 | **agy-worker** | Offloads coding tasks to Antigravity CLI (`agy`) or Codex (`gpt-5.6-terra`) with proactive quota checking (`>30%` 5h, `>10%` weekly), auto-routing, fallback to Claude Sonnet, and standard ≤15-line reports. Binaries: `dispatch-agy-worker`, `dispatch-codex-worker`, `dispatch-worker`. |
 | **url-state-resilience** | Enforces URL-as-State, deep-linking, and reload resilience across web dashboards and SPAs; provides `check-url-state.sh` linter and `url-state-guard.py` hook for non-regression. |
+| **macos-audio-hud** | Engineering standards for macOS native floating HUDs and real-time CoreAudio/AVFoundation voice companion clients (`AUVoiceProcessing`, channel 0 extraction, dynamic converters, NSRecursiveLock, floating `NSPanel`, Carbon hotkeys). |
+| **rokid-glasses-companion** | Engineering standards and hardware trap mitigations for Rokid AI Smart Glasses and Android AR wearables (direct Wi-Fi WebSocket architecture, `AudioSource.MIC` + AGC/limiter, walkie-talkie echo suppression, raw key debouncing, priority 999 `KeyReceiver`). |
+| **multimodal-voice-companion** | Universal protocol standards and audio contracts for real-time live voice/vision companions (WebSocket `/ws/live`, 16 kHz up / 24 kHz down linear PCM, mandatory barge-in buffer flush contracts, dual-ended RMS dBFS telemetry, reconnect resilience). |
 
 The `ps-release-workflow-*` skills are thin wrappers over a shared Python engine
 ([`engine/ps-release-workflow`](engine/ps-release-workflow)) — they call its scripts at runtime, so the
