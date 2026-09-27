@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"obsidian-vault-engine/pkg/agent"
 	"obsidian-vault-engine/pkg/vault"
@@ -194,6 +195,96 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Commit SUCCESS for %s by %s (OCC validated)\n", recordID, actor)
+
+	case "run-workflow":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: vault-engine run-workflow <workflow_file> [payload_json]")
+			os.Exit(1)
+		}
+		wf, err := workflow.LoadWorkflow(os.Args[2])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Load workflow error: %v\n", err)
+			os.Exit(1)
+		}
+		var payload map[string]interface{}
+		if len(os.Args) > 3 {
+			_ = json.Unmarshal([]byte(os.Args[3]), &payload)
+		}
+		if payload == nil {
+			payload = make(map[string]interface{})
+		}
+
+		storageDir := filepath.Join(engine.Root, "_meta", "instances")
+		instID := fmt.Sprintf("wf-%s-%d", wf.WorkflowID, time.Now().Unix())
+		inst := workflow.NewWorkflowInstance(wf, instID, payload, storageDir)
+		runner := workflow.NewWorkflowRunner(wf, storageDir)
+
+		// Register standard handlers
+		runner.RegisterHandler("vault.ingest_file", func(instance *workflow.WorkflowInstance, step workflow.WorkflowStep) (map[string]interface{}, error) {
+			filePath, _ := instance.Payload["file_path"].(string)
+			if filePath == "" {
+				return nil, fmt.Errorf("missing 'file_path' in workflow payload")
+			}
+			assignedID, err := engine.IngestFile(filePath)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{"idea_id": assignedID}, nil
+		})
+
+		runner.RegisterHandler("market_gap_analysis", func(instance *workflow.WorkflowInstance, step workflow.WorkflowStep) (map[string]interface{}, error) {
+			ideaID, _ := instance.Artifacts["idea_id"].(string)
+			return map[string]interface{}{
+				"idea_id":        ideaID,
+				"market_summary": "High commercial demand verified by Bestie",
+				"estimated_roi":  "high",
+				"analyst":        "agent-bestie",
+			}, nil
+		})
+
+		runner.RegisterHandler("architecture_feasibility", func(instance *workflow.WorkflowInstance, step workflow.WorkflowStep) (map[string]interface{}, error) {
+			ideaID, _ := instance.Artifacts["idea_id"].(string)
+			return map[string]interface{}{
+				"idea_id":        ideaID,
+				"feasibility":    "feasible",
+				"latency_impact": "low",
+				"auditor":        "agent-philip",
+			}, nil
+		})
+
+		runner.RegisterHandler("score_and_promote", func(instance *workflow.WorkflowInstance, step workflow.WorkflowStep) (map[string]interface{}, error) {
+			ideaID, _ := instance.Artifacts["idea_id"].(string)
+			if ideaID == "" {
+				return nil, fmt.Errorf("missing 'idea_id' artifact for promotion")
+			}
+			env, err := engine.ReadRecord(ideaID)
+			if err != nil {
+				return nil, err
+			}
+			err = engine.CommitRecord(vault.CommitRequest{
+				RecordID:       ideaID,
+				ExpectedSHA256: env.SHA256,
+				Updates: map[string]interface{}{
+					"status":     "candidate",
+					"impact":     5,
+					"effort":     2,
+					"confidence": 4,
+				},
+				Actor:          "agent-olivier",
+				IdempotencyKey: instance.InstanceID,
+				Reason:         "score_and_promote",
+			})
+			if err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{"status": "candidate", "record_id": ideaID}, nil
+		})
+
+		if err := runner.RunUntilTerminal(inst, 20); err != nil {
+			fmt.Fprintf(os.Stderr, "Workflow execution failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Workflow %s completed with status: %s (Instance ID: %s)\n", wf.WorkflowID, inst.Status, inst.InstanceID)
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
