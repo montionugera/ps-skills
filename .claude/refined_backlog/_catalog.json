@@ -166,10 +166,11 @@
     "from_idea": "I-014",
     "created_at": "2026-09-27T02:38:24.373440+00:00",
     "claimed_by": "claude-a6c35399",
-    "status": "shipped",
+    "status": "promoted",
     "release_version": "1.7",
     "claimed_at": "2026-09-27T02:38:27.448472+00:00",
     "shipped_at": "2026-09-27T02:39:56.689821+00:00",
-    "shipped_sha": "3dcb15666533a5167326da29271b020e721c99ff"
+    "shipped_sha": "3dcb15666533a5167326da29271b020e721c99ff",
+    "promoted_at": "2026-09-27T02:51:07.168719+00:00"
   }
 ]
