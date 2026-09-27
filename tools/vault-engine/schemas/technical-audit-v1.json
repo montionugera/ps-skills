@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TechnicalAuditV1",
+  "type": "object",
+  "required": ["schema", "idea_id", "feasibility", "latency_impact", "schema_changes_required", "tdd_plan", "auditor"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "schemas/technical-audit-v1.json"
+    },
+    "idea_id": {
+      "type": "string",
+      "pattern": "^IDEA-\\d{4}-\\d{6}$"
+    },
+    "feasibility": {
+      "type": "string",
+      "enum": ["feasible", "complex", "blocked"]
+    },
+    "latency_impact": {
+      "type": "string",
+      "enum": ["none", "low", "medium", "critical"]
+    },
+    "schema_changes_required": {
+      "type": "boolean"
+    },
+    "tdd_plan": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "architectural_concerns": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "auditor": {
+      "type": "string",
+      "const": "agent-philip"
+    }
+  },
+  "additionalProperties": false
+}

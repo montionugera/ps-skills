@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IdeaSchemaV1",
+  "type": "object",
+  "required": ["schema", "id", "kind", "title", "status", "created", "updated"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "idea/v1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^IDEA-\\d{4}-\\d{6}$"
+    },
+    "kind": {
+      "type": "string",
+      "const": "idea"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["inbox", "triage", "incubating", "candidate", "committed", "rejected", "archived"]
+    },
+    "owner": {
+      "type": "string"
+    },
+    "area_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "project_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "domain_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "horizon": {
+      "type": "string",
+      "enum": ["now", "next", "later", "someday"]
+    },
+    "impact": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "effort": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "confidence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "strategic_fit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "risk": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "evidence_level": {
+      "type": "string",
+      "enum": ["none", "anecdotal", "qualitative", "quantitative", "validated"]
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["undecided", "pursue", "hold", "reject"]
+    },
+    "created": {
+      "type": "string"
+    },
+    "updated": {
+      "type": "string"
+    },
+    "review_after": {
+      "type": "string"
+    },
+    "source": {
+      "type": "object"
+    },
+    "sensitive": {
+      "type": "boolean"
+    },
+    "aliases": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

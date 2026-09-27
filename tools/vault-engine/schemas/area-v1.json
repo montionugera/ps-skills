@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AreaSchemaV1",
+  "type": "object",
+  "required": ["schema", "id", "kind", "title", "status", "owner", "review_cadence"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "area/v1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^area-[a-z0-9-]+$"
+    },
+    "kind": {
+      "type": "string",
+      "const": "area"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "watch", "delegated", "retired"]
+    },
+    "owner": {
+      "type": "string"
+    },
+    "review_cadence": {
+      "type": "string",
+      "enum": ["weekly", "biweekly", "monthly", "quarterly"]
+    },
+    "next_review": {
+      "type": "string"
+    },
+    "kpi_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

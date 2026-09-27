@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResearchNotesV1",
+  "type": "object",
+  "required": ["schema", "idea_id", "market_summary", "gap_analysis", "estimated_roi", "risk_factors", "analyst"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "schemas/research-notes-v1.json"
+    },
+    "idea_id": {
+      "type": "string",
+      "pattern": "^IDEA-\\d{4}-\\d{6}$"
+    },
+    "market_summary": {
+      "type": "string",
+      "minLength": 10
+    },
+    "competitors": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gap_analysis": {
+      "type": "string",
+      "minLength": 10
+    },
+    "estimated_roi": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "transformative"]
+    },
+    "risk_factors": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "analyst": {
+      "type": "string",
+      "const": "agent-bestie"
+    }
+  },
+  "additionalProperties": false
+}
