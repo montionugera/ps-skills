@@ -145,6 +145,56 @@ func main() {
 		}
 		fmt.Printf("Agent validation PASSED for %s (role: %s)\n", m.AgentID, m.Role)
 
+	case "read-record":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: vault-engine read-record <record_id>")
+			os.Exit(1)
+		}
+		env, err := engine.ReadRecord(os.Args[2])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Read record error: %v\n", err)
+			os.Exit(1)
+		}
+		out, _ := json.MarshalIndent(env, "", "  ")
+		fmt.Println(string(out))
+
+	case "commit":
+		if len(os.Args) < 6 {
+			fmt.Fprintln(os.Stderr, "Usage: vault-engine commit <record_id> <expected_sha> <actor> <updates_json> [idempotency_key] [reason]")
+			os.Exit(1)
+		}
+		recordID := os.Args[2]
+		expectedSHA := os.Args[3]
+		actor := os.Args[4]
+		rawUpdates := os.Args[5]
+		var updates map[string]interface{}
+		if err := json.Unmarshal([]byte(rawUpdates), &updates); err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid updates JSON: %v\n", err)
+			os.Exit(1)
+		}
+		idempotencyKey := ""
+		if len(os.Args) > 6 {
+			idempotencyKey = os.Args[6]
+		}
+		reason := "cli-commit"
+		if len(os.Args) > 7 {
+			reason = os.Args[7]
+		}
+
+		err := engine.CommitRecord(vault.CommitRequest{
+			RecordID:       recordID,
+			ExpectedSHA256: expectedSHA,
+			Updates:        updates,
+			Actor:          actor,
+			IdempotencyKey: idempotencyKey,
+			Reason:         reason,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Commit FAILED: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Commit SUCCESS for %s by %s (OCC validated)\n", recordID, actor)
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		printUsage()
@@ -157,6 +207,8 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  rebuild-index                       Rebuild _meta/indexes/*.jsonl")
 	fmt.Println("  ingest <file_path>                  Ingest raw note from inbox")
+	fmt.Println("  read-record <record_id>             Read canonical record with SHA-256")
+	fmt.Println("  commit <id> <sha> <actor> <json>    Optimistic concurrency commit")
 	fmt.Println("  validate <file_path>                Validate note schema")
 	fmt.Println("  lock <record_id> <agent> <op>       Acquire atomic lock")
 	fmt.Println("  unlock <record_id>                  Release lock")
