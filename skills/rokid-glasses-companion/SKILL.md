@@ -23,6 +23,16 @@ Apply this skill when developing for Rokid smart glasses or Android AR wearables
 
 ---
 
+## Hardware & Firmware Target Matrix
+
+The empirical patterns in this skill were verified on:
+- **Device:** Rokid Smart Glasses, Android 12 User Build (API 31/32).
+- **Firmware:** `1.26.009` (Security patch 2024-07-05).
+- **System Launcher:** `com.rokid.os.sprite.launcher`.
+- **System Audio/AI Service:** `com.rokid.os.sprite.assistserver` / `cxr-service`.
+
+---
+
 ## Core Architectural Laws
 
 ### Law 1: Direct-to-Host Wi-Fi Architecture (Bypass the Phone Relay)
@@ -41,7 +51,7 @@ flowchart TD
         note2["Latency: < 200ms<br/>Continuous streaming<br/>Phone can be completely OFF"]
     end
 ```
-*Why:* Testing on Rokid CXR hardware proved that relaying via the iPhone/Android companion app over Bluetooth introduces **17–23 seconds of latency**, drops the audio capture channel whenever a photo is taken, and terminates the session the moment the phone screen locks. Direct Wi-Fi WebSocket connections to the host's LAN IP (`ws://<LAN_IP>:port/ws/live`) operate with sub-200ms latency and zero phone dependencies.
+*Why:* Testing on physical Rokid CXR hardware proved that relaying via the iPhone/Android companion app over Bluetooth introduces **17–23 seconds of latency**, drops the audio capture channel whenever a photo is taken, and terminates the session the moment the phone screen locks. Direct Wi-Fi WebSocket connections to the host's LAN IP (`ws://<LAN_IP>:port/ws/live` or `wss://`) operate with sub-200ms latency and zero phone dependencies.
 
 ---
 
@@ -63,25 +73,23 @@ val record = AudioRecord(
     MediaRecorder.AudioSource.MIC,
     16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize
 )
-// Process through AGC: Rokid mic speech is ~30 dB too quiet (peaks at -23 dBFS,
-// room noise at -82 dBFS). AGC boosts quiet speech while limiter prevents clipping on loud shouts.
+check(record.state == AudioRecord.STATE_INITIALIZED) { "AudioRecord initialization failed" }
 ```
 *Traps to remember:*
 1. `AudioSource.VOICE_RECOGNITION` returns pure zeros (`0x00`) because the system `cxr-service` holds an exclusive background lock (`isClientSilenced=true`).
-2. `AudioSource.MIC` works, but raw hardware speech arrives **~30 dB too quiet**; LLM/STT engines will transcribe nothing.
+2. `AudioSource.MIC` works, but raw hardware speech arrives **~30 dB too quiet** (speech peaks at -23 dBFS, room noise at -82 dBFS); LLM/STT engines will transcribe nothing.
 3. Applying a crude fixed multiplier (e.g. 20x or 32x) causes clipping on loud syllables (-4 dBFS clipping). An adaptive AGC with a peak limiter is mandatory.
+4. Handle `AudioRecord.ERROR_DEAD_OBJECT`: if the native `audioserver` crashes, `AudioRecord.read()` returns `ERROR_DEAD_OBJECT`. You must release and reinitialize the record instance.
 
 ---
 
-### Law 3: Walkie-Talkie Half-Duplex Mode (Acoustic Echo Mitigation)
-**On smart glasses without hardware Acoustic Echo Cancellation (AEC), use half-duplex mic suppression while the assistant is speaking.**
-- On Rokid glasses, the speakers are adjacent to the temple microphones.
-- Audio from the speakers leaks into the microphone at **-30 to -35 dBFS**.
-- In full-duplex mode, Gemini Live or conversational models hear their own voice and trigger continuous `interrupted` events (the AI talks over and cancels itself).
+### Law 3: Playback-Derived Half-Duplex Echo Suppression
+**On smart glasses without hardware AEC, key mic suppression to the local playback buffer queue, NOT merely server events.**
+- On Rokid glasses, the speakers are adjacent to the temple microphones. Audio from the speakers leaks into the microphone at **-30 to -35 dBFS**, causing Gemini Live to self-interrupt.
 - **The Invariant:**
-  1. When server state is `SPEAKING` / assistant is outputting audio: **Stop/mute mic uplink packet streaming.**
-  2. Keep mic muted during playback plus a **300–500 ms hangover tail** (to allow speaker room reverb to decay).
-  3. Provide a physical **single-tap** gesture for the user to barge in / interrupt the assistant intentionally.
+  1. Derive suppression directly from the audio rendering pipeline: mic is suppressed whenever `AudioTrack` has unplayed samples queued or is actively rendering sound.
+  2. The **300–500 ms hangover tail** must start *after* the final audio sample finishes physically playing through the hardware speaker (not when the network stream ends).
+  3. Single-tap gesture provides an instant local interrupt: stop `AudioTrack`, call `audioTrack.flush()`, cancel hangover, and resume mic capture immediately.
 
 ---
 
@@ -89,21 +97,21 @@ val record = AudioRecord(
 **Do not rely on `SPRITE_BUTTON` system broadcasts. Intercept raw key events in `dispatchKeyEvent` and register a Priority 999 `KeyReceiver` to block system camera hijacks.**
 
 1. **System Camera Hijack Prevention:**
-   A physical single-tap can trigger the Rokid OS system camera shortcut unless an ordered broadcast receiver (`KeyReceiver`) with `priority = 999` is active:
+   A physical single-tap triggers the Rokid OS system camera shortcut unless an ordered broadcast receiver (`KeyReceiver`) with `priority = 999` is active:
    ```kotlin
    override fun onResume() {
        super.onResume()
        val filter = IntentFilter().apply {
            addAction("com.android.action.ACTION_SPRITE_BUTTON_CLICK")
            addAction("com.android.action.ACTION_SPRITE_BUTTON_DOUBLE_CLICK")
-           priority = 999 // Must be higher than system AssistServer receiver!
+           priority = 999 // Higher than system AssistServer receiver!
        }
        registerReceiver(keyReceiver, filter)
    }
 
    override fun onPause() {
        super.onPause()
-       unregisterReceiver(keyReceiver) // Release when app goes to background
+       unregisterReceiver(keyReceiver)
    }
 
    // Inside KeyReceiver:
@@ -122,13 +130,20 @@ val record = AudioRecord(
 
 ---
 
-### Law 5: Wearable Radios, Power & Keep-Alive
-1. **AssistServer Wi-Fi Disable Trap:** The Rokid system daemon (`com.rokid.os.sprite.assistserver`) periodically turns off Wi-Fi (`wifi_on=0`).
-   - Check `wifiManager.isWifiEnabled` at session start; prompt user if Wi-Fi is disabled.
-   - Implement exponential backoff reconnect logic in the WebSocket layer.
-2. **Display Sleep & Radio Suspension:**
+### Law 5: Android Wearable Lifecycle, Radios & Resource Hygiene
+1. **Foreground Service Requirement:** Background audio capture and camera operations require a Foreground Service with typed attributes:
+   ```xml
+   <service
+       android:name=".services.LiveCompanionService"
+       android:foregroundServiceType="microphone|camera" />
+   ```
+2. **Wi-Fi Radios & Power Locks:**
+   - The Rokid daemon `com.rokid.os.sprite.assistserver` periodically disables Wi-Fi (`wifi_on=0`). Validate `wifiManager.isWifiEnabled` at launch.
+   - Acquire a `WifiLock` (`WIFI_MODE_FULL_HIGH_PERF`) and release it inside `try/finally` during teardown.
    - Set `window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)` during active sessions.
-   - Acquire a `WifiLock` (`WIFI_MODE_FULL_HIGH_PERF`) to prevent OS Wi-Fi power throttling while audio is streaming.
+3. **Camera2 / ImageReader Hygiene:**
+   - Every `Image` acquired from `ImageReader` must be closed immediately (`image.close()`) inside a `use` block to prevent native memory exhaustion.
+   - Close `CameraCaptureSession` and `CameraDevice` asynchronously during session termination.
 
 ---
 
@@ -155,9 +170,9 @@ adb -s <SERIAL> logcat -s JoyProbe:D AudioRecord:W
 |---|---|---|
 | Using `AudioSource.VOICE_RECOGNITION` | Returns all zeros; mic silent | Use `AudioSource.MIC` |
 | Using fixed static gain (e.g. ×32) | Clips loud speech at -4 dBFS; distorted audio | Use AGC with dynamic ceiling and limiter |
-| Leaving mic open during AI playback | Assistant voice echoes back (-30 dBFS) causing self-interruption loop | Mute mic during playback + 400ms tail (walkie-talkie mode) |
+| Deriving mic mute solely from network packets | Audio still in hardware buffers causes echo feedback | Derive mute from `AudioTrack` buffer head + 400ms hangover |
 | Omitting Priority 999 `KeyReceiver` | Single tap launches system camera app, stealing focus | Register ordered receiver with `priority=999` and `abortBroadcast()` |
-| Allowing default `KEYCODE_BACK` handling | Temple tap accidentally closes app mid-session | Consume `KEYCODE_BACK` during active session |
+| Leaking `ImageReader` frames | Native camera buffer exhaustion, Camera2 crash | Always call `image.close()` in `try/finally` |
 | Starting activity via bare `am start` | Delivers `onNewIntent` to existing instance; skips initialization | Use `am start -S` to force restart |
 
 ---
@@ -169,4 +184,5 @@ When verifying a Rokid smart glasses companion build:
 - [ ] **Speech Gain Check:** Speak at normal volume. Verify speech arrives at `-30 to -15 dBFS` (never below `-40 dBFS` or clipping at `0 dBFS`).
 - [ ] **Echo Isolation Test:** Let the assistant speak a 15-second response. Verify zero self-interruptions occur while the user remains silent.
 - [ ] **Gesture Debounce Verification:** Tap, double-tap, and swipe on the touchpad. Verify single events fire without duplicate triggers or system camera launches.
+- [ ] **Camera2 Frame Release:** Capture 10 successive images; verify `ImageReader` buffer count does not leak or freeze.
 - [ ] **Screen-Off Soak:** Allow glasses to idle for 5 minutes during an active session. Verify WebSocket does not drop and Wi-Fi remains active.
