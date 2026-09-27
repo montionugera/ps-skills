@@ -1,7 +1,8 @@
 ---
 title: "Client companion skills for macOS audio HUD, Rokid smart glasses, and multimodal voice protocol"
-id: I-014
-status: idea
+id: F-014
+status: refined
+from_idea: I-014
 ---
 
 # Client companion skills for macOS audio HUD, Rokid smart glasses, and multimodal voice protocol
