@@ -36,6 +36,12 @@ func AuditVault(vaultRoot string) (*AuditReport, error) {
 			baseName := strings.TrimSuffix(d.Name(), ".md")
 			knownNotes[baseName] = true
 			knownNotes[d.Name()] = true
+
+			relPath, _ := filepath.Rel(vaultRoot, path)
+			relPath = filepath.ToSlash(relPath)
+			relNoExt := strings.TrimSuffix(relPath, ".md")
+			knownNotes[relPath] = true
+			knownNotes[relNoExt] = true
 		}
 		return nil
 	})
