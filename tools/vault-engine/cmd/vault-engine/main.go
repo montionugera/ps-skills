@@ -22,19 +22,34 @@ func main() {
 
 	command := os.Args[1]
 
-	// Determine vault root: if VAULT_ROOT env is set, use it; otherwise search up
+	// Determine vault root: if VAULT_ROOT env is set, use it; otherwise search up or use system canonical vault
 	vaultRoot := os.Getenv("VAULT_ROOT")
 	if vaultRoot == "" {
-		// default to two levels up from _meta/engine or cwd
 		cwd, _ := os.Getwd()
 		if _, err := os.Stat(filepath.Join(cwd, "_meta")); err == nil {
 			vaultRoot = cwd
 		} else if _, err := os.Stat(filepath.Join(cwd, "..", "..", "_meta")); err == nil {
 			vaultRoot = filepath.Clean(filepath.Join(cwd, "..", ".."))
 		} else {
-			vaultRoot = cwd
+			home, _ := os.UserHomeDir()
+			candidatePaths := []string{
+				filepath.Join(home, "workspace", "agentic-vault"),
+				filepath.Join(home, "Documents", "Obsidian Vault"),
+			}
+			found := false
+			for _, p := range candidatePaths {
+				if _, err := os.Stat(filepath.Join(p, "_meta")); err == nil {
+					vaultRoot = p
+					found = true
+					break
+				}
+			}
+			if !found {
+				vaultRoot = cwd
+			}
 		}
 	}
+
 
 	engine := vault.NewVaultEngine(vaultRoot)
 
@@ -379,6 +394,26 @@ func main() {
 		}
 		fmt.Printf("Published knowledge note as %s\n", assignedID)
 
+	case "search":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: vault-engine search <query>")
+			os.Exit(1)
+		}
+		query := os.Args[2]
+		results, err := engine.SearchIndexes(query)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Search failed: %v\n", err)
+			os.Exit(1)
+		}
+		if len(results) == 0 {
+			fmt.Printf("No matching records found for '%s'\n", query)
+			return
+		}
+		fmt.Printf("Found %d matching record(s) for '%s':\n", len(results), query)
+		for _, r := range results {
+			fmt.Printf(" - [%s] %s (%s)\n", r.ID, r.Title, r.Path)
+		}
+
 	case "check-privacy":
 		if err := vault.CheckGitPrivacy(engine.Root); err != nil {
 			fmt.Fprintf(os.Stderr, "Privacy check FAILED: %v\n", err)
@@ -397,6 +432,7 @@ func printUsage() {
 	fmt.Println("Usage: vault-engine <command> [arguments]")
 	fmt.Println("Commands:")
 	fmt.Println("  rebuild-index                       Rebuild _meta/indexes/*.jsonl")
+	fmt.Println("  search <query>                      Search knowledge, projects, and ideas")
 	fmt.Println("  ingest <file_path>                  Ingest raw note from inbox")
 	fmt.Println("  read-record <record_id>             Read canonical record with SHA-256")
 	fmt.Println("  commit <id> <sha> <actor> <json>    Optimistic concurrency commit")
@@ -411,4 +447,5 @@ func printUsage() {
 	fmt.Println("  validate-dag <workflow_file>        Validate workflow DAG acyclicity")
 	fmt.Println("  validate-agent <manifest_file>      Validate agent recruitment manifest")
 }
+
 

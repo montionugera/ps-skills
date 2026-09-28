@@ -1100,3 +1100,38 @@ func (v *VaultEngine) CommitRecord(req CommitRequest) error {
 	// 5. Sync indexes
 	return v.RebuildIndexes()
 }
+
+func (v *VaultEngine) SearchIndexes(query string) ([]IndexEntry, error) {
+	q := strings.ToLower(strings.TrimSpace(query))
+	indexesDir := filepath.Join(v.Root, "_meta", "indexes")
+	indexFiles := []string{
+		filepath.Join(indexesDir, "knowledge.jsonl"),
+		filepath.Join(indexesDir, "projects.jsonl"),
+		filepath.Join(indexesDir, "ideas.jsonl"),
+	}
+
+	var results []IndexEntry
+	for _, f := range indexFiles {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var entry IndexEntry
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				continue
+			}
+			if strings.Contains(strings.ToLower(entry.ID), q) ||
+				strings.Contains(strings.ToLower(entry.Title), q) ||
+				strings.Contains(strings.ToLower(entry.Path), q) {
+				results = append(results, entry)
+			}
+		}
+	}
+	return results, nil
+}
+

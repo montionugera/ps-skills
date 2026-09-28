@@ -426,3 +426,44 @@ target_date: "2026-12-01"
 	}
 }
 
+func TestBC11_SearchIndexes(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "vault-search-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	engine := NewVaultEngine(tempDir)
+
+	// Publish a thesis
+	draftPath := filepath.Join(tempDir, "draft-sop.md")
+	draftContent := `---
+kind: sop
+title: Anti Mock Verification SOP
+status: active
+---
+
+# Anti Mock Verification SOP
+`
+	if err := os.WriteFile(draftPath, []byte(draftContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.PublishKnowledge(draftPath, "process", "agent-olivier")
+	if err != nil {
+		t.Fatalf("failed to publish: %v", err)
+	}
+
+	// Search for "anti mock"
+	results, err := engine.SearchIndexes("anti mock")
+	if err != nil {
+		t.Fatalf("SearchIndexes failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !strings.Contains(results[0].Title, "Anti Mock") {
+		t.Errorf("unexpected search hit: %+v", results[0])
+	}
+}
+
+

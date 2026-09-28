@@ -33,11 +33,13 @@ The engine binary is located at `_meta/bin/vault-engine` inside the vault root (
 
 | Command | Usage | Description |
 |---|---|---|
-| `read-record` | `vault-engine read-record <id>` | Reads note, returns JSON + SHA-256 envelope |
+| `search` | `vault-engine search <query>` | Instant keyword search across knowledge, projects, and ideas |
+| `read-record` | `vault-engine read-record <id>` | Universal record reader (Ideas, Projects, Areas, Knowledge) returning JSON + SHA-256 |
 | `commit` | `vault-engine commit <id> <sha> <actor> '<json>' [key] [reason]` | Atomic OCC commit with OS process flock + fsync |
+| `publish-knowledge` | `vault-engine publish-knowledge <file> [cat] [by]` | Transactionally validates & publishes a knowledge note with audit event |
 | `ingest` | `vault-engine ingest <file_path>` | Ingests raw inbox note, assigns sequence ID `IDEA-YYYY-NNNNNN` |
 | `validate` | `vault-engine validate <file_path>` | Validates note YAML frontmatter against JSON Schema |
-| `rebuild-index` | `vault-engine rebuild-index` | Rebuilds `_meta/indexes/ideas.jsonl` and `projects.jsonl` |
+| `rebuild-index` | `vault-engine rebuild-index` | Rebuilds `_meta/indexes/` (`ideas.jsonl`, `projects.jsonl`, `knowledge.jsonl`) |
 | `lock` | `vault-engine lock <id> <agent> <op>` | Acquires explicit task lock |
 | `unlock` | `vault-engine unlock <id>` | Releases explicit task lock |
 | `validate-dag` | `vault-engine validate-dag <file>` | Validates workflow DAG acyclicity and reachability |
@@ -45,68 +47,57 @@ The engine binary is located at `_meta/bin/vault-engine` inside the vault root (
 
 ---
 
-## 📥 Ingestion & Triage Workflow
+## 🔄 The Compounding Knowledge Loop (4-Phase Lifecycle)
 
 ```mermaid
 flowchart LR
-    Human["👤 Human Quick Capture"] --> Inbox["📥 _inbox/human/"]
-    Inbox -->|vault-engine ingest| Ideas["01_Ideas/ (status: inbox)"]
-    Ideas --> Read["read-record"]
-    Read --> Bestie["💼 Bestie (Impact & Strategy)"]
-    Read --> Philip["🔧 Philip (Effort & Architecture)"]
-    Bestie --> ArtifactB["_inbox/agent/bestie/"]
-    Philip --> ArtifactP["_inbox/agent/philip/"]
-    ArtifactB --> Synthesize["🎩 Olivier Synthesizes"]
-    ArtifactP --> Synthesize
-    Synthesize --> OCC["vault-engine commit (status: candidate)"]
-    OCC --> Audit["_meta/events/"]
-    OCC --> Index["_meta/indexes/"]
+    P1["1. Idea Generate<br/>(Discovery & Ingest)"] --> P2["2. Refine + Go/No-Go<br/>(Architecture & Audit)"]
+    P2 --> P3["3. Implement & Gate<br/>(TDD & Verification)"]
+    P3 --> P4["4. Learn / Unlearn<br/>(Publish Knowledge)"]
+
+    subgraph C1["Product / Feature"]
+        P1
+        P2
+    end
+
+    subgraph C2["Process / Workflow"]
+        P3
+    end
+
+    subgraph C3["Knowledge Thesis / Rules"]
+        P4
+    end
 ```
 
-### 1. Ingesting Raw Captures
-When a note is dropped into `_inbox/human/<note>.md`:
+### 1. Pre-Flight Knowledge Discovery (Before Coding)
+Any agent starting work in any repository queries the vault for durable rules and theses:
 ```bash
-./_meta/bin/vault-engine ingest _inbox/human/<note>.md
-# Returns: Ingested note as IDEA-2026-000004
+vault-engine search "<topic>"
+vault-engine read-record "<ID>"
 ```
 
-### 2. Triaging with Bestie & Philip
-Orchestrator reads the record:
+### 2. Triage & Project Initiation
+Ingest raw discoveries and promote to projects via OCC:
 ```bash
-./_meta/bin/vault-engine read-record IDEA-2026-000004
+vault-engine ingest _inbox/human/<note>.md
+vault-engine commit IDEA-2026-000004 "<SHA256>" "agent-olivier" '{"status":"candidate"}'
 ```
-Dispatches parallel subagents:
-- **`agent-bestie`**: Evaluates problem, buyer, competitors, ROI, and proposes `impact` (1-5).
-- **`agent-philip`**: Evaluates technical stack, latency bounds, dependencies, and proposes `effort` (1-5).
 
-### 3. Committing Evaluated Candidate
-Once outputs are synthesized, execute the OCC commit:
+### 3. Execution & Claim Protection
+Protect in-flight work with `mesh claim <path>` so concurrent agents do not collide.
+
+### 4. Post-Flight Knowledge Compounding (Learn & Unlearn)
+When an agent or thinker finishes work, captures lessons, or identifies traps:
 ```bash
-./_meta/bin/vault-engine commit IDEA-2026-000004 "<SHA256>" "agent-olivier" \
-  '{"status":"candidate","impact":4,"effort":2,"confidence":4,"strategic_fit":5}' \
-  "triage-2026-09-28" "synthesized bestie and philip evaluations"
+vault-engine publish-knowledge /tmp/new-lesson.md "thesis" "agent-olivier"
 ```
-
----
-
-## 🎯 Idea to Project Promotion Protocol
-
-When a candidate idea (`impact >= 4`, `effort <= 2`) is approved for execution:
-1. Create project folder: `02_Projects/PROJ-<slug>/Project Hub.md` conforming to `project/v1` schema.
-2. Link the project ID to the idea via OCC commit:
-   ```bash
-   ./_meta/bin/vault-engine commit IDEA-2026-000001 "<SHA>" "agent-olivier" \
-     '{"project_ids":["PROJ-monthly-close-automation"],"status":"committed"}'
-   ```
-3. Rebuild indexes:
-   ```bash
-   ./_meta/bin/vault-engine rebuild-index
-   ```
+The note is validated against `knowledge/v1`, stored in `04_Knowledge/`, logged to `_meta/events/`, and added to `_meta/indexes/knowledge.jsonl` so future agents benefit.
 
 ---
 
 ## 🧪 Verification & Audit
 
-- **Verification Script:** Always verify vault health by executing `bash _meta/scripts/test_e2e.sh`.
+- **Verification Script:** Always verify vault health by executing `bash tools/vault-engine/test_e2e.sh`.
 - **Event Audit Stream:** Every state change generates an immutable event log at `_meta/events/YYYY/MM/<timestamp>-<actor>.json`.
-- **Schema Contracts:** Schemas live in `_meta/schemas/` (`idea-v1.json`, `project-v1.json`, `area-v1.json`, `technical-audit-v1.json`, `research-notes-v1.json`). All modifications must satisfy these contracts.
+- **Schema Contracts:** Schemas live in `_meta/schemas/` (`idea-v1.json`, `project-v1.json`, `area-v1.json`, `knowledge-v1.json`, `technical-audit-v1.json`, `research-notes-v1.json`). All modifications must satisfy these contracts.
+
