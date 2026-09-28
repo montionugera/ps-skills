@@ -156,3 +156,65 @@ func TestWorkflowRunner_FailureHandling(t *testing.T) {
 		t.Errorf("expected failed status, got %s", inst.Status)
 	}
 }
+
+func TestWorkflowRunner_TerminalStepAndMaxSteps(t *testing.T) {
+	storageDir := t.TempDir()
+	wf := &WorkflowDAG{
+		WorkflowID:   "terminal-pipeline",
+		Version:      "1.0.0",
+		InitialState: "start_step",
+		States: map[string]WorkflowStep{
+			"start_step": {
+				Type: StepTypeTerminal,
+				Next: "done",
+			},
+		},
+	}
+
+	runner := NewWorkflowRunner(wf, storageDir)
+	inst := NewWorkflowInstance(wf, "inst-term-001", nil, storageDir)
+	if err := runner.Step(inst); err != nil {
+		t.Fatalf("unexpected step error: %v", err)
+	}
+	if inst.Status != StatusCompleted {
+		t.Errorf("expected StatusCompleted, got %s", inst.Status)
+	}
+
+	// Test maxSteps exceeded
+	wfMulti := &WorkflowDAG{
+		WorkflowID:   "multi-step-pipeline",
+		Version:      "1.0.0",
+		InitialState: "step_a",
+		States: map[string]WorkflowStep{
+			"step_a": {Type: StepTypeHandler, Handler: "h", Next: "step_b"},
+			"step_b": {Type: StepTypeHandler, Handler: "h", Next: "completed"},
+		},
+	}
+	runnerMulti := NewWorkflowRunner(wfMulti, storageDir)
+	runnerMulti.RegisterHandler("h", func(inst *WorkflowInstance, step WorkflowStep) (map[string]interface{}, error) {
+		return map[string]interface{}{}, nil
+	})
+	instMulti := NewWorkflowInstance(wfMulti, "inst-multi-001", nil, storageDir)
+	// maxSteps = 1 should exceed
+	if err := runnerMulti.RunUntilTerminal(instMulti, 1); err == nil {
+		t.Errorf("expected error when maxSteps exceeded")
+	}
+
+	// Test unsupported step type
+	wfBad := &WorkflowDAG{
+		WorkflowID:   "bad-step-pipeline",
+		Version:      "1.0.0",
+		InitialState: "bad_step",
+		States: map[string]WorkflowStep{
+			"bad_step": {Type: StepType("unsupported_custom_type")},
+		},
+	}
+	runnerBad := NewWorkflowRunner(wfBad, storageDir)
+	instBad := NewWorkflowInstance(wfBad, "inst-bad-001", nil, storageDir)
+	if err := runnerBad.Step(instBad); err == nil {
+		t.Errorf("expected error for unsupported step type")
+	}
+	if instBad.Status != StatusQuarantined {
+		t.Errorf("expected quarantined status, got %s", instBad.Status)
+	}
+}

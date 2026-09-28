@@ -322,6 +322,49 @@ func main() {
 			}
 		}
 
+	case "capture":
+		if len(os.Args) < 6 {
+			fmt.Fprintln(os.Stderr, "Usage: vault-engine capture <idempotency_key> <category> <origin> <payload>")
+			os.Exit(1)
+		}
+		ledger := vault.NewCaptureLedger(filepath.Join(engine.Root, "_meta", "ledger"))
+		entry, err := ledger.RecordCapture(os.Args[2], vault.CategoryTrack(os.Args[3]), os.Args[4], os.Args[5])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Capture failed: %v\n", err)
+			os.Exit(1)
+		}
+		data, _ := json.Marshal(entry)
+		fmt.Println(string(data))
+
+	case "route":
+		if len(os.Args) < 5 {
+			fmt.Fprintln(os.Stderr, "Usage: vault-engine route <category> <kind> <slug> [owner]")
+			os.Exit(1)
+		}
+		owner := ""
+		if len(os.Args) >= 6 {
+			owner = os.Args[5]
+		}
+		resolver := vault.NewPathResolver()
+		resolved := resolver.Resolve(vault.CategoryTrack(os.Args[2]), vault.RecordKind(os.Args[3]), os.Args[4], owner)
+		fmt.Println(resolved)
+
+	case "audit-health":
+		report, err := vault.AuditVault(engine.Root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Audit health failed: %v\n", err)
+			os.Exit(1)
+		}
+		data, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Println(string(data))
+
+	case "check-privacy":
+		if err := vault.CheckGitPrivacy(engine.Root); err != nil {
+			fmt.Fprintf(os.Stderr, "Privacy check FAILED: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Git privacy check PASSED: all quarantine paths strictly ignored.")
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		printUsage()
@@ -336,6 +379,10 @@ func printUsage() {
 	fmt.Println("  ingest <file_path>                  Ingest raw note from inbox")
 	fmt.Println("  read-record <record_id>             Read canonical record with SHA-256")
 	fmt.Println("  commit <id> <sha> <actor> <json>    Optimistic concurrency commit")
+	fmt.Println("  capture <key> <cat> <origin> <txt>  Record raw append-only capture")
+	fmt.Println("  route <cat> <kind> <slug> [owner]   Resolve path taxonomy")
+	fmt.Println("  audit-health                        Audit broken links and stale claims")
+	fmt.Println("  check-privacy                       Verify .gitignore quarantine rules")
 	fmt.Println("  validate <file_path>                Validate note schema")
 	fmt.Println("  lock <record_id> <agent> <op>       Acquire atomic lock")
 	fmt.Println("  unlock <record_id>                  Release lock")
