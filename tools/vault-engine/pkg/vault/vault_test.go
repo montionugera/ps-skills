@@ -309,3 +309,120 @@ func TestBC08_OptimisticConcurrencyCommit(t *testing.T) {
 		t.Fatalf("expected conflict error for stale hash, got %v", err)
 	}
 }
+
+func TestBC09_KnowledgeValidationAndPublishing(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "vault-knowledge-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	engine := NewVaultEngine(tempDir)
+
+	// 1. Validation test - valid
+	validFM := map[string]interface{}{
+		"schema": "knowledge/v1",
+		"id":     "THESIS-streaming-concurrency",
+		"kind":   "thesis",
+		"title":  "Streaming Concurrency",
+		"status": "active",
+	}
+	errs := engine.ValidateFrontmatter(validFM)
+	if len(errs) > 0 {
+		t.Fatalf("expected valid frontmatter, got errs: %v", errs)
+	}
+
+	// 2. Validation test - invalid id & status
+	invalidFM := map[string]interface{}{
+		"schema": "knowledge/v1",
+		"id":     "invalid-id",
+		"kind":   "thesis",
+		"title":  "Bad ID",
+		"status": "bogus-status",
+	}
+	errs = engine.ValidateFrontmatter(invalidFM)
+	if len(errs) != 2 {
+		t.Fatalf("expected 2 validation errors, got %d: %v", len(errs), errs)
+	}
+
+	// 3. Publish knowledge note
+	draftPath := filepath.Join(tempDir, "draft-thesis.md")
+	draftContent := `---
+kind: thesis
+title: Low Latency Voice Invariants
+status: active
+---
+
+# Low Latency Voice Invariants
+Here are the durable invariants.
+`
+	if err := os.WriteFile(draftPath, []byte(draftContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	assignedID, err := engine.PublishKnowledge(draftPath, "thesis", "agent-olivier")
+	if err != nil {
+		t.Fatalf("expected PublishKnowledge to succeed, got %v", err)
+	}
+	if !strings.HasPrefix(assignedID, "THESIS-") {
+		t.Errorf("expected THESIS- prefix, got %s", assignedID)
+	}
+
+	// Verify file was published in 04_Knowledge/theses/
+	publishedPath := filepath.Join(tempDir, "04_Knowledge", "theses", "draft-thesis.md")
+	if _, err := os.Stat(publishedPath); err != nil {
+		t.Fatalf("expected published file at %s, got error: %v", publishedPath, err)
+	}
+
+	// Verify index entry was generated
+	indexPath := filepath.Join(tempDir, "_meta", "indexes", "knowledge.jsonl")
+	indexBytes, err := os.ReadFile(indexPath)
+	if err != nil || !strings.Contains(string(indexBytes), assignedID) {
+		t.Fatalf("expected knowledge.jsonl to contain %s, got: %s", assignedID, string(indexBytes))
+	}
+}
+
+func TestBC10_UniversalReadRecord(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "vault-read-record-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	engine := NewVaultEngine(tempDir)
+
+	// Setup Project
+	projDir := filepath.Join(tempDir, "02_Projects", "PROJ-hud-assistant")
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	projHub := filepath.Join(projDir, "Project Hub.md")
+	projContent := `---
+schema: project/v1
+id: PROJ-hud-assistant
+kind: project
+title: HUD Assistant
+status: active
+owner: pasit
+target_date: "2026-12-01"
+---
+
+# HUD Assistant
+`
+	if err := os.WriteFile(projHub, []byte(projContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read project via ReadRecord
+	env, err := engine.ReadRecord("PROJ-hud-assistant")
+	if err != nil {
+		t.Fatalf("expected ReadRecord to find PROJ-hud-assistant, got %v", err)
+	}
+	if env.RecordID != "PROJ-hud-assistant" {
+		t.Errorf("expected record ID PROJ-hud-assistant, got %s", env.RecordID)
+	}
+	if env.Frontmatter["title"] != "HUD Assistant" {
+		t.Errorf("expected title HUD Assistant, got %v", env.Frontmatter["title"])
+	}
+}
+

@@ -358,6 +358,27 @@ func main() {
 		data, _ := json.MarshalIndent(report, "", "  ")
 		fmt.Println(string(data))
 
+	case "publish-knowledge":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: vault-engine publish-knowledge <file_path> [category] [author]")
+			os.Exit(1)
+		}
+		filePath := os.Args[2]
+		category := "process"
+		if len(os.Args) > 3 {
+			category = os.Args[3]
+		}
+		author := "agent-olivier"
+		if len(os.Args) > 4 {
+			author = os.Args[4]
+		}
+		assignedID, err := engine.PublishKnowledge(filePath, category, author)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Publish knowledge failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Published knowledge note as %s\n", assignedID)
+
 	case "check-privacy":
 		if err := vault.CheckGitPrivacy(engine.Root); err != nil {
 			fmt.Fprintf(os.Stderr, "Privacy check FAILED: %v\n", err)
@@ -379,6 +400,7 @@ func printUsage() {
 	fmt.Println("  ingest <file_path>                  Ingest raw note from inbox")
 	fmt.Println("  read-record <record_id>             Read canonical record with SHA-256")
 	fmt.Println("  commit <id> <sha> <actor> <json>    Optimistic concurrency commit")
+	fmt.Println("  publish-knowledge <path> [cat] [by] Publish knowledge note transactionally")
 	fmt.Println("  capture <key> <cat> <origin> <txt>  Record raw append-only capture")
 	fmt.Println("  route <cat> <kind> <slug> [owner]   Resolve path taxonomy")
 	fmt.Println("  audit-health                        Audit broken links and stale claims")
@@ -389,3 +411,4 @@ func printUsage() {
 	fmt.Println("  validate-dag <workflow_file>        Validate workflow DAG acyclicity")
 	fmt.Println("  validate-agent <manifest_file>      Validate agent recruitment manifest")
 }
+

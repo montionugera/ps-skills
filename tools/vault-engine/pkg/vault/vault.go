@@ -27,9 +27,10 @@ var (
 	ErrNotFound       = errors.New("record not found")
 	ErrInvalidLock    = errors.New("invalid or unacquired lock")
 
-	ideaIDRegex    = regexp.MustCompile(`^IDEA-\d{4}-\d{6}$`)
-	areaIDRegex    = regexp.MustCompile(`^area-[a-z0-9-]+$`)
-	projectIDRegex = regexp.MustCompile(`^PROJ-[a-z0-9-]+$`)
+	ideaIDRegex      = regexp.MustCompile(`^IDEA-\d{4}-\d{6}$`)
+	areaIDRegex      = regexp.MustCompile(`^area-[a-z0-9-]+$`)
+	projectIDRegex   = regexp.MustCompile(`^PROJ-[a-z0-9-]+$`)
+	knowledgeIDRegex = regexp.MustCompile(`^(KNOW|THESIS|CONCEPT|SOP|REF)-[a-z0-9-]+$`)
 )
 
 type RecordEnvelope struct {
@@ -234,7 +235,20 @@ func (v *VaultEngine) ValidateFrontmatter(fm map[string]interface{}) []string {
 		if !validProjectStatuses[status] {
 			errs = append(errs, fmt.Sprintf("invalid project status '%s'", status))
 		}
+
+	case "knowledge", "thesis", "concept", "sop", "reference":
+		if id != "" && !knowledgeIDRegex.MatchString(id) {
+			errs = append(errs, fmt.Sprintf("invalid knowledge id format: '%s', expected (KNOW|THESIS|CONCEPT|SOP|REF)-<slug>", id))
+		}
+		status, _ := fm["status"].(string)
+		validKnowledgeStatuses := map[string]bool{
+			"draft": true, "active": true, "deprecated": true, "archived": true,
+		}
+		if !validKnowledgeStatuses[status] {
+			errs = append(errs, fmt.Sprintf("invalid knowledge status '%s'", status))
+		}
 	}
+
 
 	return errs
 }
@@ -496,8 +510,55 @@ func (v *VaultEngine) RebuildIndexes() error {
 	}
 	_ = os.WriteFile(projIndexPath, []byte(strings.Join(projLines, "\n")+"\n"), 0644)
 
+	// 3. Knowledge
+	knowledgeDir := filepath.Join(v.Root, "04_Knowledge")
+	var knowList []IndexEntry
+	_ = filepath.Walk(knowledgeDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		fm, _, err := v.ParseMarkdown(string(data))
+		if err != nil {
+			return nil
+		}
+		id, _ := fm["id"].(string)
+		if id == "" {
+			return nil
+		}
+		title, _ := fm["title"].(string)
+		status, _ := fm["status"].(string)
+		sha, _ := v.ComputeSHA256(path)
+		relPath, _ := filepath.Rel(v.Root, path)
+		knowList = append(knowList, IndexEntry{
+			ID:      id,
+			Path:    relPath,
+			Title:   title,
+			Status:  status,
+			Updated: fmt.Sprintf("%v", fm["updated"]),
+			SHA256:  sha,
+		})
+		return nil
+	})
+
+	sort.Slice(knowList, func(i, j int) bool {
+		return knowList[i].ID < knowList[j].ID
+	})
+
+	knowIndexPath := filepath.Join(indexesDir, "knowledge.jsonl")
+	var knowLines []string
+	for _, entry := range knowList {
+		b, _ := json.Marshal(entry)
+		knowLines = append(knowLines, string(b))
+	}
+	_ = os.WriteFile(knowIndexPath, []byte(strings.Join(knowLines, "\n")+"\n"), 0644)
+
 	return nil
 }
+
 
 func (v *VaultEngine) AcquireLock(recordID, agentID, operation string) (*LockContext, error) {
 	lockDir := filepath.Join(v.Root, "_meta", "locks", fmt.Sprintf("%s.lock", recordID))
@@ -718,21 +779,85 @@ func (v *VaultEngine) VerifyWikilink(targetSlug string) bool {
 	return found
 }
 
-func (v *VaultEngine) ReadRecord(recordID string) (*RecordEnvelope, error) {
-	ideasDir := filepath.Join(v.Root, "01_Ideas")
-	files, err := os.ReadDir(ideasDir)
-	if err != nil {
-		return nil, err
-	}
-	var targetPath string
-	for _, f := range files {
-		if strings.HasPrefix(f.Name(), recordID) && strings.HasSuffix(f.Name(), ".md") {
-			targetPath = filepath.Join(ideasDir, f.Name())
-			break
+func (v *VaultEngine) FindRecordPath(recordID string) (string, error) {
+	// 1. Direct heuristic search
+	if strings.HasPrefix(recordID, "IDEA-") {
+		ideasDir := filepath.Join(v.Root, "01_Ideas")
+		files, err := os.ReadDir(ideasDir)
+		if err == nil {
+			for _, f := range files {
+				if strings.HasPrefix(f.Name(), recordID) && strings.HasSuffix(f.Name(), ".md") {
+					return filepath.Join(ideasDir, f.Name()), nil
+				}
+			}
+		}
+	} else if strings.HasPrefix(recordID, "PROJ-") {
+		projectsDir := filepath.Join(v.Root, "02_Projects")
+		hubPath := filepath.Join(projectsDir, recordID, "Project Hub.md")
+		if _, err := os.Stat(hubPath); err == nil {
+			return hubPath, nil
+		}
+		directPath := filepath.Join(projectsDir, recordID+".md")
+		if _, err := os.Stat(directPath); err == nil {
+			return directPath, nil
+		}
+	} else if strings.HasPrefix(recordID, "area-") {
+		areasDir := filepath.Join(v.Root, "03_Areas")
+		slug := strings.TrimPrefix(recordID, "area-")
+		hubPath := filepath.Join(areasDir, slug, slug+" Hub.md")
+		if _, err := os.Stat(hubPath); err == nil {
+			return hubPath, nil
+		}
+		directPath := filepath.Join(areasDir, recordID+".md")
+		if _, err := os.Stat(directPath); err == nil {
+			return directPath, nil
 		}
 	}
-	if targetPath == "" {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, recordID)
+
+	// 2. Search across canonical directories for frontmatter ID or filename match
+	searchDirs := []string{
+		filepath.Join(v.Root, "01_Ideas"),
+		filepath.Join(v.Root, "02_Projects"),
+		filepath.Join(v.Root, "03_Areas"),
+		filepath.Join(v.Root, "04_Knowledge"),
+	}
+
+	for _, sDir := range searchDirs {
+		var foundPath string
+		_ = filepath.Walk(sDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info == nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+				return nil
+			}
+			base := filepath.Base(path)
+			if strings.HasPrefix(base, recordID) {
+				foundPath = path
+				return filepath.SkipAll
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			fm, _, err := v.ParseMarkdown(string(data))
+			if err == nil {
+				if id, ok := fm["id"].(string); ok && id == recordID {
+					foundPath = path
+					return filepath.SkipAll
+				}
+			}
+			return nil
+		})
+		if foundPath != "" {
+			return foundPath, nil
+		}
+	}
+
+	return "", fmt.Errorf("%w: %s", ErrNotFound, recordID)
+}
+
+func (v *VaultEngine) ReadRecord(recordID string) (*RecordEnvelope, error) {
+	targetPath, err := v.FindRecordPath(recordID)
+	if err != nil {
+		return nil, err
 	}
 
 	data, err := os.ReadFile(targetPath)
@@ -756,6 +881,128 @@ func (v *VaultEngine) ReadRecord(recordID string) (*RecordEnvelope, error) {
 		Body:        body,
 	}, nil
 }
+
+func (v *VaultEngine) PublishKnowledge(filePath string, category string, author string) (string, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+	fm, body, err := v.ParseMarkdown(string(data))
+	if err != nil {
+		return "", fmt.Errorf("parse markdown: %w", err)
+	}
+
+	if fm == nil {
+		fm = make(map[string]interface{})
+	}
+	fm["schema"] = "knowledge/v1"
+	if _, ok := fm["status"]; !ok {
+		fm["status"] = "active"
+	}
+	if category != "" {
+		fm["category"] = category
+	}
+	if author != "" {
+		fm["author"] = author
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, ok := fm["created"]; !ok {
+		fm["created"] = time.Now().Format("2006-01-02")
+	}
+	fm["updated"] = now
+
+	id, _ := fm["id"].(string)
+	kind, _ := fm["kind"].(string)
+	if kind == "" {
+		kind = "knowledge"
+		fm["kind"] = kind
+	}
+	if id == "" {
+		base := strings.TrimSuffix(filepath.Base(filePath), ".md")
+		slug := strings.ToLower(strings.ReplaceAll(base, " ", "-"))
+		prefix := "KNOW"
+		switch kind {
+		case "thesis":
+			prefix = "THESIS"
+		case "concept":
+			prefix = "CONCEPT"
+		case "sop":
+			prefix = "SOP"
+		case "reference":
+			prefix = "REF"
+		}
+		id = fmt.Sprintf("%s-%s", prefix, slug)
+		fm["id"] = id
+	}
+
+	errs := v.ValidateFrontmatter(fm)
+	if len(errs) > 0 {
+		return "", fmt.Errorf("knowledge validation failed: %s", strings.Join(errs, ", "))
+	}
+
+	destSubdir := "concepts"
+	switch kind {
+	case "thesis":
+		destSubdir = "theses"
+	case "concept":
+		destSubdir = "concepts"
+	case "sop":
+		destSubdir = "sops"
+	case "reference":
+		destSubdir = "references"
+	}
+
+	destDir := filepath.Join(v.Root, "04_Knowledge", destSubdir)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return "", err
+	}
+
+	title, _ := fm["title"].(string)
+	if title == "" {
+		title = strings.TrimSuffix(filepath.Base(filePath), ".md")
+		fm["title"] = title
+	}
+	filename := filepath.Base(filePath)
+	if !strings.HasSuffix(filename, ".md") {
+		filename += ".md"
+	}
+	destPath := filepath.Join(destDir, filename)
+
+	yamlBytes, err := yaml.Marshal(fm)
+	if err != nil {
+		return "", fmt.Errorf("yaml marshal: %w", err)
+	}
+	content := fmt.Sprintf("---\n%s---\n\n%s", string(yamlBytes), strings.TrimSpace(body))
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+
+	if err := os.WriteFile(destPath, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("write knowledge note: %w", err)
+	}
+
+	// Emit audit event
+	eventDir := filepath.Join(v.Root, "_meta", "events", time.Now().UTC().Format("2006/01"))
+	_ = os.MkdirAll(eventDir, 0755)
+	eventPath := filepath.Join(eventDir, fmt.Sprintf("%d-%s.json", time.Now().UnixNano(), author))
+	audit := AuditEvent{
+		RecordID:  id,
+		AgentID:   author,
+		Timestamp: now,
+		Diff: map[string]interface{}{
+			"action":   "publish_knowledge",
+			"path":     destPath,
+			"category": category,
+			"kind":     kind,
+		},
+	}
+	auditData, _ := json.MarshalIndent(audit, "", "  ")
+	_ = os.WriteFile(eventPath, auditData, 0644)
+
+	_ = v.RebuildIndexes()
+	return id, nil
+}
+
 
 func (v *VaultEngine) CommitRecord(req CommitRequest) error {
 	guardsDir := filepath.Join(v.Root, "_meta", "guards")
