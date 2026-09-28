@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"obsidian-vault-engine/pkg/agent"
+	"obsidian-vault-engine/pkg/daemon"
 	"obsidian-vault-engine/pkg/vault"
 	"obsidian-vault-engine/pkg/workflow"
 )
@@ -285,6 +287,40 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Workflow %s completed with status: %s (Instance ID: %s)\n", wf.WorkflowID, inst.Status, inst.InstanceID)
+
+	case "daemon":
+		interval := 3 * time.Second
+		runOnce := false
+		wfPath := filepath.Join(engine.Root, "_meta", "workflows", "idea-lifecycle.json")
+
+		for _, arg := range os.Args[2:] {
+			if arg == "--once" {
+				runOnce = true
+			}
+		}
+
+		watcher := daemon.NewWatcher(daemon.WatcherConfig{
+			VaultRoot:    engine.Root,
+			WorkflowPath: wfPath,
+			Interval:     interval,
+			RunOnce:      runOnce,
+		})
+
+		ctx := context.Background()
+		if runOnce {
+			count, err := watcher.ProcessInboxOnce()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Daemon inbox sweep failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Daemon inbox sweep complete: %d notes processed\n", count)
+		} else {
+			fmt.Printf("Starting vault daemon watcher on %s (interval: %v)...\n", engine.Root, interval)
+			if err := watcher.Run(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Daemon error: %v\n", err)
+				os.Exit(1)
+			}
+		}
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
