@@ -30,6 +30,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **macos-audio-hud** | Engineering standards for macOS native floating HUDs and real-time CoreAudio/AVFoundation voice companion clients (`AUVoiceProcessing`, channel 0 extraction, dynamic converters, NSRecursiveLock, floating `NSPanel`, Carbon hotkeys). |
 | **rokid-glasses-companion** | Engineering standards and hardware trap mitigations for Rokid AI Smart Glasses and Android AR wearables (direct Wi-Fi WebSocket architecture, `AudioSource.MIC` + AGC/limiter, walkie-talkie echo suppression, raw key debouncing, priority 999 `KeyReceiver`). |
 | **multimodal-voice-companion** | Universal protocol standards and audio contracts for real-time live voice/vision companions (WebSocket `/ws/live`, 16 kHz up / 24 kHz down linear PCM, mandatory barge-in buffer flush contracts, dual-ended RMS dBFS telemetry, reconnect resilience). |
+| **agentic-vault** | Deterministic Second Brain operating system managing knowledge across 4 Big Phases and 3 Core Categories with Go static gateway (`vault-engine`), append-only capture ledger, optimistic concurrency control (OCC), and human review queues. |
 
 The `ps-release-workflow-*` skills are thin wrappers over a shared Python engine
 ([`engine/ps-release-workflow`](engine/ps-release-workflow)) — they call its scripts at runtime, so the
@@ -201,6 +202,11 @@ python3 -m unittest discover -s skills/ps-interactive-learning-builder/tests -v
 # ps-commu-explain React template builds
 cd skills/ps-commu-explain/assets/template-react
 npm ci && npx tsc --noEmit && npm run build
+
+# tools/vault-engine Go test suite (>80% coverage) and full E2E lifecycle
+cd tools/vault-engine
+go test -cover ./pkg/...
+./test_e2e.sh
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all four on every push and PR:
