@@ -1,6 +1,6 @@
+from dataclasses import dataclass, field
 from enum import Enum
-from pydantic import BaseModel, Field
-from datetime import datetime
+from typing import List, Optional
 
 class CategoryTrack(str, Enum):
     PRODUCT = "product_feature"
@@ -22,14 +22,33 @@ class RecordKind(str, Enum):
     SOURCE = "source"
     DAILY = "daily"
 
-class FrontmatterContract(BaseModel):
-    model_config = {"populate_by_name": True}
-
-    schema_version: str = Field(default="vault-record-v1", alias="schema")
+@dataclass
+class FrontmatterContract:
     id: str
     category: CategoryTrack
     phase: LifecyclePhase
     title: str
     created: str
     updated: str
-    tags: list[str] = Field(default_factory=list)
+    schema_version: str = "vault-record-v1"
+    tags: List[str] = field(default_factory=list)
+
+    def __init__(
+        self,
+        id: str,
+        category: CategoryTrack | str,
+        phase: LifecyclePhase | str,
+        title: str,
+        created: str,
+        updated: str,
+        tags: Optional[List[str]] = None,
+        **kwargs,
+    ):
+        self.id = id
+        self.category = CategoryTrack(category) if isinstance(category, str) else category
+        self.phase = LifecyclePhase(phase) if isinstance(phase, str) else phase
+        self.title = title
+        self.created = created
+        self.updated = updated
+        self.tags = list(tags) if tags is not None else []
+        self.schema_version = kwargs.get("schema", kwargs.get("schema_version", "vault-record-v1"))

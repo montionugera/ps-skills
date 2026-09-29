@@ -1,16 +1,17 @@
 import hashlib
 import json
 import uuid
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from pydantic import BaseModel
 from engine.vault.contracts import CategoryTrack
 
 class ConflictPayloadError(Exception):
     """Raised when an idempotency key is reused with a different raw payload."""
     pass
 
-class CaptureEntry(BaseModel):
+@dataclass
+class CaptureEntry:
     run_id: str
     idempotency_key: str
     category: CategoryTrack
@@ -18,6 +19,31 @@ class CaptureEntry(BaseModel):
     payload_sha256: str
     raw_payload_path: str
     timestamp: str
+
+    def __init__(
+        self,
+        run_id: str,
+        idempotency_key: str,
+        category: CategoryTrack | str,
+        source_origin: str,
+        payload_sha256: str,
+        raw_payload_path: str,
+        timestamp: str,
+        **kwargs,
+    ):
+        self.run_id = run_id
+        self.idempotency_key = idempotency_key
+        self.category = CategoryTrack(category) if isinstance(category, str) else category
+        self.source_origin = source_origin
+        self.payload_sha256 = payload_sha256
+        self.raw_payload_path = raw_payload_path
+        self.timestamp = timestamp
+
+    def model_dump(self):
+        d = asdict(self)
+        if isinstance(self.category, CategoryTrack):
+            d["category"] = self.category.value
+        return d
 
 class CaptureLedger:
     def __init__(self, ledger_dir: Path):
