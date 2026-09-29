@@ -5,7 +5,7 @@ catalogs, the claims ledger, and actual `git worktree list` reality into a
 single report with a state-chosen "Next:" hint. Read-only; never writes.
 
 Usage:
-    python3 status.py [--repo PATH] [--brief]
+    python3 status.py [--repo PATH] [--brief | --json]
 
 Always exits 0 (it backs the SessionStart hook — a status failure must never
 break a session). Not-opted-in repos get a single quiet line.
@@ -394,11 +394,42 @@ def render_full(st: dict) -> str:
     return "\n".join(lines)
 
 
+def render_json(st: dict) -> str:
+    """Expose the narrow, versioned delivery snapshot for external readers."""
+    payload = {
+        "schema": "psrw-status/v1",
+        "opted_in": True,
+        "release": {
+            "version": st["release"]["version"],
+            "in_progress": st["release"]["in_progress"],
+        },
+        "features": [
+            {key: feature[key] for key in ("id", "title", "status", "release_version")}
+            for feature in st["features"]
+        ],
+        "epics": [
+            {key: epic[key] for key in ("id", "title", "status")}
+            for epic in st["epics"]
+        ],
+    }
+    return json.dumps(payload)
+
+
+def _json_error(code: str, message: str, *, opted_in: bool | None = None) -> str:
+    payload: dict = {"schema": "psrw-status/v1"}
+    if opted_in is not None:
+        payload["opted_in"] = opted_in
+    payload["error"] = {"code": code, "message": message}
+    return json.dumps(payload)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="psrw status",
                                 description="ps-release-workflow status report")
     p.add_argument("--repo", default=None, help="repo root (default: resolve from cwd)")
-    p.add_argument("--brief", action="store_true", help="compact <=6-line summary")
+    format_group = p.add_mutually_exclusive_group()
+    format_group.add_argument("--brief", action="store_true", help="compact <=6-line summary")
+    format_group.add_argument("--json", action="store_true", help="versioned JSON status")
     args = p.parse_args(argv)
 
     try:
@@ -407,17 +438,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             repo = find_repo_root(Path.cwd())
     except RepoNotFoundError:
-        print("not a ps-release-workflow repo")
+        print(_json_error("not_opted_in", "not a ps-release-workflow repo", opted_in=False)
+              if args.json else "not a ps-release-workflow repo")
         return 0
     if not is_ps_release_workflow_repo(repo):
-        print("not a ps-release-workflow repo")
+        print(_json_error("not_opted_in", "not a ps-release-workflow repo", opted_in=False)
+              if args.json else "not a ps-release-workflow repo")
         return 0
 
     try:
         st = collect_status(repo)
-        print(render_brief(st) if args.brief else render_full(st))
+        print(render_json(st) if args.json else render_brief(st) if args.brief else render_full(st))
     except Exception as e:  # noqa: BLE001 — status must never break a session
-        print(f"ps-release-workflow: status unavailable ({type(e).__name__}: {e})")
+        message = f"ps-release-workflow: status unavailable ({type(e).__name__}: {e})"
+        print(_json_error("status_unavailable", message, opted_in=True) if args.json else message)
     return 0
 
 
