@@ -17,6 +17,7 @@
 #   skills/ps-*            -> $GEMINI_HOME/skills/ps-*
 #   skills/*/hooks/*       -> $CLAUDE_HOME/hooks/*   (hook scripts; register them in settings.json)
 #   bin/ps-skills-sync     -> $HOME/.local/bin/ps-skills-sync
+#   bin/ps-work            -> $HOME/.local/bin/ps-work
 #   engine/ps-release-workflow -> $CLAUDE_HOME/ps-release-workflow
 #     (the ps-release-workflow-* skills call scripts in that engine dir; without
 #      it they install but fail at runtime.)
@@ -58,7 +59,7 @@ mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$AGENTS_HOME/skills" "$GEMI
 replace_destination() {  # dest
   local dest="$1"
   case "$dest" in
-    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
+    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
     *) echo "refuse unsafe destination: $dest" >&2; return 1 ;;
   esac
   rm -rf -- "$dest"
@@ -99,6 +100,7 @@ done
 link "$REPO/engine/ps-release-workflow" "$CLAUDE_HOME/ps-release-workflow"
 link "$REPO/engine/ps-release-workflow/bin/psrw" "$BIN_HOME/psrw"
 link "$REPO/bin/ps-skills-sync" "$BIN_HOME/ps-skills-sync"
+link "$REPO/bin/ps-work" "$BIN_HOME/ps-work"
 link "$REPO/bin/mesh" "$BIN_HOME/mesh"
 link "$REPO/bin/mesh-run" "$BIN_HOME/mesh-run"
 link "$REPO/bin/dispatch-agy-worker" "$BIN_HOME/dispatch-agy-worker"

@@ -37,6 +37,14 @@
     "outcome": {
       "type": "string"
     },
+    "release_repo": {
+      "type": "string",
+      "description": "Absolute path to the opted-in repository main checkout."
+    },
+    "release_feature_id": {
+      "type": "string",
+      "pattern": "^F-[0-9]{3,}$"
+    },
     "tags": {
       "type": "array",
       "items": { "type": "string" }
