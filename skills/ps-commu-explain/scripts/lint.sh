@@ -7,8 +7,9 @@
 #   the literal "(...)" placeholder marker as documentation) don't trip the
 #   placeholder check on themselves.
 #     00-brief.md:      no unfilled "(...)" placeholders; exactly three
-#                       numbered reader questions (Q1-Q3); a section budget
-#                       line with an integer 4-7.
+#                       numbered reader questions (Q1-Q3); a non-empty
+#                       "Reader:" line; a section budget line with an
+#                       integer 4-7.
 #     01-facts.md:      at least one row "F<n> | statement | source"; every
 #                       source is path:line, a bare path, a commit hash, or
 #                       the literal "user said".
@@ -97,6 +98,8 @@ else:
         defects.append(
             f"00-brief.md: expected exactly three reader questions Q1-Q3, found: {found}"
         )
+    if not re.search(r'(?mi)^Reader:[ \t]*\S', brief):
+        defects.append("00-brief.md: missing a filled 'Reader:' line (who reads this and what they already know)")
     m = re.search(r'(?mi)^Section budget:\s*(\S+)', brief)
     if not m:
         defects.append("00-brief.md: missing a 'Section budget:' line")
@@ -242,6 +245,12 @@ if content is not None:
     import math
 
     DRAWIO_HEX_RE = re.compile(r'(fill|stroke)Color=#[0-9a-fA-F]{3,6}')
+    # <br> is draw.io's own line break in html=1 labels (written &lt;br&gt; in
+    # the XML) — the one tag allowed through the literal-'<' check below.
+    # Double-escaping it (&amp;lt;br&amp;gt;) decodes to the text "&lt;br&gt;",
+    # which the viewer then shows to the reader as a literal "<br>".
+    DRAWIO_BR_RE = re.compile(r'<br\s*/?>', re.I)
+    DRAWIO_ESCAPED_BR_RE = re.compile(r'&lt;br\s*/?&gt;', re.I)
     DRAWIO_HEAD_RE = re.compile(r'^<mxGraphModel\b')
     DRAWIO_MAX_VERTICES = 7
 
@@ -295,14 +304,22 @@ if content is not None:
                 continue
 
             value = cell.get('value')
-            if value and '<' in value:
+            if value and DRAWIO_ESCAPED_BR_RE.search(value):
+                report(
+                    f"cell '{cid}' value has a double-escaped line break (&amp;lt;br&amp;gt;) "
+                    "— the reader sees a literal '<br>'; write &lt;br&gt; instead"
+                )
+            style = cell.get('style') or ''
+            # Without html=1 draw.io draws the label as plain text, so even <br> shows literally.
+            html_label = 'html=1' in style.split(';')
+            if value and '<' in (DRAWIO_BR_RE.sub('', value) if html_label else value):
                 report(
                     f"cell '{cid}' value contains a literal '<' after XML-decoding "
                     "(from &lt; or a numeric character ref) — this corrupts the html=1 "
                     "label once the browser re-parses it as HTML"
+                    + ("" if html_label else "; a &lt;br&gt; line break needs html=1 in the style")
                 )
 
-            style = cell.get('style') or ''
             hexm = DRAWIO_HEX_RE.search(style)
             if hexm:
                 report(

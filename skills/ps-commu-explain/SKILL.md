@@ -40,12 +40,22 @@ Each stage produces a file the next one reads. `lint.sh <slug>` is the single sc
 
 | # | Stage | Output | Checked by |
 |---|---|---|---|
-| 1 | Brief | `00-brief.md` — exactly 3 numbered reader questions (Q1-Q3) and a section budget (integer, 4-7) | `init.sh` scaffolds it (never overwrites an existing one); `lint.sh` rejects unfilled `(...)` placeholders, a wrong count of Q1-Q3, or a missing/bad section-budget integer |
+| 1 | Brief | `00-brief.md` — exactly 3 numbered reader questions (Q1-Q3), a `Reader:` line (who reads it and what they already know — default: a newcomer to this repo), and a section budget (integer, 4-7) | `init.sh` scaffolds it (never overwrites an existing one); `lint.sh` rejects unfilled `(...)` placeholders, a wrong count of Q1-Q3, a missing/empty `Reader:` line, or a missing/bad section-budget integer |
 | 2 | Facts | `01-facts.md` — `F<n> \| statement \| source` rows (source: `path:line`, bare path, commit hash, or `"user said"`), gathered by a subagent | `lint.sh` rejects a bad source shape and any `F<n>` content.md cites that isn't a row here |
 | 3 | Storyboard | `02-storyboard.md` — one row per planned `app/content.md` section: `section \| question (Q1-Q3) \| facts (F<n>,...)` | `lint.sh` rejects an uncovered Q1-Q3, or a row citing an `F<n>` missing from 01-facts.md |
-| 4 | Author | `app/content.md` — **ships pre-filled with the shipped exemplar (cites F1-F19)**; replace it wholesale, or run `init.sh --example <slug>` to pair it with a matching filled 00-brief/01-facts/02-storyboard so it lints clean immediately. Component set v3 (cheat-sheet live at `app/components.md`) | `lint.sh` rejects removed classes (`stat-grid`, `stat-tile`, `meter`, `cat-*`, `metric-grid`, `card-grid`), and — for each ` ```drawio ` diagram (plain mxGraph XML: `<mxGraphModel>`/`<mxfile>` → `<root>` → `<mxCell>`) — malformed XML, missing root cells, duplicate ids, unlabeled edges, >7 vertices, overlapping/out-of-bounds vertices, unescaped `<` or `&` in labels (e.g. a shell `&&` in a label must be written `&amp;&amp;`), and raw hex colors (use `role=accent\|pitfall\|check` instead) |
+| 4 | Author | `app/content.md` — **ships pre-filled with the shipped exemplar (cites F1-F19)**; replace it wholesale, or run `init.sh --example <slug>` to pair it with a matching filled 00-brief/01-facts/02-storyboard so it lints clean immediately. Component set v3 (cheat-sheet live at `app/components.md`) | `lint.sh` rejects removed classes (`stat-grid`, `stat-tile`, `meter`, `cat-*`, `metric-grid`, `card-grid`), and — for each ` ```drawio ` diagram (plain mxGraph XML: `<mxGraphModel>`/`<mxfile>` → `<root>` → `<mxCell>`) — malformed XML, missing root cells, duplicate ids, unlabeled edges, >7 vertices, overlapping/out-of-bounds vertices, unescaped `<` or `&` in labels (e.g. a shell `&&` in a label must be written `&amp;&amp;`; a line break is `&lt;br&gt;` — the one allowed tag — and a double-escaped `&amp;lt;br&amp;gt;` is rejected because the reader would see a literal `<br>`), and raw hex colors (use `role=accent\|pitfall\|check` instead) |
 | 5 | Verify | render gate (`verify.sh`, **infographic tier only**) then reader gate (subagent, `verify.sh --dump-text` output) | both pass on infographic (html/react: a subagent Chrome load stands in for the render gate — see below), or an honest defect list — ≤5 cycles |
 | 6 | Handoff | URL + the 3 questions/reader answers + re-serve command | prose |
+
+## Plain English (hard rule)
+
+The reader named in `00-brief.md`'s `Reader:` line has NOT been in this conversation. Write for them, not for yourself:
+
+- **Define before use.** Every term, acronym, script name, or ID gets a plain-words gloss on first mention — "F-037 (the zone-content feature)", "Gate 1 (the pre-ship build/test check)". Ticket ids, codenames, and internal shorthand never appear bare.
+- **What and why before how.** Each section opens with one sentence a newcomer can follow — what this is and why they should care — before any mechanism.
+- **Short sentences, everyday words.** One idea per sentence; no arrow-chains (`A → B → fails`) in prose; if a sentence needs two parentheticals, split it.
+- **Concrete over abstract.** Show one real example (command, input, output) instead of a paragraph of description.
+- The reader gate below FAILs any page that uses a term before explaining it.
 
 ## Subagent budgets (hard rule)
 
@@ -56,7 +66,7 @@ Each stage produces a file the next one reads. `lint.sh <slug>` is the single sc
 
 ## Verify: render gate + reader gate
 
-`scripts/verify.sh` runs the full assert set on **infographic** only. On **html** it runs two render checks: `html-1` fails if `<body>` carries `explainer-error`, which the template's `mermaid.parseError` trap sets, and `html-2` fails if the rendered `<svg>` count inside `.mermaid` divs differs from the `.mermaid` div count. On html, `lint.sh` also runs every `<div class="mermaid">` block through `mmdc` and exits 1 on a syntax error. If mmdc is missing or cannot launch, it warns and skips; `EXPLAINER_STRICT_MERMAID=1` makes that a failure. On **react**, verify.sh still reports `FAIL: doc not found`: there the render check is a subagent Chrome load (console + screenshot, ≤15 lines), and the reader gate covers whatever inline `F<n>` markup you authored. On infographic, `scripts/verify.sh <slug>` loads the served page in headless Chrome and prints 7 PASS/FAIL/SKIP asserts: rendered `.mxgraph` div count == drawio diagram count in the doc (a diagram is any fenced block labelled ` ```drawio ` OR whose trimmed body starts with `<mxGraphModel` — mirrors cherry-setup.js's own content-sniff, which deliberately does NOT sniff `<mxfile>`; only an explicit ` ```drawio ` label renders an `<mxfile>`-wrapped export), each rendered `.mxgraph` div's `<svg>` actually holds shape content (not an empty graph); no `~~CODE` placeholder leak; no raw `data-nav` text in body; zero page-origin console errors; nav-click scrollY change (permanent SKIP — a DOM dump can't dispatch clicks); served `explainer.css` has no `scroll-behavior` declared (the static regression gate for the click-to-jump root cause); draw.io pan/zoom actually initialized — the `GraphViewer` global loaded AND every rendered `.mxgraph` div shows its toolbar-init side effect (`toolbar_init < mxgraph_total` fails, not just `==0`, so a partial regression on one of several diagrams still fails). Exit 0 = every non-skipped assert passed; exit 2 = no Chrome/no server — except the static `scroll-behavior` check, which needs neither and still runs on a Chrome-less box, so exit 1 is possible even without Chrome. `verify.sh --help` for detail.
+`scripts/verify.sh` runs the full assert set on **infographic** only. On **html** it runs two render checks: `html-1` fails if `<body>` carries `explainer-error`, which the template's `mermaid.parseError` trap sets, and `html-2` fails if the rendered `<svg>` count inside `.mermaid` divs differs from the `.mermaid` div count. On html, `lint.sh` also runs every `<div class="mermaid">` block through `mmdc` and exits 1 on a syntax error. If mmdc is missing or cannot launch, it warns and skips; `EXPLAINER_STRICT_MERMAID=1` makes that a failure. On **react**, verify.sh still reports `FAIL: doc not found`: there the render check is a subagent Chrome load (console + screenshot, ≤15 lines), and the reader gate covers whatever inline `F<n>` markup you authored. On infographic, `scripts/verify.sh <slug>` loads the served page in headless Chrome and prints 8 PASS/FAIL/SKIP asserts: rendered `.mxgraph` div count == drawio diagram count in the doc (a diagram is any fenced block labelled ` ```drawio ` OR whose trimmed body starts with `<mxGraphModel` — mirrors cherry-setup.js's own content-sniff, which deliberately does NOT sniff `<mxfile>`; only an explicit ` ```drawio ` label renders an `<mxfile>`-wrapped export), each rendered `.mxgraph` div's `<svg>` actually holds shape content (not an empty graph); no `~~CODE` placeholder leak; no raw `data-nav` text in body; zero page-origin console errors; nav-click scrollY change (permanent SKIP — a DOM dump can't dispatch clicks); served `explainer.css` has no `scroll-behavior` declared (the static regression gate for the click-to-jump root cause); draw.io pan/zoom actually initialized — the `GraphViewer` global loaded AND every rendered `.mxgraph` div shows its toolbar-init side effect (`toolbar_init < mxgraph_total` fails, not just `==0`, so a partial regression on one of several diagrams still fails); no literal `<br>` text in reader-visible prose (escaped instead of rendered markup — `<code>` samples exempt). Exit 0 = every non-skipped assert passed; exit 2 = no Chrome/no server — except the static `scroll-behavior` check, which needs neither and still runs on a Chrome-less box, so exit 1 is possible even without Chrome. `verify.sh --help` for detail.
 
 A clean render gate is necessary, not sufficient. Get the reader gate's input with `scripts/verify.sh <slug> --dump-text` — it reuses the same `.cherry-previewer` extractor the asserts above use and prints the clean, reader-visible text to stdout (never hand-extract from `--dump-dom`: that returns duplicated toolbar/source-pane/preview copies, plus raw `data-nav` markup and unrendered ` ```drawio ` fences). Dispatch the reader-gate subagent below with that text. It must answer the brief's 3 questions with `F<n>` citations, pulled from the page's own Receipts footer, before the page counts as done.
 
@@ -66,6 +76,9 @@ A clean render gate is necessary, not sufficient. Get the reader gate's input wi
 You are an independent reader. You have NOT seen this project's 00-brief.md, 01-facts.md,
 02-storyboard.md, or any source file — only the page text below, exactly as a browser would
 render it. Do not use outside knowledge, do not guess, do not infer from a file you were not given.
+
+THE PAGE'S INTENDED READER: <paste 00-brief.md's Reader: line>
+Read as that person — you know nothing beyond what they know.
 
 PAGE TEXT (from <URL>):
 """
@@ -81,11 +94,15 @@ For each: give a 1-3 sentence answer, then cite the F<n> id(s) the page itself a
 that claim. Never invent a citation. If the text doesn't answer a question, write UNANSWERABLE
 and name what's missing.
 
+Then list every term, acronym, ID, or codename the page uses BEFORE (or without) explaining it
+in plain words, as that reader would stumble on it. F<n> citation markers don't count.
+
 Return exactly this, nothing else:
 Q1: <answer> — F<n>[, F<n>...]
 Q2: <answer> — F<n>[, F<n>...]
 Q3: <answer> — F<n>[, F<n>...]
-Verdict: PASS (all three answered with real citations) | FAIL (name which failed and why)
+Unexplained terms: <comma-separated list, or "none">
+Verdict: PASS (all three answered with real citations AND no unexplained terms) | FAIL (name which failed and why)
 ```
 
 ## Handoff
@@ -104,6 +121,7 @@ Report: the URL, the brief's 3 questions with the reader-gate's answers + citati
 | "React would look more impressive" | Animation and diagrams live in the HTML tier too. State or HTML — react is opt-in, only for sections that need it. |
 | "Cycle 6 will definitely fix it" | ≤5 cycles, then an honest defect list. Never claim unverified success. |
 | "I'll write app/index.html fresh — faster than the template" | You drop the tier's diagram library — the pinned draw.io viewer + `cherry-setup.js` wiring (infographic) or `mermaid.min.js` (html) — and every diagram renders as raw text. `init.sh` scaffolds it — edit in place. |
+| "The reader knows this project, jargon is fine" | The reader is whoever the brief's `Reader:` line names — by default a newcomer. Unexplained IDs and codenames FAIL the reader gate. |
 | "The reader-gate subagent can peek at 01-facts.md to check its own answers" | Defeats the point — it must answer from page text alone, like a real reader, or the gate proves nothing. |
 
 ## Red flags — STOP
@@ -113,6 +131,8 @@ Report: the URL, the brief's 3 questions with the reader-gate's answers + citati
 - A reader-gate subagent given the brief/facts/storyboard files, or answering from outside knowledge
 - More than 5 verify/fix cycles without stopping to report defects
 - `stat-grid`, `meter`, or `cat-*` classes reappearing (removed in component set v3)
+- A term, ID, or codename used before it is explained in plain words
+- A literal `<br>` visible on the rendered page (verify.sh assert 8)
 - A drawio edge with no label, a diagram with more than 7 vertices, or a raw hex color in a cell style instead of a `role=accent\|pitfall\|check` token
 - Any hand-started server instead of `scripts/serve.sh`
 - "Ready" reported without both a passing render check (`verify.sh` on infographic; a subagent Chrome load on html/react) and a PASS reader-gate verdict this cycle

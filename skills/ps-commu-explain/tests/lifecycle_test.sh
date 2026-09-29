@@ -225,6 +225,8 @@ Q1: What is X?
 Q2: Why does X matter?
 Q3: How do I use X?
 
+Reader: a developer new to X.
+
 Section budget: 5
 EOF
   cat > "$ws/01-facts.md" <<'EOF'
@@ -454,6 +456,55 @@ See F1 for details.
 EOF
   local out rc; out="$("$S/lint.sh" t-lint-dunesc 2>&1)"; rc=$?
   (( rc == 1 )) && grep -q "literal '<' after XML-decoding" <<<"$out"
+}
+_drawio_br_fixture() {  # slug label-value — one-vertex diagram with the given label
+  "$S/init.sh" "$1" --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard "$1"
+  mkdir -p "/tmp/ps-commu/$1/app"
+  cat > "/tmp/ps-commu/$1/app/content.md" <<EOF
+See F1 for details.
+
+\`\`\`drawio
+<mxGraphModel pageWidth="800" pageHeight="400">
+  <root>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
+    <mxCell id="A" value="$2"
+        style="rounded=1;whiteSpace=wrap;html=1;role=accent;" vertex="1" parent="1">
+      <mxGeometry x="40" y="40" width="160" height="60" as="geometry" />
+    </mxCell>
+  </root>
+</mxGraphModel>
+\`\`\`
+EOF
+}
+test_lint_passes_drawio_br_label() {  # &lt;br&gt; is draw.io's own html=1 line break
+  _drawio_br_fixture t-lint-dbr 'line one&lt;br&gt;line two&lt;br/&gt;three'
+  "$S/lint.sh" t-lint-dbr
+}
+test_lint_fails_drawio_double_escaped_br() {  # &amp;lt;br&amp;gt; shows the reader a literal <br>
+  _drawio_br_fixture t-lint-dbr2 'line one&amp;lt;br&amp;gt;line two'
+  local out rc; out="$("$S/lint.sh" t-lint-dbr2 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "double-escaped line break" <<<"$out"
+}
+test_lint_fails_drawio_br_lookalikes() {  # only a bare <br>/<br/> in an html=1 label is allowed
+  local label out
+  for label in 'a&lt;br onload=x&gt;b' 'a&lt;bra&gt;b'; do
+    _drawio_br_fixture t-lint-dbr3 "$label"
+    out="$("$S/lint.sh" t-lint-dbr3 2>&1)" && return 1
+    grep -q "literal '<' after XML-decoding" <<<"$out" || return 1
+  done
+  _drawio_br_fixture t-lint-dbr3 'a&lt;br&gt;b'
+  sed -i.bak 's/html=1;//' /tmp/ps-commu/t-lint-dbr3/app/content.md   # plain-text label
+  out="$("$S/lint.sh" t-lint-dbr3 2>&1)" && return 1
+  grep -q "needs html=1" <<<"$out"
+}
+test_lint_fails_missing_reader() {  # brief without a filled Reader: line
+  "$S/init.sh" t-lint-noreader --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-noreader
+  sed -i.bak '/^Reader:/d' /tmp/ps-commu/t-lint-noreader/00-brief.md
+  local out rc; out="$("$S/lint.sh" t-lint-noreader 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q "missing a filled 'Reader:' line" <<<"$out"
 }
 test_lint_fails_drawio_raw_hex() {  # style has fillColor=#1c4f8f instead of role=accent
   "$S/init.sh" t-lint-dhex --tier html >/dev/null
@@ -959,6 +1010,10 @@ check lint_fails_drawio_overlap            test_lint_fails_drawio_overlap
 check lint_fails_drawio_out_of_bounds      test_lint_fails_drawio_out_of_bounds
 check lint_fails_drawio_unescaped_label    test_lint_fails_drawio_unescaped_label
 check lint_fails_drawio_raw_hex            test_lint_fails_drawio_raw_hex
+check lint_passes_drawio_br_label          test_lint_passes_drawio_br_label
+check lint_fails_drawio_double_escaped_br  test_lint_fails_drawio_double_escaped_br
+check lint_fails_missing_reader            test_lint_fails_missing_reader
+check lint_fails_drawio_br_lookalikes      test_lint_fails_drawio_br_lookalikes
 check lint_passes_drawio_valid             test_lint_passes_drawio_valid
 check lint_passes_drawio_origin_vertex               test_lint_passes_drawio_origin_vertex
 check lint_fails_drawio_bounds_unverifiable          test_lint_fails_drawio_bounds_unverifiable
@@ -1153,6 +1208,26 @@ test_verify_dump_text() {  # --dump-text: clean reader-visible text on stdout, e
   ! grep -q 'data-nav' <<<"$out" &&
   ! grep -q '```mermaid' <<<"$out" &&
   ! grep -qE '^(PASS|FAIL|SKIP):' <<<"$out"
+}
+test_verify_fails_on_br_leak() {  # a double-escaped draw.io label renders as literal "<br>"
+  local port; port="$(meta_get t-verify port)"
+  cat > /tmp/ps-commu/t-verify/app/brleak.md <<'MD'
+Real break in a table: ok.
+
+| a | b |
+|---|---|
+| one<br>two | `code<br>sample` |
+
+```drawio
+<mxGraphModel pageWidth="800" pageHeight="400"><root><mxCell id="0" /><mxCell id="1" parent="0" />
+<mxCell id="A" value="init&amp;lt;br&amp;gt;sh" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+<mxGeometry x="40" y="40" width="160" height="60" as="geometry" /></mxCell></root></mxGraphModel>
+```
+MD
+  local out rc; out="$(verify_run t-verify --url "http://127.0.0.1:$port/?doc=brleak.md")"; rc=$?
+  echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) && grep -q '^FAIL: 8 literal <br> text LEAKED in body text (1x)' <<<"$out"
 }
 test_verify_fails_on_leak() {  # literal ~~CODE$ in prose + a drawio fence that renders empty
   local port; port="$(meta_get t-verify port)"
@@ -1409,6 +1484,7 @@ test_verify_help() { "$S/verify.sh" --help | grep -q 'Usage: verify.sh' && ! "$S
 check_or_skip verify_passes_template               test_verify_passes_template
 check_or_skip verify_dump_text                     test_verify_dump_text
 check_or_skip verify_fails_on_leak                 test_verify_fails_on_leak
+check_or_skip verify_fails_on_br_leak              test_verify_fails_on_br_leak
 check_or_skip verify_passes_drawio_template        test_verify_passes_drawio_template
 check_or_skip verify_fails_drawio_empty_render     test_verify_fails_drawio_empty_render
 check_or_skip verify_counts_xml_fenced_drawio      test_verify_counts_xml_fenced_drawio
