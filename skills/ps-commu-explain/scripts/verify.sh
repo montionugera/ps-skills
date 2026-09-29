@@ -55,6 +55,9 @@
 #        over the graph container, which a --dump-dom capture can never
 #        trigger — the same hover/click limitation that makes assert 5 a
 #        permanent SKIP.
+#     8  reader-visible prose has no literal `<br>` / `&lt;br&gt;` text —
+#        markup that was escaped instead of rendered (typically a
+#        double-escaped draw.io label). Text inside <code>/<pre> is exempt.
 #   --url  page URL to load (default: http://127.0.0.1:<port> from meta.json;
 #          requires a live marker-verified server). A ?doc=X query selects
 #          which app/X markdown file the fence count is taken from.
@@ -270,7 +273,7 @@ class Preview(HTMLParser):
     def handle_starttag(self, tag, attrs):
         cls = dict(attrs).get("class", "")
         if not self.depth and "cherry-previewer" in cls.split(): self.depth = 1; return
-        if self.depth:
+        if self.depth and tag not in _VOID_TAGS:   # <br> etc. never close — no depth
             self.depth += 1
             if tag in ("script", "style"): self.skip = self.depth
             if tag in ("code", "pre"): self.code = self.code or self.depth
@@ -372,6 +375,10 @@ elif toolbar_init < mxgraph_total:
 else:
     report("PASS", 7, f"drawio interactivity: GraphViewer loaded, toolbar initialized on "
            f"{toolbar_init}/{mxgraph_total} diagram(s)")
+# A literal <br> in reader-visible prose means markup was escaped instead of
+# rendered (e.g. a double-escaped draw.io label). <code> samples are exempt.
+br_leaks = re.findall(r"(?:<|&lt;)br\s*/?(?:>|&gt;)", prose, re.I)
+report("FAIL" if br_leaks else "PASS", 8, "literal <br> text " + (f"LEAKED in body text ({len(br_leaks)}x)" if br_leaks else "absent"))
 print("\n".join(lines))
 sys.exit(1 if failed else 0)
 PY
