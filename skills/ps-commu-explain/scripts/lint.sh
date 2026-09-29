@@ -33,6 +33,8 @@
 #                       link operator inside style arguments, or a block
 #                       whose header is not a known diagram type is REPORTED
 #                       (fail closed) — never silently skipped.
+#   html tier: also validates every <div class="mermaid"> in app/index.html with mmdc
+#     (see the "html tier" block at the bottom; MMDC_BIN, EXPLAINER_STRICT_MERMAID).
 #   Output: one defect per line ("<file>: <reason>"). Exit 0 = clean;
 #   1 = defects listed.
 set -uo pipefail
@@ -489,3 +491,87 @@ if defects:
     print('\n'.join(d for d in defects if not (d in seen or seen.add(d))))
 sys.exit(1 if defects else 0)
 PY
+py_status=$?
+
+# --- html tier: deterministic Mermaid validation (F-015) ---------------------
+# Every <div class="mermaid"> in app/index.html is extracted (HTML entities
+# unescaped, exactly as the browser would hand them to Mermaid) and rendered
+# with mmdc; a Mermaid syntax error is reported as
+#   app/index.html: mermaid block <N>: <mmdc message>
+# and fails the lint (exit 1), so serve.sh never binds on a broken diagram.
+#   MMDC_BIN                  mmdc executable (default: mmdc on PATH)
+#   EXPLAINER_STRICT_MERMAID  1 = a missing mmdc, or an mmdc/browser launch
+#                             failure, FAILS the lint instead of warning.
+# A launch failure is never reported as a syntax error: only output that
+# matches Mermaid's own parse/lex/unknown-diagram errors counts as one.
+# On macOS, mmdc's bundled Chromium fails under Rosetta, so an installed
+# Google Chrome is used when PUPPETEER_EXECUTABLE_PATH is unset.
+mermaid_status=0
+if [[ "$(meta_get "$slug" tier)" == "html" && -f "$ws/app/index.html" ]]; then
+  mm_tmp="$(mktemp -d)"
+  trap 'rm -rf "$mm_tmp"' EXIT
+  mm_count="$(python3 - "$ws/app/index.html" "$mm_tmp" <<'PY'
+import os, sys
+from html.parser import HTMLParser
+
+class Blocks(HTMLParser):   # convert_charrefs=True: &amp; &lt; &gt; &quot; arrive unescaped
+    def __init__(self):
+        super().__init__(); self.blocks = []; self.cur = None; self.depth = 0
+    def handle_starttag(self, tag, attrs):
+        if self.cur is None:
+            if tag == "div" and "mermaid" in (dict(attrs).get("class") or "").split():
+                self.cur, self.depth = [], 1
+        elif tag == "div":
+            self.depth += 1
+    def handle_endtag(self, tag):
+        if self.cur is not None and tag == "div":
+            self.depth -= 1
+            if self.depth == 0:
+                self.blocks.append("".join(self.cur)); self.cur = None
+    def handle_data(self, data):
+        if self.cur is not None: self.cur.append(data)
+
+b = Blocks()
+with open(sys.argv[1], encoding="utf-8") as f:
+    b.feed(f.read()); b.close()
+for i, text in enumerate(b.blocks, 1):
+    with open(os.path.join(sys.argv[2], f"block-{i}.mmd"), "w", encoding="utf-8") as o:
+        o.write(text.strip() + "\n")
+print(len(b.blocks))
+PY
+)"
+  if [[ "$mm_count" =~ ^[0-9]+$ && "$mm_count" -gt 0 ]]; then
+    mmdc_bin="${MMDC_BIN:-mmdc}"
+    mm_strict=0; [[ "${EXPLAINER_STRICT_MERMAID:-}" == "1" ]] && mm_strict=1
+    # skip = the check could not run: WARNING and pass, or a defect under strict.
+    mm_skip() {
+      if (( mm_strict )); then echo "app/index.html: mermaid check could not run (EXPLAINER_STRICT_MERMAID=1): $1"; mermaid_status=1
+      else echo "WARNING: mermaid check skipped: $1" >&2; fi
+    }
+    if ! command -v "$mmdc_bin" >/dev/null 2>&1; then
+      mm_skip "mmdc not found ($mm_count block(s) unvalidated; install: npm i -g @mermaid-js/mermaid-cli, or set MMDC_BIN)"
+    else
+      chrome_app="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      if [[ -z "${PUPPETEER_EXECUTABLE_PATH:-}" && -x "$chrome_app" ]]; then
+        export PUPPETEER_EXECUTABLE_PATH="$chrome_app"
+      fi
+      mm_timeout=(); command -v timeout >/dev/null 2>&1 && mm_timeout=(timeout 120)
+      for ((i = 1; i <= mm_count; i++)); do
+        mm_rc=0
+        ${mm_timeout[@]+"${mm_timeout[@]}"} "$mmdc_bin" -q -i "$mm_tmp/block-$i.mmd" -o "$mm_tmp/block-$i.svg" >"$mm_tmp/block-$i.log" 2>&1 || mm_rc=$?
+        (( mm_rc == 0 )) && continue
+        if grep -Eq 'Parse error|Lexical error|UnknownDiagramError|No diagram type detected|Syntax error|Expecting ' "$mm_tmp/block-$i.log"; then
+          # message = the "Error: ..." paragraph, minus stack frames and the Rosetta banner
+          msg="$(sed -n '/^[A-Za-z]*Error:/,$p' "$mm_tmp/block-$i.log" | sed '/^ *at /,$d' | sed '/^$/,$d' | head -n 8 | sed '1!s/^/    /')"
+          echo "app/index.html: mermaid block $i: $msg"
+          mermaid_status=1
+        else
+          mm_skip "mmdc failed on block $i, but not with a Mermaid diagram error (browser launch failure?): $(grep -m1 -E '^[A-Za-z]*Error:|ailed' "$mm_tmp/block-$i.log" || echo "exit $mm_rc")"
+          break   # a launch failure will repeat for every remaining block
+        fi
+      done
+    fi
+  fi
+fi
+(( py_status != 0 || mermaid_status != 0 )) && exit 1
+exit 0
