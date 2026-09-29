@@ -23,6 +23,10 @@ check_or_skip(){       # like check, but exit code 2 = visible SKIP (e.g. no Chr
 
 # --- common.sh ---
 source "$S/common.sh"
+# Pre-F-015 tests build html-tier workspaces from the default template, which contains a
+# .mermaid block; lint.sh would run real mmdc (~15s) for each. Point it at a missing binary
+# by default (warn-and-skip); the F-015 tests that need real mmdc pass MMDC_BIN=mmdc explicitly.
+export MMDC_BIN=/nonexistent/mmdc
 
 cleanup_tests() {
   for d in /tmp/ps-commu/t-*/; do
@@ -1488,6 +1492,164 @@ check_or_skip verify_fails_partial_toolbar         test_verify_fails_partial_too
 check_or_skip verify_counts_html_commented_fence   test_verify_counts_html_commented_fence_because_it_still_renders
 check verify_help                                  test_verify_help
 "$S/stop.sh" t-verify >/dev/null 2>&1
+
+# --- F-015: deterministic Mermaid validation (lint.sh html tier) + error trap + verify.sh html tier ---
+# Real-mmdc cases (~15s per block on this Mac: Rosetta'd node + Chrome start) SKIP visibly (rc 2)
+# when mmdc is not installed; the absent/launch-failure cases are simulated via MMDC_BIN.
+_html_ws() {   # slug — html-tier workspace with a valid authoring chain; app/index.html from stdin
+  "$S/init.sh" "$1" --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard "$1"
+  cat > "/tmp/ps-commu/$1/app/index.html"
+}
+_need_mmdc() { command -v mmdc >/dev/null || { echo "SKIP: mmdc not installed"; return 2; }; }
+
+test_lint_mermaid_valid_passes() {
+  _need_mmdc || return 2
+  _html_ws t-mm-ok <<'HTML'
+<html><body><div class="mermaid">graph TD
+  A[Start] --> B[End]</div></body></html>
+HTML
+  MMDC_BIN=mmdc "$S/lint.sh" t-mm-ok
+}
+test_lint_mermaid_invalid_fails_with_block_number() {
+  _need_mmdc || return 2
+  _html_ws t-mm-bad <<'HTML'
+<html><body>
+<div class="mermaid">graph TD
+  A --> B</div>
+<div class="mermaid">graph TD; A-->|[[x]]| B; B --></div>
+</body></html>
+HTML
+  local out rc; out="$(MMDC_BIN=mmdc "$S/lint.sh" t-mm-bad 2>&1)"; rc=$?
+  echo "$out"
+  (( rc == 1 )) && grep -q 'mermaid block 2' <<<"$out" && ! grep -q 'mermaid block 1' <<<"$out" &&
+  grep -qi 'parse error' <<<"$out"
+}
+test_lint_mermaid_unescapes_entities() {   # --&gt; is only valid Mermaid after HTML-unescaping
+  _need_mmdc || return 2
+  _html_ws t-mm-esc <<'HTML'
+<html><body><div class="mermaid">graph TD
+  A["a &amp; b"] --&gt; B["&lt;c&gt; &quot;d&quot;"]</div></body></html>
+HTML
+  MMDC_BIN=mmdc "$S/lint.sh" t-mm-esc
+}
+test_lint_mermaid_missing_mmdc_warns_and_passes() {
+  _html_ws t-mm-absent <<'HTML'
+<html><body><div class="mermaid">graph TD
+  A --> B</div></body></html>
+HTML
+  local out rc; out="$(MMDC_BIN=/nonexistent/mmdc "$S/lint.sh" t-mm-absent 2>&1)"; rc=$?
+  echo "$out"; (( rc == 0 )) && grep -q 'WARNING.*mmdc' <<<"$out"
+}
+test_lint_mermaid_missing_mmdc_strict_fails() {
+  _html_ws t-mm-strict <<'HTML'
+<html><body><div class="mermaid">graph TD
+  A --> B</div></body></html>
+HTML
+  local out rc; out="$(EXPLAINER_STRICT_MERMAID=1 MMDC_BIN=/nonexistent/mmdc "$S/lint.sh" t-mm-strict 2>&1)"; rc=$?
+  echo "$out"; (( rc == 1 )) && grep -q 'mmdc' <<<"$out"
+}
+_fake_mmdc_launch_failure() {   # path — mmdc stand-in that dies like a browser launch failure
+  printf '#!/bin/sh\necho "Error: Tried to find the browser at the configured path (/x), but no executable was found." >&2\nexit 1\n' > "$1"
+  chmod +x "$1"
+}
+test_lint_mermaid_launch_failure_is_not_syntax_error() {
+  _html_ws t-mm-launch <<'HTML'
+<html><body><div class="mermaid">graph TD
+  A --> B</div></body></html>
+HTML
+  local fake="/tmp/ps-commu/t-mm-launch/fake-mmdc"; _fake_mmdc_launch_failure "$fake"
+  local out rc; out="$(MMDC_BIN="$fake" "$S/lint.sh" t-mm-launch 2>&1)"; rc=$?
+  echo "$out"
+  (( rc == 0 )) && grep -q 'WARNING' <<<"$out" && ! grep -qi 'syntax error\|mermaid block 1:' <<<"$out" || return 1
+  out="$(EXPLAINER_STRICT_MERMAID=1 MMDC_BIN="$fake" "$S/lint.sh" t-mm-launch 2>&1)"; rc=$?
+  echo "$out"
+  (( rc == 1 )) && ! grep -qi 'syntax error' <<<"$out"
+}
+test_lint_mermaid_no_blocks_needs_no_mmdc() {   # no .mermaid divs -> no mmdc, no warning, exit 0
+  _html_ws t-mm-none <<'HTML'
+<html><body><h1>no diagrams</h1></body></html>
+HTML
+  local out rc; out="$(MMDC_BIN=/nonexistent/mmdc "$S/lint.sh" t-mm-none 2>&1)"; rc=$?
+  echo "$out"; (( rc == 0 )) && ! grep -q WARNING <<<"$out"
+}
+test_lint_mermaid_extraction_failure_never_fails_open() {   # non-UTF-8 index.html
+  _html_ws t-mm-enc <<'HTML'
+<html><body><div class="mermaid">graph TD
+  A --> B</div></body></html>
+HTML
+  printf '<div class="mermaid">caf\xe9</div>' > /tmp/ps-commu/t-mm-enc/app/index.html
+  local out rc; out="$(MMDC_BIN=/nonexistent/mmdc "$S/lint.sh" t-mm-enc 2>&1)"; rc=$?
+  echo "$out"; (( rc == 0 )) && grep -q 'WARNING.*could not extract' <<<"$out" || return 1
+  out="$(EXPLAINER_STRICT_MERMAID=1 MMDC_BIN=/nonexistent/mmdc "$S/lint.sh" t-mm-enc 2>&1)"; rc=$?
+  echo "$out"; (( rc == 1 )) && grep -q 'could not extract' <<<"$out"
+}
+test_serve_refuses_bad_mermaid() {   # lint failure means serve.sh never binds
+  _need_mmdc || return 2
+  _html_ws t-mm-serve <<'HTML'
+<html><body><div class="mermaid">graph TD; A-->|[[x]]| B; B --></div></body></html>
+HTML
+  local out rc; out="$(MMDC_BIN=mmdc "$S/serve.sh" t-mm-serve 2>&1)"; rc=$?
+  echo "$out"
+  local p; p="$(meta_get t-mm-serve pid)"
+  (( rc != 0 )) && [[ -z "$p" ]]
+}
+test_template_has_error_trap() {
+  local t="$SKILL_DIR/assets/template-html/index.html"
+  grep -q 'mermaid.parseError' "$t" && grep -q "classList.add('explainer-error')" "$t"
+}
+
+check_or_skip lint_mermaid_valid_passes                 test_lint_mermaid_valid_passes
+check_or_skip lint_mermaid_invalid_block_number         test_lint_mermaid_invalid_fails_with_block_number
+check_or_skip lint_mermaid_unescapes_entities           test_lint_mermaid_unescapes_entities
+check lint_mermaid_missing_mmdc_warns_and_passes        test_lint_mermaid_missing_mmdc_warns_and_passes
+check lint_mermaid_missing_mmdc_strict_fails            test_lint_mermaid_missing_mmdc_strict_fails
+check lint_mermaid_launch_failure_not_syntax_error      test_lint_mermaid_launch_failure_is_not_syntax_error
+check lint_mermaid_no_blocks_needs_no_mmdc              test_lint_mermaid_no_blocks_needs_no_mmdc
+check lint_mermaid_extraction_failure_never_fails_open test_lint_mermaid_extraction_failure_never_fails_open
+check_or_skip serve_refuses_bad_mermaid                 test_serve_refuses_bad_mermaid
+check template_has_error_trap                           test_template_has_error_trap
+
+# verify.sh html tier (needs Chrome; ~45s per run). The scaffolded template is the fixture.
+_verify_html() {   # slug — serve the workspace (lint skipped: no authoring chain here) and verify it
+  "$S/serve.sh" "$1" --no-lint >/dev/null
+  verify_run "$1"
+}
+test_verify_html_passes_template() {
+  "$S/init.sh" t-vh-ok --tier html >/dev/null
+  local out rc; out="$(_verify_html t-vh-ok)"; rc=$?; echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 0 )) && grep -q '^PASS: html-1 no .explainer-error' <<<"$out" &&
+  grep -Eq '^PASS: html-2 mermaid svg=[0-9]+ divs=[0-9]+' <<<"$out" && ! grep -q '^FAIL' <<<"$out"
+}
+test_verify_html_fails_on_mermaid_error() {
+  "$S/init.sh" t-vh-err --tier html >/dev/null
+  python3 - /tmp/ps-commu/t-vh-err/app/index.html <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace('<main', '<div class="mermaid">graph TD; A-->|[[x]]| B; B --></div>\n<main', 1)
+open(p, 'w').write(s)
+PY
+  local out rc; out="$(_verify_html t-vh-err)"; rc=$?; echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) && grep -q '^FAIL: html-1 .explainer-error' <<<"$out"
+}
+test_verify_html_fails_on_svg_count_mismatch() {   # a pre-"processed" div is skipped by mermaid -> no svg
+  "$S/init.sh" t-vh-cnt --tier html >/dev/null
+  python3 - /tmp/ps-commu/t-vh-cnt/app/index.html <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace('<main', '<div class="mermaid" data-processed="true">graph TD; A-->B</div>\n<main', 1)
+open(p, 'w').write(s)
+PY
+  local out rc; out="$(_verify_html t-vh-cnt)"; rc=$?; echo "$out"
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) && grep -q '^FAIL: html-2 mermaid svg=' <<<"$out"
+}
+check_or_skip verify_html_passes_template               test_verify_html_passes_template
+check_or_skip verify_html_fails_on_mermaid_error        test_verify_html_fails_on_mermaid_error
+check_or_skip verify_html_fails_on_svg_count_mismatch   test_verify_html_fails_on_svg_count_mismatch
+for s in t-vh-ok t-vh-err t-vh-cnt t-mm-serve; do "$S/stop.sh" "$s" >/dev/null 2>&1; done
 
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.

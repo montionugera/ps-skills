@@ -101,3 +101,17 @@ The note is validated against `knowledge/v1`, stored in `04_Knowledge/`, logged 
 - **Event Audit Stream:** Every state change generates an immutable event log at `_meta/events/YYYY/MM/<timestamp>-<actor>.json`.
 - **Schema Contracts:** Schemas live in `_meta/schemas/` (`idea-v1.json`, `project-v1.json`, `area-v1.json`, `knowledge-v1.json`, `technical-audit-v1.json`, `research-notes-v1.json`). All modifications must satisfy these contracts.
 
+## 🔗 Linked release progress
+
+`ps-work link PROJ-ID --vault-root PATH --repo MAIN_CHECKOUT --feature F-NNN` links
+one project to one feature. Run it only as the orchestrator or an authorized
+human: it reads the project SHA and commits the two link fields through
+`vault-engine` OCC. The repository must be an opted-in main checkout.
+
+`ps-work show PROJ-ID --vault-root PATH [--json]` reads the project's goal and
+live release status. It never writes either source. The vault owns the project
+goal and link; ps-release-workflow owns feature and release state. Missing,
+invalid, or unavailable links appear as distinct states rather than cached
+delivery progress. Use `--vault-engine` and `--psrw` for nonstandard installs.
+
+A moved or deleted repo path shows `link_invalid`; re-run `ps-work link` with the new path.

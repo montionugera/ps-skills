@@ -205,6 +205,14 @@ flowchart LR
 </main>
 <script src="mermaid.min.js"></script>
 <script>
+  // Error trap: mermaid v11 calls mermaid.parseError for every diagram it fails to
+  // parse/render, but still paints its own "Syntax error" SVG into the div — so the
+  // SVG count alone can't reveal a broken diagram. Flag it on <body> instead;
+  // scripts/verify.sh fails the page when body.explainer-error is present.
+  if (window.mermaid) mermaid.parseError = function (err) {
+    document.body.classList.add('explainer-error');
+    console.error('mermaid render error:', err);
+  };
   if (window.mermaid) mermaid.initialize({
     startOnLoad: true, theme: 'base',
     themeVariables: {

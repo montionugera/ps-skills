@@ -71,6 +71,7 @@ Then restart your agent session so the new skills are discovered.
 - `ps-release-workflow-*` use the engine installed at `~/.claude/ps-release-workflow`.
 - `dispatch-worker` / `dispatch-agy-worker` / `dispatch-codex-worker` / `dispatch-cursor-worker` are linked into `~/.local/bin/`.
 - `ps-plugin-bridge` is linked into `~/.local/bin/` to bridge Claude plugins to Antigravity CLI.
+- `ps-work` is linked into `~/.local/bin/`: `ps-work link` records a vault project's repo + feature ID, and `ps-work show` prints the project goal beside the live `psrw status --json` feature status (read-only; never writes release state into the vault).
 
 Running `./install.sh` in an interactive terminal automatically prompts you to choose your default routing chain and on-demand preferences, writing to `~/.config/dispatch/config.env`.
 
