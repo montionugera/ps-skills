@@ -23,6 +23,10 @@ check_or_skip(){       # like check, but exit code 2 = visible SKIP (e.g. no Chr
 
 # --- common.sh ---
 source "$S/common.sh"
+# Pre-F-015 tests build html-tier workspaces from the default template, which contains a
+# .mermaid block; lint.sh would run real mmdc (~15s) for each. Point it at a missing binary
+# by default (warn-and-skip); the F-015 tests that need real mmdc pass MMDC_BIN=mmdc explicitly.
+export MMDC_BIN=/nonexistent/mmdc
 
 cleanup_tests() {
   for d in /tmp/ps-commu/t-*/; do
@@ -1429,7 +1433,7 @@ test_lint_mermaid_valid_passes() {
 <html><body><div class="mermaid">graph TD
   A[Start] --> B[End]</div></body></html>
 HTML
-  "$S/lint.sh" t-mm-ok
+  MMDC_BIN=mmdc "$S/lint.sh" t-mm-ok
 }
 test_lint_mermaid_invalid_fails_with_block_number() {
   _need_mmdc || return 2
@@ -1440,7 +1444,7 @@ test_lint_mermaid_invalid_fails_with_block_number() {
 <div class="mermaid">graph TD; A-->|[[x]]| B; B --></div>
 </body></html>
 HTML
-  local out rc; out="$("$S/lint.sh" t-mm-bad 2>&1)"; rc=$?
+  local out rc; out="$(MMDC_BIN=mmdc "$S/lint.sh" t-mm-bad 2>&1)"; rc=$?
   echo "$out"
   (( rc == 1 )) && grep -q 'mermaid block 2' <<<"$out" && ! grep -q 'mermaid block 1' <<<"$out" &&
   grep -qi 'parse error' <<<"$out"
@@ -1451,7 +1455,7 @@ test_lint_mermaid_unescapes_entities() {   # --&gt; is only valid Mermaid after 
 <html><body><div class="mermaid">graph TD
   A["a &amp; b"] --&gt; B["&lt;c&gt; &quot;d&quot;"]</div></body></html>
 HTML
-  "$S/lint.sh" t-mm-esc
+  MMDC_BIN=mmdc "$S/lint.sh" t-mm-esc
 }
 test_lint_mermaid_missing_mmdc_warns_and_passes() {
   _html_ws t-mm-absent <<'HTML'
@@ -1498,7 +1502,7 @@ test_serve_refuses_bad_mermaid() {   # lint failure means serve.sh never binds
   _html_ws t-mm-serve <<'HTML'
 <html><body><div class="mermaid">graph TD; A-->|[[x]]| B; B --></div></body></html>
 HTML
-  local out rc; out="$("$S/serve.sh" t-mm-serve 2>&1)"; rc=$?
+  local out rc; out="$(MMDC_BIN=mmdc "$S/serve.sh" t-mm-serve 2>&1)"; rc=$?
   echo "$out"
   local p; p="$(meta_get t-mm-serve pid)"
   (( rc != 0 )) && [[ -z "$p" ]]
