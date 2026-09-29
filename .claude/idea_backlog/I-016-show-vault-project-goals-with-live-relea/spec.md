@@ -26,6 +26,6 @@ The user asked for the two skills to work together without tightly coupling thei
 
 - [ ] `psrw status --json` emits parseable JSON with feature, epic, and release status while preserving current text output.
 - [ ] A project can hold optional repo and feature link fields through its existing vault commit path.
-- [ ] `ps-work-view` shows a linked project's goal and feature status from a live release snapshot.
+- [ ] `ps-work show` shows a linked project's goal and feature status from a live release snapshot.
 - [ ] Missing link, unknown feature, and unavailable release status are distinct and readable.
 - [ ] Focused tests and an end-to-end fixture prove the view does not mutate either source.

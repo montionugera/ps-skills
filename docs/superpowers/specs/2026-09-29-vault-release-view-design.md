@@ -23,7 +23,7 @@ The standalone `bin/ps-work` command has two operations:
 - `ps-work link PROJECT_ID --vault-root PATH --repo MAIN_ROOT --feature F-NNN [--actor NAME]` checks that the repo is an opted-in main checkout and that the feature ID exists in the status snapshot, then reads the project SHA and writes only the two link fields via `vault-engine commit`. It is run by the orchestrator or a human, not a leaf agent.
 - `ps-work show PROJECT_ID --vault-root PATH [--json]` reads the project with `vault-engine read-record` and then the linked repository with `psrw status --json --repo`. It never calls a write operation. It displays project ID/title/outcome (using title if outcome is absent), feature ID/title/status, and release version. `--vault-engine` and `--psrw` flags allow nonstandard installations and test fixtures.
 
-Both operations pass `VAULT_ROOT=PATH` in the vault-engine child environment and use subprocess argument arrays, never a shell. They treat `psrw` JSON `opted_in: false` as unavailable despite its zero exit code.
+Both operations pass `VAULT_ROOT=PATH` in the vault-engine child environment and use subprocess argument arrays, never a shell. If `--psrw` is omitted, the command prefers the dispatcher beside its own checkout, then PATH; this allows the release worktree copy to run before global promotion. They treat `psrw` JSON `opted_in: false` as unavailable despite its zero exit code.
 
 ## Flow
 
@@ -51,7 +51,7 @@ The `show` operation does not copy feature state into a vault note. The `link` o
 1. Focused tests for `psrw status --json`: versioned success shape, non-opted-in repo, unavailable status, text compatibility, and no identity-state write.
 2. Focused tests for `ps-work link/show`: valid link, missing/invalid link, worktree path rejection, missing feature, unavailable release, malformed child output, and OCC conflict. Assert `show` invokes no mutating command.
 3. One temporary vault + release-repo fixture exercises the two CLIs and checks source files are unchanged after `show`.
-4. Run repository gates, independent code review, fix findings, and re-verify. Ship the feature into release 1.8 only after gates pass.
+4. Run explicit focused/installer/Go tests, independent code review, fix findings, and re-verify. This repo has no precheck script. Ship into release 1.8 only after tests pass. The globally installed commands still point at main until the release is promoted; use the release worktree command in the meantime.
 
 ## Appendix — audit trail
 
