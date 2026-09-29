@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProjectSchemaV1",
+  "type": "object",
+  "required": ["schema", "id", "kind", "title", "status", "owner", "target_date"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "project/v1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^PROJ-[a-z0-9-]+$"
+    },
+    "kind": {
+      "type": "string",
+      "const": "project"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["proposed", "active", "blocked", "done", "cancelled"]
+    },
+    "owner": {
+      "type": "string"
+    },
+    "area_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "target_date": {
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

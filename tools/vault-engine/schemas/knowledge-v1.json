@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KnowledgeSchemaV1",
+  "type": "object",
+  "required": ["schema", "id", "kind", "title", "status"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "knowledge/v1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^(KNOW|THESIS|CONCEPT|SOP|REF)-[a-z0-9-]+$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["knowledge", "thesis", "concept", "sop", "reference"]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "active", "deprecated", "archived"]
+    },
+    "category": {
+      "type": "string",
+      "enum": ["product", "process", "thesis", "rule"]
+    },
+    "author": {
+      "type": "string"
+    },
+    "created": {
+      "type": "string"
+    },
+    "updated": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "project_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "area_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
