@@ -1,7 +1,8 @@
 ---
 title: "Show vault project goals with live release feature status"
-id: I-016
-status: idea
+id: F-016
+status: refined
+from_idea: I-016
 ---
 
 # Show vault project goals with live release feature status

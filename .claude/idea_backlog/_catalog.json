@@ -96,6 +96,6 @@
     "id": "I-016",
     "title": "Show vault project goals with live release feature status",
     "created_at": "2026-09-29T08:06:24.298610+00:00",
-    "promoted_to": null
+    "promoted_to": "F-016"
   }
 ]

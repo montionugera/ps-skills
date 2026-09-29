@@ -182,5 +182,14 @@
     "status": "claimed",
     "release_version": null,
     "claimed_at": "2026-09-27T14:27:13.759941+00:00"
+  },
+  {
+    "id": "F-016",
+    "title": "Show vault project goals with live release feature status",
+    "from_idea": "I-016",
+    "created_at": "2026-09-29T08:14:14.667383+00:00",
+    "claimed_by": null,
+    "status": "open",
+    "release_version": null
   }
 ]
