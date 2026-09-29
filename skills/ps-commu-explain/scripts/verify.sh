@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# verify.sh — render gate for a ps-commu workspace (infographic tier).
+# verify.sh — render gate for a ps-commu workspace (infographic tier; html tier
+# has its own, smaller assert set — see "html tier" below).
 # Usage: verify.sh <slug> [--url URL]
 #   Loads the served page in headless Google Chrome (--dump-dom under a virtual
 #   time budget, so the client-side fetch() + Markdown + draw.io render has
@@ -55,6 +56,16 @@
 #        over the graph container, which a --dump-dom capture can never
 #        trigger — the same hover/click limitation that makes assert 5 a
 #        permanent SKIP.
+#   html tier (meta.json tier=html): asserts 1-7 above are infographic-only
+#     (Cherry/draw.io) and do not run. Instead, after the same headless-Chrome
+#     --dump-dom load (Mermaid renders client-side):
+#     html-1  <body> does NOT carry class `explainer-error` (the template's
+#             mermaid.parseError trap sets it; mermaid still paints its own
+#             error SVG for a broken diagram, so html-2 alone cannot catch it)
+#     html-2  rendered <svg> count inside `.mermaid` divs == `.mermaid` div count
+#     Cannot check: diagram correctness/legibility beyond "mermaid produced an
+#     svg and raised no parse error"; console errors, clicks, and nav are not
+#     checked. --dump-text is not supported for the html tier (exit 2).
 #   --url  page URL to load (default: http://127.0.0.1:<port> from meta.json;
 #          requires a live marker-verified server). A ?doc=X query selects
 #          which app/X markdown file the fence count is taken from.
@@ -89,6 +100,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$slug" ]] || usage 1
 ws="$PS_COMMU_ROOT/$slug"
+tier="$(meta_get "$slug" tier)"
 [[ -d "$ws/app" ]] || { echo "no workspace app dir: $ws/app (run init.sh first)" >&2; exit 1; }
 
 # Assert 6 (defined here, run at its usual point below AND from the
@@ -96,6 +108,7 @@ ws="$PS_COMMU_ROOT/$slug"
 # a Chrome check, so it must not be silently skipped on a Chrome-less box —
 # see the assert 6 comment further down for the full rationale.
 assert6() {
+  [[ "$tier" == "html" ]] && return 0   # html tier ships no explainer.css
   local explainer_css="$ws/app/explainer.css"
   if [[ ! -f "$explainer_css" ]]; then
     echo "FAIL: 6 explainer.css not found at $explainer_css"
@@ -128,6 +141,7 @@ chrome="$(find_chrome)" || {
   echo "SKIP: no Google Chrome found (set CHROME_BIN)"
   # --dump-text has nothing to export without Chrome — unchanged, exit 2.
   [[ "$dump_text" == "1" ]] && exit 2
+  [[ "$tier" == "html" ]] && exit 2
   # Asserts 1-5 need Chrome and cannot run, but assert 6 needs neither Chrome
   # nor a live server (it greps a file on disk) — run it so a Chrome-less CI
   # box still gates the branch's flagship regression instead of skipping it
@@ -143,6 +157,10 @@ if [[ -z "$url" ]]; then
   url="http://127.0.0.1:$port/"
 fi
 
+if [[ "$tier" == "html" ]]; then
+  [[ "$dump_text" == "1" ]] && { echo "SKIP: --dump-text is not supported for the html tier" >&2; exit 2; }
+  fences=0   # no markdown/draw.io on the html tier; the python block runs its own asserts
+else
 # Which markdown file the page will fetch: ?doc=X, else content.md.
 doc="$(python3 -c 'import sys,urllib.parse as u; q=u.parse_qs(u.urlparse(sys.argv[1]).query); print(q.get("doc",["content.md"])[0])' "$url")"
 md="$ws/app/$doc"
@@ -201,11 +219,12 @@ for m in re.finditer(r"```([^\n`]*)\n(.*?)```", content, re.S):
 print(n)
 ' "$md")"
 [[ "$fences" =~ ^[0-9]+$ ]] || { echo "FAIL: could not count drawio fences in $md: $fences"; exit 1; }
+fi
 
-python3 - "$chrome" "$url" "$fences" "$dump_text" <<'PY'
+python3 - "$chrome" "$url" "$fences" "$dump_text" "$tier" <<'PY'
 import os, re, select, shutil, signal, subprocess, sys, tempfile, time
 from html.parser import HTMLParser
-chrome, url, fences, dump_text = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4] == "1"
+chrome, url, fences, dump_text, tier = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4] == "1", sys.argv[5]
 prof = tempfile.mkdtemp(prefix="ps-commu-verify-")
 proc = None
 out, err = b"", b""
@@ -255,6 +274,30 @@ def report(status, n, text):
     lines.append(f"{status}: {n} {text}")
 if "</html>" not in dom:
     report("FAIL", 0, f"Chrome produced no complete DOM within 90s ({len(dom)} bytes)")
+if tier == "html":
+    # html tier: no Cherry/draw.io pipeline — only the Mermaid error trap and svg-vs-div count.
+    if os.environ.get("PS_COMMU_VERIFY_DOM"):
+        open(os.environ["PS_COMMU_VERIFY_DOM"], "w").write(dom)
+    class MermaidCount(HTMLParser):
+        def __init__(self):
+            super().__init__(); self.body_cls = []; self.divs = 0; self.svgs = 0; self.depth = 0; self.seen = False
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag == "body": self.body_cls = (a.get("class") or "").split()
+            if self.depth:
+                if tag == "div": self.depth += 1
+                if tag == "svg" and not self.seen: self.svgs += 1; self.seen = True
+            elif tag == "div" and "mermaid" in (a.get("class") or "").split():
+                self.divs += 1; self.depth = 1; self.seen = False
+        def handle_endtag(self, tag):
+            if self.depth and tag == "div": self.depth -= 1
+    mc = MermaidCount(); mc.feed(dom)
+    tripped = "explainer-error" in mc.body_cls
+    report("FAIL" if tripped else "PASS", "html-1",
+           ".explainer-error present on body (mermaid parse/render error)" if tripped else "no .explainer-error on body")
+    report("PASS" if mc.svgs == mc.divs else "FAIL", "html-2", f"mermaid svg={mc.svgs} divs={mc.divs}")
+    print("\n".join(lines))
+    sys.exit(1 if failed else 0)
 if not re.search(r'class="[^"]*\bis-ready\b', dom):
     report("FAIL", 0, "page never reached .is-ready (render pipeline did not finish in the 8s budget)")
 m = re.search(r'class="explainer-error".*?</div>\s*</div>', dom, re.S)
