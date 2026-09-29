@@ -283,11 +283,11 @@ if tier == "html":
             super().__init__(); self.body_cls = []; self.divs = 0; self.svgs = 0; self.depth = 0; self.seen = False
         def handle_starttag(self, tag, attrs):
             a = dict(attrs)
-            if tag == "body": self.body_cls = a.get("class", "").split()
+            if tag == "body": self.body_cls = (a.get("class") or "").split()
             if self.depth:
                 if tag == "div": self.depth += 1
                 if tag == "svg" and not self.seen: self.svgs += 1; self.seen = True
-            elif tag == "div" and "mermaid" in a.get("class", "").split():
+            elif tag == "div" and "mermaid" in (a.get("class") or "").split():
                 self.divs += 1; self.depth = 1; self.seen = False
         def handle_endtag(self, tag):
             if self.depth and tag == "div": self.depth -= 1
