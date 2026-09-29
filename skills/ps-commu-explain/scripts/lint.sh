@@ -540,7 +540,16 @@ for i, text in enumerate(b.blocks, 1):
 print(len(b.blocks))
 PY
 )"
-  if [[ "$mm_count" =~ ^[0-9]+$ && "$mm_count" -gt 0 ]]; then
+  if [[ ! "$mm_count" =~ ^[0-9]+$ ]]; then
+    # extraction failed (e.g. non-UTF-8 index.html): never fail open silently
+    mm_count=0
+    if [[ "${EXPLAINER_STRICT_MERMAID:-}" == "1" ]]; then
+      echo "app/index.html: could not extract mermaid blocks (EXPLAINER_STRICT_MERMAID=1)"; mermaid_status=1
+    else
+      echo "WARNING: mermaid check skipped: could not extract mermaid blocks from app/index.html" >&2
+    fi
+  fi
+  if [[ "$mm_count" -gt 0 ]]; then
     mmdc_bin="${MMDC_BIN:-mmdc}"
     mm_strict=0; [[ "${EXPLAINER_STRICT_MERMAID:-}" == "1" ]] && mm_strict=1
     # skip = the check could not run: WARNING and pass, or a defect under strict.
@@ -560,7 +569,7 @@ PY
         mm_rc=0
         ${mm_timeout[@]+"${mm_timeout[@]}"} "$mmdc_bin" -q -i "$mm_tmp/block-$i.mmd" -o "$mm_tmp/block-$i.svg" >"$mm_tmp/block-$i.log" 2>&1 || mm_rc=$?
         (( mm_rc == 0 )) && continue
-        if grep -Eq 'Parse error|Lexical error|UnknownDiagramError|No diagram type detected|Syntax error|Expecting ' "$mm_tmp/block-$i.log"; then
+        if grep -Eq '^(Error: )?(Parse|Lexical) error|UnknownDiagramError|No diagram type detected' "$mm_tmp/block-$i.log"; then
           # message = the "Error: ..." paragraph, minus stack frames and the Rosetta banner
           msg="$(sed -n '/^[A-Za-z]*Error:/,$p' "$mm_tmp/block-$i.log" | sed '/^ *at /,$d' | sed '/^$/,$d' | head -n 8 | sed '1!s/^/    /')"
           echo "app/index.html: mermaid block $i: $msg"

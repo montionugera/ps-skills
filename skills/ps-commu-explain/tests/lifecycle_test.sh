@@ -1497,6 +1497,17 @@ HTML
   local out rc; out="$(MMDC_BIN=/nonexistent/mmdc "$S/lint.sh" t-mm-none 2>&1)"; rc=$?
   echo "$out"; (( rc == 0 )) && ! grep -q WARNING <<<"$out"
 }
+test_lint_mermaid_extraction_failure_never_fails_open() {   # non-UTF-8 index.html
+  _html_ws t-mm-enc <<'HTML'
+<html><body><div class="mermaid">graph TD
+  A --> B</div></body></html>
+HTML
+  printf '<div class="mermaid">caf\xe9</div>' > /tmp/ps-commu/t-mm-enc/app/index.html
+  local out rc; out="$(MMDC_BIN=/nonexistent/mmdc "$S/lint.sh" t-mm-enc 2>&1)"; rc=$?
+  echo "$out"; (( rc == 0 )) && grep -q 'WARNING.*could not extract' <<<"$out" || return 1
+  out="$(EXPLAINER_STRICT_MERMAID=1 MMDC_BIN=/nonexistent/mmdc "$S/lint.sh" t-mm-enc 2>&1)"; rc=$?
+  echo "$out"; (( rc == 1 )) && grep -q 'could not extract' <<<"$out"
+}
 test_serve_refuses_bad_mermaid() {   # lint failure means serve.sh never binds
   _need_mmdc || return 2
   _html_ws t-mm-serve <<'HTML'
@@ -1519,6 +1530,7 @@ check lint_mermaid_missing_mmdc_warns_and_passes        test_lint_mermaid_missin
 check lint_mermaid_missing_mmdc_strict_fails            test_lint_mermaid_missing_mmdc_strict_fails
 check lint_mermaid_launch_failure_not_syntax_error      test_lint_mermaid_launch_failure_is_not_syntax_error
 check lint_mermaid_no_blocks_needs_no_mmdc              test_lint_mermaid_no_blocks_needs_no_mmdc
+check lint_mermaid_extraction_failure_never_fails_open test_lint_mermaid_extraction_failure_never_fails_open
 check_or_skip serve_refuses_bad_mermaid                 test_serve_refuses_bad_mermaid
 check template_has_error_trap                           test_template_has_error_trap
 
