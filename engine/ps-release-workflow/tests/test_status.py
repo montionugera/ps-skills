@@ -226,6 +226,58 @@ def test_corrupt_release_json_never_raises(tmp_repo: Path):
     assert "Traceback" not in cp.stderr
 
 
+def test_json_status_projects_only_public_delivery_fields(tmp_repo_with_release: Path, fixed_owner: str):
+    feats = _setup_release_with_features(tmp_repo_with_release, fixed_owner)
+    cp = _run_script(tmp_repo_with_release, "--json")
+    assert cp.returncode == 0
+    assert json.loads(cp.stdout) == {
+        "schema": "psrw-status/v1",
+        "opted_in": True,
+        "release": {"version": "1.1", "in_progress": True},
+        "features": [
+            {"id": feats[0]["id"], "title": "First feature", "status": "claimed", "release_version": None},
+            {"id": feats[1]["id"], "title": "Second feature", "status": "open", "release_version": None},
+        ],
+        "epics": [],
+    }
+
+
+def test_json_status_for_non_opted_in_repo_is_machine_readable(tmp_repo: Path):
+    cp = _run_script(tmp_repo, "--json")
+    assert cp.returncode == 0
+    payload = json.loads(cp.stdout)
+    assert payload["schema"] == "psrw-status/v1"
+    assert payload["opted_in"] is False
+    assert payload["error"]["code"] == "not_opted_in"
+
+
+def test_json_status_collection_error_is_machine_readable(tmp_repo: Path):
+    (tmp_repo / ".release.json").write_text("{not json")
+    cp = _run_script(tmp_repo, "--json")
+    assert cp.returncode == 0
+    payload = json.loads(cp.stdout)
+    assert payload["schema"] == "psrw-status/v1"
+    assert payload["opted_in"] is True
+    assert payload["error"]["code"] == "status_unavailable"
+
+
+def test_json_status_does_not_write_identity_cache(tmp_repo_with_release: Path, monkeypatch):
+    import os
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    cache = Path(os.environ["HOME"]) / ".cache" / "ps-release-workflow" / "session-id"
+    cache.unlink(missing_ok=True)
+    cp = _run_script(tmp_repo_with_release, "--json")
+    assert cp.returncode == 0
+    assert json.loads(cp.stdout)["opted_in"] is True
+    assert not cache.exists()
+
+
+def test_json_and_brief_are_mutually_exclusive(tmp_repo_with_release: Path):
+    cp = _run_script(tmp_repo_with_release, "--json", "--brief")
+    assert cp.returncode == 2
+    assert "not allowed" in cp.stderr
+
+
 # ── epic rollup ───────────────────────────────────────────────────────────
 
 

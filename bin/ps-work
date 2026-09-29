@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Join a vault project with live ps-release-workflow status."""
+
+import argparse
+import functools
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+FEATURE_ID = re.compile(r"F-\d{3,}\Z")
+ACTOR = re.compile(r"[A-Za-z0-9_-]+\Z")
+PROJECT_ID = re.compile(r"PROJ-[a-z0-9-]+\Z")  # matches vault-engine project-v1 schema
+CHILD_TIMEOUT = 30
+
+
+class WorkError(Exception):
+    pass
+
+
+def command_path(override, candidates, name):
+    if override:
+        return override
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    found = shutil.which(name)
+    if found:
+        return found
+    raise WorkError(f"{name} command not found")
+
+
+def child(command, args, *, vault_root=None):
+    env = os.environ.copy()
+    if vault_root is not None:
+        env["VAULT_ROOT"] = str(vault_root)
+    try:
+        result = subprocess.run([command, *args], text=True, capture_output=True, env=env,
+                                check=False, timeout=CHILD_TIMEOUT, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired as exc:
+        raise WorkError(f"{Path(command).name} timed out after {CHILD_TIMEOUT}s") from exc
+    except OSError as exc:
+        raise WorkError(f"cannot run {Path(command).name}: {exc}") from exc
+    if result.returncode:
+        raise WorkError(result.stderr.strip() or f"{Path(command).name} exited {result.returncode}")
+    return result.stdout
+
+
+def json_child(command, args, *, vault_root=None):
+    raw = child(command, args, vault_root=vault_root)
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise WorkError(f"invalid JSON from {Path(command).name}") from exc
+    if not isinstance(result, dict):
+        raise WorkError(f"invalid response from {Path(command).name}")
+    return result
+
+
+def read_project(vault_engine, vault_root, project_id):
+    record = json_child(vault_engine, ["read-record", project_id], vault_root=vault_root)
+    fm = record.get("frontmatter")
+    if not isinstance(fm, dict) or fm.get("kind") != "project" or fm.get("id") != project_id:
+        raise WorkError(f"{project_id} is not a project record")
+    if not isinstance(fm.get("title"), str) or not fm["title"]:
+        raise WorkError(f"{project_id} has no project title")
+    return record, fm
+
+
+def repo_problem(value):
+    """Return why value is not an opted-in main checkout, or None if it is."""
+    if not isinstance(value, str):
+        return "repository path is not a string"
+    path = Path(value)
+    if not path.is_absolute():
+        return "repository path is not absolute"
+    if path.resolve() != path:
+        return "repository path is not canonical"
+    if not path.is_dir():
+        return "repository path is not a directory"
+    if not (path / ".git").is_dir():
+        return ".git is not a directory (worktrees are not accepted)"
+    if not (path / ".release.json").is_file():
+        return ".release.json is missing (repository is not opted in)"
+    return None
+
+
+def link_problem(repo, feature_id):
+    problem = repo_problem(repo)
+    if problem:
+        return problem
+    if not isinstance(feature_id, str) or not FEATURE_ID.fullmatch(feature_id):
+        return "feature ID is not F-NNN"
+    return None
+
+
+def release_status(psrw, repo):
+    snapshot = json_child(psrw, ["status", "--json", "--repo", repo])
+    if snapshot.get("schema") != "psrw-status/v1":
+        raise WorkError("unsupported psrw status response")
+    error = snapshot.get("error")
+    if isinstance(error, dict) and error.get("message"):
+        raise WorkError(f"release status unavailable: {error['message']}")
+    if snapshot.get("opted_in") is not True:
+        raise WorkError("release status unavailable: repository is not opted in")
+    if not isinstance(snapshot.get("features"), list) or not isinstance(snapshot.get("release"), dict):
+        raise WorkError("incomplete psrw status response")
+    return snapshot
+
+
+def find_feature(snapshot, feature_id):
+    return next((item for item in snapshot["features"]
+                 if isinstance(item, dict) and item.get("id") == feature_id), None)
+
+
+def show(args, vault_engine, psrw):
+    _, fm = read_project(vault_engine, args.vault_root, args.project_id)
+    title = str(fm["title"])
+    outcome = str(fm.get("outcome") or title)
+    result = {"project": {"id": args.project_id, "title": title, "outcome": outcome},
+              "state": "link_missing", "feature": None, "release": None}
+    repo = fm.get("release_repo")
+    feature_id = fm.get("release_feature_id")
+    if repo is not None or feature_id is not None:
+        if link_problem(repo, feature_id):
+            result["state"] = "link_invalid"
+        else:
+            result["feature"] = {"id": feature_id}
+            try:
+                snapshot = release_status(psrw(), repo)
+            except WorkError as exc:
+                result["state"] = "release_unavailable"
+                result["message"] = str(exc)
+                print(f"ps-work: {exc}", file=sys.stderr)
+            else:
+                feature = find_feature(snapshot, feature_id)
+                if feature is None:
+                    result["state"] = "feature_not_found"
+                elif (not isinstance(feature.get("title"), str)
+                      or not isinstance(feature.get("status"), str)):
+                    result["state"] = "release_unavailable"
+                else:
+                    result["state"] = "linked"
+                    result["feature"] = {key: feature.get(key)
+                                         for key in ("id", "title", "status", "release_version")}
+                    result["release"] = {key: snapshot["release"].get(key)
+                                         for key in ("version", "in_progress")}
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"{title} ({args.project_id})")
+        print(f"Goal: {outcome}")
+        if result["state"] == "linked":
+            feature = result["feature"]
+            print(f"Feature: {feature['id']} — {str(feature['title'])} ({str(feature['status'])})")
+            feature_release = feature.get("release_version")
+            if feature_release:
+                print(f"Release: {str(feature_release)}")
+            else:
+                print(f"Current release: {str(result['release']['version'])}")
+        else:
+            print(f"Release link: {result['state']}")
+
+
+def link(args, vault_engine, psrw):
+    repo = str(Path(args.repo).resolve())
+    problem = link_problem(repo, args.feature)
+    if problem:
+        raise WorkError(f"invalid link: {problem}")
+    if not ACTOR.fullmatch(args.actor):
+        raise WorkError("invalid actor: use letters, digits, hyphens, or underscores")
+    snapshot = release_status(psrw, repo)
+    if find_feature(snapshot, args.feature) is None:
+        raise WorkError(f"feature not found: {args.feature}")
+    record, _ = read_project(vault_engine, args.vault_root, args.project_id)
+    sha = record.get("sha256")
+    if not isinstance(sha, str) or not sha:
+        raise WorkError("vault record has no SHA-256")
+    updates = {"release_repo": repo, "release_feature_id": args.feature}
+    child(vault_engine, ["commit", args.project_id, sha, args.actor, json.dumps(updates)],
+          vault_root=args.vault_root)
+    print(f"Linked {args.project_id} to {args.feature}")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="ps-work")
+    sub = parser.add_subparsers(dest="operation", required=True)
+    for operation in ("link", "show"):
+        p = sub.add_parser(operation)
+        p.add_argument("project_id")
+        p.add_argument("--vault-root", required=True, type=Path)
+        p.add_argument("--vault-engine")
+        p.add_argument("--psrw")
+        if operation == "link":
+            p.add_argument("--repo", required=True)
+            p.add_argument("--feature", required=True)
+            p.add_argument("--actor", default="ps-work")
+        else:
+            p.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    if not PROJECT_ID.fullmatch(args.project_id):
+        parser.error("invalid project ID: expected PROJ-<lowercase letters, digits, hyphens>")
+    sibling_dir = Path(__file__).absolute().parent
+    checkout_psrw = Path(__file__).resolve().parents[1] / "engine/ps-release-workflow/bin/psrw"
+    try:
+        vault_engine = command_path(args.vault_engine, [sibling_dir / "vault-engine"], "vault-engine")
+        @functools.cache
+        def psrw():
+            return command_path(args.psrw, [sibling_dir / "psrw", checkout_psrw], "psrw")
+
+        if args.operation == "link":
+            link(args, vault_engine, psrw())
+        else:
+            show(args, vault_engine, psrw)
+    except WorkError as exc:
+        print(f"ps-work: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
