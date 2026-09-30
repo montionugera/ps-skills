@@ -62,3 +62,11 @@ Caveats, stated honestly: the wall-clock delta is inflated because this run did 
 ## Full test suite
 
 `----- 111 passed, 0 failed, 0 skipped`
+
+## Reader-gate interface: real subagent run (2026-10-01)
+
+Closes the caveat above. A fresh `model: sonnet` Agent was given the verbatim output of `verify.sh f018-reader-check --reader-prompt` (path-based: "read this one file"), against the page text of a workspace scaffolded with `init.sh --example` (the exemplar page, NOT a page authored for this feature).
+
+- **Interface: works.** The subagent read the single named file (1 tool use, ~8 s), answered Q1-Q3 with F<n> citations, and returned the exact requested shape (Q1-Q3, Unexplained terms, Verdict).
+- **Verdict on that page: FAIL** (unexplained terms: slug, kebab-case, authoring chain, lint gate, watchdog, headless Chrome, and others; Q3 only partly supported). This is a content verdict on the exemplar page, which this branch does not change; it is the reader gate doing its job, not a defect in the interface.
+- **Observation, not fixed here:** the exemplar says "6 asserts" while verify.sh now has 8. Filed as a follow-up for the exemplar's content, out of scope for F-018.
