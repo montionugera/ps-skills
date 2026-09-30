@@ -1206,6 +1206,7 @@ test_verify_dump_text() {  # --dump-text: clean reader-visible text on stdout, e
   local out rc; out="$(verify_run t-verify --dump-text)"; rc=$?
   echo "chars=${#out}"
   (( rc == 2 )) && return 2
+  [[ "$out" == "$(cat /tmp/ps-commu/t-verify/page-text.txt 2>/dev/null)" ]] || { echo "stdout != page-text.txt"; return 1; }
   (( rc == 0 )) &&
   [[ -n "$out" ]] &&
   ! grep -q 'data-nav' <<<"$out" &&
@@ -1699,6 +1700,53 @@ test_scripts_log_timing() {  # init, serve and verify each add exactly one line 
 check log_timing_appends              test_log_timing_appends
 check log_timing_noop_without_workspace test_log_timing_noop_without_workspace
 check scripts_log_timing              test_scripts_log_timing
+
+test_verify_one_load_writes_page_text() {  # asserts + page-text.txt from ONE Chrome launch
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-one pt=/tmp/ps-commu/t-vstub/page-text.txt out
+  _stub_chrome "$d" page; rm -f "$pt"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub)"
+  echo "$out"
+  [[ "$(wc -l < "$d/launches" | tr -d ' ')" == 1 ]] &&
+  grep -q '^PASS: 2 ' <<<"$out" && grep -q '^PASS: 3 ' <<<"$out" && grep -q '^PASS: 8 ' <<<"$out" &&
+  grep -q '^PASS: 6 ' <<<"$out" &&
+  [[ "$(cat "$pt")" == "Stub page text for F-018." ]]
+}
+test_verify_dump_text_same_path() {  # --dump-text: one launch, stdout == page-text.txt
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-dump pt=/tmp/ps-commu/t-vstub/page-text.txt out rc
+  _stub_chrome "$d" page; rm -f "$pt"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --dump-text)"; rc=$?
+  (( rc == 0 )) && [[ "$(wc -l < "$d/launches" | tr -d ' ')" == 1 ]] &&
+  [[ "$out" == "Stub page text for F-018." ]] && [[ "$out" == "$(cat "$pt")" ]]
+}
+test_verify_failed_load_leaves_no_page_text() {  # stale copy from an earlier run must not survive
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-fail pt=/tmp/ps-commu/t-vstub/page-text.txt rc
+  _stub_chrome "$d" fail; echo STALE > "$pt"
+  CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub >/dev/null 2>&1; rc=$?
+  (( rc == 1 )) && [[ ! -e "$pt" ]] || return 1
+  # Also verify when DOM renders but an assert fails (e.g. explainer-error body): no page-text.txt
+  mkdir -p "$d"
+  printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="explainer-error"><div>fail</div></div></div></body></html>' > "$d/page.html"
+  echo STALE > "$pt"
+  CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub >/dev/null 2>&1; rc=$?
+  (( rc == 1 )) && [[ ! -e "$pt" ]]
+}
+test_verify_url_writes_no_page_text() {  # --url may load another doc: never written, stale copy removed
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-url pt=/tmp/ps-commu/t-vstub/page-text.txt port out
+  _stub_chrome "$d" page; echo STALE > "$pt"; port="$(meta_get t-vstub port)"
+  CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --url "http://127.0.0.1:$port/" >/dev/null 2>&1
+  [[ ! -e "$pt" ]] || return 1
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --url "http://127.0.0.1:$port/" --dump-text)" &&
+  [[ "$out" == "Stub page text for F-018." ]] && [[ ! -e "$pt" ]]
+}
+check verify_one_load_writes_page_text        test_verify_one_load_writes_page_text
+check verify_dump_text_same_path              test_verify_dump_text_same_path
+check verify_failed_load_leaves_no_page_text  test_verify_failed_load_leaves_no_page_text
+check verify_url_writes_no_page_text          test_verify_url_writes_no_page_text
+
 
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.
