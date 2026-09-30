@@ -97,5 +97,11 @@
     "title": "Show vault project goals with live release feature status",
     "created_at": "2026-09-29T08:06:24.298610+00:00",
     "promoted_to": "F-016"
+  },
+  {
+    "id": "I-017",
+    "title": "Fix 3 red docs-style skill tests (promote/ship body budget, sync-main lifecycle link)",
+    "created_at": "2026-09-30T00:15:11.223481+00:00",
+    "promoted_to": null
   }
 ]
