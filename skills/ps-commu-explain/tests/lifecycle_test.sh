@@ -1945,6 +1945,31 @@ test_components_index_covers_every_section() {
 }
 check components_index_covers_every_section test_components_index_covers_every_section
 
+test_handoff_prints_everything() {
+  _vstub_ws || return 1
+  rm -f /tmp/ps-commu/t-vstub/timings.log
+  local port out; port="$(meta_get t-vstub port)"
+  out="$("$S/handoff.sh" t-vstub)" || { echo "$out"; return 1; }
+  echo "$out"
+  grep -qxF "URL: http://localhost:$port" <<<"$out" &&
+  grep -q '^Q1: ' <<<"$out" && grep -q '^Q2: ' <<<"$out" && grep -q '^Q3: ' <<<"$out" &&
+  grep -q '^Reader-gate answers:' <<<"$out" &&
+  grep -qE '^SLUG +TIER' <<<"$out" && grep -qE '^t-vstub +infographic .*running' <<<"$out" &&
+  grep -qF "$S/stop.sh t-vstub" <<<"$out" && grep -qF "$S/clean.sh" <<<"$out" &&
+  grep -qxF "Re-serve: $S/serve.sh t-vstub" <<<"$out" &&
+  [[ "$(grep -cE ' handoff\.sh [0-9]+$' /tmp/ps-commu/t-vstub/timings.log)" == 1 ]]
+}
+test_handoff_without_server_or_workspace() {
+  rm -rf /tmp/ps-commu/t-hoff; "$S/init.sh" t-hoff --example >/dev/null
+  local out rc
+  out="$("$S/handoff.sh" t-hoff)"; rc=$?
+  (( rc == 1 )) && grep -q '^URL: none, no live server' <<<"$out" || return 1
+  "$S/handoff.sh" t-no-such-ws-xyz >/dev/null 2>&1; rc=$?
+  (( rc == 2 )) && "$S/handoff.sh" --help | grep -q 'Usage: handoff.sh'
+}
+check handoff_prints_everything           test_handoff_prints_everything
+check handoff_without_server_or_workspace test_handoff_without_server_or_workspace
+
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.
 test_list_shows_running_and_stopped() {
