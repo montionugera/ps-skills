@@ -103,5 +103,11 @@
     "title": "Fix 3 red docs-style skill tests (promote/ship body budget, sync-main lifecycle link)",
     "created_at": "2026-09-30T00:15:11.223481+00:00",
     "promoted_to": "F-017"
+  },
+  {
+    "id": "I-018",
+    "title": "ps-commu-explain speed quick wins: single Chrome run, scripted content skeleton, reader-prompt and handoff scripts, cheaper verify subagents, auto-lint hook",
+    "created_at": "2026-09-30T00:27:22.954763+00:00",
+    "promoted_to": null
   }
 ]
