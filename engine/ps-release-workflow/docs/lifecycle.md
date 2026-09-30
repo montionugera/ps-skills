@@ -180,7 +180,8 @@ so its `hooks` block legitimately differs per branch.
    marks features promoted, archives the `F-NNN` folders, prunes the per-feature and
    `_release` worktrees and branches, and finalizes `.release.json` on `main`.
    It verifies the PR is merged first and refuses otherwise, because deleting the
-   remote release branch would auto-close an open PR.
+   remote release branch would auto-close an open PR. `--force-cleanup` is the explicit
+   override.
 
 **The release is frozen from the moment promote starts.** Promote records the freeze
 in `.claude/state/release-freeze.json` under the `_release` lock, and `ship` checks it
