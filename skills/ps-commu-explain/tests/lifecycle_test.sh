@@ -1868,6 +1868,51 @@ check lint_flags_missing_content_infographic       test_lint_flags_missing_conte
 check lint_rejects_todo_line_infographic           test_lint_rejects_todo_line_infographic
 check lint_help_describes_drawio_not_mermaid       test_lint_help_describes_drawio_not_mermaid_scanner
 
+_skel_ws() {  # t-skel: the filled --example chain with NO app/content.md
+  rm -rf /tmp/ps-commu/t-skel
+  "$S/init.sh" t-skel --example >/dev/null && rm -f /tmp/ps-commu/t-skel/app/content.md
+}
+test_skeleton_writes_todo_per_row() {
+  _skel_ws || return 1
+  "$S/skeleton.sh" t-skel || return 1
+  local c=/tmp/ps-commu/t-skel/app/content.md rows
+  rows="$(grep -cE '^\| *[0-9]' /tmp/ps-commu/t-skel/02-storyboard.md)"
+  (( rows == 7 )) && [[ "$(grep -c '^TODO(' "$c")" == "$rows" ]] &&
+  grep -qxF 'TODO(Q1; F1,F2): 1 Overview' "$c" &&
+  ! grep -qF '<!--' "$c" &&
+  grep -q 'class="reader-questions"' "$c" &&
+  grep -qF '<span class="receipts-fact">F19</span>' "$c" &&
+  [[ "$(grep -cE ' skeleton\.sh [0-9]+$' /tmp/ps-commu/t-skel/timings.log)" == 1 ]]
+}
+test_skeleton_lint_gate() {  # unfilled: lint rejects; every TODO( replaced with cited prose: lint accepts
+  _skel_ws && "$S/skeleton.sh" t-skel >/dev/null || return 1
+  local c=/tmp/ps-commu/t-skel/app/content.md out
+  out="$("$S/lint.sh" t-skel)" && return 1
+  [[ "$(grep -c 'unfilled skeleton line' <<<"$out")" == 7 ]] || { echo "$out"; return 1; }
+  sed -i.bak -E 's/^TODO\(.*$/This section is explained in plain words (F1)./' "$c" && rm -f "$c.bak"
+  "$S/lint.sh" t-skel
+}
+test_skeleton_refuses_overwrite() {
+  _skel_ws || return 1
+  local c=/tmp/ps-commu/t-skel/app/content.md rc
+  echo 'authored work' > "$c"
+  "$S/skeleton.sh" t-skel 2>/dev/null; rc=$?
+  (( rc == 1 )) && grep -qx 'authored work' "$c" &&
+  "$S/skeleton.sh" t-skel --force >/dev/null && grep -q '^TODO(' "$c"
+}
+test_skeleton_preconditions() {  # exit 2: no workspace; non-infographic tier
+  local rc
+  "$S/skeleton.sh" t-no-such-ws-xyz 2>/dev/null; rc=$?; (( rc == 2 )) || return 1
+  rm -rf /tmp/ps-commu/t-skel-html; "$S/init.sh" t-skel-html --tier html >/dev/null
+  "$S/skeleton.sh" t-skel-html 2>/dev/null; rc=$?; (( rc == 2 )) &&
+  "$S/skeleton.sh" --help | grep -q 'Usage: skeleton.sh'
+}
+check skeleton_writes_todo_per_row test_skeleton_writes_todo_per_row
+check skeleton_lint_gate           test_skeleton_lint_gate
+check skeleton_refuses_overwrite   test_skeleton_refuses_overwrite
+check skeleton_preconditions       test_skeleton_preconditions
+
+
 
 
 
