@@ -55,9 +55,9 @@ timings.log:
 
 ## Comparison
 
-Script time was about 50 s of 71 s, of which 41 s is the single verify.sh Chrome load; the rest of the wall clock is model time between timings.log entries (writing brief/facts/storyboard 16:26:16 to skeleton, filling TODO lines 16:26:16 to 16:26:23). One Chrome launch per verify cycle held (chrome-launches.log: 1 line). The per-cycle verify saving (119.3 s to 41 s) is the like-for-like result.
+Script time was 47 s of 71 s (timings.log sum), of which 41 s is the single verify.sh Chrome load; the rest of the wall clock is model time between timings.log entries (writing brief/facts/storyboard 16:26:06 to 16:26:16, filling TODO lines 16:26:16 to 16:26:23). One Chrome launch per verify cycle held (chrome-launches.log: 1 line). The per-cycle verify saving (119.3 s to 41 s) is the like-for-like result.
 
-Caveats, stated honestly: the wall-clock delta is inflated because this run did NOT include the baseline's 2 facts subagents (I authored facts directly from source I had already read in this session) and did NOT run the reader gate as an independent subagent (none may be dispatched in this task). `verify.sh --reader-prompt` ran and produced the prompt, but no sonnet reader verdict exists, so the reader gate is unverified for this run. The baseline's ~196 s model time included those subagents. Only the Chrome/verify figures and launch count are directly comparable.
+Caveats, stated honestly: the wall-clock delta is inflated because this run did NOT include the baseline's 2 facts subagents (I authored facts directly from source I had already read in this session) and did NOT run the reader gate as an independent subagent (none may be dispatched in this task). `verify.sh --reader-prompt` ran and produced the prompt, but no sonnet reader verdict exists, so the reader gate is unverified for this run. The baseline's ~196 s model time included those subagents. The short model gaps (10 s for the chain docs, 7 s for all TODO lines) also mean the content was pre-written in context before the timed run started, so model time is understated beyond the facts point above. Only the Chrome/verify figures and launch count are directly comparable.
 
 ## Full test suite
 
