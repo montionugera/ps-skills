@@ -1178,19 +1178,16 @@ verify_run() {           # args... → verify.sh output on stdout; rc 2 = cannot
   if command -v timeout >/dev/null; then timeout 150 "$S/verify.sh" "$@"; else "$S/verify.sh" "$@"; fi
 }
 test_verify_passes_template() {
-  # --no-lint: deliberate deviation from --no-lint's "html/react dev loop
-  # only" framing in serve.sh's usage text. This test scaffolds a PLAIN
-  # (no --example) infographic workspace: app/content.md ships as the real,
-  # lint-clean Task 7 exemplar (it cites F1-F19), but 01-facts.md/etc. scaffold
-  # as the EMPTY authoring-chain skeleton (see init.sh, no --example flag), so
-  # lint.sh would correctly reject content.md's citations against an empty
-  # facts sheet. init.sh --example (see init_example_* tests above) is the
-  # flow that pairs content.md with a matching filled chain and lints clean.
-  "$S/init.sh" t-verify >/dev/null
-  "$S/serve.sh" t-verify --no-lint >/dev/null
+  # --example pairs the shipped exemplar content.md with its matching filled
+  # 00-brief/01-facts/02-storyboard, so it lints clean and serves through the
+  # real lint gate (F-018: a plain init no longer ships app/content.md).
+  rm -rf /tmp/ps-commu/t-verify
+  "$S/init.sh" t-verify --example >/dev/null
+  "$S/serve.sh" t-verify >/dev/null
   local out rc; out="$(verify_run t-verify)"; rc=$?
   echo "$out"
   (( rc == 2 )) && return 2
+  [[ -s /tmp/ps-commu/t-verify/page-text.txt ]] || { echo "no page-text.txt after a real run"; return 1; }
   # F-013's content migration (Task 4) landed: the shipped content.md now
   # carries its real, migrated ```drawio fence (Task 0's verified 6-node
   # flowchart) instead of the pre-migration ```mermaid one. Assert 1 sees
@@ -1835,6 +1832,42 @@ test_reader_prompt_stale_page_text_exits_2() {  # compares app/content.md only; 
 check reader_prompt_non_utf8_brief_exits_2     test_reader_prompt_non_utf8_brief_exits_2
 check reader_prompt_stale_page_text_exits_2    test_reader_prompt_stale_page_text_exits_2
 "$S/stop.sh" t-vstub >/dev/null 2>&1
+
+test_init_default_moves_exemplar() {
+  rm -rf /tmp/ps-commu/t-initex
+  "$S/init.sh" t-initex >/dev/null &&
+  [[ ! -e /tmp/ps-commu/t-initex/app/content.md ]] &&
+  cmp -s /tmp/ps-commu/t-initex/app/example-content.md "$SKILL_DIR/assets/template-infographic/content.md"
+}
+test_lint_flags_missing_content_infographic() {
+  rm -rf /tmp/ps-commu/t-lint-nocontent
+  "$S/init.sh" t-lint-nocontent >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-nocontent
+  local out; out="$("$S/lint.sh" t-lint-nocontent)" && return 1
+  echo "$out"
+  grep -qxF 'missing app/content.md: run skeleton.sh t-lint-nocontent' <<<"$out"
+}
+test_lint_rejects_todo_line_infographic() {
+  rm -rf /tmp/ps-commu/t-lint-todo
+  "$S/init.sh" t-lint-todo >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-todo
+  printf 'Intro (F1).\n\nTODO(Q1; F1): 1\n' > /tmp/ps-commu/t-lint-todo/app/content.md
+  local out; out="$("$S/lint.sh" t-lint-todo)" && return 1
+  echo "$out"
+  grep -qxF 'app/content.md: unfilled skeleton line: TODO(Q1; F1): 1' <<<"$out" || return 1
+  printf 'Intro (F1).\n\nFilled in plain words (F1).\n' > /tmp/ps-commu/t-lint-todo/app/content.md
+  "$S/lint.sh" t-lint-todo
+}
+test_lint_help_describes_drawio_not_mermaid_scanner() {
+  local h; h="$("$S/lint.sh" --help)"
+  ! grep -q 'Mermaid flowchart edges' <<<"$h" && ! grep -q 'sequenceDiagram' <<<"$h" &&
+  grep -q 'drawio' <<<"$h" && grep -qF 'TODO(' <<<"$h" && grep -q 'skeleton.sh' <<<"$h"
+}
+check init_default_moves_exemplar                  test_init_default_moves_exemplar
+check lint_flags_missing_content_infographic       test_lint_flags_missing_content_infographic
+check lint_rejects_todo_line_infographic           test_lint_rejects_todo_line_infographic
+check lint_help_describes_drawio_not_mermaid       test_lint_help_describes_drawio_not_mermaid_scanner
+
 
 
 
