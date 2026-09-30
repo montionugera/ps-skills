@@ -1726,7 +1726,7 @@ test_verify_failed_load_leaves_no_page_text() {  # stale copy from an earlier ru
   _stub_chrome "$d" fail; echo STALE > "$pt"
   CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub >/dev/null 2>&1; rc=$?
   (( rc == 1 )) && [[ ! -e "$pt" ]] || return 1
-  # Also verify when DOM renders but an assert fails (e.g. explainer-error body): no page-text.txt
+  # Also when the DOM renders but the page shows an explainer-error panel (asserts 0 and 1 fail): no page-text.txt
   mkdir -p "$d"
   printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="explainer-error"><div>fail</div></div></div></body></html>' > "$d/page.html"
   echo STALE > "$pt"
@@ -1746,6 +1746,44 @@ check verify_one_load_writes_page_text        test_verify_one_load_writes_page_t
 check verify_dump_text_same_path              test_verify_dump_text_same_path
 check verify_failed_load_leaves_no_page_text  test_verify_failed_load_leaves_no_page_text
 check verify_url_writes_no_page_text          test_verify_url_writes_no_page_text
+
+test_verify_assert6_failure_removes_page_text() {  # every python assert passes; only the CSS check fails
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-a6 ws=/tmp/ps-commu/t-vstub pt=/tmp/ps-commu/t-vstub/page-text.txt out rc
+  _stub_chrome "$d" page
+  cp "$ws/app/explainer.css" "$d/explainer.css.bak"
+  printf 'html { scroll-behavior: smooth; }\n' >> "$ws/app/explainer.css"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub 2>&1)"; rc=$?
+  cp "$d/explainer.css.bak" "$ws/app/explainer.css"
+  echo "$out" | grep -E '^(FAIL|PASS): (1|6) '
+  (( rc == 1 )) && grep -q '^PASS: 1 ' <<<"$out" && grep -q '^FAIL: 6 ' <<<"$out" && [[ ! -e "$pt" ]]
+}
+test_verify_dump_text_failed_render_no_page_text() {  # --dump-text keeps stdout/exit codes; failed renders leave no file
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-dfail pt=/tmp/ps-commu/t-vstub/page-text.txt out rc
+  _stub_chrome "$d" page; rm -f "$pt"
+  # never reached .is-ready
+  printf '%s\n' '<html><body><div class="cherry-previewer"><p>Half rendered.</p></div></body></html>' > "$d/page.html"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --dump-text 2>/dev/null)"; rc=$?
+  (( rc == 0 )) && [[ "$out" == "Half rendered." ]] && [[ ! -e "$pt" ]] || return 1
+  # explainer-error panel
+  printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="explainer-error"><div>boom</div></div><p>Some text.</p></div></body></html>' > "$d/page.html"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --dump-text 2>/dev/null)"; rc=$?
+  (( rc == 0 )) && [[ -n "$out" ]] && [[ ! -e "$pt" ]]
+}
+test_verify_page_text_oserror_warns() {  # unwritable workspace dir: one-line warning, asserts + exit code intact
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-ro ws=/tmp/ps-commu/t-vstub out rc
+  _stub_chrome "$d" page; rm -f "$ws/page-text.txt"
+  chmod a-w "$ws"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub 2>&1)"; rc=$?
+  chmod u+w "$ws"
+  echo "$out" | grep -E 'warning|^(PASS|FAIL): (2|8) '
+  (( rc == 0 )) && grep -q '^PASS: 8 ' <<<"$out" && grep -q 'warning: could not write' <<<"$out" && [[ ! -e "$ws/page-text.txt" ]]
+}
+check verify_assert6_failure_removes_page_text     test_verify_assert6_failure_removes_page_text
+check verify_dump_text_failed_render_no_page_text  test_verify_dump_text_failed_render_no_page_text
+check verify_page_text_oserror_warns               test_verify_page_text_oserror_warns
 
 test_reader_prompt_needs_page_text() {
   _vstub_ws || return 1
@@ -1772,6 +1810,31 @@ test_reader_prompt_fills_brief_and_path() {  # path, not contents; no Chrome; So
 }
 check reader_prompt_needs_page_text      test_reader_prompt_needs_page_text
 check reader_prompt_fills_brief_and_path test_reader_prompt_fills_brief_and_path
+
+test_reader_prompt_non_utf8_brief_exits_2() {
+  _vstub_ws || return 1
+  local ws=/tmp/ps-commu/t-vstub out rc
+  cp "$ws/00-brief.md" "$ws/00-brief.md.bak"
+  printf 'Reader: caf\xe9 \xff\xfe\n' > "$ws/00-brief.md"
+  printf 'x\n' > "$ws/page-text.txt"
+  out="$("$S/verify.sh" t-vstub --reader-prompt 2>&1)"; rc=$?
+  mv "$ws/00-brief.md.bak" "$ws/00-brief.md"
+  echo "$out" | head -n 3
+  (( rc == 2 )) && ! grep -q Traceback <<<"$out"
+}
+test_reader_prompt_stale_page_text_exits_2() {  # compares app/content.md only; -nt has 1s granularity
+  _vstub_ws || return 1
+  local ws=/tmp/ps-commu/t-vstub out rc
+  printf 'x\n' > "$ws/page-text.txt"; sleep 1; touch "$ws/app/content.md"
+  out="$("$S/verify.sh" t-vstub --reader-prompt 2>&1)"; rc=$?
+  echo "$out" | head -n 3
+  (( rc == 2 )) && grep -qF 'stale page text' <<<"$out" || return 1
+  sleep 1; touch "$ws/page-text.txt"      # fresh again: accepted
+  "$S/verify.sh" t-vstub --reader-prompt >/dev/null 2>&1
+}
+check reader_prompt_non_utf8_brief_exits_2     test_reader_prompt_non_utf8_brief_exits_2
+check reader_prompt_stale_page_text_exits_2    test_reader_prompt_stale_page_text_exits_2
+"$S/stop.sh" t-vstub >/dev/null 2>&1
 
 
 

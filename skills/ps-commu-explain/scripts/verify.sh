@@ -90,7 +90,9 @@
 #          Reader: line and Q1-Q3 and the ABSOLUTE path to page-text.txt (never
 #          its contents; the subagent reads that one file itself). Starts no
 #          Chrome. Exit 2 if page-text.txt is missing (run verify.sh <slug>
-#          first) or the brief lacks Reader:/Q1-Q3.
+#          first), stale (app/content.md, the only file compared, is newer than
+#          page-text.txt: run verify.sh <slug> again), or the brief is unreadable
+#          or lacks Reader:/Q1-Q3.
 #   Chrome: $CHROME_BIN, else google-chrome/chromium on PATH, else the macOS app.
 # Exit 0 = every non-skipped assert passed; 1 = defects listed; 2 = cannot run
 # (no Chrome / no server) — callers treat 2 as SKIP, never as pass. Exception:
@@ -131,7 +133,7 @@ brief_path, page_text = sys.argv[1], sys.argv[2]
 try:
     with open(brief_path, encoding="utf-8") as f:
         brief = re.sub(r"<!--.*?-->", "", f.read(), flags=re.S)
-except OSError as e:
+except (OSError, UnicodeDecodeError) as e:
     sys.stderr.write(f"cannot read {brief_path}: {e}\n"); sys.exit(2)
 reader = re.search(r"(?mi)^Reader:[ \t]*(\S.*)$", brief)
 qs = dict(re.findall(r"(?m)^Q([1-3]):[ \t]*(\S.*)$", brief))
@@ -442,9 +444,21 @@ pv = Preview(); pv.feed(dom)
 text, prose = "".join(pv.text), "".join(pv.prose)
 no_preview_msg = "no .cherry-previewer subtree in the dump (page did not render)"
 # One extraction feeds all three consumers: page-text.txt, --dump-text and asserts 2/3/8.
-if dump_text and text.strip() and text_out:
-    with open(text_out, "w", encoding="utf-8") as f:
-        f.write(text)
+def write_page_text():
+    """Atomic (temp file in the same dir + os.replace); an OSError only warns, never loses the assert output."""
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(text_out), prefix=".page-text.")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, text_out)
+    except OSError as e:
+        sys.stderr.write(f"warning: could not write {text_out}: {e}\n")
+        if tmp:
+            try: os.unlink(tmp)
+            except OSError: pass
+if dump_text and text.strip() and text_out and not failed:
+    write_page_text()
 if dump_text:
     # Backward-compatible text-export mode: same load, same extraction, same file.
     if not pv.text:
@@ -499,8 +513,7 @@ else:
 br_leaks = re.findall(r"(?:<|&lt;)br\s*/?(?:>|&gt;)", prose, re.I)
 report("FAIL" if br_leaks else "PASS", 8, "literal <br> text " + (f"LEAKED in body text ({len(br_leaks)}x)" if br_leaks else "absent"))
 if not failed and text.strip() and text_out:
-    with open(text_out, "w", encoding="utf-8") as f:
-        f.write(text)
+    write_page_text()
 print("\n".join(lines))
 sys.exit(1 if failed else 0)
 PY
@@ -526,5 +539,8 @@ py_status=$?
 # script) so a rule like "/* no scroll-behavior:smooth here, see ... */" that
 # EXPLAINS the fix in prose doesn't itself trip a false FAIL.
 css_status=0; assert6 || css_status=$?
+# Assert 6 runs after the python block wrote page-text.txt: a failing assert 6 must not
+# leave the reader gate an input from a run that exits 1.
+(( css_status == 0 )) || rm -f "$page_text"
 
 [[ "$py_status" -eq 0 && "$css_status" -eq 0 ]]
