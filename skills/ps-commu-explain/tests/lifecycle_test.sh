@@ -1983,6 +1983,27 @@ check handoff_rejects_bad_slug          test_handoff_rejects_bad_slug
 check handoff_prints_everything           test_handoff_prints_everything
 check handoff_without_server_or_workspace test_handoff_without_server_or_workspace
 
+test_skill_md_budget_and_routing() {
+  local m="$SKILL_DIR/SKILL.md"
+  (( $(wc -l < "$m") <= 110 )) || { echo "SKILL.md is $(wc -l < "$m") lines"; return 1; }
+  grep -qF 'model: haiku' "$m" && grep -qF 'model: sonnet' "$m" &&
+  grep -qF -- '--reader-prompt' "$m" && grep -qF 'skeleton.sh' "$m" &&
+  grep -qF 'handoff.sh' "$m" && grep -qF 'components-index.md' "$m" &&
+  grep -qi 'main thread' "$m" &&
+  ! grep -qF 'You are an independent reader' "$m" &&        # verbatim prompt lives in verify.sh now
+  grep -qF 'You are an independent reader' "$S/verify.sh" &&
+  grep -qF 'TODO(' "$m" && grep -qF 'role=accent' "$m" && grep -qF 'scroll-behavior' "$m"
+}
+test_serve_help_not_stale() { ! "$S/serve.sh" --help | grep -q 'Task 6/7'; }
+test_readme_mentions_new_scripts() {
+  local r="$SKILL_DIR/../../README.md"
+  grep -F 'ps-commu-explain' "$r" | grep -qF 'skeleton.sh' &&
+  grep -qF 'handoff.sh' "$r" && grep -qF -- '--reader-prompt' "$r"
+}
+check skill_md_budget_and_routing test_skill_md_budget_and_routing
+check serve_help_not_stale        test_serve_help_not_stale
+check readme_mentions_new_scripts test_readme_mentions_new_scripts
+
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.
 test_list_shows_running_and_stopped() {
