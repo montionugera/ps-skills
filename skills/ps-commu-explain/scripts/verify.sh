@@ -446,6 +446,8 @@ no_preview_msg = "no .cherry-previewer subtree in the dump (page did not render)
 # One extraction feeds all three consumers: page-text.txt, --dump-text and asserts 2/3/8.
 def write_page_text():
     """Atomic (temp file in the same dir + os.replace); an OSError only warns, never loses the assert output."""
+    if not (text_out and text.strip()):
+        return
     tmp = None
     try:
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(text_out), prefix=".page-text.")
@@ -457,7 +459,7 @@ def write_page_text():
         if tmp:
             try: os.unlink(tmp)
             except OSError: pass
-if dump_text and text.strip() and text_out and not failed:
+if dump_text and not failed:
     write_page_text()
 if dump_text:
     # Backward-compatible text-export mode: same load, same extraction, same file.
@@ -512,7 +514,7 @@ else:
 # rendered (e.g. a double-escaped draw.io label). <code> samples are exempt.
 br_leaks = re.findall(r"(?:<|&lt;)br\s*/?(?:>|&gt;)", prose, re.I)
 report("FAIL" if br_leaks else "PASS", 8, "literal <br> text " + (f"LEAKED in body text ({len(br_leaks)}x)" if br_leaks else "absent"))
-if not failed and text.strip() and text_out:
+if not failed:
     write_page_text()
 print("\n".join(lines))
 sys.exit(1 if failed else 0)
