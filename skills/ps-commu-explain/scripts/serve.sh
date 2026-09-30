@@ -4,11 +4,10 @@
 #   --dev         React tier only: run vite dev (fix loop). Default serves app/dist.
 #   --keep-alive  Watchdog lifetime: 10s | 90m | 8h | 72h. Default 24h (spec D6).
 #   --no-lint     Skip the scripts/lint.sh authoring-chain gate before serving.
-#                 Intended for the html/react tiers' dev loops — and, until
-#                 assets/template-infographic/content.md is itself lint-clean
-#                 (Task 6/7), this repo's own render-gate lifecycle tests.
-#                 Prints a warning. Without it, serve.sh refuses (exit 1,
-#                 printing the lint output) when scripts/lint.sh <slug> fails.
+#                 Intended for the html/react tiers' dev loops and this repo's
+#                 own server-mechanics tests. Prints a warning. Without it,
+#                 serve.sh refuses (exit 1, printing the lint output) when
+#                 scripts/lint.sh <slug> fails.
 # All servers bind 127.0.0.1 ONLY (spec D9). The server command line contains the
 # workspace path — the kill-safety marker (spec D7). Binding is authoritative:
 # on bind failure the next port is tried, up to 7799 (spec D3).
@@ -31,6 +30,7 @@ done
 [[ -n "$slug" ]] || usage 1
 ws="$PS_COMMU_ROOT/$slug"
 [[ -d "$ws" ]] || { echo "no workspace: $ws (run init.sh first)" >&2; exit 1; }
+trap 'log_timing serve.sh "$SECONDS"' EXIT
 tier="$(meta_get "$slug" tier)"
 [[ "$tier" == "infographic" || "$tier" == "html" || "$tier" == "react" ]] || { echo "bad tier='$tier' in meta.json for $slug (re-run init.sh)" >&2; exit 1; }
 
@@ -135,6 +135,7 @@ meta_set "$slug" started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Self-destruct watchdog (spec D6): marker-verified kill after the TTL.
 (
+  trap - EXIT
   sleep "$keep_secs"
   if ps -p "$server_pid" -o command= 2>/dev/null | grep -qF "$PS_COMMU_ROOT/$slug"; then
     kill "$server_pid" 2>/dev/null || true

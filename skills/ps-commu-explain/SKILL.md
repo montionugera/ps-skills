@@ -15,7 +15,7 @@ Build a fact-checked, visually rich explanation served from /tmp; hand over a ve
 
 ## Tiers
 
-- **infographic (DEFAULT)** — cream, Markdown-driven explainer rendered by cherry-markdown + draw.io (pan/zoom mxGraph diagrams) + Lucide. You author `app/content.md`; you do NOT touch `app/index.html`. Component cheat-sheet ships live at `app/components.md` (served alongside). This is the default look — `init.sh <slug>` with no `--tier`.
+- **infographic (DEFAULT)** — cream, Markdown-driven explainer rendered by cherry-markdown + draw.io (pan/zoom mxGraph diagrams) + Lucide. You author `app/content.md`; you do NOT touch `app/index.html`. Components: read `app/components-index.md` first (one line per section), then `grep -n 'id="<id>"' app/components.md` for only the section you need. This is the default look — `init.sh <slug>` with no `--tier`.
 - **html** (opt-in `--tier html`) — the classic bespoke, hand-written HTML tier. You edit `app/index.html` in place. Component/treatment-tag reference: `references/visual-components.md`.
 - **react** (opt-in `--tier react`) — interactive React+TS, for sections that need state (slider / step-sim / live-filter). Component/treatment-tag reference: `references/visual-components.md`. Build before serving: `npm ci` in `app/` once, then `npm run build` (creates `app/dist`, which `serve.sh` hard-requires) — or `serve.sh <slug> --dev` to run `vite` directly instead (still needs `npm ci` first).
 
@@ -43,9 +43,9 @@ Each stage produces a file the next one reads. `lint.sh <slug>` is the single sc
 | 1 | Brief | `00-brief.md` — exactly 3 numbered reader questions (Q1-Q3), a `Reader:` line (who reads it and what they already know — default: a newcomer to this repo), and a section budget (integer, 4-7) | `init.sh` scaffolds it (never overwrites an existing one); `lint.sh` rejects unfilled `(...)` placeholders, a wrong count of Q1-Q3, a missing/empty `Reader:` line, or a missing/bad section-budget integer |
 | 2 | Facts | `01-facts.md` — `F<n> \| statement \| source` rows (source: `path:line`, bare path, commit hash, or `"user said"`), gathered by a subagent | `lint.sh` rejects a bad source shape and any `F<n>` content.md cites that isn't a row here |
 | 3 | Storyboard | `02-storyboard.md` — one row per planned `app/content.md` section: `section \| question (Q1-Q3) \| facts (F<n>,...)` | `lint.sh` rejects an uncovered Q1-Q3, or a row citing an `F<n>` missing from 01-facts.md |
-| 4 | Author | `app/content.md` — **ships pre-filled with the shipped exemplar (cites F1-F19)**; replace it wholesale, or run `init.sh --example <slug>` to pair it with a matching filled 00-brief/01-facts/02-storyboard so it lints clean immediately. Component set v3 (cheat-sheet live at `app/components.md`) | `lint.sh` rejects removed classes (`stat-grid`, `stat-tile`, `meter`, `cat-*`, `metric-grid`, `card-grid`), and — for each ` ```drawio ` diagram (plain mxGraph XML: `<mxGraphModel>`/`<mxfile>` → `<root>` → `<mxCell>`) — malformed XML, missing root cells, duplicate ids, unlabeled edges, >7 vertices, overlapping/out-of-bounds vertices, unescaped `<` or `&` in labels (e.g. a shell `&&` in a label must be written `&amp;&amp;`; a line break is `&lt;br&gt;` — the one allowed tag — and a double-escaped `&amp;lt;br&amp;gt;` is rejected because the reader would see a literal `<br>`), and raw hex colors (use `role=accent\|pitfall\|check` instead) |
-| 5 | Verify | render gate (`verify.sh`, **infographic tier only**) then reader gate (subagent, `verify.sh --dump-text` output) | both pass on infographic (html/react: a subagent Chrome load stands in for the render gate — see below), or an honest defect list — ≤5 cycles |
-| 6 | Handoff | URL + the 3 questions/reader answers + re-serve command | prose |
+| 4 | Author | `app/content.md` — once the storyboard lints, run `scripts/skeleton.sh <slug>`: it writes the reader-questions block, one section per storyboard row with a `TODO(Q<n>; F<n>,...): <section>` line for you to replace with cited prose, and a Receipts footer (refuses to overwrite without `--force`). Exemplar: `app/example-content.md`; `init.sh --example <slug>` uses it as content.md with a matching filled chain. **A plain `init.sh` + `serve.sh` fails lint until `skeleton.sh` has run and every `TODO(` line is filled.** Components: `app/components-index.md` | `lint.sh` rejects a missing `content.md` and any remaining `TODO(` line; it also rejects removed classes (`stat-grid`, `stat-tile`, `meter`, `cat-*`, `metric-grid`, `card-grid`), and — for each ` ```drawio ` diagram (plain mxGraph XML: `<mxGraphModel>`/`<mxfile>` → `<root>` → `<mxCell>`) — malformed XML, missing root cells, duplicate ids, unlabeled edges, >7 vertices, overlapping/out-of-bounds vertices, unescaped `<` or `&` in labels (e.g. a shell `&&` in a label must be written `&amp;&amp;`; a line break is `&lt;br&gt;` — the one allowed tag — and a double-escaped `&amp;lt;br&amp;gt;` is rejected because the reader would see a literal `<br>`), and raw hex colors (use `role=accent\|pitfall\|check` instead) |
+| 5 | Verify | render gate (`verify.sh <slug>`, **infographic tier only**, main thread; the same Chrome load writes `page-text.txt`) then reader gate (`model: sonnet` subagent, prompt from `verify.sh <slug> --reader-prompt`) | both pass on infographic (html/react: a `model: haiku` subagent Chrome load stands in for the render gate — see below), or an honest defect list — ≤5 cycles |
+| 6 | Handoff | `scripts/handoff.sh <slug>` output + the reader gate's answers | prose |
 
 ## Plain English (hard rule)
 
@@ -60,61 +60,26 @@ The reader named in `00-brief.md`'s `Reader:` line has NOT been in this conversa
 ## Subagent budgets (hard rule)
 
 - **Facts (Stage 2):** dispatch a subagent per source area to read/grep and return `F<n> | statement | source` rows — never grep the target codebase from the main thread yourself.
-- **Authoring cycles (Stage 4):** you author `content.md` in the main thread, but every check of the rendered result — Chrome load, screenshot, console read — runs in a subagent that returns ≤15 lines (status + defects, never a transcript). Screenshots are never taken inline in the main thread; this mirrors the token-economy rule that images are the biggest context burner.
-- **Reader gate (Stage 5):** always a fresh subagent, given ONLY the rendered page text (`verify.sh <slug> --dump-text`) — never the brief/facts/storyboard files. Use the verbatim prompt below.
+- **Authoring cycles (Stage 4):** you author `content.md` in the main thread. The infographic render gate (`verify.sh <slug>`, ~8 PASS/FAIL lines) also runs in the main thread: a subagent would add latency and save nothing. Every html/react render check (Chrome load, screenshot, console read) runs in a `model: haiku` subagent that returns ≤15 lines. Screenshots are never taken inline in the main thread.
+- **Reader gate (Stage 5):** always a fresh `model: sonnet` subagent, prompted with the output of `verify.sh <slug> --reader-prompt`. It reads only `page-text.txt`, never the brief/facts/storyboard files.
 - **Cap:** ≤5 verify/fix cycles total (render + reader together). On cycle 5's failure, STOP and report the honest defect list — never continue silently or claim success.
 
 ## Verify: render gate + reader gate
 
-`scripts/verify.sh` runs the full assert set on **infographic** only. On **html** it runs two render checks: `html-1` fails if `<body>` carries `explainer-error`, which the template's `mermaid.parseError` trap sets, and `html-2` fails if the rendered `<svg>` count inside `.mermaid` divs differs from the `.mermaid` div count. On html, `lint.sh` also runs every `<div class="mermaid">` block through `mmdc` and exits 1 on a syntax error. If mmdc is missing or cannot launch, it warns and skips; `EXPLAINER_STRICT_MERMAID=1` makes that a failure. On **react**, verify.sh still reports `FAIL: doc not found`: there the render check is a subagent Chrome load (console + screenshot, ≤15 lines), and the reader gate covers whatever inline `F<n>` markup you authored. On infographic, `scripts/verify.sh <slug>` loads the served page in headless Chrome and prints 8 PASS/FAIL/SKIP asserts: rendered `.mxgraph` div count == drawio diagram count in the doc (a diagram is any fenced block labelled ` ```drawio ` OR whose trimmed body starts with `<mxGraphModel` — mirrors cherry-setup.js's own content-sniff, which deliberately does NOT sniff `<mxfile>`; only an explicit ` ```drawio ` label renders an `<mxfile>`-wrapped export), each rendered `.mxgraph` div's `<svg>` actually holds shape content (not an empty graph); no `~~CODE` placeholder leak; no raw `data-nav` text in body; zero page-origin console errors; nav-click scrollY change (permanent SKIP — a DOM dump can't dispatch clicks); served `explainer.css` has no `scroll-behavior` declared (the static regression gate for the click-to-jump root cause); draw.io pan/zoom actually initialized — the `GraphViewer` global loaded AND every rendered `.mxgraph` div shows its toolbar-init side effect (`toolbar_init < mxgraph_total` fails, not just `==0`, so a partial regression on one of several diagrams still fails); no literal `<br>` text in reader-visible prose (escaped instead of rendered markup — `<code>` samples exempt). Exit 0 = every non-skipped assert passed; exit 2 = no Chrome/no server — except the static `scroll-behavior` check, which needs neither and still runs on a Chrome-less box, so exit 1 is possible even without Chrome. `verify.sh --help` for detail.
-
-A clean render gate is necessary, not sufficient. Get the reader gate's input with `scripts/verify.sh <slug> --dump-text` — it reuses the same `.cherry-previewer` extractor the asserts above use and prints the clean, reader-visible text to stdout (never hand-extract from `--dump-dom`: that returns duplicated toolbar/source-pane/preview copies, plus raw `data-nav` markup and unrendered ` ```drawio ` fences). Dispatch the reader-gate subagent below with that text. It must answer the brief's 3 questions with `F<n>` citations, pulled from the page's own Receipts footer, before the page counts as done.
-
-### Reader-gate prompt (paste verbatim, fill the brackets)
-
-```
-You are an independent reader. You have NOT seen this project's 00-brief.md, 01-facts.md,
-02-storyboard.md, or any source file — only the page text below, exactly as a browser would
-render it. Do not use outside knowledge, do not guess, do not infer from a file you were not given.
-
-THE PAGE'S INTENDED READER: <paste 00-brief.md's Reader: line>
-Read as that person — you know nothing beyond what they know.
-
-PAGE TEXT (from <URL>):
-"""
-<PASTE THE FULL RENDERED PAGE TEXT HERE>
-"""
-
-Answer these three questions using ONLY the text above:
-Q1: <paste 00-brief.md's Q1>
-Q2: <paste 00-brief.md's Q2>
-Q3: <paste 00-brief.md's Q3>
-
-For each: give a 1-3 sentence answer, then cite the F<n> id(s) the page itself attributes to
-that claim. Never invent a citation. If the text doesn't answer a question, write UNANSWERABLE
-and name what's missing.
-
-Then list every term, acronym, ID, or codename the page uses BEFORE (or without) explaining it
-in plain words, as that reader would stumble on it. F<n> citation markers don't count.
-
-Return exactly this, nothing else:
-Q1: <answer> — F<n>[, F<n>...]
-Q2: <answer> — F<n>[, F<n>...]
-Q3: <answer> — F<n>[, F<n>...]
-Unexplained terms: <comma-separated list, or "none">
-Verdict: PASS (all three answered with real citations AND no unexplained terms) | FAIL (name which failed and why)
-```
+- **Infographic render gate:** `scripts/verify.sh <slug>` in the main thread: one headless-Chrome load, 8 PASS/FAIL/SKIP asserts (drawio render count and non-empty shapes, no `~~CODE` leak, no raw `data-nav` text, zero page-origin console errors, nav click (permanent SKIP), no `scroll-behavior` in explainer.css, drawio pan/zoom initialized on every diagram, no literal `<br>` text). Detail: `verify.sh --help`. Exit 0 = pass; 1 = defects; 2 = no Chrome/no server (a SKIP, never a pass; the `scroll-behavior` check still runs without Chrome). The same load writes the reader-visible text to `/tmp/ps-commu/<slug>/page-text.txt`, but only when every assert passes (`--dump-text` writes it without running the asserts).
+- **html:** verify.sh runs `html-1` (no `explainer-error` on body) and `html-2` (svg count == `.mermaid` div count); `lint.sh` runs every `.mermaid` block through `mmdc` (missing mmdc warns and skips; `EXPLAINER_STRICT_MERMAID=1` fails). **react:** verify.sh reports `FAIL: doc not found`; the render check is a `model: haiku` subagent Chrome load (console + screenshot, ≤15 lines) that also saves the page's visible text to `/tmp/ps-commu/<slug>/page-text.txt` (html too, where verify.sh has no extractor).
+- **Reader gate:** a clean render gate is necessary, not sufficient. Run `scripts/verify.sh <slug> --reader-prompt` (exit 2 = no `page-text.txt` yet: run `verify.sh <slug>` first; on html/react the haiku render subagent must have saved it). Its first line, `Agent model: sonnet`, is the Agent tool's `model`; paste the rest verbatim as the prompt, and never paste page text yourself. The subagent must answer Q1-Q3 with `F<n>` citations from the page's Receipts footer, list unexplained terms, and return `Verdict: PASS` before the page counts as done.
 
 ## Handoff
 
-Report: the URL, the brief's 3 questions with the reader-gate's answers + citations, `list.sh` output, cleanup hint (`clean.sh` / `stop.sh <slug>`), and the re-serve command (`serve.sh <slug>`). Offer an artifact copy-out. Explainers stay under `/tmp`, never committed.
+Run `scripts/handoff.sh <slug>`: it prints the URL, the brief's 3 questions, `list.sh` output, the cleanup hint and the re-serve command. Relay it and add the reader gate's answers with citations. Offer an artifact copy-out. Explainers stay under `/tmp`, never committed.
 
 ## Rationalizations (from baselines)
 
 | Excuse | Reality |
 |---|---|
 | "I read the code, a fact sheet is overhead" | `lint.sh` rejects any `F<n>` *cited* with no matching row in 01-facts.md — but it does NOT require citations to exist; content with zero `F<n>` citations lints clean. The reader gate (Stage 5) is what actually fails a page that cites nothing, so both gates are needed. |
-| "Console is clean, ship it" | Console errors are 1 of 7 `verify.sh` asserts, and a clean render gate still isn't a reader gate — it must independently answer the brief's 3 questions with citations. |
+| "Console is clean, ship it" | Console errors are 1 of 8 `verify.sh` asserts, and a clean render gate still isn't a reader gate — it must independently answer the brief's 3 questions with citations. |
 | "--no-lint gets past the gate" | `--no-lint` skips `lint.sh` entirely, on any tier — it turns off fact-citation checking, forbidden-component checks, drawio/mxGraph XML validation, and the brief/facts/storyboard checks all at once. It's meant for the html/react dev loops, not a safe way to skip the infographic chain. |
 | "I'll skip 00-brief.md, the diagram speaks for itself" | `lint.sh` rejects unfilled `(...)` placeholders, a wrong count of Q1-Q3, or a missing section budget — `serve.sh` won't serve until it's clean. |
 | "I'll just python -m http.server it quickly" | Baselines exposed all of /tmp on all interfaces, forever. `serve.sh`: loopback-only, scoped doc root, watchdog self-destruct. |
@@ -126,8 +91,8 @@ Report: the URL, the brief's 3 questions with the reader-gate's answers + citati
 
 ## Red flags — STOP
 
-- `content.md` citing an `F<n>` with no matching row in `01-facts.md` after you've replaced the exemplar content (lint catches this — if it didn't, lint wasn't run). A fresh `init.sh <slug>` without `--example` legitimately shows this before you've replaced the exemplar — not a lint bug; see Stage 4.
-- A screenshot or Chrome check run inline in the main thread instead of a subagent
+- `content.md` still holding a `TODO(` line, or citing an `F<n>` with no matching row in `01-facts.md` (lint catches both; if it didn't, lint wasn't run)
+- A screenshot, or an html/react Chrome check, run inline in the main thread instead of a `model: haiku` subagent (the infographic `verify.sh` text run is the one main-thread Chrome check)
 - A reader-gate subagent given the brief/facts/storyboard files, or answering from outside knowledge
 - More than 5 verify/fix cycles without stopping to report defects
 - `stat-grid`, `meter`, or `cat-*` classes reappearing (removed in component set v3)
@@ -135,4 +100,4 @@ Report: the URL, the brief's 3 questions with the reader-gate's answers + citati
 - A literal `<br>` visible on the rendered page (verify.sh assert 8)
 - A drawio edge with no label, a diagram with more than 7 vertices, or a raw hex color in a cell style instead of a `role=accent\|pitfall\|check` token
 - Any hand-started server instead of `scripts/serve.sh`
-- "Ready" reported without both a passing render check (`verify.sh` on infographic; a subagent Chrome load on html/react) and a PASS reader-gate verdict this cycle
+- "Ready" reported without both a passing render check (`verify.sh` on infographic; a `model: haiku` subagent Chrome load on html/react) and a PASS reader-gate verdict this cycle
