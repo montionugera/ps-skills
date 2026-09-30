@@ -1907,14 +1907,30 @@ test_skeleton_preconditions() {  # exit 2: no workspace; non-infographic tier
   "$S/skeleton.sh" t-skel-html 2>/dev/null; rc=$?; (( rc == 2 )) &&
   "$S/skeleton.sh" --help | grep -q 'Usage: skeleton.sh'
 }
+test_skeleton_no_filled_rows() {  # plain init: storyboard has no filled rows -> exit 1, nothing written
+  rm -rf /tmp/ps-commu/t-skel-plain; "$S/init.sh" t-skel-plain >/dev/null || return 1
+  rm -f /tmp/ps-commu/t-skel-plain/app/content.md
+  local rc; "$S/skeleton.sh" t-skel-plain 2>/dev/null; rc=$?
+  (( rc == 1 )) && [[ ! -e /tmp/ps-commu/t-skel-plain/app/content.md ]]
+}
+test_skeleton_missing_chain_file() {
+  _skel_ws && rm -f /tmp/ps-commu/t-skel/02-storyboard.md || return 1
+  local rc; "$S/skeleton.sh" t-skel 2>/dev/null; rc=$?
+  (( rc == 2 )) && [[ ! -e /tmp/ps-commu/t-skel/app/content.md ]]
+}
+test_skeleton_non_utf8_chain() {  # exit 2, one-line message, no traceback
+  _skel_ws && printf 'F1 | bad \377 byte | src\n' >> /tmp/ps-commu/t-skel/01-facts.md || return 1
+  local rc err; err="$("$S/skeleton.sh" t-skel 2>&1 >/dev/null)"; rc=$?
+  (( rc == 2 )) && ! grep -q Traceback <<<"$err" && [[ "$(wc -l <<<"$err")" -le 1 ]] &&
+  [[ ! -e /tmp/ps-commu/t-skel/app/content.md ]]
+}
 check skeleton_writes_todo_per_row test_skeleton_writes_todo_per_row
 check skeleton_lint_gate           test_skeleton_lint_gate
 check skeleton_refuses_overwrite   test_skeleton_refuses_overwrite
 check skeleton_preconditions       test_skeleton_preconditions
-
-
-
-
+check skeleton_no_filled_rows      test_skeleton_no_filled_rows
+check skeleton_missing_chain_file  test_skeleton_missing_chain_file
+check skeleton_non_utf8_chain      test_skeleton_non_utf8_chain
 
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.

@@ -44,14 +44,18 @@ if [[ -e "$ws/app/content.md" && "$force" != 1 ]]; then
 fi
 
 python3 - "$ws" <<'PY'
-import html, os, re, sys
+import html, os, re, sys, tempfile
 
 ws = sys.argv[1]
 
 
 def read(name):
-    with open(os.path.join(ws, name), encoding="utf-8") as f:
-        return re.sub(r"<!--.*?-->", "", f.read(), flags=re.S)
+    try:
+        with open(os.path.join(ws, name), encoding="utf-8") as f:
+            return re.sub(r"<!--.*?-->", "", f.read(), flags=re.S)
+    except UnicodeDecodeError:
+        sys.stderr.write(f"{name}: not valid UTF-8 (re-save it as UTF-8)\n")
+        sys.exit(2)
 
 
 def esc(s):
@@ -108,8 +112,15 @@ for fid in sorted(cited, key=lambda f: int(f[1:])):
 out += ["  </ul>", "</div>", ""]
 
 path = os.path.join(ws, "app", "content.md")
-with open(path, "w", encoding="utf-8") as f:
-    f.write("\n".join(out))
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".content.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(out))
+    os.replace(tmp, path)
+except BaseException:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
 print(f"wrote {path}: {len(rows)} sections, {len(cited)} receipts. "
       "Replace every TODO( line with cited prose, then serve.sh.")
 PY
