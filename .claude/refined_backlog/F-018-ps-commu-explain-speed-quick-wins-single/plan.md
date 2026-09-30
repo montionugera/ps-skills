@@ -245,7 +245,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ## Task 2: `verify.sh`: one Chrome load writes `page-text.txt`; `--dump-text` reuses it; stale and `--url` guards
 
 **Files:**
-- Modify: `$SK/scripts/verify.sh`: header L3 and L74-80 (`--dump-text` text); arg parse L92-104; after the Task 1 trap (~L108); the python invocation L227 (`python3 - "$chrome" "$url" "$fences" "$dump_text" "$tier" <<'PY'`) and its argv line L231; extraction L365-378.
+- Modify: `$SK/scripts/verify.sh`: header L3 and L74-80 (`--dump-text` text); arg parse L92-104; after the Task 1 trap (~L108); the python invocation L227 (`python3 - "$chrome" "$url" "$fences" "$dump_text" "$tier" <<'PY'`) and its argv line L230; extraction L369-378 (KEEP L368 `pv = Preview(); pv.feed(dom)`).
 - Modify: `$SK/tests/lifecycle_test.sh`: `test_verify_dump_text` (~L1202-1210), the F-018 block.
 
 **Interfaces:**
@@ -342,13 +342,13 @@ python3 - "$chrome" "$url" "$fences" "$dump_text" "$tier" "$text_out" <<'PY'
 chrome, url, fences, dump_text, tier, text_out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4] == "1", sys.argv[5], sys.argv[6]
 ```
 
-Replace the extraction block (L367-378) with:
+Replace L369-378 of the extraction block with the snippet below. **Keep L368 `pv = Preview(); pv.feed(dom)` untouched.** Deleting it makes every infographic run fail with a NameError on `pv`.
 
 ```python
 text, prose = "".join(pv.text), "".join(pv.prose)
 no_preview_msg = "no .cherry-previewer subtree in the dump (page did not render)"
 # One extraction feeds all three consumers: page-text.txt, --dump-text and asserts 2/3/8.
-if text.strip() and text_out:
+if dump_text and text.strip() and text_out:
     with open(text_out, "w", encoding="utf-8") as f:
         f.write(text)
 if dump_text:
@@ -359,6 +359,16 @@ if dump_text:
     sys.stdout.write(text)
     sys.exit(0)
 ```
+
+In the assert run, `page-text.txt` must come only from a run that passed, so a partial render never reaches the reader gate. Directly before the final `sys.exit(1 if failed else 0)` (verify.sh L426), add:
+
+```python
+if not failed and text.strip() and text_out:
+    with open(text_out, "w", encoding="utf-8") as f:
+        f.write(text)
+```
+
+Add to `test_verify_failed_load_leaves_no_page_text`, or a sibling stub test, a case where the stub DOM renders but an assert FAILs (e.g. an `explainer-error` body). Expected: no `page-text.txt`.
 
 Header comment: change L3 to `# Usage: verify.sh <slug> [--url URL] [--dump-text] [--reader-prompt]`. Replace the `--dump-text` paragraph (L74-80) with:
 
@@ -462,6 +472,7 @@ The new branch, after the trap and before `page_text=...; rm -f`:
 # model never re-types the page). No Chrome; never deletes page-text.txt.
 if [[ "$reader_prompt" == 1 ]]; then
   [[ -s "$ws/page-text.txt" ]] || { echo "no page text at $ws/page-text.txt: run verify.sh $slug first" >&2; exit 2; }
+  [[ "$ws/app/content.md" -nt "$ws/page-text.txt" ]] && { echo "stale page text: app/content.md changed after the last verify; run verify.sh $slug again" >&2; exit 2; }
   python3 - "$ws/00-brief.md" "$ws/page-text.txt" <<'PY'
 import re, sys
 brief_path, page_text = sys.argv[1], sys.argv[2]
@@ -664,7 +675,7 @@ if tier == 'infographic':
         defects.append(f"missing app/content.md: run skeleton.sh {slug}")
     else:
         for ln in content.splitlines():
-            if 'TODO(' in ln:
+            if ln.startswith('TODO('):  # line-start only: skeleton.sh always emits it there; code samples mentioning TODO( stay legal
                 defects.append(f"app/content.md: unfilled skeleton line: {ln.strip()[:120]}")
 ```
 
@@ -1362,3 +1373,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 Spec design items without their own acceptance line, also covered: the stale `serve.sh` comment (Task 8), the verbatim prompt moved to its single source (Tasks 3 and 8), and no auto-lint hook (Global Constraints).
 
 Additions beyond the spec, all test-only or clarifying: the `ONLY=` filter in the test harness (Task 1), so TDD steps don't each need a 10-minute full run; and `log_timing` reads the caller's `$ws`, because the spec's two-argument signature `log_timing <script> <seconds>` does not name the workspace.
+
+
+## Appendix: audit trail
+
+- 2026-09-30 self-grill-audit (plan): verdict safe-with-fixes.
+  - Corrected: Task 2 now keeps verify.sh L368 (`pv = Preview()`); the old wording would have deleted it (HIGH).
+  - Corrected: in the assert run, `page-text.txt` is written only when no assert FAILs.
+  - Corrected: `--reader-prompt` exits 2 when `app/content.md` is newer than `page-text.txt`, so it never serves stale text.
+  - Corrected: the lint `TODO(` match is line-start only.
+  - Corrected: argv line is L230.
+- Notes for implementers (LOW, not rewritten above):
+  - Task 1 Step 3: all 3 new tests FAIL, `log_timing_noop` with exit 127.
+  - Task 3 Step 2: an unparsed `--reader-prompt` is taken as the slug, so the FAIL reason is "no workspace app dir". Still a FAIL, as expected.
+  - Task 1 Step 5: the watchdog-subshell EXIT-trap contingency is moot.
+  - A full lifecycle run takes about 3.5 min in CI, not 10.
+- Blast radius: Task 4 means a plain `init.sh` no longer creates `content.md`, and Task 8 updates SKILL.md to match. Both ship in the same feature (F-018) and must never be split across promotes.
