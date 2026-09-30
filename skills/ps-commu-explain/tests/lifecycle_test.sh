@@ -9,11 +9,14 @@ ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 skip() { echo "SKIP: $1"; SKIP=$((SKIP+1)); }
 CHECK_LOG="$(mktemp)"
+_selected() { [[ -z "${ONLY:-}" || "$1" =~ $ONLY ]]; }   # ONLY=<regex>: run only matching test names
 check(){               # on FAIL, show the test's output so CI logs say why
+  _selected "$1" || return 0
   local name="$1"; shift
   if "$@" >"$CHECK_LOG" 2>&1; then ok "$name"; else bad "$name"; tail -n 25 "$CHECK_LOG" | sed 's/^/    /'; fi
 }
 check_or_skip(){       # like check, but exit code 2 = visible SKIP (e.g. no Chrome) — never a pass
+  _selected "$1" || return 0
   local name="$1"; shift; local rc
   "$@" >"$CHECK_LOG" 2>&1; rc=$?
   if (( rc == 0 )); then ok "$name"
@@ -1650,6 +1653,52 @@ check_or_skip verify_html_passes_template               test_verify_html_passes_
 check_or_skip verify_html_fails_on_mermaid_error        test_verify_html_fails_on_mermaid_error
 check_or_skip verify_html_fails_on_svg_count_mismatch   test_verify_html_fails_on_svg_count_mismatch
 for s in t-vh-ok t-vh-err t-vh-cnt t-mm-serve; do "$S/stop.sh" "$s" >/dev/null 2>&1; done
+
+# --- F-018: speed quick wins ---
+_stub_chrome() {  # dir page|fail — fake Chrome at $dir/chrome; one line in $dir/launches per launch
+  local dir="$1" mode="$2"
+  mkdir -p "$dir"; : > "$dir/launches"
+  if [[ "$mode" == page ]]; then
+    printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="mxgraph" style="margin-top: 10px"><svg><rect></rect></svg></div><p>Stub page text for F-018.</p></div></body></html>' > "$dir/page.html"
+  else
+    : > "$dir/page.html"          # a failed load: no DOM at all
+  fi
+  cat > "$dir/chrome" <<EOF
+#!/usr/bin/env bash
+echo launch >> "$dir/launches"
+cat "$dir/page.html"
+EOF
+  chmod +x "$dir/chrome"
+}
+_vstub_ws() {  # a served, lint-clean infographic workspace t-vstub (reused by F-018 verify tests)
+  [[ -f /tmp/ps-commu/t-vstub/meta.json ]] || "$S/init.sh" t-vstub --example >/dev/null || return 1
+  local pid; pid="$(meta_get t-vstub pid)"
+  [[ -n "$pid" ]] && pid_has_marker "$pid" t-vstub && return 0
+  "$S/serve.sh" t-vstub >/dev/null
+}
+test_log_timing_appends() {
+  mkdir -p /tmp/ps-commu/t-timing; rm -f /tmp/ps-commu/t-timing/timings.log
+  ( ws=/tmp/ps-commu/t-timing; log_timing demo.sh 3; log_timing demo.sh 4 )
+  [[ "$(wc -l < /tmp/ps-commu/t-timing/timings.log | tr -d ' ')" == 2 ]] &&
+  grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z demo\.sh 3$' /tmp/ps-commu/t-timing/timings.log
+}
+test_log_timing_noop_without_workspace() { ( unset ws; log_timing demo.sh 1 ) && ( ws=/nonexistent/x; log_timing demo.sh 1 ); }
+test_scripts_log_timing() {  # init, serve and verify each add exactly one line per call
+  rm -rf /tmp/ps-commu/t-timelog
+  local d=/tmp/ps-commu/t-stub-timelog log=/tmp/ps-commu/t-timelog/timings.log
+  _stub_chrome "$d" fail
+  "$S/init.sh" t-timelog --example >/dev/null &&
+  "$S/serve.sh" t-timelog >/dev/null || return 1
+  CHROME_BIN="$d/chrome" "$S/verify.sh" t-timelog >/dev/null 2>&1   # fails fast on the empty DOM; still logged
+  "$S/stop.sh" t-timelog >/dev/null
+  cat "$log"
+  [[ "$(grep -cE ' init\.sh [0-9]+$' "$log")" == 1 ]] &&
+  [[ "$(grep -cE ' serve\.sh [0-9]+$' "$log")" == 1 ]] &&
+  [[ "$(grep -cE ' verify\.sh [0-9]+$' "$log")" == 1 ]]
+}
+check log_timing_appends              test_log_timing_appends
+check log_timing_noop_without_workspace test_log_timing_noop_without_workspace
+check scripts_log_timing              test_scripts_log_timing
 
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.

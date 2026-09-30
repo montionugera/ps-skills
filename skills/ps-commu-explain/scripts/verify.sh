@@ -105,6 +105,7 @@ done
 ws="$PS_COMMU_ROOT/$slug"
 tier="$(meta_get "$slug" tier)"
 [[ -d "$ws/app" ]] || { echo "no workspace app dir: $ws/app (run init.sh first)" >&2; exit 1; }
+trap 'log_timing verify.sh "$SECONDS"' EXIT
 
 # Assert 6 (defined here, run at its usual point below AND from the
 # no-Chrome branch just below): a static grep of a file already on disk, not

@@ -65,6 +65,7 @@ done
 # --- workspace ---
 ws="$PS_COMMU_ROOT/$slug"
 mkdir -p "$ws"
+trap 'log_timing init.sh "$SECONDS"' EXIT
 
 # --- scaffold app/ from the tier template ---
 # Copy the template (incl. mermaid.min.js for the HTML tier) so the agent edits

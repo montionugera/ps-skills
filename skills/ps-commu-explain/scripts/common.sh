@@ -68,3 +68,11 @@ parse_duration() {  # "24h" | "90m" | "10s" | bare seconds → seconds; invalid 
         echo "$d" ;;
   esac
 }
+
+# Timing log (F-018): append "<ISO-8601 UTC> <script> <seconds>" to <workspace>/timings.log.
+# The workspace is the caller's $ws (every ps-commu script names it that). Script time only —
+# model time shows up as the gaps between entries. Never fails the caller.
+log_timing() {  # script seconds
+  [[ -n "${ws:-}" && -d "${ws:-}" ]] || return 0
+  printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >>"$ws/timings.log" 2>/dev/null || true
+}

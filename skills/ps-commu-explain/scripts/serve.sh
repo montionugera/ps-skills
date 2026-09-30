@@ -31,6 +31,7 @@ done
 [[ -n "$slug" ]] || usage 1
 ws="$PS_COMMU_ROOT/$slug"
 [[ -d "$ws" ]] || { echo "no workspace: $ws (run init.sh first)" >&2; exit 1; }
+trap 'log_timing serve.sh "$SECONDS"' EXIT
 tier="$(meta_get "$slug" tier)"
 [[ "$tier" == "infographic" || "$tier" == "html" || "$tier" == "react" ]] || { echo "bad tier='$tier' in meta.json for $slug (re-run init.sh)" >&2; exit 1; }
 
@@ -135,6 +136,7 @@ meta_set "$slug" started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Self-destruct watchdog (spec D6): marker-verified kill after the TTL.
 (
+  trap - EXIT
   sleep "$keep_secs"
   if ps -p "$server_pid" -o command= 2>/dev/null | grep -qF "$PS_COMMU_ROOT/$slug"; then
     kill "$server_pid" 2>/dev/null || true
