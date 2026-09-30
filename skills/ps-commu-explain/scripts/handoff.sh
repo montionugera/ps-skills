@@ -6,13 +6,14 @@
 #   from the reader subagent's reply), list.sh output, the cleanup hint and
 #   the re-serve command. Commands are printed with absolute paths.
 # Exit 0 = printed with a live URL; 1 = printed, but no live server (no URL to
-# hand over: run serve.sh <slug> first); 2 = no workspace / no 00-brief.md.
+# hand over: run serve.sh <slug> first); 2 = bad slug, no workspace, or no 00-brief.md.
 set -uo pipefail
 source "$(dirname "$0")/common.sh"
 
 usage() { grep '^#' "$0" | cut -c3-; exit "${1:-0}"; }
 case "${1:-}" in -h|--help) usage ;; "") usage 1 ;; esac
 slug="$1"
+[[ "$slug" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || { echo "bad slug: '$slug' (use kebab-case)" >&2; exit 2; }
 dir="$(cd "$(dirname "$0")" && pwd)"
 ws="$PS_COMMU_ROOT/$slug"
 [[ -f "$ws/00-brief.md" ]] || { echo "no $ws/00-brief.md (run init.sh first)" >&2; exit 2; }

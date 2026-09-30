@@ -1936,10 +1936,14 @@ test_components_index_covers_every_section() {
   local a="$SKILL_DIR/assets/template-infographic" ids id rc=0
   [[ -f "$a/components-index.md" ]] || { echo "no components-index.md"; return 1; }
   (( $(wc -l < "$a/components-index.md") <= 40 )) || { echo "index over 40 lines"; return 1; }
-  ids="$(grep -oE 'class="section-head[^"]*"[^>]*id="[^"]+"' "$a/components.md" | sed -E 's/.*id="([^"]+)"$/\1/')"
+  # section-head lines, id= and class= in either order; then the reverse direction
+  ids="$(grep 'class="section-head' "$a/components.md" | grep -oE ' id="[^"]+"' | sed -E 's/ id="([^"]+)"/\1/')"
   [[ -n "$ids" ]] || { echo "no section ids parsed from components.md"; return 1; }
   for id in $ids; do
     grep -qF "id=\"$id\"" "$a/components-index.md" || { echo "index misses section: $id"; rc=1; }
+  done
+  for id in $(grep -oE '^\| `id="[^"]+"`' "$a/components-index.md" | sed -E 's/.*id="([^"]+)".*/\1/'); do
+    grep 'class="section-head' "$a/components.md" | grep -qF " id=\"$id\"" || { echo "index lists id not in components.md: $id"; rc=1; }
   done
   return $rc
 }
@@ -1967,6 +1971,15 @@ test_handoff_without_server_or_workspace() {
   "$S/handoff.sh" t-no-such-ws-xyz >/dev/null 2>&1; rc=$?
   (( rc == 2 )) && "$S/handoff.sh" --help | grep -q 'Usage: handoff.sh'
 }
+test_handoff_rejects_bad_slug() {
+  # a real brief outside the root, so only slug validation (not "no workspace") can give exit 2
+  local rc=0 out="/tmp/hf-trav-x"
+  mkdir -p "$out" && echo "Q1: x" > "$out/00-brief.md"
+  out="$("$S/handoff.sh" ../../hf-trav-x 2>&1)" || rc=$?
+  rm -rf /tmp/hf-trav-x
+  [[ "$rc" == 2 && "$out" == *"bad slug"* ]]
+}
+check handoff_rejects_bad_slug          test_handoff_rejects_bad_slug
 check handoff_prints_everything           test_handoff_prints_everything
 check handoff_without_server_or_workspace test_handoff_without_server_or_workspace
 
