@@ -8,7 +8,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 
 | Skill | What it does |
 |-------|--------------|
-| **ps-commu-explain** | Turns "explain X" into a fact-checked, visually rich web explanation (diagrams, animation, interactivity) served from `/tmp` and handed back as a verified localhost URL. Six-stage chain — brief → facts → storyboard → author → verify (render gate + reader gate) → handoff — gated by `scripts/lint.sh` and `scripts/verify.sh`. Mechanical steps are scripted so the model only does the judgment: `skeleton.sh` drafts `content.md` from the storyboard, `verify.sh` does one Chrome load per cycle and `verify.sh --reader-prompt` builds the reader-gate prompt, `handoff.sh` prints the handoff, and each script logs to the workspace's `timings.log`. Self-contained: lifecycle scripts + HTML and React+TS templates. |
+| **ps-commu-explain** | Turns "explain X" into a fact-checked, visually rich web explanation (diagrams, animation, interactivity) served from `/tmp` and handed back as a verified localhost URL. Six-stage chain — brief → facts → storyboard → author → verify (render gate + reader gate) → handoff — gated by `scripts/lint.sh` and `scripts/verify.sh`. Mechanical steps are scripted so the model only does the judgment: `skeleton.sh` drafts `content.md` from the storyboard, `verify.sh` does one Chrome load per cycle and `verify.sh --reader-prompt` builds the reader-gate prompt, `handoff.sh` prints the handoff, and init, serve, skeleton, verify and handoff log to the workspace's `timings.log`. Self-contained: lifecycle scripts + HTML and React+TS templates. |
 | **ps-interactive-learning-builder** | Orchestrates research, learning design, interactive builds, independent audits, and durable verification for traceable courses and explorable references. |
 | **ps-release-workflow-init** | Opt a repo into the ship-the-release workflow (`.release.json`, backlogs, routing convention). |
 | **ps-release-workflow-idea** | Capture a new idea (`I-NNN`) in the idea backlog. |
@@ -175,7 +175,7 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
   (headless Chrome asserts, one load that also writes `page-text.txt`); `verify.sh <slug> --reader-prompt`
   prints the prompt for a Sonnet reader-gate subagent, which reads only that page text and must answer the
   brief's 3 questions with citations. `scripts/handoff.sh <slug>` prints the final handoff. Authors read
-  `app/components-index.md` (a 20-line index) before grepping `components.md`.
+  `app/components-index.md` (a 25-line index) before grepping `components.md`.
   Modes: `/ps-commu-explain list`, `/ps-commu-explain clean`.
   Built explanations live under `/tmp/ps-commu/<slug>/` and self-destruct after 24h.
 - **ps-interactive-learning-builder** — invoke `/ps-interactive-learning-builder <topic>` to create a
