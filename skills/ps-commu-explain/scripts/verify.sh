@@ -72,14 +72,18 @@
 #   --url  page URL to load (default: http://127.0.0.1:<port> from meta.json;
 #          requires a live marker-verified server). A ?doc=X query selects
 #          which app/X markdown file the fence count is taken from.
-#   page-text.txt  every infographic run (asserts or --dump-text) also writes the
-#          clean, reader-visible page text to /tmp/ps-commu/<slug>/page-text.txt
-#          from the SAME Chrome load: one load per verify cycle. It is deleted at
-#          the start of every run and written only when the extracted text is
-#          non-empty, never under --url (which may load a different doc).
+#   page-text.txt  an infographic run also writes the clean, reader-visible page
+#          text to /tmp/ps-commu/<slug>/page-text.txt from the SAME Chrome load: one
+#          load per verify cycle. It is deleted at the start of every run and a plain
+#          run leaves it ONLY when every assert passes (a failing run leaves none, so
+#          --reader-prompt then exits 2: fix the defect and re-run). Never written
+#          under --url (which may load a different doc). On html/react there is no
+#          extractor: the haiku render subagent saves the page's visible text to that
+#          path by hand before --reader-prompt is run.
 #   --dump-text  skip the PASS/FAIL asserts; print that same page text to stdout
 #          and exit 0 (kept for backward compatibility; a plain run already writes
-#          page-text.txt). It reuses the .cherry-previewer extractor the asserts
+#          page-text.txt). Unlike a plain run it writes page-text.txt WITHOUT running the
+#          asserts, so run the render gate first. It reuses the .cherry-previewer extractor the asserts
 #          use, never a raw --dump-dom (that holds toolbar/source-pane copies, raw
 #          data-nav markup and unrendered ```drawio fences). Exit 1 if the page
 #          never rendered a .cherry-previewer subtree; 2 if Chrome/server is
@@ -119,7 +123,9 @@ done
 ws="$PS_COMMU_ROOT/$slug"
 tier="$(meta_get "$slug" tier)"
 [[ -d "$ws/app" ]] || { echo "no workspace app dir: $ws/app (run init.sh first)" >&2; exit 1; }
-trap 'log_timing verify.sh "$SECONDS"' EXIT
+# --reader-prompt never loads Chrome: log it under its own label so timings.log stays honest.
+timing_label=verify.sh; [[ "$reader_prompt" == "1" ]] && timing_label=verify.sh:reader-prompt
+trap 'log_timing "$timing_label" "$SECONDS"' EXIT
 
 # --reader-prompt (F-018): print the reader-gate prompt, filled from 00-brief.md, pointing
 # at page-text.txt by ABSOLUTE PATH (the reader subagent reads it itself, so the main

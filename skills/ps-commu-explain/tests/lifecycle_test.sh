@@ -1829,6 +1829,21 @@ test_reader_prompt_stale_page_text_exits_2() {  # compares app/content.md only; 
   sleep 1; touch "$ws/page-text.txt"      # fresh again: accepted
   "$S/verify.sh" t-vstub --reader-prompt >/dev/null 2>&1
 }
+test_reader_prompt_html_tier_hand_written_page_text() {  # html/react: page-text.txt is saved by the haiku render subagent
+  local ws=/tmp/ps-commu/t-rphtml out rc
+  rm -rf "$ws"; "$S/init.sh" t-rphtml --tier html >/dev/null 2>&1 || return 1
+  printf 'Q1: what is A?\nQ2: what is B?\nQ3: what is C?\nReader: a newcomer\n' > "$ws/00-brief.md"
+  out="$("$S/verify.sh" t-rphtml --reader-prompt 2>&1)"; rc=$?
+  (( rc == 2 )) && grep -qF 'run verify.sh t-rphtml first' <<<"$out" || return 1
+  printf 'hand-written visible text\n' > "$ws/page-text.txt"
+  out="$("$S/verify.sh" t-rphtml --reader-prompt 2>&1)"; rc=$?
+  echo "$out" | head -n 6
+  (( rc == 0 )) && [[ "$(head -n1 <<<"$out")" == "Agent model: sonnet" ]] &&
+  grep -qxF "$ws/page-text.txt" <<<"$out" && grep -qF 'Q2: what is B?' <<<"$out" &&
+  grep -qE ' verify\.sh:reader-prompt [0-9]+$' "$ws/timings.log" &&
+  ! grep -qE ' verify\.sh [0-9]+$' "$ws/timings.log"   # logged apart from a Chrome run
+}
+check reader_prompt_html_tier_hand_written_page_text test_reader_prompt_html_tier_hand_written_page_text
 check reader_prompt_non_utf8_brief_exits_2     test_reader_prompt_non_utf8_brief_exits_2
 check reader_prompt_stale_page_text_exits_2    test_reader_prompt_stale_page_text_exits_2
 "$S/stop.sh" t-vstub >/dev/null 2>&1
