@@ -1932,6 +1932,19 @@ check skeleton_no_filled_rows      test_skeleton_no_filled_rows
 check skeleton_missing_chain_file  test_skeleton_missing_chain_file
 check skeleton_non_utf8_chain      test_skeleton_non_utf8_chain
 
+test_components_index_covers_every_section() {
+  local a="$SKILL_DIR/assets/template-infographic" ids id rc=0
+  [[ -f "$a/components-index.md" ]] || { echo "no components-index.md"; return 1; }
+  (( $(wc -l < "$a/components-index.md") <= 40 )) || { echo "index over 40 lines"; return 1; }
+  ids="$(grep -oE 'class="section-head[^"]*"[^>]*id="[^"]+"' "$a/components.md" | sed -E 's/.*id="([^"]+)"$/\1/')"
+  [[ -n "$ids" ]] || { echo "no section ids parsed from components.md"; return 1; }
+  for id in $ids; do
+    grep -qF "id=\"$id\"" "$a/components-index.md" || { echo "index misses section: $id"; rc=1; }
+  done
+  return $rc
+}
+check components_index_covers_every_section test_components_index_covers_every_section
+
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.
 test_list_shows_running_and_stopped() {
