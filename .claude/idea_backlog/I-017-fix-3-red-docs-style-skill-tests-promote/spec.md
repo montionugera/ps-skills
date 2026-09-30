@@ -8,16 +8,18 @@ status: idea
 
 ## Problem
 
-(what hurts; concrete examples)
+Three docs-style tests in test_docs_single_source.py fail on main: promote (47 lines) and ship (45 lines) exceed the 40-line skill body budget, and sync-main links to lifecycle.md#main-sync-mechanics, which the test's ANCHORS list omits.
 
 ## Why now
 
-(opportunity; deadline; constraint)
+Red tests on main hide real regressions; found while promoting 1.8.
 
 ## Sketch
 
-(rough shape; not a design yet)
+Full design: docs/superpowers/specs/2026-09-30-fix-red-docs-tests-design.md
 
 ## Acceptance criteria
 
-- [ ] (one observable, testable outcome per item; refine refuses a spec without any)
+- [ ] test_docs_single_source.py reports 0 failed
+- [ ] promote and ship SKILL.md each have <= 40 non-blank body lines and keep their lifecycle.md link
+- [ ] full pytest shows no new failures versus the 788-passed baseline
