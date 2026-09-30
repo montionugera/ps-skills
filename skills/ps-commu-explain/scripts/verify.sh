@@ -84,6 +84,13 @@
 #          data-nav markup and unrendered ```drawio fences). Exit 1 if the page
 #          never rendered a .cherry-previewer subtree; 2 if Chrome/server is
 #          unavailable, same as the normal run.
+#   --reader-prompt  print the reader-gate prompt (the single source of its text):
+#          line 1 is "Agent model: sonnet" (pass it as the Agent tool's model),
+#          the rest is the prompt to paste verbatim, filled with 00-brief.md's
+#          Reader: line and Q1-Q3 and the ABSOLUTE path to page-text.txt (never
+#          its contents; the subagent reads that one file itself). Starts no
+#          Chrome. Exit 2 if page-text.txt is missing (run verify.sh <slug>
+#          first) or the brief lacks Reader:/Q1-Q3.
 #   Chrome: $CHROME_BIN, else google-chrome/chromium on PATH, else the macOS app.
 # Exit 0 = every non-skipped assert passed; 1 = defects listed; 2 = cannot run
 # (no Chrome / no server) — callers treat 2 as SKIP, never as pass. Exception:
@@ -94,12 +101,13 @@ set -uo pipefail
 source "$(dirname "$0")/common.sh"
 
 usage() { grep '^#' "$0" | cut -c3-; exit "${1:-0}"; }
-slug="" url="" url_given=0 dump_text=0
+slug="" url="" url_given=0 dump_text=0 reader_prompt=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --url) [[ $# -ge 2 ]] || { echo "--url requires a value" >&2; exit 1; }
            url="$2"; url_given=1; shift ;;
     --dump-text) dump_text=1 ;;
+    --reader-prompt) reader_prompt=1 ;;
     -h|--help) usage ;;
     *) slug="$1" ;;
   esac
@@ -110,6 +118,58 @@ ws="$PS_COMMU_ROOT/$slug"
 tier="$(meta_get "$slug" tier)"
 [[ -d "$ws/app" ]] || { echo "no workspace app dir: $ws/app (run init.sh first)" >&2; exit 1; }
 trap 'log_timing verify.sh "$SECONDS"' EXIT
+
+# --reader-prompt (F-018): print the reader-gate prompt, filled from 00-brief.md, pointing
+# at page-text.txt by ABSOLUTE PATH (the reader subagent reads it itself, so the main
+# model never re-types the page). No Chrome; never deletes page-text.txt.
+if [[ "$reader_prompt" == 1 ]]; then
+  [[ -s "$ws/page-text.txt" ]] || { echo "no page text at $ws/page-text.txt: run verify.sh $slug first" >&2; exit 2; }
+  [[ "$ws/app/content.md" -nt "$ws/page-text.txt" ]] && { echo "stale page text: app/content.md changed after the last verify; run verify.sh $slug again" >&2; exit 2; }
+  python3 - "$ws/00-brief.md" "$ws/page-text.txt" <<'PY'
+import re, sys
+brief_path, page_text = sys.argv[1], sys.argv[2]
+try:
+    with open(brief_path, encoding="utf-8") as f:
+        brief = re.sub(r"<!--.*?-->", "", f.read(), flags=re.S)
+except OSError as e:
+    sys.stderr.write(f"cannot read {brief_path}: {e}\n"); sys.exit(2)
+reader = re.search(r"(?mi)^Reader:[ \t]*(\S.*)$", brief)
+qs = dict(re.findall(r"(?m)^Q([1-3]):[ \t]*(\S.*)$", brief))
+if not reader or sorted(qs) != ["1", "2", "3"]:
+    sys.stderr.write(f"{brief_path}: needs a filled Reader: line and Q1-Q3 (run lint.sh)\n"); sys.exit(2)
+print(f"""Agent model: sonnet
+You are an independent reader. You have NOT seen this project's 00-brief.md, 01-facts.md,
+02-storyboard.md, or any source file — only the page text in the ONE file named below, exactly
+as a browser would render it. Do not use outside knowledge, do not guess, do not infer from a
+file you were not given.
+
+THE PAGE'S INTENDED READER: {reader.group(1).strip()}
+Read as that person — you know nothing beyond what they know.
+
+PAGE TEXT: read this one file with the Read tool, and no other file:
+{page_text}
+
+Answer these three questions using ONLY that page text:
+Q1: {qs["1"].strip()}
+Q2: {qs["2"].strip()}
+Q3: {qs["3"].strip()}
+
+For each: give a 1-3 sentence answer, then cite the F<n> id(s) the page itself attributes to
+that claim. Never invent a citation. If the text doesn't answer a question, write UNANSWERABLE
+and name what's missing.
+
+Then list every term, acronym, ID, or codename the page uses BEFORE (or without) explaining it
+in plain words, as that reader would stumble on it. F<n> citation markers don't count.
+
+Return exactly this, nothing else:
+Q1: <answer> — F<n>[, F<n>...]
+Q2: <answer> — F<n>[, F<n>...]
+Q3: <answer> — F<n>[, F<n>...]
+Unexplained terms: <comma-separated list, or "none">
+Verdict: PASS (all three answered with real citations AND no unexplained terms) | FAIL (name which failed and why)""")
+PY
+  exit $?
+fi
 
 # page-text.txt (F-018) is the reader gate's input, written by the SAME Chrome load as
 # the asserts. Delete it up front so a failed load, a missing Chrome, the html tier or a

@@ -1747,6 +1747,33 @@ check verify_dump_text_same_path              test_verify_dump_text_same_path
 check verify_failed_load_leaves_no_page_text  test_verify_failed_load_leaves_no_page_text
 check verify_url_writes_no_page_text          test_verify_url_writes_no_page_text
 
+test_reader_prompt_needs_page_text() {
+  _vstub_ws || return 1
+  rm -f /tmp/ps-commu/t-vstub/page-text.txt
+  local out rc; out="$("$S/verify.sh" t-vstub --reader-prompt 2>&1)"; rc=$?
+  echo "$out"
+  (( rc == 2 )) && grep -qF 'run verify.sh t-vstub first' <<<"$out"
+}
+test_reader_prompt_fills_brief_and_path() {  # path, not contents; no Chrome; Sonnet first line
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-rp ws=/tmp/ps-commu/t-vstub out rc q
+  _stub_chrome "$d" page
+  printf 'PAGE BODY SENTINEL 7f3a\n' > "$ws/page-text.txt"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --reader-prompt)"; rc=$?
+  echo "$out" | head -n 12
+  (( rc == 0 )) || return 1
+  [[ "$(head -n1 <<<"$out")" == "Agent model: sonnet" ]] || return 1
+  grep -qF "THE PAGE'S INTENDED READER: $(sed -n 's/^Reader:[[:space:]]*//p' "$ws/00-brief.md")" <<<"$out" || return 1
+  for q in Q1 Q2 Q3; do grep -qF "$(grep "^$q:" "$ws/00-brief.md")" <<<"$out" || return 1; done
+  grep -qxF "$ws/page-text.txt" <<<"$out" &&
+  ! grep -q 'SENTINEL 7f3a' <<<"$out" &&
+  [[ ! -s "$d/launches" ]] &&
+  [[ -f "$ws/page-text.txt" ]]          # --reader-prompt must not delete its own input
+}
+check reader_prompt_needs_page_text      test_reader_prompt_needs_page_text
+check reader_prompt_fills_brief_and_path test_reader_prompt_fills_brief_and_path
+
+
 
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.
