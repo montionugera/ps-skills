@@ -204,8 +204,9 @@
     "title": "Fix 3 red docs-style skill tests (promote/ship body budget, sync-main lifecycle link)",
     "from_idea": "I-017",
     "created_at": "2026-09-30T00:16:30.611491+00:00",
-    "claimed_by": null,
-    "status": "open",
-    "release_version": null
+    "claimed_by": "claude-a6c35399",
+    "status": "claimed",
+    "release_version": null,
+    "claimed_at": "2026-09-30T00:16:34.759653+00:00"
   }
 ]
