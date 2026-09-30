@@ -32,14 +32,6 @@ Clean tree, run from inside the claimed feature worktree.
 - You never need `--no-deploy` for a non-local kubectl context: the deploy script
   self-refuses those.
 
-## Automated main sync (hotfix absorption)
-
-`psrw ship` automatically fetches `origin/main` outside the lock and merges it into `release/<v>`
-before merging your feature branch. Gate 1 runs on the integrated tree (`release + hotfix + feature`).
-If Gate 1 fails, `ship` atomically rolls back to the exact pre-sync commit (`pre_sha`), undoing both
-the hotfix sync and the feature merge. If a conflict occurs during main sync, the merge is cleanly
-aborted and the feature remains claimed.
-
 ## The local deploy
 
 Runs the repo's own local deploy script against `release/<v>`, so the local env

@@ -9,7 +9,7 @@ README = TOOLKIT / "README.md"
 SKILLS_DIR = Path.home() / ".claude" / "skills"
 
 ANCHORS = ["d11-backlog-routing", "gates", "promote-sequence",
-           "state-layout", "guard-guarantees"]
+           "state-layout", "guard-guarantees", "main-sync-mechanics"]
 
 # full-promote is exempt: it is an R0 chain whose command sequence stays inline.
 EXEMPT = {"ps-release-workflow-full-promote"}

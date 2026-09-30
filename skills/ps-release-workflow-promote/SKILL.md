@@ -36,23 +36,13 @@ by itself — cleanup is.
 - `--allow-stale-main` — emergency override to proceed with promote even if `origin/main`
   cannot be reached or synced into the release branch.
 - `--cleanup-only <version>` — **required after the PR merges** unless you used
-  `--babysit`. It marks features promoted, archives the `F-NNN` folders, prunes the
-  per-feature + `_release` worktrees/branches, and finalizes `.release.json` on `main`.
-  It verifies the PR is MERGED first and **refuses while the PR is unmerged** (deleting
-  the remote release branch would auto-close an open PR); `--force-cleanup` is the
-  explicit override. Until cleanup runs, the next `psrw new-release` is wedged.
+  `--babysit`. Refuses while the PR is unmerged (`--force-cleanup` overrides). Until it
+  runs, the next `psrw new-release` is wedged.
 - Promote **freezes** the release (`ship` refuses it) until cleanup; a failed promote
   lifts it. Cleanup loudly re-opens any "shipped" feature missing from the merged head.
 
-## Automated main sync parity
-
-`psrw promote` strictly syncs `origin/main` into `release/<v>` before running epic checks
-and Gate 2. If new commits from `main` are absorbed, Gate 1 runs on the release tree to verify
-integration, and epic outcome checks are re-triggered. The generated PR body records a sync
-disclosure line (`- Synced with <source>@<sha> before Gate 2 (<N> commits absorbed)`).
-
 ## Then
- 
+
 Without `--babysit`: a human reviews and squash-merges the PR (that merge deploys prod),
 then run `psrw promote --cleanup-only <version>`. With `--babysit`: release is fully promoted.
 
