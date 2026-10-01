@@ -19,14 +19,28 @@ import re
 import subprocess
 import sys
 
-THRESHOLD = int(os.environ.get("CLAUDE_AUTO_HANDOFF_THRESHOLD", "200000"))
-HARD_CAP = int(os.environ.get("CLAUDE_AUTO_HANDOFF_HARD_CAP", str(THRESHOLD * 3 // 2)))
+def env_int(name, default):
+    """An integer setting; a missing or non-numeric value falls back to the default."""
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+THRESHOLD = env_int("CLAUDE_AUTO_HANDOFF_THRESHOLD", 200000)
+HARD_CAP = env_int("CLAUDE_AUTO_HANDOFF_HARD_CAP", THRESHOLD * 3 // 2)
 HANDOFF_SCRIPT = os.path.expanduser("~/.claude/skills/handoff/scripts/herdr-handoff.sh")
 
 # Background work is found in the raw transcript text: a launch line names the task
-# id, and a task-notification names it again when the task ends.
-LAUNCHED = re.compile(r"agentId: (\w+)|Command running in background with ID: (\w+)")
-FINISHED = re.compile(r"<task-id>(\w+)</task-id>")
+# id, and a task-notification names it again when the task ends, whatever its status.
+# The agent pattern is tied to the background wording: a foreground agent's result
+# also carries an agentId, and it never gets a notification.
+LAUNCHED = re.compile(
+    r"Async agent launched successfully.{0,400}?agentId: ([\w-]+)"
+    r"|Command running in background with ID: ([\w-]+)"
+    r"|moved to the background \(ID: ([\w-]+)\)"
+)
+FINISHED = re.compile(r"<task-id>([\w-]+)</task-id>")
 
 
 def dirty_tree(cwd):
@@ -35,7 +49,7 @@ def dirty_tree(cwd):
         return False
     try:
         out = subprocess.run(
-            ["git", "-C", cwd, "status", "--porcelain", "--untracked-files=no"],
+            ["git", "--no-optional-locks", "-C", cwd, "status", "--porcelain", "--untracked-files=no"],
             capture_output=True, text=True, timeout=5,
         )
     except Exception:
@@ -66,7 +80,7 @@ def main():
             line = line.strip()
             if not line:
                 continue
-            launched.update(a or b for a, b in LAUNCHED.findall(line))
+            launched.update(next(filter(None, ids)) for ids in LAUNCHED.findall(line))
             finished.update(FINISHED.findall(line))
             try:
                 entry = json.loads(line)
@@ -119,4 +133,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        pass  # a Stop hook must never break the session it watches
