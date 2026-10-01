@@ -3,17 +3,44 @@
 # Claude Code Stop hook: when session context (input + cache tokens) exceeds the
 # threshold, force the agent to run the handoff skill (one-shot per session).
 #
+# Past the threshold the hook waits for a safe point: it does not fire while this
+# session has background work still running or the working tree has uncommitted
+# tracked changes. Past the hard cap it fires regardless, so it cannot wait forever.
+#
 # Env overrides:
 #   CLAUDE_AUTO_HANDOFF_THRESHOLD   token threshold (default 200000)
+#   CLAUDE_AUTO_HANDOFF_HARD_CAP    fire regardless of the safe point (default 1.5 x threshold)
 #   CLAUDE_AUTO_HANDOFF=0           disable entirely
 
 import json
 import os
 import pathlib
+import re
+import subprocess
 import sys
 
 THRESHOLD = int(os.environ.get("CLAUDE_AUTO_HANDOFF_THRESHOLD", "200000"))
+HARD_CAP = int(os.environ.get("CLAUDE_AUTO_HANDOFF_HARD_CAP", str(THRESHOLD * 3 // 2)))
 HANDOFF_SCRIPT = os.path.expanduser("~/.claude/skills/handoff/scripts/herdr-handoff.sh")
+
+# Background work is found in the raw transcript text: a launch line names the task
+# id, and a task-notification names it again when the task ends.
+LAUNCHED = re.compile(r"agentId: (\w+)|Command running in background with ID: (\w+)")
+FINISHED = re.compile(r"<task-id>(\w+)</task-id>")
+
+
+def dirty_tree(cwd):
+    """True when cwd is a git checkout with uncommitted changes to tracked files."""
+    if not cwd:
+        return False
+    try:
+        out = subprocess.run(
+            ["git", "-C", cwd, "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    return out.returncode == 0 and bool(out.stdout.strip())
 
 
 def main():
@@ -33,11 +60,14 @@ def main():
         return
 
     usage = None
+    launched, finished = set(), set()
     with open(transcript, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
+            launched.update(a or b for a, b in LAUNCHED.findall(line))
+            finished.update(FINISHED.findall(line))
             try:
                 entry = json.loads(line)
             except Exception:
@@ -61,6 +91,9 @@ def main():
 
     flag = pathlib.Path("/tmp") / f"claude-auto-handoff-{session_id}.flag"
     if flag.exists():
+        return
+    # Not a safe point yet: say nothing, and look again after the next turn.
+    if context < HARD_CAP and (launched - finished or dirty_tree(data.get("cwd"))):
         return
     try:
         flag.write_text(str(context))
