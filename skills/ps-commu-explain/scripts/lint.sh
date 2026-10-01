@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # lint.sh — authoring-chain lint gate for a ps-commu workspace.
 # Usage: lint.sh <slug>
-#   Checks the workspace's authoring docs and, if present, app/content.md.
+#   Checks the workspace's authoring docs and app/content.md (required on the
+#   infographic tier; checked only if present on html/react).
 #   HTML comments (<!-- ... -->) are stripped from every file before any
 #   check runs, so the templates' own instructional comments (which mention
 #   the literal "(...)" placeholder marker as documentation) don't trip the
@@ -16,24 +17,20 @@
 #     02-storyboard.md: every brief question id (Q1-Q3) appears in at least
 #                       one row; every row cites >=1 F<n> that exists in
 #                       01-facts.md.
-#     app/content.md (only checked if present): every F<n> mentioned exists
-#                       in 01-facts.md; forbidden classes absent (stat-grid,
-#                       stat-tile, meter, cat-*, metric-grid, card-grid);
-#                       Mermaid flowchart edges carry a label (-->|x| or
-#                       -- x -->, for every link family Mermaid has:
-#                       ---/-->/-.->/==>/--x/--o/x--x/o--o/<-->/... ; the
-#                       invisible ~~~ link is exempt); flowchart node count
-#                       <=7 per diagram, counting every declared node id
-#                       (edge endpoints AND standalone "ID[label]"
-#                       declarations); sequenceDiagram arrows carry text
-#                       after the colon. Flowcharts are read by a scanner
-#                       that mirrors Mermaid's own case-sensitive grammar:
-#                       anything it cannot classify, a mis-cased keyword
-#                       ("Graph", "classdef", "End" closing a subgraph), a
-#                       trailing "%% comment", an unbalanced subgraph, a
-#                       link operator inside style arguments, or a block
-#                       whose header is not a known diagram type is REPORTED
-#                       (fail closed) — never silently skipped.
+#     app/content.md:   every F<n> mentioned exists in 01-facts.md; forbidden
+#                       classes absent (stat-grid, stat-tile, meter, cat-*,
+#                       metric-grid, card-grid); every ```drawio fence (and any
+#                       fence whose body starts with <mxGraphModel, mirroring
+#                       cherry-setup.js) is parsed as mxGraph XML: well-formed,
+#                       both root cells, unique ids, vertex/edge exclusivity,
+#                       every edge labelled, <=7 vertices, no overlapping or
+#                       out-of-bounds vertices, no literal '<' or '&' in a
+#                       label (&lt;br&gt; is the one allowed break), and
+#                       role=accent|pitfall|check instead of raw hex colours.
+#     infographic tier only: app/content.md must exist ("missing
+#                       app/content.md: run skeleton.sh <slug>") and must hold
+#                       no line starting with TODO( (an unfilled skeleton.sh
+#                       placeholder). html/react: content.md is optional.
 #   html tier: also validates every <div class="mermaid"> in app/index.html with mmdc
 #     (see the "html tier" block at the bottom; MMDC_BIN, EXPLAINER_STRICT_MERMAID).
 #   Output: one defect per line ("<file>: <reason>"). Exit 0 = clean;
@@ -54,10 +51,12 @@ done
 ws="$PS_COMMU_ROOT/$slug"
 [[ -d "$ws" ]] || { echo "no workspace: $ws (run init.sh first)" >&2; exit 1; }
 
-python3 - "$ws" <<'PY'
+python3 - "$ws" "$(meta_get "$slug" tier)" <<'PY'
 import os, re, sys
 
 ws = sys.argv[1]
+tier = sys.argv[2]
+slug = os.path.basename(ws.rstrip('/'))
 defects = []
 
 
@@ -82,6 +81,15 @@ brief = read(brief_path)
 facts = read(facts_path)
 story = read(story_path)
 content = read(content_path)  # None if absent — content.md is optional (html/react tiers)
+# Infographic tier (F-018): content.md is required, and an unfilled skeleton.sh
+# placeholder (a TODO( line) is a defect, so the serve.sh lint gate enforces it.
+if tier == 'infographic':
+    if content is None:
+        defects.append(f"missing app/content.md: run skeleton.sh {slug}")
+    else:
+        for ln in content.splitlines():
+            if ln.startswith('TODO('):  # line-start only: skeleton.sh always emits it there
+                defects.append(f"app/content.md: unfilled skeleton line: {ln.strip()[:120]}")
 
 # --- 00-brief.md ---
 q_ids = []  # the brief's actual parsed reader-question ids — reused below by
