@@ -84,6 +84,14 @@ dispatch-worker --tail latest -n 20
 dispatch-worker --tail dw-1789785000-a1b2 -f    # Follow live output stream
 ```
 
+### Observability
+
+- **Event log**: every run appends JSONL records to `~/.local/state/dispatch/events.jsonl` (override with `DISPATCH_EVENTS_FILE`): `route`, `start`, `fallback`, `timeout`, `verify_failed`, `finish` (agent, model, status, exit code, duration, files changed). Sync, detached and batch runs are all covered; only a task hash plus its first 80 characters are logged, never the full prompt.
+- **Live output**: detached jobs stream worker stdout/stderr into their log as it arrives, so `dispatch-worker --tail <job> -f` shows progress before the worker exits.
+- **Stall detection**: `dispatch-worker --status` shows `last output Ns ago` for RUNNING jobs and marks `STALLED?` after 300s of silence. Check `--tail` before killing it.
+- **Stats**: `dispatch-worker --stats [DAYS]` (default 7) prints runs, success %, timeouts, fallbacks, verify failures and median duration per agent.
+- **Recovery**: an `--agent auto` / `--priority` run whose worker fails retries once on the next eligible agent (never for a pinned `--agent` or a verify failure), and a quota observation older than 60 minutes counts as not eligible.
+
 ### Exit Codes Contract
 
 | Exit Code | Meaning | Action for Orchestrator |
