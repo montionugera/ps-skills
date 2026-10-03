@@ -1694,6 +1694,33 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
         self.assertEqual(self._calls(), ["agy"])
         self.assertIn("left changes behind", proc.stderr)
 
+    def test_fallback_refusal_decision(self):
+        refusal = dispatch_mod.fallback_refusal
+        self.assertIsNone(refusal("No changes", [], head_moved=False))
+        self.assertIsNone(refusal(None, [], head_moved=False))
+        self.assertIn("merge conflict", refusal("MERGE_CONFLICT (saved patch: /tmp/x.patch)", [], head_moved=False))
+        self.assertIn("could not be compared", refusal("No changes", None, head_moved=False))
+        self.assertIn("HEAD moved", refusal("No changes", [], head_moved=True))
+        left = refusal("No changes", ["a.txt", "b.txt"], head_moved=False)
+        self.assertIn("left changes behind", left)
+        self.assertIn("a.txt", left)
+
+    def test_isolated_merge_conflict_after_partial_merge_blocks_fallback(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        (self.repo / "a.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "a.txt"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "a"],
+                       cwd=self.repo, check=True)
+        # The base tree's own uncommitted edit makes the worker's patch conflict; its new file is still copied.
+        (self.repo / "a.txt").write_text("user edit\n", encoding="utf-8")
+        self._fake("agy", body="echo worker > a.txt; echo new > new.txt")
+        self._fake("codex", output="codex-ok")
+        proc = self._run("--agent", "auto", "--no-verify", "--isolated")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self._calls(), ["agy"])
+        self.assertIn("refusing fallback", proc.stderr)
+
 
 class TestEventLog(unittest.TestCase):
     """Append-only JSONL event log: one line per routing/run event, never raises."""
