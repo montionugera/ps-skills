@@ -188,8 +188,9 @@ def ship_current_work(
         # _release worktree itself, so it checks the combined release code.
         try:
             rc = _run_precheck(rel_wt)
-        except GateFailedError:
-            # A bad hooks.precheck path must not leave the merge standing: the
+        except BaseException:
+            # Any failure (bad hooks.precheck path, gate-slot timeout, Ctrl-C) must not
+            # leave the merge standing: the
             # raise would otherwise skip the rollback below and escape the lock
             # with the feature merged on release/<v> while ship reports failure.
             git_run(rel_wt, "reset", "--hard", pre_sha)

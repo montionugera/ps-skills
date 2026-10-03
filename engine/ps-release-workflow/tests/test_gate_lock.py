@@ -41,3 +41,19 @@ def test_two_slots_allow_two_holders(tmp_path, monkeypatch):
     with gate_lock.gate_slot("a") as a:
         with gate_lock.gate_slot("b", timeout=1) as b:
             assert {a, b} == {0, 1}
+
+
+def test_slot_released_when_body_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate_lock, "LOCK_DIR", tmp_path)
+    monkeypatch.setattr(gate_lock, "SLOTS", 1)
+    with pytest.raises(RuntimeError):
+        with gate_lock.gate_slot("a"):
+            raise RuntimeError("gate blew up")
+    with gate_lock.gate_slot("b", timeout=1):
+        pass
+
+
+@pytest.mark.parametrize("raw,expected", [("0", 1), ("-3", 1), ("abc", 2), ("", 2), ("4", 4)])
+def test_slots_env_is_validated(monkeypatch, raw, expected):
+    monkeypatch.setenv("PSRW_GATE_SLOTS", raw)
+    assert gate_lock._slots_from_env() == expected

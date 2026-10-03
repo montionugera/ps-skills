@@ -11,7 +11,16 @@ import time
 from pathlib import Path
 
 LOCK_DIR = Path(os.environ.get("PSRW_GATE_LOCK_DIR", Path.home() / ".cache/psrw/gate-locks"))
-SLOTS = int(os.environ.get("PSRW_GATE_SLOTS", "2"))
+
+
+def _slots_from_env():
+    try:
+        return max(1, int(os.environ.get("PSRW_GATE_SLOTS", "2")))
+    except ValueError:
+        return 2
+
+
+SLOTS = _slots_from_env()
 
 
 @contextlib.contextmanager
@@ -27,9 +36,12 @@ def gate_slot(label, poll=5.0, timeout=3600.0):
             except BlockingIOError:
                 os.close(fd)
                 continue
-            os.ftruncate(fd, 0)
-            os.write(fd, f"{os.getpid()} {label}\n".encode())
+            except BaseException:
+                os.close(fd)
+                raise
             try:
+                os.ftruncate(fd, 0)
+                os.write(fd, f"{os.getpid()} {label}\n".encode())
                 yield i
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
