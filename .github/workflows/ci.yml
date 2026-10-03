@@ -6,6 +6,21 @@ on:
   pull_request:
 
 jobs:
+  test-coverage:
+    name: every test file runs in CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install PyYAML and pytest
+        run: pip install pyyaml pytest
+      - name: Guard self-tests
+        run: python3 -m pytest .github/scripts -v
+      - name: Check no test file is left out of CI
+        run: python3 .github/scripts/check_test_coverage.py
+
   engine:
     name: ps-release-workflow engine (pytest)
     runs-on: ubuntu-latest
@@ -19,7 +34,7 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Run tests
         working-directory: engine/ps-release-workflow
-        run: pytest -q
+        run: pytest -q -rs
 
   ps-commu-lifecycle:
     name: ps-commu-explain lifecycle (bash, macOS)
@@ -31,15 +46,17 @@ jobs:
         run: bash skills/ps-commu-explain/tests/lifecycle_test.sh
 
   ps-interactive-learning-builder:
-    name: ps-interactive-learning-builder (unittest)
+    name: ps-interactive-learning-builder (pytest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Install pytest
+        run: pip install pytest
       - name: Run tests
-        run: python3 -m unittest discover -s skills/ps-interactive-learning-builder/tests -v
+        run: python3 -m pytest skills/ps-interactive-learning-builder/tests -v
 
   ps-commu-react-template:
     name: ps-commu-explain React template builds
@@ -55,6 +72,23 @@ jobs:
           npm ci
           npx tsc --noEmit
           npm run build
+
+  vault-engine:
+    name: vault-engine (go test + e2e)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/vault-engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/vault-engine/go.mod
+          cache-dependency-path: tools/vault-engine/go.sum
+      - name: Unit tests
+        run: go test -cover ./...
+      - name: E2E lifecycle
+        run: ./test_e2e.sh
 
   dispatch-agy-worker:
     name: dispatch-agy-worker (pytest)
