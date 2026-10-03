@@ -295,11 +295,11 @@ PY
   echo "Configure your Multi-Agent Dispatch preferences:"
   echo "  1) Step-by-Step Setup Wizard (Mode -> Tool 1 -> Model -> Tool 2 -> Model ... -> Done) [Recommended]"
   if [[ -n "$agy_model" ]]; then
-    echo "  2) Quick Preset: Flat Subscriptions (agy:$agy_model > codex:$codex_model)"
+    echo "  2) Quick Preset: Flat Subscription (agy:$agy_model)"
   else
-    echo "  2) Quick Preset: Flat Subscriptions (agy > codex)"
+    echo "  2) Quick Preset: Flat Subscription (agy)"
   fi
-  echo "  3) Dynamic Runway Auto Mode (balanced across agy and codex)"
+  echo "  3) Auto Mode (agy when its quota allows)"
   echo "  4) Enter Custom Priority String directly"
   echo "  5) Keep existing configuration / Skip"
   echo
@@ -328,7 +328,7 @@ PY
       echo
       echo "--- [2/3] Primary Tool (#1 Preference) ---"
       echo "  1) Antigravity CLI (agy)"
-      echo "  2) OpenAI Codex (codex)"
+      echo "  2) OpenAI Codex (codex) [disabled in dispatch-worker: dropped from the chain at run time]"
       echo "  3) Cursor CLI (cursor)"
       read -r -p "Select primary tool [1-3] (default: 1): " t1_choice
       t1_choice="${t1_choice:-1}"
@@ -403,16 +403,16 @@ PY
       ;;
     2)
       if [[ -n "$agy_model" ]]; then
-        pref="agy:$agy_model > codex:$codex_model"
+        pref="agy:$agy_model"
       else
-        pref="agy > codex"
+        pref="agy"
       fi
       ;;
     3)
       pref="auto"
       ;;
     4)
-      read -r -p "Enter custom chain (e.g. 'cursor:gemini-3.8-flash > codex:terra'): " custom_pref
+      read -r -p "Enter custom chain (e.g. 'cursor:gemini-3.8-flash > agy'): " custom_pref
       pref="${custom_pref:-auto}"
       ;;
     5)
