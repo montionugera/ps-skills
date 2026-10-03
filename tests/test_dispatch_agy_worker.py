@@ -588,6 +588,18 @@ class TestTimeoutAndGitInspection(unittest.TestCase):
             os.kill(grandchild, 9)
         self.assertFalse(alive, "grandchild survived the worker timeout")
 
+    def test_execute_worker_process_returns_promptly_when_descendant_holds_pipes(self):
+        # The worker exits 0 at once, but a backgrounded descendant keeps stdout/stderr open.
+        cmd = ["sh", "-c", "echo hi; sleep 8 & exit 0"]
+        start = time.monotonic()
+        exit_code, stdout, _stderr, is_timeout = dispatch_mod.execute_worker_process(
+            cmd, str(self.repo_dir), timeout_seconds=3, agent_name="test-worker"
+        )
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(is_timeout)
+        self.assertIn("hi", stdout)
+
     def test_execute_worker_process_gives_worker_eof_on_stdin(self):
         # A worker waiting on an interactive prompt must see EOF, not block on the dispatcher's stdin.
         read_end, write_end = os.pipe()  # never written to: inheriting it would block `read` until timeout

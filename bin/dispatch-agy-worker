@@ -690,9 +690,20 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
-    # Bounded drain: a descendant that escaped the process group may still hold the pipes; give up on the rest.
-    for r in readers:
-        r.join(timeout=5 if is_timeout else None)
+    # Bounded drain, also after a normal exit: a descendant the worker left behind may still hold the pipes.
+    def _drain(seconds):
+        deadline = time.monotonic() + seconds
+        for r in readers:
+            r.join(timeout=max(0.0, deadline - time.monotonic()))
+        return not any(r.is_alive() for r in readers)
+
+    if not is_timeout and not _drain(1):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    # A descendant that escaped the process group may still hold the pipes; give up on the rest.
+    _drain(5 if is_timeout else 2)
     if log_fh:
         with log_lock:
             log_fh.close()
