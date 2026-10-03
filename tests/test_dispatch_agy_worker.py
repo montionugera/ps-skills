@@ -1768,10 +1768,18 @@ class TestEventLog(unittest.TestCase):
     def test_emit_event_never_raises_on_unserializable_field(self):
         dispatch_mod.emit_event("start", run_id="r1", weird=object())
 
-    def test_task_digest_is_bounded(self):
-        d = dispatch_mod.task_digest("x" * 500)
-        self.assertEqual(len(d["task_head"]), 80)
+    def test_task_digest_is_hash_only(self):
+        d = dispatch_mod.task_digest("short secret prompt")
+        self.assertEqual(list(d), ["task_sha"])
         self.assertEqual(len(d["task_sha"]), 12)
+
+    def test_event_log_is_created_owner_only(self):
+        old_umask = os.umask(0)
+        try:
+            dispatch_mod.emit_event("start", run_id="r1")
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(self.events.stat().st_mode & 0o777, 0o600)
 
     def test_run_internal_job_emits_start_and_finish(self):
         job_dir = str(Path(self.temp_dir.name) / "jobs")
@@ -1800,6 +1808,7 @@ class TestEventLog(unittest.TestCase):
         start = next(e for e in evs if e["event"] == "start")
         self.assertEqual((start["run_id"], start["agent"], start["model"], start["timeout"]), ("r9", "agy", "m1", 1))
         self.assertTrue(any(e["event"] == "timeout" and e["run_id"] == "r9" for e in evs))
+        self.assertNotIn("secret", self.events.read_text(encoding="utf-8"))
 
     def test_batch_emits_finish_per_task(self):
         def _fake(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, **_kw):

@@ -72,9 +72,8 @@ def new_run_id():
 
 
 def task_digest(task_text):
-    """Short task fingerprint for the event log: never the full prompt."""
-    text = task_text or ""
-    return {"task_sha": hashlib.sha256(text.encode("utf-8")).hexdigest()[:12], "task_head": text[:80]}
+    """Short task fingerprint for the event log: a hash only, never any prompt text."""
+    return {"task_sha": hashlib.sha256((task_text or "").encode("utf-8")).hexdigest()[:12]}
 
 
 def emit_event(event, **fields):
@@ -84,7 +83,7 @@ def emit_event(event, **fields):
         line = (json.dumps(record, default=str) + "\n").encode("utf-8")
         path = os.environ.get("DISPATCH_EVENTS_FILE") or DEFAULT_EVENTS_FILE
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             os.write(fd, line)
         finally:
