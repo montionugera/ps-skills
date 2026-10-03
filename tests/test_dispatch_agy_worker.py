@@ -573,6 +573,41 @@ class TestTimeoutAndGitInspection(unittest.TestCase):
         self.assertEqual(stdout, "got:")
         self.assertNotEqual(exit_code, 124)
 
+    def test_execute_worker_process_streams_to_log_before_exit(self):
+        log = Path(self.temp_dir.name) / "stream.log"
+        cmd = ["python3", "-c", "import sys, time; print('early line', flush=True); "
+                                "sys.stderr.write('err line\\n'); sys.stderr.flush(); time.sleep(3); print('late')"]
+        result = {}
+        t = __import__("threading").Thread(target=lambda: result.update(r=dispatch_mod.execute_worker_process(
+            cmd, str(self.repo_dir), timeout_seconds=20, agent_name="test-worker", log_path=str(log))))
+        t.start()
+        deadline = time.monotonic() + 2.5
+        seen = ""
+        while time.monotonic() < deadline and "err line" not in seen:
+            seen = log.read_text(encoding="utf-8") if log.exists() else ""
+            time.sleep(0.05)
+        self.assertTrue(t.is_alive(), "worker already exited; streaming not demonstrated")
+        self.assertIn("early line", seen)
+        self.assertIn("err line", seen)
+        t.join(30)
+        exit_code, stdout, stderr, is_timeout = result["r"]
+        self.assertEqual((exit_code, is_timeout), (0, False))
+        self.assertEqual(stdout, "early line\nlate")
+        self.assertEqual(stderr, "err line")
+        self.assertIn("late", log.read_text(encoding="utf-8"))
+
+    def test_execute_worker_process_timeout_with_log_path_still_kills_group(self):
+        log = Path(self.temp_dir.name) / "stream.log"
+        start = time.monotonic()
+        exit_code, stdout, stderr, is_timeout = dispatch_mod.execute_worker_process(
+            ["sh", "-c", "echo partial; sleep 30 & sleep 30"], str(self.repo_dir), timeout_seconds=1,
+            agent_name="test-worker", log_path=str(log))
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual((exit_code, is_timeout), (124, True))
+        self.assertIn("partial", stdout)
+        self.assertIn("timed out after 1s", stderr)
+        self.assertIn("partial", log.read_text(encoding="utf-8"))
+
     def test_inspect_git_changes_with_commits_and_working_tree(self):
         # 1. Create a commit
         (self.repo_dir / "committed_file.txt").write_text("committed content\n", encoding="utf-8")
@@ -1011,6 +1046,24 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         }]
         rep = dispatch_mod.format_status_report(jobs)
         self.assertIn("tail: running pytest", rep)
+
+    def test_format_status_report_last_output_and_stalled(self):
+        fresh = Path(self.temp_dir.name) / "fresh.log"
+        fresh.write_text("working\n", encoding="utf-8")
+        stale = Path(self.temp_dir.name) / "stale.log"
+        stale.write_text("last words\n", encoding="utf-8")
+        old = time.time() - dispatch_mod.STALL_SECONDS - 60
+        os.utime(stale, (old, old))
+        rep = dispatch_mod.format_status_report([
+            {"job_id": "dw-fresh", "agent": "agy", "status": "RUNNING", "log_file": str(fresh), "created_at": time.time() - 5},
+            {"job_id": "dw-stale", "agent": "agy", "status": "RUNNING", "log_file": str(stale), "created_at": old},
+        ])
+        fresh_line = next(l for l in rep.splitlines() if "dw-fresh" in l)
+        stale_line = next(l for l in rep.splitlines() if "dw-stale" in l)
+        self.assertIn("last output 0s ago", fresh_line)
+        self.assertNotIn("STALLED?", fresh_line)
+        self.assertIn("STALLED?", stale_line)
+        self.assertRegex(stale_line, r"last output 3\d\ds ago")
 
     def test_format_batch_report_retry_hint(self):
         results = [

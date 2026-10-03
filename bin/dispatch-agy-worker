@@ -57,6 +57,7 @@ DEFAULT_VERIFY_TIMEOUT = int(os.environ.get("DISPATCH_VERIFY_TIMEOUT") or "600")
 DEFAULT_VERIFY_SCRIPT = "scripts/precheck.sh"
 VERIFY_FAILED_EXIT_CODE = 13
 VERIFY_TAIL_LINES = 40
+STALL_SECONDS = 300  # --status flags a RUNNING job STALLED? after this long without log output
 
 PROTECTED_CONFIG_PATTERNS = [
     ".release.json",
@@ -627,11 +628,12 @@ def inspect_git_changes(target_dir, initial_head=None):
     return files_changed, diff_summary, commit_count
 
 
-def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"):
+def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker", log_path=None):
     """
     Executes worker subprocess in target_dir with timeout.
     Returns: (exit_code, stdout, stderr, is_timeout)
     The worker gets its own process group so a timeout kills the whole tree, and partial output is kept.
+    With log_path, stdout/stderr lines are also appended to that file as they arrive (live --tail / --status).
     """
     try:
         proc = subprocess.Popen(
@@ -647,25 +649,58 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
     except Exception as e:
         return 1, "", f"FAILED: error launching {agent_name}: {e}", False
 
+    log_fh = None
+    if log_path:
+        try:
+            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+            log_fh = open(log_path, "a", encoding="utf-8", errors="replace")
+        except OSError:
+            log_fh = None
+    log_lock = threading.Lock()
+    chunks = {"out": [], "err": []}
+
+    def _pump(pipe, key):
+        # One reader per pipe so neither can fill up and deadlock the worker.
+        for line in iter(pipe.readline, ""):
+            chunks[key].append(line)
+            if log_fh:
+                with log_lock:
+                    try:
+                        log_fh.write(line)
+                        log_fh.flush()
+                    except (OSError, ValueError):
+                        pass
+
+    readers = [threading.Thread(target=_pump, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=_pump, args=(proc.stderr, "err"), daemon=True)]
+    for r in readers:
+        r.start()
+
+    is_timeout = False
     try:
-        out, err = proc.communicate(timeout=timeout_seconds)
-        return proc.returncode, (out or "").strip(), (err or "").strip(), False
-    except subprocess.TimeoutExpired as te:
-        out, err = te.stdout, te.stderr
+        proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        is_timeout = True
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
             proc.kill()
         try:
-            out, err = proc.communicate(timeout=5)
+            proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            # A descendant that escaped the process group still holds the pipes; give up on the rest.
-            proc.kill()
-        out = out.decode("utf-8", errors="replace") if isinstance(out, bytes) else (out or "")
-        err = err.decode("utf-8", errors="replace") if isinstance(err, bytes) else (err or "")
-        timeout_msg = f"FAILED: {agent_name} timed out after {timeout_seconds}s."
-        combined_err = f"{timeout_msg}\n{err}".strip() if err else timeout_msg
-        return 124, out.strip(), combined_err, True
+            pass
+    # Bounded drain: a descendant that escaped the process group may still hold the pipes; give up on the rest.
+    for r in readers:
+        r.join(timeout=5 if is_timeout else None)
+    if log_fh:
+        with log_lock:
+            log_fh.close()
+    out, err = "".join(chunks["out"]), "".join(chunks["err"])
+    if not is_timeout:
+        return proc.returncode, out.strip(), err.strip(), False
+    timeout_msg = f"FAILED: {agent_name} timed out after {timeout_seconds}s."
+    combined_err = f"{timeout_msg}\n{err}".strip() if err else timeout_msg
+    return 124, out.strip(), combined_err.strip(), True
 
 
 def resolve_verify_cmd(target_dir, verify_cmd=None, no_verify=False):
@@ -1175,7 +1210,8 @@ def verify_opts_from(source):
 
 
 def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, context_files=None, output_file=None,
-                    is_thinking=False, verify_opts=None, verify_info=None, effort=None, run_id=None, isolated=False):
+                    is_thinking=False, verify_opts=None, verify_info=None, effort=None, run_id=None, isolated=False,
+                    log_path=None):
     """
     Runs the worker, then (worker exit 0 only) the verify command inside target_dir. On verify failure the same
     worker is re-invoked exactly once with the failure output; a second failure returns VERIFY_FAILED_EXIT_CODE,
@@ -1218,7 +1254,8 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         )
         resolved_effort = resolve_agent_effort(chosen_agent, effort, is_thinking=is_thinking)
         cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=output_file, effort=resolved_effort)
-        result = execute_worker_process(cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent)
+        result = execute_worker_process(cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent,
+                                        log_path=log_path)
         if result[3]:
             emit_event("timeout", run_id=run_id, agent=chosen_agent, model=chosen_model, timeout=timeout_seconds)
         return result
@@ -1414,6 +1451,10 @@ def format_status_report(jobs):
                         if len(last_l) > 28:
                             last_l = last_l[:25] + "..."
                         tail_snippet = f" | tail: {last_l}"
+                silent = max(0, int(time.time() - os.path.getmtime(log_file)))
+                tail_snippet += f" | last output {silent}s ago"
+                if silent > STALL_SECONDS:
+                    tail_snippet += " STALLED?"
             except Exception:
                 pass
 
@@ -1500,7 +1541,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
             task, target_dir, agent, model, timeout,
             context_files=context_files, output_file=output_file, is_thinking=is_thinking,
             verify_opts=verify_opts_from(state), verify_info=verify_info, effort=effort,
-            run_id=job_id, isolated=isolated,
+            run_id=job_id, isolated=isolated, log_path=state.get("log_file"),
         )
 
     try:
