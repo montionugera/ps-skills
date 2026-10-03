@@ -44,6 +44,8 @@ DEFAULT_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_MIN_5H_QUOTA", "30.0"))
 DEFAULT_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_MIN_WEEKLY_QUOTA", "10.0"))
 DEFAULT_THINK_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_5H_QUOTA", "80.0"))
 DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKLY_QUOTA", "20.0"))
+# A quota observation older than this may hide quota spent since; it is not trusted for routing.
+STALE_OBSERVATION_MINUTES = 60
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 DEFAULT_CLAUDE_THINK_MODEL = os.environ.get("CLAUDE_THINK_MODEL", "claude-opus-5-5")
@@ -205,8 +207,10 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
     try:
         mtime = os.path.getmtime(target_file)
         age_minutes = int((current_time - mtime) / 60)
-        if age_minutes > 60:
-            stale_suffix = f" [stale: observation {age_minutes}m old]"
+        if age_minutes > STALE_OBSERVATION_MINUTES:
+            eligible = False
+            stale_suffix = (f" [stale: observation {age_minutes}m old, over {STALE_OBSERVATION_MINUTES}m"
+                            f" - not eligible until the quota telemetry refreshes]")
     except Exception:
         pass
 

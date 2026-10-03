@@ -168,6 +168,35 @@ class TestWindowRollover(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertEqual(rem_5h, 100.0)
 
+    def _write_healthy_state(self, age_minutes, now):
+        content = {"snapshot": {"windows": [
+            {"kind": "five_hour", "remaining_percent": 90.0, "resets_at": now + 5000},
+            {"kind": "weekly", "remaining_percent": 90.0, "resets_at": now + 50000},
+        ]}}
+        self.state_file.write_text(json.dumps(content), encoding="utf-8")
+        mtime = now - age_minutes * 60
+        os.utime(self.state_file, (mtime, mtime))
+
+    def test_stale_observation_is_not_eligible(self):
+        now = time.time()
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, now)
+        eligible, rem_5h, _rem_weekly, msg = dispatch_mod.check_quota(
+            "agy", str(self.state_file), min_5h=30.0, min_weekly=10.0, current_time=now
+        )
+        self.assertFalse(eligible)
+        self.assertEqual(rem_5h, 90.0)
+        self.assertIn("stale", msg)
+        self.assertIn("not eligible", msg)
+
+    def test_fresh_observation_within_threshold_stays_eligible(self):
+        now = time.time()
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES - 5, now)
+        eligible, _r5, _rw, msg = dispatch_mod.check_quota(
+            "agy", str(self.state_file), min_5h=30.0, min_weekly=10.0, current_time=now
+        )
+        self.assertTrue(eligible)
+        self.assertNotIn("stale", msg)
+
 
 class TestBestRunwayAutoRouting(unittest.TestCase):
     def setUp(self):
