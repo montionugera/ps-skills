@@ -685,7 +685,8 @@ def _promote_release(
             )
         # verify_pr=False: the PR was squash-merged two lines up — the
         # merged state is known by construction.
-        cleanup(repo, version=version, gh_runner=gh_runner, verify_pr=False)
+        cleaned = cleanup(repo, version=version, gh_runner=gh_runner, verify_pr=False)
+        result["unverified"] = cleaned.get("unverified", [])
         result["merged"] = True
         result["cleaned_up"] = True
         return result
@@ -707,11 +708,12 @@ def _promote_release(
         from lib.git_ops import push as push_fn
         push_fn(repo, "main")
 
+    unverified: list[str] = []
     if not keep:
         # verify_pr=False: --direct never opened a PR for this release.
-        cleanup(repo, version=version, verify_pr=False)
+        unverified = cleanup(repo, version=version, verify_pr=False).get("unverified", [])
 
-    return {"ok": True, "version": version, "mode": "direct"}
+    return {"ok": True, "version": version, "mode": "direct", "unverified": unverified}
 
 
 def _remote_branch_head(repo: Path, branch: str) -> str | None:
@@ -748,9 +750,13 @@ def _merged_release_head(repo: Path, version: str, gh_runner) -> tuple[str | Non
     return None, ""
 
 
-def _stranded_features(repo: Path, version: str, gh_runner) -> list[dict]:
-    """Features the release branch's catalog marks shipped on `version` whose
-    shipped commit is NOT in the release head that actually merged.
+def _stranded_features(repo: Path, version: str, gh_runner) -> tuple[list[dict], list[str]]:
+    """Returns (stranded, unverified).
+
+    stranded: features the release branch's catalog marks shipped on `version`
+    whose shipped commit is NOT in the release head that actually merged.
+    unverified: ids of shipped features whose presence in main could not be
+    proven either way; the caller must not report success over these.
 
     Only a recorded `shipped_sha` can prove a feature missing: a legacy entry
     without one is warned about, never reset (its branch may have moved on
@@ -759,27 +765,28 @@ def _stranded_features(repo: Path, version: str, gh_runner) -> list[dict]:
     """
     rel_cat = repo / ".claude" / "worktrees" / "_release" / ".claude" / "refined_backlog" / "_catalog.json"
     if not rel_cat.exists():
-        return []
+        return [], []
     shipped = [e for e in list_entries(rel_cat)
                if e.get("release_version") == version and e.get("status") == "shipped"]
     if not shipped:
-        return []
+        return [], []
     merged_head, source = _merged_release_head(repo, version, gh_runner)
     if merged_head is None:
         print(f"⚠️ cleanup: cannot find the release/{version} head that merged — "
               f"CANNOT verify that {', '.join(e['id'] for e in shipped)} reached main. "
               f"Check each by hand before starting the next release.", file=sys.stderr)
-        return []
+        return [], [e["id"] for e in shipped]
     if _has_origin(repo):
         # Make sure the merged head's objects are local for the ancestry checks.
         git_run(repo, "fetch", "-q", "origin", f"refs/heads/release/{version}", check=False)
-    stranded = []
+    stranded, unverified = [], []
     for entry in shipped:
         sha = entry.get("shipped_sha")
         if not sha:
             print(f"⚠️ cleanup: {entry['id']} has no shipped_sha (shipped by an older "
                   f"psrw) — cannot verify it is in {source}; check it by hand.",
                   file=sys.stderr)
+            unverified.append(entry["id"])
             continue
         rc = git_run(repo, "merge-base", "--is-ancestor", sha, merged_head, check=False).returncode
         if rc == 1:
@@ -787,7 +794,8 @@ def _stranded_features(repo: Path, version: str, gh_runner) -> list[dict]:
         elif rc != 0:
             print(f"⚠️ cleanup: cannot verify {entry['id']} ({sha[:12]}) is in {source} "
                   f"({merged_head[:12]}) — check it by hand", file=sys.stderr)
-    return stranded
+            unverified.append(entry["id"])
+    return stranded, unverified
 
 
 def _reopen_stranded(repo: Path, version: str, stranded: list[dict]) -> None:
@@ -889,7 +897,15 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
     # Before anything is deleted: every feature the release branch says it
     # shipped must be in the head that merged. Stragglers are flagged and put
     # back in main's catalog instead of vanishing with the _release worktree.
-    stranded = _stranded_features(repo, version, gh_runner)
+    stranded, unverified = _stranded_features(repo, version, gh_runner)
+    if unverified and verify_pr and not force:
+        # Nothing has been deleted or committed yet: stop here rather than warn
+        # and print "Promoted". Same gate as the unmerged-PR check above.
+        raise RuntimeError(
+            f"cannot verify that {', '.join(unverified)} reached main (details above). "
+            f"No worktree, branch or catalog was changed. Check each by hand, then re-run with "
+            f"--force-cleanup: promote_release.py --cleanup-only {version} --force-cleanup"
+        )
     if stranded:
         _reopen_stranded(repo, version, stranded)
 
@@ -1048,7 +1064,8 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
                 )
 
     unfreeze_release(repo, version)
-    return {"ok": True, "version": version, "stranded": [e["id"] for e in stranded]}
+    return {"ok": True, "version": version, "stranded": [e["id"] for e in stranded],
+            "unverified": unverified}
 
 
 def _build_parser():
@@ -1115,9 +1132,15 @@ def main() -> int:
         if result.get("merged"):
             print(f"\n✅ Babysat release/{result['version']} → main{gated}: checks green, "
                   f"squash-merged, cleaned up.\n   {result.get('pr_url','(see GitHub)')}")
+            if result.get("unverified"):
+                print(f"⚠️ NOT verified on main: {', '.join(result['unverified'])}. "
+                      f"Check each by hand.", file=sys.stderr)
         else:
             print(f"\n✅ PR opened for release/{result['version']} → main{gated}:\n   {result.get('pr_url','(see GitHub)')}")
             print(f"   Review + squash-merge it to deploy to prod. After merge: --cleanup-only {result['version']}")
+    elif result.get("unverified"):
+        print(f"\n⚠️ Cleaned up v{result['version']}, but NOT verified on main: "
+              f"{', '.join(result['unverified'])}. Check each by hand.", file=sys.stderr)
     else:
         print(f"\n✅ Promoted v{result['version']} to main.")
     return 0
