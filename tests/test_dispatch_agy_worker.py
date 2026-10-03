@@ -1675,6 +1675,18 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(self._calls(), ["agy"])
 
+    def test_pinned_agent_in_equals_form_does_not_fall_back(self):
+        # An explicit --priority routes through the chain; an explicit --agent still pins, however it is spelled.
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        self._fake("agy", exit_code=1, output="agy-boom")
+        self._fake("codex", output="codex-ok")
+        for agent_args in (["--agent", "agy"], ["--agent=agy"]):
+            self.calls_log.unlink(missing_ok=True)
+            proc = self._run(*agent_args, "--priority", "agy > codex", "--no-verify")
+            self.assertNotEqual(proc.returncode, 0, agent_args)
+            self.assertEqual(self._calls(), ["agy"], agent_args)
+
     def test_verify_failure_does_not_fall_back(self):
         self._quota(self.agy_state, 95.0, 95.0)
         self._quota(self.codex_state, 60.0, 60.0)

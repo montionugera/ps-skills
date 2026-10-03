@@ -1754,7 +1754,7 @@ def main():
     default_timeout = get_config_timeout(cfg)
 
     parser = argparse.ArgumentParser(description="Dispatch task to Antigravity CLI, Codex, or Cursor with quota check.")
-    parser.add_argument("--agent", choices=["agy", "codex", "cursor", "claude", "auto"], default=default_agent,
+    parser.add_argument("--agent", choices=["agy", "codex", "cursor", "claude", "auto"], default=None,
                         help=f"External agent to dispatch to (default: {default_agent}); 'claude' runs `claude -p`")
     parser.add_argument("--model", type=str, default=None,
                         help=f"Model override (for codex defaults to {DEFAULT_CODEX_MODEL})")
@@ -1809,6 +1809,10 @@ def main():
     parser.add_argument("--internal-run-job", type=str, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+    # Explicit --agent (any spelling: `--agent X`, `--agent=X`) vs the default derived from the program name.
+    agent_explicit = args.agent is not None
+    if not agent_explicit:
+        args.agent = default_agent
 
     # 1. Internal runner invocation
     if args.internal_run_job:
@@ -1930,7 +1934,7 @@ def main():
             chosen_model = normalize_model_name("codex", chosen_model) if chosen_model else DEFAULT_CODEX_THINK_MODEL
     if chosen_agent == "claude":
         chosen_model = normalize_model_name("claude", chosen_model) or DEFAULT_CLAUDE_THINK_MODEL
-    think_chain = args.think and chosen_agent == "auto" and "--agent" not in sys.argv
+    think_chain = args.think and chosen_agent == "auto" and not agent_explicit
 
     chosen_effort = args.effort
     if not chosen_effort:
@@ -2156,7 +2160,7 @@ def main():
         sys.exit(batch_overall_exit(results))
 
     # Routed execution tasks get the same one-shot runtime fallback as the thinker chain; a pinned --agent never does.
-    agent_pinned = "--agent" in sys.argv and args.agent != "auto"
+    agent_pinned = agent_explicit and args.agent != "auto"
     if routed_by_dispatcher and not args.think and not agent_pinned:
         runtime_fallback = route_execution_fallback(
             chosen_agent, chain=chain, allow_on_demand=effective_on_demand, min_5h=min_5h, min_weekly=min_weekly,
