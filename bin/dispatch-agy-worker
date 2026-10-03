@@ -257,7 +257,8 @@ def route_best_agent(min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, agy_s
     runway = min(5h_remaining - min_5h, weekly_remaining - min_weekly)
     Picks the agent with the higher runway score.
     Returns: (chosen_agent, eligible, rem_5h, rem_weekly, msg)
-    If both runway scores are negative, eligible is False.
+    An agent check_quota marks ineligible (low quota, stale or missing observation) is never chosen.
+    If neither is eligible, eligible is False.
     """
     el_a, r5_a, rw_a, msg_a = check_quota("agy", agy_state_file, min_5h, min_weekly, current_time=current_time)
     el_c, r5_c, rw_c, msg_c = check_quota("codex", codex_state_file, min_5h, min_weekly, current_time=current_time)
@@ -265,14 +266,14 @@ def route_best_agent(min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, agy_s
     runway_a = calculate_runway(r5_a, rw_a, min_5h, min_weekly) if (r5_a is not None and rw_a is not None) else float("-inf")
     runway_c = calculate_runway(r5_c, rw_c, min_5h, min_weekly) if (r5_c is not None and rw_c is not None) else float("-inf")
 
-    if runway_a < 0 and runway_c < 0:
+    if not el_a and not el_c:
         msg = f"Auto routing failed (insufficient runway): agy runway={runway_a:.1f} ({msg_a}) | codex runway={runway_c:.1f} ({msg_c})"
         # Return higher of the two or agy by default
         if runway_c > runway_a:
             return "codex", False, r5_c, rw_c, msg
         return "agy", False, r5_a, rw_a, msg
 
-    if runway_a >= runway_c:
+    if el_a and (not el_c or runway_a >= runway_c):
         msg = f"{msg_a} (runway: {runway_a:.1f} vs codex {runway_c:.1f})"
         return "agy", True, r5_a, rw_a, msg
     else:

@@ -275,6 +275,39 @@ class TestBestRunwayAutoRouting(unittest.TestCase):
         self.assertFalse(eligible)
         self.assertIn("Auto routing failed", msg)
 
+    def _age(self, file_path, now):
+        mtime = now - (dispatch_mod.STALE_OBSERVATION_MINUTES + 30) * 60
+        os.utime(file_path, (mtime, mtime))
+
+    def test_auto_skips_stale_agent_even_with_higher_runway(self):
+        now = time.time()
+        self._write_quota(self.agy_file, 95.0, 95.0)  # best runway, but the observation is stale
+        self._write_quota(self.codex_file, 50.0, 90.0)
+        self._age(self.agy_file, now)
+
+        agent, eligible, r5, _rw, _msg = dispatch_mod.route_best_agent(
+            min_5h=30.0, min_weekly=10.0, agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file), current_time=now
+        )
+        self.assertEqual(agent, "codex")
+        self.assertTrue(eligible)
+        self.assertEqual(r5, 50.0)
+
+    def test_auto_fails_when_both_observations_are_stale(self):
+        now = time.time()
+        self._write_quota(self.agy_file, 95.0, 95.0)
+        self._write_quota(self.codex_file, 90.0, 90.0)
+        self._age(self.agy_file, now)
+        self._age(self.codex_file, now)
+
+        _agent, eligible, _r5, _rw, msg = dispatch_mod.route_best_agent(
+            min_5h=30.0, min_weekly=10.0, agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file), current_time=now
+        )
+        self.assertFalse(eligible)
+        self.assertIn("Auto routing failed", msg)
+        self.assertIn("stale", msg)
+
 
 class TestPromptContract(unittest.TestCase):
     def test_wrap_prompt_contract_includes_rules(self):
