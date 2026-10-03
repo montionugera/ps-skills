@@ -496,6 +496,32 @@ class TestTimeoutAndGitInspection(unittest.TestCase):
         self.assertIn("FAILED: test-worker timed out after 1s.", stderr)
         self.assertIn("partial output", stdout)
 
+    def test_execute_worker_process_timeout_kills_grandchildren_holding_pipes(self):
+        # A backgrounded grandchild inherits stdout/stderr. Killing only the direct child either hangs
+        # communicate() (older Pythons) or leaves the grandchild running; the whole group must die.
+        pid_file = Path(self.temp_dir.name) / "grandchild.pid"
+        cmd = ["sh", "-c", f"sleep 30 & echo $! > {pid_file}; sleep 30"]
+        start = time.monotonic()
+        exit_code, _stdout, stderr, is_timeout = dispatch_mod.execute_worker_process(
+            cmd, str(self.repo_dir), timeout_seconds=1, agent_name="test-worker"
+        )
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertTrue(is_timeout)
+        self.assertEqual(exit_code, 124)
+        self.assertIn("FAILED: test-worker timed out after 1s.", stderr)
+        grandchild = int(pid_file.read_text().strip())
+        deadline = time.monotonic() + 5
+        alive = True
+        while alive and time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+                time.sleep(0.1)
+            except ProcessLookupError:
+                alive = False
+        if alive:
+            os.kill(grandchild, 9)
+        self.assertFalse(alive, "grandchild survived the worker timeout")
+
     def test_inspect_git_changes_with_commits_and_working_tree(self):
         # 1. Create a commit
         (self.repo_dir / "committed_file.txt").write_text("committed content\n", encoding="utf-8")

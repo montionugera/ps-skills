@@ -584,26 +584,40 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
     """
     Executes worker subprocess in target_dir with timeout.
     Returns: (exit_code, stdout, stderr, is_timeout)
-    Properly handles subprocess.TimeoutExpired without losing partial process output.
+    The worker gets its own process group so a timeout kills the whole tree, and partial output is kept.
     """
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=target_dir,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_seconds,
+            errors="replace",
+            start_new_session=True,
         )
-        return proc.returncode, proc.stdout.strip(), proc.stderr.strip(), False
-    except subprocess.TimeoutExpired as te:
-        exit_code = 124
-        out = te.stdout if isinstance(te.stdout, str) else (te.stdout.decode("utf-8", errors="replace") if te.stdout else "")
-        err = te.stderr if isinstance(te.stderr, str) else (te.stderr.decode("utf-8", errors="replace") if te.stderr else "")
-        timeout_msg = f"FAILED: {agent_name} timed out after {timeout_seconds}s."
-        combined_err = f"{timeout_msg}\n{err}".strip() if err else timeout_msg
-        return exit_code, (out.strip() if out else ""), combined_err, True
     except Exception as e:
         return 1, "", f"FAILED: error launching {agent_name}: {e}", False
+
+    try:
+        out, err = proc.communicate(timeout=timeout_seconds)
+        return proc.returncode, (out or "").strip(), (err or "").strip(), False
+    except subprocess.TimeoutExpired as te:
+        out, err = te.stdout, te.stderr
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # A descendant that escaped the process group still holds the pipes; give up on the rest.
+            proc.kill()
+        out = out.decode("utf-8", errors="replace") if isinstance(out, bytes) else (out or "")
+        err = err.decode("utf-8", errors="replace") if isinstance(err, bytes) else (err or "")
+        timeout_msg = f"FAILED: {agent_name} timed out after {timeout_seconds}s."
+        combined_err = f"{timeout_msg}\n{err}".strip() if err else timeout_msg
+        return 124, out.strip(), combined_err, True
 
 
 def resolve_verify_cmd(target_dir, verify_cmd=None, no_verify=False):
