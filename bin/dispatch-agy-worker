@@ -38,6 +38,7 @@ DEFAULT_CONFIG_PATH = os.path.expanduser("~/.config/dispatch/config.env")
 DEFAULT_AGY_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/agy-statusline.observation.json")
 DEFAULT_CODEX_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/codex-app-server.json")
 DEFAULT_JOB_DIR = os.path.expanduser("~/.local/state/dispatch/jobs")
+DEFAULT_EVENTS_FILE = os.path.expanduser("~/.local/state/dispatch/events.jsonl")  # override: DISPATCH_EVENTS_FILE
 DEFAULT_LOG_DIR = "/tmp/dispatch-jobs"
 
 DEFAULT_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_MIN_5H_QUOTA", "30.0"))
@@ -63,6 +64,32 @@ PROTECTED_CONFIG_PATTERNS = [
     "working-feature.json",
     "claims.json",
 ]
+
+
+def new_run_id():
+    return f"dw-{int(time.time())}-{os.urandom(3).hex()}"
+
+
+def task_digest(task_text):
+    """Short task fingerprint for the event log: never the full prompt."""
+    text = task_text or ""
+    return {"task_sha": hashlib.sha256(text.encode("utf-8")).hexdigest()[:12], "task_head": text[:80]}
+
+
+def emit_event(event, **fields):
+    """Appends one JSON line to the dispatch event log with a single write. Never raises."""
+    try:
+        record = {"ts": time.time(), "event": event, "pid": os.getpid(), **fields}
+        line = (json.dumps(record, default=str) + "\n").encode("utf-8")
+        path = os.environ.get("DISPATCH_EVENTS_FILE") or DEFAULT_EVENTS_FILE
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
 
 
 def load_dispatch_config(config_path=None):
@@ -1148,7 +1175,7 @@ def verify_opts_from(source):
 
 
 def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, context_files=None, output_file=None,
-                    is_thinking=False, verify_opts=None, verify_info=None, effort=None):
+                    is_thinking=False, verify_opts=None, verify_info=None, effort=None, run_id=None, isolated=False):
     """
     Runs the worker, then (worker exit 0 only) the verify command inside target_dir. On verify failure the same
     worker is re-invoked exactly once with the failure output; a second failure returns VERIFY_FAILED_EXIT_CODE,
@@ -1191,12 +1218,17 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         )
         resolved_effort = resolve_agent_effort(chosen_agent, effort, is_thinking=is_thinking)
         cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=output_file, effort=resolved_effort)
-        return execute_worker_process(cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent)
+        result = execute_worker_process(cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent)
+        if result[3]:
+            emit_event("timeout", run_id=run_id, agent=chosen_agent, model=chosen_model, timeout=timeout_seconds)
+        return result
 
     def _own_exit(code):
         # VERIFY_FAILED_EXIT_CODE is reserved for the dispatcher's verdict, never the worker's own exit status.
         return 1 if code == VERIFY_FAILED_EXIT_CODE else code
 
+    emit_event("start", run_id=run_id, agent=chosen_agent, model=chosen_model, cwd=target_dir, isolated=isolated,
+               timeout=timeout_seconds, **task_digest(task_text))
     exit_code, stdout, stderr, is_timeout = _invoke_worker(task_text)
     exit_code = _own_exit(exit_code)
 
@@ -1227,6 +1259,8 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
             )
             stderr = f"{stderr}\n{fail_msg}".strip()
             print(fail_msg, file=sys.stderr)
+            emit_event("verify_failed", run_id=run_id, agent=chosen_agent, model=chosen_model, verify_cmd=verify_cmd,
+                       attempts=info["verify_attempts"])
 
     files_changed, diff_summary, commit_count = inspect_git_changes(target_dir, initial_head)
     return exit_code, stdout, stderr, files_changed, diff_summary
@@ -1457,6 +1491,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     state["status"] = "RUNNING"
     state["pid"] = os.getpid()
     save_job_state(job_id, state, job_dir)
+    started = time.time()
 
     verify_info = {}
 
@@ -1465,6 +1500,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
             task, target_dir, agent, model, timeout,
             context_files=context_files, output_file=output_file, is_thinking=is_thinking,
             verify_opts=verify_opts_from(state), verify_info=verify_info, effort=effort,
+            run_id=job_id, isolated=isolated,
         )
 
     try:
@@ -1492,6 +1528,8 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     state["tail_output"] = tail_output[-2000:] if tail_output else ""
     state["completed_at"] = time.time()
     save_job_state(job_id, state, job_dir)
+    emit_event("finish", run_id=job_id, agent=agent, model=model, status=status, exit_code=exit_code,
+               duration_s=round(time.time() - started, 1), files_changed=files_changed)
 
     sys.exit(exit_code)
 
@@ -1512,9 +1550,11 @@ def spawn_detached_process(job_id, cwd, log_file, job_dir=DEFAULT_JOB_DIR, scrip
     return proc.pid
 
 
-def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, timeout_seconds, max_parallel=4, chosen_effort=None):
+def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, timeout_seconds, max_parallel=4, chosen_effort=None,
+                           run_id=None):
     results = [None] * len(tasks)
     merge_lock = threading.Lock()
+    batch_run_id = run_id or new_run_id()
 
     def _run_task_item(idx, item):
         t_task = item.get("task", "")
@@ -1527,12 +1567,15 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
         t_output_file = item.get("output_file")
         t_is_thinking = item.get("is_thinking", False)
         t_verify_info = {}
+        t_run_id = f"{batch_run_id}-{idx + 1}"
+        t_started = time.time()
 
         def _execute(target_dir):
             return run_single_task(
                 t_task, target_dir, t_agent, t_model, t_timeout,
                 context_files=t_context_files, output_file=t_output_file, is_thinking=t_is_thinking,
                 verify_opts=verify_opts_from(item), verify_info=t_verify_info, effort=t_effort,
+                run_id=t_run_id, isolated=True,
             )
 
         try:
@@ -1541,6 +1584,8 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
             )
         except Exception as e:
             exit_code, stdout, stderr, files_changed, diff_summary = 1, "", str(e), 0, "error"
+        emit_event("finish", run_id=t_run_id, agent=t_agent, model=t_model, status=derive_status(exit_code, files_changed),
+                   exit_code=exit_code, duration_s=round(time.time() - t_started, 1), files_changed=files_changed)
 
         results[idx] = {
             "task": t_task,
@@ -1817,6 +1862,11 @@ def main():
             print("FAILED: no valid tasks found for batch dispatch.", file=sys.stderr)
             sys.exit(2)
 
+    run_id = new_run_id()
+    if not args.dry_run:
+        emit_event("route", run_id=run_id, agent=chosen_agent, model=chosen_model, eligible=eligible, reason=msg,
+                   rem_5h=rem_5h, rem_weekly=rem_weekly, mode=args.mode, think=bool(args.think), batch=is_batch)
+
     if not eligible:
         if is_deep_design:
             print(f"FAILED: Thinker unavailable for 'deep-design-v1' ({msg}). Refusing fallback to execution model.", file=sys.stderr)
@@ -1899,7 +1949,7 @@ def main():
             print(f"Wait:  dispatch-worker --wait all")
             sys.exit(0)
         else:
-            jid = f"dw-{int(time.time())}-{os.urandom(3).hex()}"
+            jid = run_id
             state = {
                 "job_id": jid,
                 "agent": chosen_agent,
@@ -1952,6 +2002,7 @@ def main():
             timeout_seconds=args.timeout,
             max_parallel=args.max_parallel,
             chosen_effort=chosen_effort,
+            run_id=run_id,
         )
         report = format_batch_report(results)
         print(report)
@@ -1978,6 +2029,7 @@ def main():
                 args.task, target_dir, agent, model, args.timeout,
                 context_files=args.context_files, output_file=args.output_file, is_thinking=args.think,
                 verify_opts=cli_verify_opts, verify_info=verify_info, effort=chosen_effort,
+                run_id=run_id, isolated=args.isolated,
             )
 
         if not args.isolated:
@@ -1994,6 +2046,7 @@ def main():
     output_preexisted = bool(output_abs and os.path.exists(output_abs))
     pre_status = git_status_entries(cwd) if (runtime_fallback and not args.isolated) else None
 
+    started = time.time()
     exit_code, stdout, stderr, files_changed, diff_summary = dispatch_once(chosen_agent, chosen_model)
     # VERIFY_FAILED means the worker ran and the task's checks failed: a task problem, not a worker problem.
     if exit_code not in (0, VERIFY_FAILED_EXIT_CODE) and runtime_fallback:
@@ -2013,8 +2066,10 @@ def main():
                 os.remove(output_abs)
                 print(f"{fallback_tag} discarded {chosen_agent}'s partial output file {args.output_file}.", file=sys.stderr)
         if retry:
-            print(f"{fallback_tag} {chosen_agent} ({chosen_model}) exited {exit_code}; falling back once to "
-                  f"{runtime_fallback[0]} with {runtime_fallback[1]}.", file=sys.stderr)
+            print(f"{fallback_tag} {chosen_agent} ({chosen_model or 'default model'}) exited {exit_code}; falling back once to "
+                  f"{runtime_fallback[0]} with {runtime_fallback[1] or 'its default model'}.", file=sys.stderr)
+            emit_event("fallback", run_id=run_id, from_agent=chosen_agent, to_agent=runtime_fallback[0],
+                       to_model=runtime_fallback[1], exit_code=exit_code, reason="worker_failed")
             chosen_agent, chosen_model = runtime_fallback
             verify_info.clear()
             exit_code, stdout, stderr, files_changed, diff_summary = dispatch_once(chosen_agent, chosen_model)
@@ -2022,6 +2077,8 @@ def main():
             exit_code = 12  # Fail closed: THINKER_UNAVAILABLE
 
     status = derive_status(exit_code, files_changed)
+    emit_event("finish", run_id=run_id, agent=chosen_agent, model=chosen_model, status=status, exit_code=exit_code,
+               duration_s=round(time.time() - started, 1), files_changed=files_changed)
 
     tail_output = stdout if stdout else (stderr or "none")
     if status == "VERIFY_FAILED":

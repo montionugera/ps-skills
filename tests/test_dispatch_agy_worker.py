@@ -18,6 +18,10 @@ BIN_DIR = REPO_ROOT / "bin"
 SCRIPT_PATH = BIN_DIR / "dispatch-agy-worker"
 CODEX_SCRIPT_PATH = BIN_DIR / "dispatch-codex-worker"
 
+# Keep every in-process and CLI test run out of the user's real ~/.local/state/dispatch/events.jsonl.
+_EVENTS_TMP = tempfile.TemporaryDirectory()
+os.environ["DISPATCH_EVENTS_FILE"] = str(Path(_EVENTS_TMP.name) / "events.jsonl")
+
 import importlib.machinery
 import importlib.util
 loader = importlib.machinery.SourceFileLoader("dispatch_agy_worker", str(SCRIPT_PATH))
@@ -1505,6 +1509,7 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
             "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
             "AGY_QUOTA_STATE_FILE": str(self.agy_state),
             "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
         })
         return subprocess.run(
             [sys.executable, str(self.WORKER_BIN), "--cwd", str(self.repo), "--task", "x", *extra],
@@ -1555,6 +1560,13 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
         self.assertEqual(self._calls(), ["agy", "codex"])
         self.assertIn("codex-ok", proc.stdout)
         self.assertIn("falling back once to codex", proc.stderr)
+        self.assertNotIn("with None", proc.stderr)
+        events = [json.loads(l) for l in (self.root / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([e["event"] for e in events], ["route", "start", "fallback", "start", "finish"])
+        self.assertEqual(len({e["run_id"] for e in events}), 1)
+        fb = events[2]
+        self.assertEqual((fb["from_agent"], fb["to_agent"], fb["exit_code"]), ("agy", "codex", 1))
+        self.assertEqual((events[-1]["agent"], events[-1]["status"]), ("codex", "SUCCESS"))
 
     def test_pinned_agent_does_not_fall_back(self):
         self._quota(self.agy_state, 95.0, 95.0)
@@ -1583,6 +1595,84 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(self._calls(), ["agy"])
         self.assertIn("left changes behind", proc.stderr)
+
+
+class TestEventLog(unittest.TestCase):
+    """Append-only JSONL event log: one line per routing/run event, never raises."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.events = Path(self.temp_dir.name) / "state" / "events.jsonl"
+        self.env = mock.patch.dict(os.environ, {"DISPATCH_EVENTS_FILE": str(self.events)})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.temp_dir.cleanup()
+
+    def _events(self):
+        return [json.loads(l) for l in self.events.read_text(encoding="utf-8").splitlines()]
+
+    def test_emit_event_appends_one_json_line_with_ts_and_pid(self):
+        dispatch_mod.emit_event("start", run_id="r1", agent="agy")
+        dispatch_mod.emit_event("finish", run_id="r1", agent="agy", status="SUCCESS")
+        evs = self._events()
+        self.assertEqual([e["event"] for e in evs], ["start", "finish"])
+        self.assertEqual(evs[0]["run_id"], "r1")
+        self.assertEqual(evs[0]["pid"], os.getpid())
+        self.assertIsInstance(evs[0]["ts"], float)
+        self.assertEqual(evs[1]["status"], "SUCCESS")
+
+    def test_emit_event_never_raises_on_unwritable_path(self):
+        self.events.parent.mkdir(parents=True)
+        self.events.mkdir()  # a directory where the file should be
+        dispatch_mod.emit_event("start", run_id="r1")  # must not raise
+
+    def test_emit_event_never_raises_on_unserializable_field(self):
+        dispatch_mod.emit_event("start", run_id="r1", weird=object())
+
+    def test_task_digest_is_bounded(self):
+        d = dispatch_mod.task_digest("x" * 500)
+        self.assertEqual(len(d["task_head"]), 80)
+        self.assertEqual(len(d["task_sha"]), 12)
+
+    def test_run_internal_job_emits_start_and_finish(self):
+        job_dir = str(Path(self.temp_dir.name) / "jobs")
+        dispatch_mod.save_job_state("job-ev", {
+            "job_id": "job-ev", "agent": "agy", "task": "t", "cwd": self.temp_dir.name,
+            "isolated": False, "timeout": 30,
+        }, job_dir=job_dir)
+        with mock.patch.object(dispatch_mod, "run_single_task", return_value=(0, "ok", "", 2, "2 files")):
+            with self.assertRaises(SystemExit):
+                dispatch_mod.run_internal_job("job-ev", job_dir=job_dir)
+        fin = [e for e in self._events() if e["event"] == "finish"]
+        self.assertEqual(len(fin), 1)
+        self.assertEqual(fin[0]["run_id"], "job-ev")
+        self.assertEqual(fin[0]["status"], "SUCCESS")
+        self.assertEqual(fin[0]["files_changed"], 2)
+        self.assertIn("duration_s", fin[0])
+
+    def test_run_single_task_emits_start_and_timeout(self):
+        repo = Path(self.temp_dir.name) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        with mock.patch.object(dispatch_mod, "build_agent_command", return_value=["sh", "-c", "sleep 5"]):
+            dispatch_mod.run_single_task("secret task text", str(repo), "agy", "m1", 1,
+                                         verify_opts={"no_verify": True}, run_id="r9")
+        evs = self._events()
+        start = next(e for e in evs if e["event"] == "start")
+        self.assertEqual((start["run_id"], start["agent"], start["model"], start["timeout"]), ("r9", "agy", "m1", 1))
+        self.assertTrue(any(e["event"] == "timeout" and e["run_id"] == "r9" for e in evs))
+
+    def test_batch_emits_finish_per_task(self):
+        def _fake(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, **_kw):
+            return 1, "", "boom", 0, "no diff"
+        with mock.patch.object(dispatch_mod, "run_single_task", side_effect=_fake), \
+                mock.patch.object(dispatch_mod, "execute_in_isolated_worktree", side_effect=lambda cwd, fn, merge_lock=None: fn(cwd)):
+            dispatch_mod.execute_batch_parallel([{"task": "a"}, {"task": "b"}], self.temp_dir.name, "agy", None, 30,
+                                                run_id="batch1")
+        fin = sorted(e["run_id"] for e in self._events() if e["event"] == "finish")
+        self.assertEqual(fin, ["batch1-1", "batch1-2"])
 
 
 if __name__ == "__main__":
