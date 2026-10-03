@@ -198,7 +198,7 @@ pytest -q
 bash skills/ps-commu-explain/tests/lifecycle_test.sh
 
 # ps-interactive-learning-builder contract, installer, and repository integration suite
-python3 -m unittest discover -s skills/ps-interactive-learning-builder/tests -v
+python3 -m pytest skills/ps-interactive-learning-builder/tests -v
 
 # ps-commu-explain React template builds
 cd skills/ps-commu-explain/assets/template-react

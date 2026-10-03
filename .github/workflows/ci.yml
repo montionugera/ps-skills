@@ -14,8 +14,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install PyYAML
-        run: pip install pyyaml
+      - name: Install PyYAML and pytest
+        run: pip install pyyaml pytest
+      - name: Guard self-tests
+        run: python3 -m pytest .github/scripts -v
       - name: Check no test file is left out of CI
         run: python3 .github/scripts/check_test_coverage.py
 
@@ -70,6 +72,23 @@ jobs:
           npm ci
           npx tsc --noEmit
           npm run build
+
+  vault-engine:
+    name: vault-engine (go test + e2e)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/vault-engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/vault-engine/go.mod
+          cache-dependency-path: tools/vault-engine/go.sum
+      - name: Unit tests
+        run: go test -cover ./...
+      - name: E2E lifecycle
+        run: ./test_e2e.sh
 
   dispatch-agy-worker:
     name: dispatch-agy-worker (pytest)
