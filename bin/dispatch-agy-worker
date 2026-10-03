@@ -590,6 +590,7 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
         proc = subprocess.Popen(
             cmd,
             cwd=target_dir,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

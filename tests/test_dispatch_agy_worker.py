@@ -522,6 +522,24 @@ class TestTimeoutAndGitInspection(unittest.TestCase):
             os.kill(grandchild, 9)
         self.assertFalse(alive, "grandchild survived the worker timeout")
 
+    def test_execute_worker_process_gives_worker_eof_on_stdin(self):
+        # A worker waiting on an interactive prompt must see EOF, not block on the dispatcher's stdin.
+        read_end, write_end = os.pipe()  # never written to: inheriting it would block `read` until timeout
+        saved_stdin = os.dup(0)
+        try:
+            os.dup2(read_end, 0)
+            exit_code, stdout, _stderr, is_timeout = dispatch_mod.execute_worker_process(
+                ["sh", "-c", "read x; echo got:$x"], str(self.repo_dir), timeout_seconds=3, agent_name="test-worker"
+            )
+        finally:
+            os.dup2(saved_stdin, 0)
+            os.close(saved_stdin)
+            os.close(read_end)
+            os.close(write_end)
+        self.assertFalse(is_timeout)
+        self.assertEqual(stdout, "got:")
+        self.assertNotEqual(exit_code, 124)
+
     def test_inspect_git_changes_with_commits_and_working_tree(self):
         # 1. Create a commit
         (self.repo_dir / "committed_file.txt").write_text("committed content\n", encoding="utf-8")
