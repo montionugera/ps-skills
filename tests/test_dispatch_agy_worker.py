@@ -1459,6 +1459,132 @@ class TestEffortHelpers(unittest.TestCase):
         self.assertNotIn('--effort', cmd_cur)
 
 
+class TestExecutionRuntimeFallback(unittest.TestCase):
+    """Non-think single tasks routed by --agent auto / --priority get one retry on the next eligible agent."""
+
+    WORKER_BIN = BIN_DIR / "dispatch-worker"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.fake_bin = self.root / "bin"
+        self.fake_bin.mkdir()
+        self.agy_state = self.root / "agy-status.json"
+        self.codex_state = self.root / "codex-status.json"
+        self.calls_log = self.root / "calls.log"
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"],
+                       cwd=self.repo, check=True)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _quota(self, path, five_hour, weekly):
+        path.write_text(json.dumps({"windows": [
+            {"kind": "five_hour", "remaining_percent": five_hour},
+            {"kind": "weekly", "remaining_percent": weekly},
+        ]}), encoding="utf-8")
+
+    def _fake(self, name, exit_code=0, output="ok", body=""):
+        path = self.fake_bin / name
+        path.write_text(f"#!/bin/sh\necho \"{name}\" >> '{self.calls_log}'\n{body}\necho '{output}'\nexit {exit_code}\n",
+                        encoding="utf-8")
+        path.chmod(0o755)
+
+    def _calls(self):
+        return self.calls_log.read_text(encoding="utf-8").splitlines() if self.calls_log.exists() else []
+
+    def _run(self, *extra):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE", "DISPATCH_ROUTING_PREFERENCE",
+                            "DISPATCH_EFFORT")}
+        env.update({
+            "PATH": f"{self.fake_bin}:/usr/bin:/bin",
+            "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+        })
+        return subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--cwd", str(self.repo), "--task", "x", *extra],
+            capture_output=True, text=True, env=env,
+        )
+
+    # --- routing helper ---
+
+    def test_fallback_helper_auto_yields_other_eligible_agent(self):
+        self._quota(self.agy_state, 90.0, 90.0)
+        self._quota(self.codex_state, 80.0, 80.0)
+        fb = dispatch_mod.route_execution_fallback(
+            "agy", agy_state_file=str(self.agy_state), codex_state_file=str(self.codex_state))
+        self.assertEqual(fb, ("codex", None))
+
+    def test_fallback_helper_none_when_other_agent_ineligible(self):
+        self._quota(self.agy_state, 90.0, 90.0)
+        self._quota(self.codex_state, 1.0, 1.0)
+        fb = dispatch_mod.route_execution_fallback(
+            "agy", agy_state_file=str(self.agy_state), codex_state_file=str(self.codex_state))
+        self.assertIsNone(fb)
+
+    def test_fallback_helper_priority_chain_skips_chosen_agent_and_keeps_model(self):
+        self._quota(self.agy_state, 90.0, 90.0)
+        self._quota(self.codex_state, 90.0, 90.0)
+        chain = dispatch_mod.parse_priority_chain("codex:gpt-5.6-terra > agy:gemini-x")
+        fb = dispatch_mod.route_execution_fallback(
+            "codex", chain=chain, agy_state_file=str(self.agy_state), codex_state_file=str(self.codex_state))
+        self.assertEqual(fb[0], "agy")
+        self.assertEqual(fb, chain[1])
+
+    def test_fallback_helper_priority_chain_respects_on_demand_gate(self):
+        self._quota(self.agy_state, 90.0, 90.0)
+        chain = dispatch_mod.parse_priority_chain("agy > cursor")
+        fb = dispatch_mod.route_execution_fallback("agy", chain=chain, allow_on_demand=False,
+                                                   agy_state_file=str(self.agy_state))
+        self.assertIsNone(fb)
+
+    # --- retry decision (end to end with fake workers) ---
+
+    def test_auto_agy_failure_falls_back_once_to_codex(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        self._fake("agy", exit_code=1, output="agy-boom")
+        self._fake("codex", output="codex-ok")
+        proc = self._run("--agent", "auto", "--no-verify")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self._calls(), ["agy", "codex"])
+        self.assertIn("codex-ok", proc.stdout)
+        self.assertIn("falling back once to codex", proc.stderr)
+
+    def test_pinned_agent_does_not_fall_back(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        self._fake("agy", exit_code=1, output="agy-boom")
+        self._fake("codex", output="codex-ok")
+        proc = self._run("--agent", "agy", "--no-verify")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self._calls(), ["agy"])
+
+    def test_verify_failure_does_not_fall_back(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        self._fake("agy", output="agy-ok")
+        self._fake("codex", output="codex-ok")
+        proc = self._run("--agent", "auto", "--verify-cmd", "false")
+        self.assertEqual(proc.returncode, dispatch_mod.VERIFY_FAILED_EXIT_CODE, proc.stdout + proc.stderr)
+        self.assertNotIn("codex", self._calls())
+
+    def test_failed_agent_leaving_changes_blocks_fallback(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        self._fake("agy", exit_code=1, body=f"echo half > '{self.repo}/half.txt'")
+        self._fake("codex", output="codex-ok")
+        proc = self._run("--agent", "auto", "--no-verify")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self._calls(), ["agy"])
+        self.assertIn("left changes behind", proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
 
