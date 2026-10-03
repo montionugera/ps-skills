@@ -19,6 +19,10 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "bin" / "dispatch-agy-worker"
 
+# Keep test runs out of the user's real ~/.local/state/dispatch/events.jsonl.
+_EVENTS_TMP = tempfile.TemporaryDirectory()
+os.environ["DISPATCH_EVENTS_FILE"] = str(Path(_EVENTS_TMP.name) / "events.jsonl")
+
 import importlib.machinery
 import importlib.util
 loader = importlib.machinery.SourceFileLoader("dispatch_agy_worker_verify", str(SCRIPT_PATH))
