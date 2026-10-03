@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-dispatch-worker / dispatch-agy-worker / dispatch-codex-worker
-Dispatch an implementation task to Antigravity CLI (agy) or Codex (gpt-5.6-terra)
+dispatch-worker / dispatch-agy-worker
+Dispatch an implementation task to Antigravity CLI (agy), Cursor CLI or `claude -p`
 after verifying quota thresholds (5h > 30%, weekly > 10%).
 
+Agents listed in DISABLED_AGENTS are never routed to, in any mode: naming one with --agent is
+refused, and a --priority chain entry naming one is dropped with a one-line notice.
+
 Thinking mode (--think / --capability deep-design-v1, the `dispatch-thinker` shim) routes to
-Claude Opus 5.5 first (`claude -p`, model via CLAUDE_THINK_MODEL) and falls back to Codex
-gpt-5.6-sol (CODEX_THINK_MODEL; quota 5h > 80%, weekly > 20%) when claude is unavailable or its
-run fails. deep-design-v1 fails closed with exit 12 when neither thinker is available.
+Claude Opus 5.5 only (`claude -p`, model via CLAUDE_THINK_MODEL). deep-design-v1 fails closed
+with exit 12 when it is unavailable.
 
 Exit Codes:
   0: Task executed successfully by external agent
   1: Task execution failed (or error in execution)
-  2: Invalid arguments / missing required task prompt
   10: Insufficient quota (signals orchestrator to fall back to internal Claude subagent)
-  12: deep-design-v1 thinker unavailable (neither Claude nor Codex sol) or forbidden model
+  2: Invalid arguments / missing required task prompt / a disabled agent was named
+  12: deep-design-v1 thinker unavailable (Claude Opus 5.5) or forbidden model
   13: Worker exited 0 but the verify command failed (twice); nothing was merged
 """
 
@@ -50,6 +52,10 @@ DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKL
 STALE_OBSERVATION_MINUTES = 60
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
+
+# Agents the dispatcher refuses to route to, in every mode (auto, priority chain, thinker, batch,
+# runtime fallback). The single switch: remove a name here to route to that agent again.
+DISABLED_AGENTS = frozenset({"codex"})
 DEFAULT_CLAUDE_THINK_MODEL = os.environ.get("CLAUDE_THINK_MODEL", "claude-opus-5-5")
 DEFAULT_THINK_EFFORT = os.environ.get("THINK_EFFORT") or os.environ.get("DISPATCH_THINK_EFFORT") or "medium"
 DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "900")
@@ -259,8 +265,11 @@ def route_best_agent(min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, agy_s
     Returns: (chosen_agent, eligible, rem_5h, rem_weekly, msg)
     An agent check_quota marks ineligible (low quota, stale or missing observation) is never chosen.
     If neither is eligible, eligible is False.
+    With codex in DISABLED_AGENTS, agy is the only candidate and codex quota is never read.
     """
     el_a, r5_a, rw_a, msg_a = check_quota("agy", agy_state_file, min_5h, min_weekly, current_time=current_time)
+    if "codex" in DISABLED_AGENTS:
+        return "agy", el_a, r5_a, rw_a, msg_a
     el_c, r5_c, rw_c, msg_c = check_quota("codex", codex_state_file, min_5h, min_weekly, current_time=current_time)
 
     runway_a = calculate_runway(r5_a, rw_a, min_5h, min_weekly) if (r5_a is not None and rw_a is not None) else float("-inf")
@@ -364,6 +373,13 @@ def parse_priority_chain(chain_str):
     return chain
 
 
+def drop_disabled_agents(chain):
+    """Splits a parsed chain into (entries that may be routed to, names of the disabled agents it listed)."""
+    kept = [c for c in chain if c[0] not in DISABLED_AGENTS]
+    dropped = sorted({c[0] for c in chain if c[0] in DISABLED_AGENTS})
+    return kept, dropped
+
+
 def route_priority_chain(chain, allow_on_demand=False, min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, agy_state_file=None, codex_state_file=None, current_time=None):
     """
     Evaluates each candidate in chain in priority order.
@@ -371,6 +387,9 @@ def route_priority_chain(chain, allow_on_demand=False, min_5h=DEFAULT_MIN_5H, mi
     """
     traces = []
     for agent, model in chain:
+        if agent in DISABLED_AGENTS:
+            traces.append(f"{agent}: disabled")
+            continue
         if agent == "cursor":
             if not allow_on_demand:
                 traces.append("cursor: skipped (on-demand disallowed)")
@@ -406,7 +425,8 @@ def route_execution_fallback(chosen_agent, chain=None, allow_on_demand=False, mi
     Runtime fallback for a routed (non-think) task: the next eligible (agent, model) other than chosen_agent,
     drawn from the priority chain, or from agy/codex for --agent auto. None when no other candidate is eligible.
     """
-    candidates = [c for c in (chain or [("agy", None), ("codex", None)]) if c[0] != chosen_agent]
+    candidates = [c for c in (chain or [("agy", None), ("codex", None)])
+                  if c[0] != chosen_agent and c[0] not in DISABLED_AGENTS]
     if not candidates:
         return None
     agent, model, eligible, _r5, _rw, _msg = route_priority_chain(
@@ -422,7 +442,8 @@ CLAUDE_THINK_MODEL_NAMES = ("claude-opus-5-5", "opus")
 def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H, min_weekly=DEFAULT_THINK_MIN_WEEKLY,
                   current_time=None):
     """
-    Thinking-mode chain: Claude Opus 5.5 first, then Codex gpt-5.6-sol under the think quota.
+    Thinking-mode chain: Claude Opus 5.5, then Codex gpt-5.6-sol under the think quota unless codex is in
+    DISABLED_AGENTS (it is: Claude Opus 5.5 is the only thinker, so there is no runtime fallback).
     An explicit model pins its provider (Claude-family -> claude only, anything else -> codex only).
     Returns: (agent, model, eligible, rem_5h, rem_weekly, msg, runtime_fallback), where runtime_fallback is the
     next eligible (agent, model) to retry once if the chosen agent's run fails, else None.
@@ -431,8 +452,11 @@ def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H
     candidates = []
     if model is None or is_claude_model:
         candidates.append(("claude", normalize_model_name("claude", model) or DEFAULT_CLAUDE_THINK_MODEL))
-    if not is_claude_model:
+    if not is_claude_model and "codex" not in DISABLED_AGENTS:
         candidates.append(("codex", normalize_model_name("codex", model) if model else DEFAULT_CODEX_THINK_MODEL))
+
+    if not candidates:
+        return "claude", model, False, 0.0, 0.0, f"model '{model}' is not a Claude thinking model", None
 
     eligible_picks = []
     traces = []
@@ -1178,6 +1202,8 @@ CLAUDE_DISALLOWED_TOOLS = "Bash,WebFetch,WebSearch"
 
 
 def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=None, effort=None):
+    if chosen_agent in DISABLED_AGENTS:
+        raise ValueError(f"{chosen_agent} is disabled")
     if chosen_agent == "codex":
         model = chosen_model or DEFAULT_CODEX_MODEL
         cmd = [
@@ -1758,15 +1784,18 @@ def main():
     default_mode_str, default_on_demand = get_config_mode(cfg)
     default_timeout = get_config_timeout(cfg)
 
-    parser = argparse.ArgumentParser(description="Dispatch task to Antigravity CLI, Codex, or Cursor with quota check.")
-    parser.add_argument("--agent", choices=["agy", "codex", "cursor", "claude", "auto"], default=None,
+    parser = argparse.ArgumentParser(description="Dispatch task to Antigravity CLI, Cursor, or claude -p with quota check.")
+    # A disabled agent stays a parseable choice so it gets the "is disabled" refusal below, not an argparse error.
+    agent_choices = ["agy", "codex", "cursor", "claude", "auto"]
+    parser.add_argument("--agent", choices=agent_choices, default=None,
+                        metavar="{" + ",".join(a for a in agent_choices if a not in DISABLED_AGENTS) + "}",
                         help=f"External agent to dispatch to (default: {default_agent}); 'claude' runs `claude -p`")
     parser.add_argument("--model", type=str, default=None,
-                        help=f"Model override (for codex defaults to {DEFAULT_CODEX_MODEL})")
+                        help="Model override for the chosen agent")
     parser.add_argument("--effort", type=str, default=None,
                         help="Reasoning effort level (e.g. low, medium, high, max). Thinking mode defaults to 'high'.")
     parser.add_argument("--priority", type=str, default=default_preference,
-                        help="Priority chain preference (e.g. 'cursor:gemini-3.8-flash > agy > codex')")
+                        help="Priority chain preference (e.g. 'cursor:gemini-3.8-flash > agy')")
     parser.add_argument("--mode", choices=["subscription_quota_remaining", "on_demand"], default=default_mode_str,
                         help="Dispatch mode: 'subscription_quota_remaining' (flat quota) or 'on_demand'")
     parser.add_argument("--allow-on-demand", action="store_true", default=default_on_demand,
@@ -1794,9 +1823,9 @@ def main():
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
-    parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Claude Opus 5.5 first, then Codex gpt-5.6-sol (enforces 5h > 80%%, weekly > 20%% quota)")
+    parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Claude Opus 5.5 only (`claude -p`)")
     parser.add_argument("--capability", type=str, default=None, choices=["deep-design-v1"],
-                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Claude Opus 5.5 or GPT-5.6-Sol and fails closed with exit code 12)")
+                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Claude Opus 5.5 and fails closed with exit code 12)")
     parser.add_argument("--attestation-file", type=str, default=None, help="Explicit path to write Thinker attestation JSON (.thinker.json)")
     parser.add_argument("--context", nargs="+", dest="context_files", help="Paths to context/reference files or directories")
     parser.add_argument("--output-file", type=str, default=None, help="File path where worker must write primary deliverable")
@@ -1909,6 +1938,12 @@ def main():
             sys.exit(batch_overall_exit(results_list))
 
     # 4. Quota check / evaluation
+    # (the job-inspection commands above stay usable under a disabled agent's program name)
+    if args.agent in DISABLED_AGENTS:
+        print(f"FAILED: {args.agent} is disabled: dispatch-worker no longer routes to it. "
+              f"Use --agent auto, or one of: {', '.join(a for a in agent_choices if a not in DISABLED_AGENTS and a != 'auto')}.",
+              file=sys.stderr)
+        sys.exit(2)
     effective_on_demand = args.allow_on_demand or (args.mode == "on_demand")
     chosen_agent = args.agent
     chosen_model = args.model
@@ -1921,8 +1956,11 @@ def main():
     is_deep_design = (args.capability == "deep-design-v1")
     if is_deep_design:
         args.think = True
-        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 or GPT-5.6-Sol
-        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "gpt-5.6-sol", "sol"]
+        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 (plus GPT-5.6-Sol only
+        # while codex is not in DISABLED_AGENTS)
+        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus"]
+        if "codex" not in DISABLED_AGENTS:
+            ALLOWED_DEEP_DESIGN_MODELS += ["gpt-5.6-sol", "sol"]
         if chosen_model and chosen_model.lower() not in ALLOWED_DEEP_DESIGN_MODELS:
             print(f"FAILED: capability 'deep-design-v1' strictly forbids model '{chosen_model}'. Allowed models: {ALLOWED_DEEP_DESIGN_MODELS}", file=sys.stderr)
             sys.exit(12)  # Fail-closed: THINKER_UNAVAILABLE / FORBIDDEN_MODEL
@@ -1934,12 +1972,18 @@ def main():
             min_5h = DEFAULT_THINK_MIN_5H
         if "--min-weekly" not in sys.argv:
             min_weekly = DEFAULT_THINK_MIN_WEEKLY
-        # Explicit agents are respected; otherwise route_thinker picks Claude Opus 5.5, then Codex gpt-5.6-sol.
+        # Explicit agents are respected; otherwise route_thinker picks Claude Opus 5.5.
         if chosen_agent == "codex":
             chosen_model = normalize_model_name("codex", chosen_model) if chosen_model else DEFAULT_CODEX_THINK_MODEL
     if chosen_agent == "claude":
         chosen_model = normalize_model_name("claude", chosen_model) or DEFAULT_CLAUDE_THINK_MODEL
-    think_chain = args.think and chosen_agent == "auto" and not agent_explicit
+    # `--agent auto` spelled out is the same request as no --agent: thinking never routes to an execution agent.
+    think_chain = args.think and chosen_agent == "auto"
+    if (think_chain and "codex" in DISABLED_AGENTS and chosen_model
+            and chosen_model.lower() not in CLAUDE_THINK_MODEL_NAMES):
+        print(f"FAILED: thinking mode runs Claude Opus 5.5 only (codex is disabled); model '{chosen_model}' is not allowed. "
+              f"Allowed models: {list(CLAUDE_THINK_MODEL_NAMES)}", file=sys.stderr)
+        sys.exit(12)
 
     chosen_effort = args.effort
     if not chosen_effort:
@@ -1960,7 +2004,12 @@ def main():
             model=chosen_model, codex_state_file=args.state_file, min_5h=min_5h, min_weekly=min_weekly,
         )
     elif args.priority and (chosen_agent == "auto" or "--priority" in sys.argv):
-        chain = parse_priority_chain(args.priority)
+        chain, dropped = drop_disabled_agents(parse_priority_chain(args.priority))
+        for name in dropped:
+            print(f"NOTICE: {name} is disabled; dropped from priority chain '{args.priority}'.", file=sys.stderr)
+        if dropped and not chain:
+            print(f"FAILED: priority chain '{args.priority}' names only disabled agents; nothing to route to.", file=sys.stderr)
+            sys.exit(2)
         routed_by_dispatcher = True
         if chain:
             chosen_agent, routed_model, eligible, rem_5h, rem_weekly, msg = route_priority_chain(
@@ -2017,6 +2066,10 @@ def main():
         if not batch_tasks:
             print("FAILED: no valid tasks found for batch dispatch.", file=sys.stderr)
             sys.exit(2)
+        for item in batch_tasks:
+            if normalize_agent_name(str(item.get("agent") or "")) in DISABLED_AGENTS:
+                print(f"FAILED: {item.get('agent')} is disabled: a batch task names it as its agent.", file=sys.stderr)
+                sys.exit(2)
 
     run_id = new_run_id()
     if not args.dry_run:
