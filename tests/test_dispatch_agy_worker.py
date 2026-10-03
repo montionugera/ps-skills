@@ -1687,6 +1687,18 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0, agent_args)
             self.assertEqual(self._calls(), ["agy"], agent_args)
 
+    def test_isolated_execution_error_still_emits_finish(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._fake("agy")
+        import shutil
+        shutil.rmtree(self.repo / ".git")  # `git worktree add` now fails inside the isolated runner
+        proc = self._run("--agent", "agy", "--no-verify", "--isolated")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("isolated execution error", proc.stderr)
+        events = [json.loads(l) for l in (self.root / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        fin = [e for e in events if e["event"] == "finish"]
+        self.assertEqual([(e["status"], e["exit_code"], e["agent"]) for e in fin], [("ERROR", 1, "agy")])
+
     def test_verify_failure_does_not_fall_back(self):
         self._quota(self.agy_state, 95.0, 95.0)
         self._quota(self.codex_state, 60.0, 60.0)
@@ -1809,6 +1821,16 @@ class TestEventLog(unittest.TestCase):
         self.assertEqual((start["run_id"], start["agent"], start["model"], start["timeout"]), ("r9", "agy", "m1", 1))
         self.assertTrue(any(e["event"] == "timeout" and e["run_id"] == "r9" for e in evs))
         self.assertNotIn("secret", self.events.read_text(encoding="utf-8"))
+
+    def test_verify_start_is_written_to_job_log(self):
+        repo = Path(self.temp_dir.name) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        log = Path(self.temp_dir.name) / "job.log"
+        with mock.patch.object(dispatch_mod, "build_agent_command", return_value=["sh", "-c", "echo worked"]):
+            dispatch_mod.run_single_task("t", str(repo), "agy", None, 30, verify_opts={"verify_cmd": "true"},
+                                         run_id="r1", log_path=str(log))
+        self.assertIn("[Verify] running: true", log.read_text(encoding="utf-8"))
 
     def test_batch_emits_finish_per_task(self):
         def _fake(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, **_kw):

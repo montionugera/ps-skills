@@ -1308,6 +1308,13 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
 
     if exit_code == 0 and verify_cmd:
         for attempt in (1, 2):
+            if log_path:
+                # Keeps the job log moving during a long verify, so --status does not flag it STALLED?.
+                try:
+                    with open(log_path, "a", encoding="utf-8") as log_fh:
+                        log_fh.write(f"[Verify] running: {verify_cmd}\n")
+                except OSError:
+                    pass
             ok, verify_tail, _verify_timed_out = run_verify_cmd(verify_cmd, target_dir, verify_timeout)
             info.update({"verified": ok, "verify_attempts": attempt, "verify_output": verify_tail})
             if ok:
@@ -2188,6 +2195,8 @@ def main():
             return execute_in_isolated_worktree(cwd, run_worker_in_target)
         except Exception as e:
             print(f"FAILED: isolated execution error: {e}", file=sys.stderr)
+            emit_event("finish", run_id=run_id, agent=agent, model=model, status="ERROR", exit_code=1,
+                       duration_s=round(time.time() - started, 1), files_changed=0)
             sys.exit(1)
 
     # Non-isolated runs share the user's tree: snapshot it so a failed first thinker's writes are never
