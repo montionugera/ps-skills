@@ -316,8 +316,8 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
         readme = (REPO / "README.md").read_text()
         workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text()
         command = (
-            "python3 -m unittest discover "
-            "-s skills/ps-interactive-learning-builder/tests -v"
+            "python3 -m pytest "
+            "skills/ps-interactive-learning-builder/tests -v"
         )
 
         for expected in (

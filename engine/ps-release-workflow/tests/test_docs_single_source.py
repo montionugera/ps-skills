@@ -6,7 +6,9 @@ import pytest
 TOOLKIT = Path(__file__).resolve().parent.parent
 LIFECYCLE = TOOLKIT / "docs" / "lifecycle.md"
 README = TOOLKIT / "README.md"
-SKILLS_DIR = Path.home() / ".claude" / "skills"
+# The repo's own skills/ dir, not ~/.claude/skills (a symlink farm into it that
+# CI runners lack, where these tests used to skip and collect zero cases).
+SKILLS_DIR = TOOLKIT.parent.parent / "skills"
 
 ANCHORS = ["d11-backlog-routing", "gates", "promote-sequence",
            "state-layout", "guard-guarantees", "main-sync-mechanics"]
@@ -27,8 +29,7 @@ def skill_dirs():
 
 
 def test_skills_repo_is_present():
-    if not SKILLS_DIR.is_dir():
-        pytest.skip(f"{SKILLS_DIR} not present on this machine")
+    assert SKILLS_DIR.is_dir(), f"{SKILLS_DIR} missing — the docs lint below would collect nothing"
     assert skill_dirs(), "skills repo present but no ps-release-workflow-* skills found"
 
 
