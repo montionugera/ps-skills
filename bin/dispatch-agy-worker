@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -1561,9 +1562,7 @@ def format_stats_report(events, days=7, now=None):
     for agent, r in sorted(rows.items(), key=lambda kv: -max(kv[1]["starts"], kv[1]["finishes"]))[:12]:
         runs = max(r["starts"], r["finishes"])
         ok_pct = f"{round(100 * r['ok'] / runs)}%" if runs else "-"
-        d = sorted(r["durations"])
-        median = (d[len(d) // 2] if len(d) % 2 else (d[len(d) // 2 - 1] + d[len(d) // 2]) / 2) if d else None
-        median_str = f"{median:.0f}s" if median is not None else "-"
+        median_str = f"{statistics.median(r['durations']):.0f}s" if r["durations"] else "-"
         lines.append(f"{agent:<8} {runs:>5} {ok_pct:>5} {r['timeouts']:>8} {r['fallbacks']:>9} {r['verify_failed']:>12} {median_str:>7}")
     return "\n".join(lines)
 
