@@ -210,9 +210,13 @@ go test -cover ./pkg/...
 ./test_e2e.sh
 ```
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all four on every push and PR:
-the engine and interactive-learning-builder tests on Linux, the lifecycle suite on macOS, and the
-React template build on Linux.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all of these on every push and PR,
+plus the root `tests/` suite (`python3 -m pytest tests -v`). The lifecycle suite runs on macOS and
+everything else on Linux. A `test-coverage` job
+([`.github/scripts/check_test_coverage.py`](.github/scripts/check_test_coverage.py)) fails the
+build when any tracked test file is not run by a CI step, when a step uses `unittest` (it never
+collects pytest-style tests), or when a test step can be skipped or have its failures ignored
+(`if:`, `continue-on-error`, `|| true`). A new test suite therefore needs a CI step.
 
 ## License
 
