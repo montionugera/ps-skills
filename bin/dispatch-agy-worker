@@ -1463,6 +1463,67 @@ def format_status_report(jobs):
     return "\n".join(lines[:15])
 
 
+def load_events(path=None):
+    """Reads the event log, skipping blank, malformed, or non-object lines."""
+    path = path or os.environ.get("DISPATCH_EVENTS_FILE") or DEFAULT_EVENTS_FILE
+    events = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    events.append(rec)
+    except OSError:
+        pass
+    return events
+
+
+def format_stats_report(events, days=7, now=None):
+    """One-screen per-agent summary of the last `days` days of events."""
+    cutoff = (now or time.time()) - days * 86400
+    rows = {}
+
+    def _row(agent):
+        return rows.setdefault(agent or "unknown", {"starts": 0, "finishes": 0, "ok": 0, "timeouts": 0,
+                                                     "fallbacks": 0, "verify_failed": 0, "durations": []})
+
+    for e in events:
+        ts = e.get("ts")
+        if not isinstance(ts, (int, float)) or ts < cutoff:
+            continue
+        kind = e.get("event")
+        if kind == "start":
+            _row(e.get("agent"))["starts"] += 1
+        elif kind == "finish":
+            r = _row(e.get("agent"))
+            r["finishes"] += 1
+            r["ok"] += e.get("status") == "SUCCESS"
+            if isinstance(e.get("duration_s"), (int, float)):
+                r["durations"].append(e["duration_s"])
+        elif kind == "timeout":
+            _row(e.get("agent"))["timeouts"] += 1
+        elif kind == "verify_failed":
+            _row(e.get("agent"))["verify_failed"] += 1
+        elif kind == "fallback":
+            _row(e.get("from_agent"))["fallbacks"] += 1
+
+    if not rows:
+        return f"No dispatch events in the last {days:g} day(s)."
+    lines = [f"=== DISPATCH STATS (last {days:g}d) ===",
+             f"{'AGENT':<8} {'RUNS':>5} {'OK%':>5} {'TIMEOUT':>8} {'FALLBACK':>9} {'VERIFY_FAIL':>12} {'MEDIAN':>7}"]
+    for agent, r in sorted(rows.items(), key=lambda kv: -max(kv[1]["starts"], kv[1]["finishes"]))[:12]:
+        runs = max(r["starts"], r["finishes"])
+        ok_pct = f"{round(100 * r['ok'] / runs)}%" if runs else "-"
+        d = sorted(r["durations"])
+        median = (d[len(d) // 2] if len(d) % 2 else (d[len(d) // 2 - 1] + d[len(d) // 2]) / 2) if d else None
+        median_str = f"{median:.0f}s" if median is not None else "-"
+        lines.append(f"{agent:<8} {runs:>5} {ok_pct:>5} {r['timeouts']:>8} {r['fallbacks']:>9} {r['verify_failed']:>12} {median_str:>7}")
+    return "\n".join(lines)
+
+
 def tail_job(job_target="latest", num_lines=20, follow=False, job_dir=DEFAULT_JOB_DIR):
     jobs = list_all_jobs(job_dir=job_dir)
     if not jobs:
@@ -1675,6 +1736,8 @@ def main():
     parser.add_argument("--detach", "--async", dest="detach", action="store_true", help="Launch task in background and exit immediately")
     parser.add_argument("--status", type=str, nargs="?", const="all", help="Check status of background job(s)")
     parser.add_argument("--wait", type=str, nargs="?", const="all", help="Wait for background job(s) to finish")
+    parser.add_argument("--stats", type=float, nargs="?", const=7.0, default=None, metavar="DAYS",
+                        help="Per-agent summary of the event log over the last DAYS days (default: 7)")
     parser.add_argument("--tail", type=str, nargs="?", const="latest", help="Show recent log output for a job (default: latest)")
     parser.add_argument("-n", "--lines", type=int, default=20, help="Number of lines to show with --tail (default: 20)")
     parser.add_argument("-f", "--follow", action="store_true", help="Follow log output in real-time (like tail -f)")
@@ -1712,6 +1775,11 @@ def main():
     # 1. Internal runner invocation
     if args.internal_run_job:
         run_internal_job(args.internal_run_job, job_dir=args.job_dir)
+
+    # 1a. Event log summary
+    if args.stats is not None:
+        print(format_stats_report(load_events(), days=args.stats))
+        sys.exit(0)
 
     # 1b. Tail job log
     if args.tail:

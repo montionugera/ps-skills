@@ -1728,6 +1728,63 @@ class TestEventLog(unittest.TestCase):
         self.assertEqual(fin, ["batch1-1", "batch1-2"])
 
 
+class TestStats(unittest.TestCase):
+    """--stats [DAYS] summarizes events.jsonl per agent and tolerates junk lines."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.events = Path(self.temp_dir.name) / "events.jsonl"
+        now = time.time()
+        old = now - 30 * 86400
+        recs = [
+            {"ts": now, "event": "start", "run_id": "a", "agent": "agy"},
+            {"ts": now, "event": "fallback", "run_id": "a", "from_agent": "agy", "to_agent": "codex"},
+            {"ts": now, "event": "start", "run_id": "a", "agent": "codex"},
+            {"ts": now, "event": "finish", "run_id": "a", "agent": "codex", "status": "SUCCESS", "duration_s": 10},
+            {"ts": now, "event": "start", "run_id": "b", "agent": "agy"},
+            {"ts": now, "event": "timeout", "run_id": "b", "agent": "agy"},
+            {"ts": now, "event": "finish", "run_id": "b", "agent": "agy", "status": "TIMEOUT_NO_PROGRESS", "duration_s": 900},
+            {"ts": now, "event": "start", "run_id": "c", "agent": "agy"},
+            {"ts": now, "event": "verify_failed", "run_id": "c", "agent": "agy"},
+            {"ts": now, "event": "finish", "run_id": "c", "agent": "agy", "status": "VERIFY_FAILED", "duration_s": 100},
+            {"ts": now, "event": "start", "run_id": "d", "agent": "agy"},
+            {"ts": now, "event": "finish", "run_id": "d", "agent": "agy", "status": "SUCCESS", "duration_s": 50},
+            {"ts": old, "event": "start", "run_id": "z", "agent": "cursor"},
+            {"ts": old, "event": "finish", "run_id": "z", "agent": "cursor", "status": "SUCCESS", "duration_s": 1},
+        ]
+        lines = [json.dumps(r) for r in recs]
+        lines.insert(3, "{not json")
+        lines.insert(5, "")
+        lines.append('["a list"]')
+        self.events.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_format_stats_report_counts_per_agent(self):
+        rep = dispatch_mod.format_stats_report(dispatch_mod.load_events(str(self.events)), days=7)
+        row = {l.split()[0]: l.split() for l in rep.splitlines() if l.split() and l.split()[0] in ("agy", "codex", "cursor")}
+        # agent runs ok% timeouts fallbacks verify_failed median
+        self.assertEqual(row["agy"][1:], ["4", "25%", "1", "1", "1", "100s"])
+        self.assertEqual(row["codex"][1:], ["1", "100%", "0", "0", "0", "10s"])
+        self.assertNotIn("cursor", row)  # older than the window
+
+    def test_stats_cli_exits_zero_and_tolerates_malformed_lines(self):
+        env = dict(os.environ, DISPATCH_EVENTS_FILE=str(self.events))
+        proc = subprocess.run([sys.executable, str(SCRIPT_PATH), "--stats"], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("agy", proc.stdout)
+        proc = subprocess.run([sys.executable, str(SCRIPT_PATH), "--stats", "60"], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("cursor", proc.stdout)
+
+    def test_stats_missing_file_exits_zero(self):
+        env = dict(os.environ, DISPATCH_EVENTS_FILE=str(Path(self.temp_dir.name) / "nope.jsonl"))
+        proc = subprocess.run([sys.executable, str(SCRIPT_PATH), "--stats"], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("No dispatch events", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
 
