@@ -22,6 +22,7 @@ from lib.epic import (
     mark_epic_promoted, set_split_approved, try_begin_verification,
 )
 from lib.epic_gate import run_and_record
+from lib.gate_lock import gate_slot
 from lib.git_ops import (
     GitError, _run as git_run, commit_all, is_dirty,
     delete_branch_local, delete_branch_remote, push, remove_worktree,
@@ -550,7 +551,8 @@ def _promote_release(
         gate2_root = rel_wt if rel_wt.exists() else repo
         integ = resolve_hook(gate2_root, "integration")
         if integ.exists():
-            cp = subprocess.run([str(integ)], cwd=gate2_root)
+            with gate_slot(f"gate2 {gate2_root.name}"):
+                cp = subprocess.run([str(integ)], cwd=gate2_root)
             if cp.returncode != 0:
                 raise Gate2FailedError(f"Gate 2 ({integ}) failed for release/{version}")
             gate2_ran = True
