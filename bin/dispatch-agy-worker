@@ -1972,13 +1972,17 @@ def main():
             min_5h = DEFAULT_THINK_MIN_5H
         if "--min-weekly" not in sys.argv:
             min_weekly = DEFAULT_THINK_MIN_WEEKLY
-        # Explicit agents are respected; otherwise route_thinker picks Claude Opus 5.5.
+        # route_thinker picks Claude Opus 5.5 (below), whatever --agent says.
         if chosen_agent == "codex":
             chosen_model = normalize_model_name("codex", chosen_model) if chosen_model else DEFAULT_CODEX_THINK_MODEL
     if chosen_agent == "claude":
         chosen_model = normalize_model_name("claude", chosen_model) or DEFAULT_CLAUDE_THINK_MODEL
     # `--agent auto` spelled out is the same request as no --agent: thinking never routes to an execution agent.
     think_chain = args.think and chosen_agent == "auto"
+    if args.think and chosen_agent not in ("auto", "claude"):
+        # Thinking never runs on an execution agent, pinned or not: take the same Claude route as `--agent auto`.
+        print(f"NOTICE: thinking mode runs on Claude Opus 5.5 only; ignoring --agent {chosen_agent}.", file=sys.stderr)
+        think_chain = True
     if (think_chain and "codex" in DISABLED_AGENTS and chosen_model
             and chosen_model.lower() not in CLAUDE_THINK_MODEL_NAMES):
         print(f"FAILED: thinking mode runs Claude Opus 5.5 only (codex is disabled); model '{chosen_model}' is not allowed. "

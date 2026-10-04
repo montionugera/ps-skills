@@ -1433,6 +1433,32 @@ class TestThinkerRouting(unittest.TestCase):
         attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
         self.assertEqual(attestation["effort"], "medium")
 
+    def test_think_with_explicit_agy_routes_to_claude(self):
+        self._fake("claude")
+        for capability in (True, False):
+            proc = self._run("--agent", "agy", "--dry-run", capability=capability)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+            self.assertEqual(proc.stderr.count("NOTICE: thinking mode runs on Claude Opus 5.5 only; ignoring --agent agy"), 1)
+
+    def test_think_with_explicit_agy_fails_closed_without_claude(self):
+        self._fake("agy")
+        proc = self._run("--agent", "agy", "--dry-run")
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertNotIn("Would dispatch", proc.stdout)
+        proc = self._run("--agent", "agy", "--dry-run", capability=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("Would dispatch", proc.stdout)
+
+    def test_think_with_explicit_agy_attests_the_agent_that_ran(self):
+        self._fake("claude")
+        self._fake("agy")
+        proc = self._run("--agent", "agy")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("agy", self.calls_log.read_text(encoding="utf-8"))
+        attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
+        self.assertEqual((attestation["agent"], attestation["model"]), ("claude", "claude-opus-5-5"))
+
 
 class TestEffortHelpers(unittest.TestCase):
     def test_normalize_effort_codex(self):
