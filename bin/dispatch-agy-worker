@@ -26,6 +26,7 @@ from contextlib import nullcontext
 import datetime
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -50,6 +51,7 @@ DEFAULT_THINK_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_5H_QUOTA"
 DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKLY_QUOTA", "20.0"))
 # A quota observation older than this may hide quota spent since; it is not trusted for routing.
 STALE_OBSERVATION_MINUTES = 60
+ALLOW_STALE = False  # set by --allow-stale: a stale quota observation is reported but does not make the agent ineligible
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 
@@ -58,12 +60,14 @@ DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 DISABLED_AGENTS = frozenset({"codex"})
 DEFAULT_CLAUDE_THINK_MODEL = os.environ.get("CLAUDE_THINK_MODEL", "claude-opus-5-5")
 DEFAULT_THINK_EFFORT = os.environ.get("THINK_EFFORT") or os.environ.get("DISPATCH_THINK_EFFORT") or "medium"
-DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "900")
+DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "2400")
 
 DEFAULT_VERIFY_TIMEOUT = int(os.environ.get("DISPATCH_VERIFY_TIMEOUT") or "600")
 DEFAULT_VERIFY_SCRIPT = "scripts/precheck.sh"
 VERIFY_FAILED_EXIT_CODE = 13
+WAIT_STILL_RUNNING_EXIT_CODE = 14  # --wait ran out of budget while the job was still alive
 VERIFY_TAIL_LINES = 40
+PENDING_NO_PID_GRACE_SECONDS = 120  # a PENDING job with no pid this long after creation never got its runner
 STALL_SECONDS = 300  # --status flags a RUNNING job STALLED? after this long without log output
 
 PROTECTED_CONFIG_PATTERNS = [
@@ -201,18 +205,21 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
     windows = data.get("windows") or data.get("snapshot", {}).get("windows") or []
     rem_5h = None
     rem_weekly = None
+    rolled_over = {}  # window kind -> its resets_at, for windows that have reset since the observation (read as 100%)
     for w in windows:
         if w.get("kind") == "five_hour":
             rem_val = float(w.get("remaining_percent", 0.0))
             resets_at_ts = _parse_resets_at(w.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
+                rolled_over["five_hour"] = resets_at_ts
             rem_5h = rem_val
         elif w.get("kind") == "weekly":
             rem_val = float(w.get("remaining_percent", 0.0))
             resets_at_ts = _parse_resets_at(w.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
+                rolled_over["weekly"] = resets_at_ts
             rem_weekly = rem_val
 
     # Fallback to payload.quota (Gemini structure) if snapshot windows missing
@@ -224,6 +231,7 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
             resets_at_ts = _parse_resets_at(g5.get("reset_time") or g5.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
+                rolled_over["five_hour"] = resets_at_ts
             rem_5h = rem_val
         if rem_weekly is None and "gemini-weekly" in quota:
             gw = quota["gemini-weekly"]
@@ -231,6 +239,7 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
             resets_at_ts = _parse_resets_at(gw.get("reset_time") or gw.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
+                rolled_over["weekly"] = resets_at_ts
             rem_weekly = rem_val
 
     if rem_5h is None or rem_weekly is None:
@@ -238,15 +247,28 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
 
     eligible = (rem_5h >= min_5h) and (rem_weekly >= min_weekly)
     stale_suffix = ""
-    try:
-        mtime = os.path.getmtime(target_file)
-        age_minutes = int((current_time - mtime) / 60)
+    snapshot = data.get("snapshot")
+    known_at = snapshot.get("fetched_at_unix") if isinstance(snapshot, dict) else None
+    # Trust fetched_at_unix only when it is a plausible unix-seconds time (not NaN, milliseconds or the future).
+    if (isinstance(known_at, bool) or not isinstance(known_at, (int, float)) or not math.isfinite(known_at)
+            or not 0 <= known_at <= current_time + 60):
+        try:
+            known_at = os.path.getmtime(target_file)
+        except OSError:
+            known_at = None
+    if known_at is not None:
+        if len(rolled_over) == 2:
+            # Both windows have reset since the observation: the state (100%/100%) is known as of the later reset.
+            known_at = max(known_at, *rolled_over.values())
+        age_minutes = int((current_time - known_at) / 60)
         if age_minutes > STALE_OBSERVATION_MINUTES:
-            eligible = False
-            stale_suffix = (f" [stale: observation {age_minutes}m old, over {STALE_OBSERVATION_MINUTES}m"
-                            f" - not eligible until the quota telemetry refreshes]")
-    except Exception:
-        pass
+            if ALLOW_STALE:
+                stale_suffix = (f" [stale: observation {age_minutes}m old, over {STALE_OBSERVATION_MINUTES}m"
+                                f" - proceeding (--allow-stale)]")
+            else:
+                eligible = False
+                stale_suffix = (f" [stale: observation {age_minutes}m old, over {STALE_OBSERVATION_MINUTES}m"
+                                f" - not eligible until the quota telemetry refreshes]")
 
     msg = f"[{agent.upper()}] 5h: {rem_5h:.1f}% (min {min_5h:.1f}%), Weekly: {rem_weekly:.1f}% (min {min_weekly:.1f}%){stale_suffix}"
     return eligible, rem_5h, rem_weekly, msg
@@ -1178,8 +1200,53 @@ def is_pid_running(pid):
     try:
         os.kill(pid, 0)
         return True
-    except (OSError, ProcessLookupError):
+    except ProcessLookupError:
         return False
+    except OSError:
+        # e.g. PermissionError: the process exists but is not ours to signal. Not proof of death.
+        return True
+
+
+def job_looks_dead(state):
+    """A RUNNING/PENDING job whose pid is gone, or a PENDING job that never got a pid within the grace period."""
+    if state.get("status") not in ("RUNNING", "PENDING"):
+        return False
+    if state.get("pid"):
+        return not is_pid_running(state["pid"])
+    created = state.get("created_at")
+    return (state.get("status") == "PENDING" and isinstance(created, (int, float))
+            and time.time() - created > PENDING_NO_PID_GRACE_SECONDS)
+
+
+def reap_dead_job(state, job_dir=DEFAULT_JOB_DIR):
+    """Persists FAILED_DIED for a job that job_looks_dead. Returns the state to report."""
+    if not state.get("job_id") or not job_looks_dead(state):
+        return state
+    # Re-read: the runner may have written its final status and exited between our read and the pid check.
+    fresh = load_job_state(state["job_id"], job_dir) or state
+    if job_looks_dead(fresh):
+        fresh["status"] = "FAILED_DIED"
+        fresh["exit_code"] = 1
+        save_job_state(fresh["job_id"], fresh, job_dir)
+    return fresh
+
+
+def repo_identity(path):
+    """What `--wait all` scopes by: the git common dir (shared by a repo's subdirs and worktrees), else the real path."""
+    real = os.path.realpath(path)
+    try:
+        res = subprocess.run(["git", "-C", real, "rev-parse", "--git-common-dir"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return real
+    if res.returncode != 0 or not res.stdout.strip():
+        return real
+    return os.path.realpath(os.path.join(real, res.stdout.strip()))
+
+
+def wait_budget_seconds(states, fallback_timeout):
+    """Default --wait budget: a job can be worker + verify + one retry + verify, so 2x its timeouts (longest job wins)."""
+    return max(2 * ((st or {}).get("timeout") or fallback_timeout)
+               + 2 * ((st or {}).get("verify_timeout") or DEFAULT_VERIFY_TIMEOUT) for st in states)
 
 
 def list_all_jobs(job_dir=DEFAULT_JOB_DIR):
@@ -1473,7 +1540,8 @@ def format_batch_report(results):
     for idx, r in enumerate(results, 1):
         task_preview = r.get("task", "")[:28] + "..." if len(r.get("task", "")) > 28 else r.get("task", "")
         status_icon = "SUCCESS" if r.get("exit_code") == 0 else (
-            "VERIFY_FAILED" if r.get("exit_code") == VERIFY_FAILED_EXIT_CODE else "FAILED")
+            "VERIFY_FAILED" if r.get("exit_code") == VERIFY_FAILED_EXIT_CODE else
+            "STILL_RUNNING" if r.get("exit_code") == WAIT_STILL_RUNNING_EXIT_CODE else "FAILED")
         agent = r.get("agent", "worker").upper()
         fc = r.get("files_changed", 0)
         ds = r.get("diff_summary", "no diff")
@@ -1721,6 +1789,31 @@ def spawn_detached_process(job_id, cwd, log_file, job_dir=DEFAULT_JOB_DIR, scrip
     return proc.pid
 
 
+def resolve_batch_item_routing(batch_tasks, chosen_agent, is_think, priority, explicit_model):
+    """
+    Per-item fix-ups (in place) for batch tasks that name their own agent. Returns stderr notices.
+    Think mode: every item runs on the routed thinker (Claude); a non-Claude item model raises ValueError.
+    Otherwise: an item naming another agent takes that agent's model from the priority chain (None = the agent's
+    default) instead of inheriting the routed agent's model, unless --model was given explicitly.
+    """
+    notices = []
+    chain_models = {}
+    for agent, model in parse_priority_chain(priority or ""):
+        if model:
+            chain_models.setdefault(agent, model)
+    for idx, item in enumerate(batch_tasks, 1):
+        item_agent = normalize_agent_name(str(item.get("agent") or ""))
+        if is_think:
+            if item.get("model") and str(item["model"]).lower() not in CLAUDE_THINK_MODEL_NAMES:
+                raise ValueError(f"batch task #{idx} names model '{item['model']}'")
+            if item_agent and item_agent != chosen_agent:
+                notices.append(f"NOTICE: thinking mode runs on Claude Opus 5.5 only; ignoring agent {item_agent} of batch task #{idx}.")
+                item["agent"] = chosen_agent
+        elif item_agent and item_agent != chosen_agent and not item.get("model") and not explicit_model:
+            item["model"] = chain_models.get(item_agent)
+    return notices
+
+
 def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, timeout_seconds, max_parallel=4, chosen_effort=None,
                            run_id=None):
     results = [None] * len(tasks)
@@ -1731,7 +1824,7 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
         t_task = item.get("task", "")
         t_cwd = item.get("cwd") or base_repo_dir
         t_agent = item.get("agent") or chosen_agent
-        t_model = item.get("model") or chosen_model
+        t_model = item.get("model") if "model" in item else chosen_model  # "model": None = the item agent's default
         t_effort = item.get("effort") or chosen_effort
         t_timeout = item.get("timeout") or timeout_seconds
         t_context_files = item.get("context_files")
@@ -1794,7 +1887,8 @@ def main():
                         help="Model override for the chosen agent")
     parser.add_argument("--effort", type=str, default=None,
                         help="Reasoning effort level (e.g. low, medium, high, max). Thinking mode defaults to 'high'.")
-    parser.add_argument("--priority", type=str, default=default_preference,
+    # default=None on --priority / --min-5h / --min-weekly: "was it given" is read off the parsed value (resolved below).
+    parser.add_argument("--priority", type=str, default=None,
                         help="Priority chain preference (e.g. 'cursor:gemini-3.8-flash > agy')")
     parser.add_argument("--mode", choices=["subscription_quota_remaining", "on_demand"], default=default_mode_str,
                         help="Dispatch mode: 'subscription_quota_remaining' (flat quota) or 'on_demand'")
@@ -1808,6 +1902,9 @@ def main():
     parser.add_argument("--detach", "--async", dest="detach", action="store_true", help="Launch task in background and exit immediately")
     parser.add_argument("--status", type=str, nargs="?", const="all", help="Check status of background job(s)")
     parser.add_argument("--wait", type=str, nargs="?", const="all", help="Wait for background job(s) to finish")
+    parser.add_argument("--wait-timeout", type=int, default=None,
+                        help=f"Seconds --wait keeps waiting (default: 2 x the job's timeout + 2 x its verify timeout); "
+                             f"a job still alive after that is reported STILL_RUNNING with exit code {WAIT_STILL_RUNNING_EXIT_CODE}")
     parser.add_argument("--stats", type=float, nargs="?", const=7.0, default=None, metavar="DAYS",
                         help="Per-agent summary of the event log over the last DAYS days (default: 7)")
     parser.add_argument("--tail", type=str, nargs="?", const="latest", help="Show recent log output for a job (default: latest)")
@@ -1816,11 +1913,15 @@ def main():
     parser.add_argument("--from-plan", type=str, help="Extract tasks from a markdown plan file (e.g. plan.md)")
     parser.add_argument("--phase", type=str, default=None, help="Phase to extract from plan (e.g. 1 or 'Phase 1')")
     parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
-    parser.add_argument("--min-5h", type=float, default=DEFAULT_MIN_5H, help="Minimum 5h quota remaining percent")
-    parser.add_argument("--min-weekly", type=float, default=DEFAULT_MIN_WEEKLY, help="Minimum weekly quota remaining percent")
-    parser.add_argument("--timeout", type=int, default=default_timeout,
+    parser.add_argument("--min-5h", type=float, default=None, help="Minimum 5h quota remaining percent")
+    parser.add_argument("--min-weekly", type=float, default=None, help="Minimum weekly quota remaining percent")
+    parser.add_argument("--all-cwds", action="store_true",
+                        help="With `--wait all`: wait on every active job, not only those of the current --cwd's repository")
+    parser.add_argument("--timeout", type=int, default=None,
                         help=f"Timeout in seconds for execution (default: {default_timeout}s)")
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
+    parser.add_argument("--allow-stale", action="store_true",
+                        help=f"Proceed on a quota observation older than {STALE_OBSERVATION_MINUTES} minutes instead of treating the agent as ineligible")
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
     parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Claude Opus 5.5 only (`claude -p`)")
@@ -1843,8 +1944,17 @@ def main():
     parser.add_argument("--internal-run-job", type=str, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+    if args.allow_stale:
+        global ALLOW_STALE
+        ALLOW_STALE = True
     # Explicit --agent (any spelling: `--agent X`, `--agent=X`) vs the default derived from the program name.
     agent_explicit = args.agent is not None
+    priority_explicit = args.priority is not None
+    timeout_explicit = args.timeout is not None
+    if not timeout_explicit:
+        args.timeout = default_timeout
+    if not priority_explicit:
+        args.priority = default_preference
     if not agent_explicit:
         args.agent = default_agent
 
@@ -1865,7 +1975,7 @@ def main():
     # 2. Check status of job(s)
     if args.status:
         if args.status == "all":
-            jobs = list_all_jobs(job_dir=args.job_dir)
+            jobs = [reap_dead_job(j, job_dir=args.job_dir) for j in list_all_jobs(job_dir=args.job_dir)]
             print(format_status_report(jobs))
             sys.exit(0)
         else:
@@ -1873,7 +1983,7 @@ def main():
             if not state:
                 print(f"Job '{args.status}' not found.", file=sys.stderr)
                 sys.exit(1)
-            print(format_status_report([state]))
+            print(format_status_report([reap_dead_job(state, job_dir=args.job_dir)]))
             sys.exit(0)
 
     # 3. Wait for job(s)
@@ -1882,13 +1992,37 @@ def main():
         if args.wait == "all":
             all_jobs = list_all_jobs(job_dir=args.job_dir)
             active = [j for j in all_jobs if j.get("status") in ("RUNNING", "PENDING")]
+            here = os.path.realpath(args.cwd)
+            if not args.all_cwds:
+                # Only this repository's jobs (any subdir or worktree of it): the job dir is machine-wide.
+                identities = {}
+
+                def identity(path):
+                    if path not in identities:
+                        identities[path] = repo_identity(path)
+                    return identities[path]
+
+                ours = [j for j in active if not j.get("cwd") or identity(j["cwd"]) == identity(here)]
+                if len(ours) < len(active):
+                    print(f"NOTICE: {len(active) - len(ours)} active job(s) from other repositories not waited on "
+                          f"(use --all-cwds to include them).", file=sys.stderr)
+                active = ours
             target_ids = [j["job_id"] for j in active]
             if not target_ids:
-                print("No running jobs to wait for.")
+                print("No running jobs to wait for." if args.all_cwds else f"No running jobs to wait for in {here}.")
                 sys.exit(0)
         else:
             target_ids = [args.wait]
 
+        # Budget: --wait-timeout, else an explicitly given --timeout, else derived from the job record(s).
+        if args.wait_timeout is not None:
+            wait_budget = args.wait_timeout
+        elif timeout_explicit:
+            wait_budget = args.timeout
+        else:
+            wait_budget = wait_budget_seconds(
+                [load_job_state(jid, job_dir=args.job_dir) for jid in target_ids], args.timeout)
+        print(f"Waiting up to {wait_budget}s for {len(target_ids)} job(s).", file=sys.stderr)
         start_time = time.time()
         completed_results = {}
         while True:
@@ -1898,22 +2032,24 @@ def main():
                 if not st:
                     completed_results[jid] = {"exit_code": 1, "status": "NOT_FOUND"}
                     continue
-                status = st.get("status")
-                pid = st.get("pid")
-                if status in ("RUNNING", "PENDING"):
-                    if pid and not is_pid_running(pid):
-                        st["status"] = "FAILED_DIED"
-                        st["exit_code"] = 1
-                        save_job_state(jid, st, job_dir=args.job_dir)
-                        completed_results[jid] = st
-                    else:
-                        all_done = False
+                st = reap_dead_job(st, job_dir=args.job_dir)
+                if st.get("status") in ("RUNNING", "PENDING"):
+                    all_done = False
                 else:
                     completed_results[jid] = st
 
-            if all_done or (time.time() - start_time) > args.timeout:
+            if all_done or (time.time() - start_time) > wait_budget:
                 break
             time.sleep(0.5)
+
+        still_running = False
+        for jid in target_ids:
+            if jid not in completed_results:
+                st = load_job_state(jid, job_dir=args.job_dir) or {}
+                # Dead jobs were reaped in the loop: what is left RUNNING/PENDING is alive or has not started yet.
+                if st.get("status") in ("RUNNING", "PENDING"):
+                    still_running = True
+                    completed_results[jid] = {**st, "status": "STILL_RUNNING", "exit_code": WAIT_STILL_RUNNING_EXIT_CODE}
 
         if len(target_ids) == 1:
             res = completed_results.get(target_ids[0], {})
@@ -1935,7 +2071,7 @@ def main():
         else:
             results_list = [completed_results.get(jid, {"task": jid, "agent": args.agent, "exit_code": 1, "files_changed": 0, "diff_summary": "error"}) for jid in target_ids]
             print(format_batch_report(results_list))
-            sys.exit(batch_overall_exit(results_list))
+            sys.exit(WAIT_STILL_RUNNING_EXIT_CODE if still_running else batch_overall_exit(results_list))
 
     # 4. Quota check / evaluation
     # (the job-inspection commands above stay usable under a disabled agent's program name)
@@ -1965,23 +2101,26 @@ def main():
             print(f"FAILED: capability 'deep-design-v1' strictly forbids model '{chosen_model}'. Allowed models: {ALLOWED_DEEP_DESIGN_MODELS}", file=sys.stderr)
             sys.exit(12)  # Fail-closed: THINKER_UNAVAILABLE / FORBIDDEN_MODEL
 
-    min_5h = args.min_5h
-    min_weekly = args.min_weekly
+    min_5h = args.min_5h if args.min_5h is not None else (DEFAULT_THINK_MIN_5H if args.think else DEFAULT_MIN_5H)
+    min_weekly = args.min_weekly if args.min_weekly is not None else (
+        DEFAULT_THINK_MIN_WEEKLY if args.think else DEFAULT_MIN_WEEKLY)
     if args.think:
-        if "--min-5h" not in sys.argv:
-            min_5h = DEFAULT_THINK_MIN_5H
-        if "--min-weekly" not in sys.argv:
-            min_weekly = DEFAULT_THINK_MIN_WEEKLY
-        # Explicit agents are respected; otherwise route_thinker picks Claude Opus 5.5.
+        # route_thinker picks Claude Opus 5.5 (below), whatever --agent says.
         if chosen_agent == "codex":
             chosen_model = normalize_model_name("codex", chosen_model) if chosen_model else DEFAULT_CODEX_THINK_MODEL
     if chosen_agent == "claude":
         chosen_model = normalize_model_name("claude", chosen_model) or DEFAULT_CLAUDE_THINK_MODEL
     # `--agent auto` spelled out is the same request as no --agent: thinking never routes to an execution agent.
     think_chain = args.think and chosen_agent == "auto"
-    if (think_chain and "codex" in DISABLED_AGENTS and chosen_model
-            and chosen_model.lower() not in CLAUDE_THINK_MODEL_NAMES):
-        print(f"FAILED: thinking mode runs Claude Opus 5.5 only (codex is disabled); model '{chosen_model}' is not allowed. "
+    if args.think and chosen_agent not in ("auto", "claude"):
+        # Thinking never runs on an execution agent, pinned or not: take the same Claude route as `--agent auto`.
+        ignored = f"ignoring --agent {chosen_agent}" if agent_explicit else f"not using {chosen_agent}, this command's default agent"
+        print(f"NOTICE: thinking mode runs on Claude Opus 5.5 only; {ignored}.", file=sys.stderr)
+        think_chain = True
+    # Checked against the model the caller asked for, on every think run (a pinned `--agent claude` included).
+    if (args.think and "codex" in DISABLED_AGENTS and args.model
+            and args.model.lower() not in CLAUDE_THINK_MODEL_NAMES):
+        print(f"FAILED: thinking mode runs Claude Opus 5.5 only (codex is disabled); model '{args.model}' is not allowed. "
               f"Allowed models: {list(CLAUDE_THINK_MODEL_NAMES)}", file=sys.stderr)
         sys.exit(12)
 
@@ -2003,7 +2142,7 @@ def main():
         chosen_agent, chosen_model, eligible, rem_5h, rem_weekly, msg, runtime_fallback = route_thinker(
             model=chosen_model, codex_state_file=args.state_file, min_5h=min_5h, min_weekly=min_weekly,
         )
-    elif args.priority and (chosen_agent == "auto" or "--priority" in sys.argv):
+    elif args.priority and (chosen_agent == "auto" or priority_explicit):
         chain, dropped = drop_disabled_agents(parse_priority_chain(args.priority))
         for name in dropped:
             print(f"NOTICE: {name} is disabled; dropped from priority chain '{args.priority}'.", file=sys.stderr)
@@ -2038,7 +2177,13 @@ def main():
             codex_state_file=args.state_file if default_agent == "codex" else None,
         )
     else:
+        if not chosen_model and args.priority:
+            # A pinned agent still runs the model the preference chain configures for it (e.g. agy:gemini-3.8-flash-high).
+            chosen_model = next((m for a, m in parse_priority_chain(args.priority) if a == chosen_agent and m), None)
         eligible, rem_5h, rem_weekly, msg = check_quota(chosen_agent, args.state_file, min_5h, min_weekly)
+
+    if ALLOW_STALE and eligible and "[stale:" in msg:
+        print(f"NOTICE: proceeding on a stale quota reading (--allow-stale): {msg}", file=sys.stderr)
 
     if args.check_quota:
         if eligible:
@@ -2070,6 +2215,13 @@ def main():
             if normalize_agent_name(str(item.get("agent") or "")) in DISABLED_AGENTS:
                 print(f"FAILED: {item.get('agent')} is disabled: a batch task names it as its agent.", file=sys.stderr)
                 sys.exit(2)
+        try:
+            for notice in resolve_batch_item_routing(batch_tasks, chosen_agent, args.think, args.priority, args.model):
+                print(notice, file=sys.stderr)
+        except ValueError as e:
+            print(f"FAILED: thinking mode runs Claude Opus 5.5 only; {e}. Allowed models: {list(CLAUDE_THINK_MODEL_NAMES)}",
+                  file=sys.stderr)
+            sys.exit(12)
 
     run_id = new_run_id()
     if not args.dry_run:
@@ -2132,7 +2284,7 @@ def main():
                 state = {
                     "job_id": jid,
                     "agent": item.get("agent") or chosen_agent,
-                    "model": item.get("model") or chosen_model,
+                    "model": item.get("model") if "model" in item else chosen_model,
                     "effort": item.get("effort") or chosen_effort,
                     "task": item.get("task", ""),
                     "cwd": os.path.abspath(item.get("cwd") or args.cwd),

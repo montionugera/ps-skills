@@ -20,7 +20,7 @@ This workflow:
    - Evaluates left-to-right, respecting `--mode {subscription_quota_remaining,on_demand}` (or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE`) to guard against unexpected metered billing.
    - `--agent auto` with no chain routes to `agy` when its quota allows.
 4. **Prompt Contract & Scoped Verification**: Wraps prompts with non-negotiable standing rules (TDD cycle, new commits only / never amend, preserving protected configs like `.release.json`, running targeted tests for touched modules, and visual integrity forbidding invented CSS classes).
-5. **Isolated Execution (`--isolated`) & Salvage**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success. If a worker fails or times out (default 900s / 15m, configurable via `AI_AGENT_AUTO_DISPATCH_TIMEOUT`), any partial work is automatically preserved to `/tmp/worker-salvage-<timestamp>.patch` before cleanup.
+5. **Isolated Execution (`--isolated`) & Salvage**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success. If a worker fails or times out (default 2400s / 40m, configurable via `AI_AGENT_AUTO_DISPATCH_TIMEOUT`), any partial work is automatically preserved to `/tmp/worker-salvage-<timestamp>.patch` before cleanup.
 6. **Enforces Thin Orchestration**: Returns a standardized **≤ 15-line report** (status, modified files, diff summary, and execution output) so orchestrator context windows remain clean and free from archaeological bloat.
 
 ---
@@ -60,6 +60,7 @@ dispatch-worker --task "Heavy refactor in src/engine" --detach --cwd "$REPO_DIR"
 # There is no fallback thinker: a failed Claude run is reported as a failure.
 # Defaults reasoning effort to 'high' (--effort overrides, or THINK_EFFORT env var).
 # Fails closed (exit code 12) if Claude is unavailable or a non-Claude model is specified.
+# --think / deep-design-v1 always run on Claude: an explicit `--agent agy` (or a batch item's agent) is ignored with a stderr NOTICE.
 dispatch-thinker --task "Synthesize multi-wave portal architecture" \
   --context docs/specs/hub.md \
   --output-file /tmp/portal-synthesis.md
@@ -89,7 +90,10 @@ dispatch-worker --tail dw-1789785000-a1b2 -f    # Follow live output stream
 - **Live output**: detached jobs stream worker stdout/stderr into their log as it arrives, so `dispatch-worker --tail <job> -f` shows progress before the worker exits.
 - **Stall detection**: `dispatch-worker --status` shows `last output Ns ago` for RUNNING jobs and marks `STALLED?` after 300s of silence. Check `--tail` before killing it.
 - **Stats**: `dispatch-worker --stats [DAYS]` (default 7) prints runs, success %, timeouts, fallbacks, verify failures and median duration per agent.
-- **Recovery**: an `--agent auto` / `--priority` run whose worker fails retries once on the next eligible agent (never for a pinned `--agent` or a verify failure), and a quota observation older than 60 minutes counts as not eligible.
+- **Recovery**: an `--agent auto` / `--priority` run whose worker fails retries once on the next eligible agent (never for a pinned `--agent` or a verify failure), and a quota observation older than 60 minutes counts as not eligible. Age is read from the observation's `snapshot.fetched_at_unix` (file mtime when absent), an implausible value (future, milliseconds, NaN) falls back to the mtime. Once both the 5h and weekly windows have reset, the age is counted from the later reset, with the same 60-minute limit. `--allow-stale` proceeds on a stale reading with a stderr NOTICE.
+- **Pinned agent model**: `--agent X` without `--model` runs the model the routing preference chain lists for X (e.g. `agy:gemini-3.8-flash-high`); `--model` still wins. A batch item naming another agent gets that agent's chain model, not the routed agent's.
+- **Waiting**: `--wait <job>` waits up to `--wait-timeout` seconds; without it, an explicitly given `--timeout`; without either, 2 x the job's timeout + 2 x its verify timeout. The budget is printed on stderr. A job still running (or not started yet) after that is reported `STILL_RUNNING` with exit `14`: wait again, do not re-dispatch. `--wait all` waits on the jobs of the current `--cwd`'s repository (any subdirectory or worktree) and reports on stderr how many other active jobs it skipped; add `--all-cwds` to wait on every job.
+- **Dead jobs**: `--status` and `--wait` mark a RUNNING or PENDING job whose process is gone as `FAILED_DIED` and save that to the job record. A PENDING job that never got a process is marked the same way 120 seconds after it was created.
 - **Detached jobs do not get the runtime fallback**: a `--detach` job runs only the agent it was routed to; if it fails, re-dispatch it yourself.
 
 ### Exit Codes Contract
@@ -101,6 +105,7 @@ dispatch-worker --tail dw-1789785000-a1b2 -f    # Follow live output stream
 | `2` | **Invalid Arguments** | Fix parameters |
 | `10` | **`FALLBACK_INTERNAL`** | External quota below threshold; dispatch internal Claude Sonnet agent |
 | `13` | **`VERIFY_FAILED`** | Worker exited 0 but the verify command failed twice (one automatic fix-up retry). Nothing was merged; the worktree path is in the report. Inspect it, do NOT re-dispatch blindly |
+| `14` | **`STILL_RUNNING`** | `--wait` ran out of its budget while the job was still alive. Run `--wait` again (or raise `--wait-timeout`); do NOT re-dispatch |
 | `12` | **`THINKER_UNAVAILABLE`** | deep-design-v1 capability unavailable or forbidden model; fail closed (do NOT fallback to inline runner) |
 
 ### Verify Before Merge

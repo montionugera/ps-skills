@@ -206,6 +206,102 @@ class TestWindowRollover(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertNotIn("stale", msg)
 
+    def _write_state(self, now, fetched_age_minutes=None, mtime_age_minutes=0, reset_5h=5000, reset_weekly=50000,
+                     fetched_at=None):
+        snapshot = {"windows": [
+            {"kind": "five_hour", "remaining_percent": 90.0, "resets_at": now + reset_5h},
+            {"kind": "weekly", "remaining_percent": 90.0, "resets_at": now + reset_weekly},
+        ]}
+        if fetched_age_minutes is not None:
+            snapshot["fetched_at_unix"] = int(now - fetched_age_minutes * 60)
+        if fetched_at is not None:
+            snapshot["fetched_at_unix"] = fetched_at
+        self.state_file.write_text(json.dumps({"snapshot": snapshot}), encoding="utf-8")
+        mtime = now - mtime_age_minutes * 60
+        os.utime(self.state_file, (mtime, mtime))
+
+    def _check(self, now):
+        return dispatch_mod.check_quota("agy", str(self.state_file), min_5h=30.0, min_weekly=10.0, current_time=now)
+
+    def test_age_is_judged_from_fetched_at_not_mtime(self):
+        now = time.time()
+        self._write_state(now, fetched_age_minutes=5, mtime_age_minutes=dispatch_mod.STALE_OBSERVATION_MINUTES + 30)
+        eligible, _r5, _rw, msg = self._check(now)
+        self.assertTrue(eligible, msg)
+        self.assertNotIn("stale", msg)
+
+        self._write_state(now, fetched_age_minutes=dispatch_mod.STALE_OBSERVATION_MINUTES + 30, mtime_age_minutes=0)
+        eligible, _r5, _rw, msg = self._check(now)
+        self.assertFalse(eligible)
+        self.assertIn("stale", msg)
+
+    def test_old_observation_is_not_stale_once_both_windows_have_reset(self):
+        now = time.time()
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600, reset_5h=-60, reset_weekly=-60)
+        eligible, rem_5h, rem_weekly, msg = self._check(now)
+        self.assertTrue(eligible, msg)
+        self.assertEqual((rem_5h, rem_weekly), (100.0, 100.0))
+        self.assertNotIn("stale", msg)
+
+    def test_old_observation_stays_stale_while_one_window_has_not_reset(self):
+        now = time.time()
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600, reset_5h=-60)
+        eligible, rem_5h, _rw, msg = self._check(now)
+        self.assertFalse(eligible)
+        self.assertEqual(rem_5h, 100.0)
+        self.assertIn("stale", msg)
+
+    def test_implausible_fetched_at_falls_back_to_mtime(self):
+        now = time.time()
+        old = dispatch_mod.STALE_OBSERVATION_MINUTES + 30
+        for bad in (now + 86400, now * 1000, float("nan"), float("inf"), -5):
+            self._write_state(now, fetched_at=bad, mtime_age_minutes=old)
+            eligible, _r5, _rw, msg = self._check(now)
+            self.assertFalse(eligible, (bad, msg))
+            self.assertIn("stale", msg, bad)
+            self._write_state(now, fetched_at=bad, mtime_age_minutes=5)
+            eligible, _r5, _rw, msg = self._check(now)
+            self.assertTrue(eligible, (bad, msg))
+            self.assertNotIn("stale", msg, bad)
+
+    def test_fetched_at_slightly_ahead_of_the_clock_is_accepted(self):
+        now = time.time()
+        self._write_state(now, fetched_at=now + 30, mtime_age_minutes=dispatch_mod.STALE_OBSERVATION_MINUTES + 30)
+        eligible, _r5, _rw, msg = self._check(now)
+        self.assertTrue(eligible, msg)
+
+    def test_resets_long_past_do_not_waive_staleness(self):
+        now = time.time()
+        day = 86400
+        self._write_state(now, fetched_age_minutes=6 * 24 * 60, mtime_age_minutes=6 * 24 * 60,
+                          reset_5h=-5 * day, reset_weekly=-5 * day)
+        eligible, _r5, _rw, msg = self._check(now)
+        self.assertFalse(eligible, msg)
+        self.assertIn("stale", msg)
+
+    def test_age_after_both_resets_runs_from_the_later_reset(self):
+        now = time.time()
+        limit = dispatch_mod.STALE_OBSERVATION_MINUTES * 60
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600, reset_5h=-(limit + 600), reset_weekly=-60)
+        self.assertTrue(self._check(now)[0])
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600, reset_5h=-60, reset_weekly=-(limit + 600))
+        self.assertTrue(self._check(now)[0])
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600,
+                          reset_5h=-(limit + 600), reset_weekly=-(limit + 900))
+        eligible, _r5, _rw, msg = self._check(now)
+        self.assertFalse(eligible, msg)
+        with mock.patch.object(dispatch_mod, "ALLOW_STALE", True):
+            self.assertTrue(self._check(now)[0])
+
+    def test_allow_stale_keeps_a_stale_observation_eligible(self):
+        now = time.time()
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600)
+        with mock.patch.object(dispatch_mod, "ALLOW_STALE", True):
+            eligible, _r5, _rw, msg = self._check(now)
+        self.assertTrue(eligible, msg)
+        self.assertIn("stale", msg)
+        self.assertIn("--allow-stale", msg)
+
 
 @codex_enabled()
 class TestBestRunwayAutoRouting(unittest.TestCase):
@@ -833,7 +929,7 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(dispatch_mod.get_config_preference(cfg), "explicit > chain")
 
     def test_get_config_timeout_precedence_and_default(self):
-        self.assertEqual(dispatch_mod.get_config_timeout({}), 900)
+        self.assertEqual(dispatch_mod.get_config_timeout({}), 2400)
         self.assertEqual(dispatch_mod.get_config_timeout({"DISPATCH_TIMEOUT": "600"}), 600)
         self.assertEqual(dispatch_mod.get_config_timeout({"AI_AGENT_AUTO_DISPATCH_TIMEOUT": "1200", "DISPATCH_TIMEOUT": "600"}), 1200)
 
@@ -1016,6 +1112,154 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         )
         self.assertEqual(wait_res.returncode, 0)
         self.assertIn("Status: SUCCESS (exit 0)", wait_res.stdout)
+
+    def _save_live_job(self, jid, **fields):
+        # pid of this test process: alive for the whole test, and no worker is launched.
+        state = {"job_id": jid, "agent": "agy", "task": "t", "status": "RUNNING", "pid": os.getpid(),
+                 "cwd": str(self.repo_dir), "created_at": time.time(), **fields}
+        dispatch_mod.save_job_state(jid, state, job_dir=str(self.job_dir))
+
+    def _wait_cli(self, *args):
+        # Hermetic: no user config.env, no real event log, job dir in the temp dir.
+        env = {k: v for k, v in os.environ.items() if "DISPATCH" not in k}
+        env.update({
+            "DISPATCH_CONFIG_FILE": str(Path(self.temp_dir.name) / "no-config.env"),
+            "DISPATCH_EVENTS_FILE": str(Path(self.temp_dir.name) / "events.jsonl"),
+        })
+        return subprocess.run([sys.executable, str(SCRIPT_PATH), "--job-dir", str(self.job_dir), *args],
+                              capture_output=True, text=True, env=env)
+
+    def test_wait_budget_is_derived_from_the_job_record(self):
+        self.assertEqual(dispatch_mod.wait_budget_seconds([{"timeout": 100, "verify_timeout": 50}], 900), 300)
+        self.assertEqual(dispatch_mod.wait_budget_seconds([{}], 900), 2 * 900 + 2 * dispatch_mod.DEFAULT_VERIFY_TIMEOUT)
+        self.assertEqual(dispatch_mod.wait_budget_seconds(
+            [{"timeout": 100, "verify_timeout": 50}, None, {"timeout": 1000, "verify_timeout": 50}], 10), 2100)
+
+    def test_wait_timeout_on_live_job_reports_still_running(self):
+        self._save_live_job("dw-live")
+        res = self._wait_cli("--wait", "dw-live", "--wait-timeout", "1")
+        self.assertEqual(res.returncode, dispatch_mod.WAIT_STILL_RUNNING_EXIT_CODE, res.stdout + res.stderr)
+        self.assertEqual(res.returncode, 14)
+        self.assertIn("Status: STILL_RUNNING (exit 14)", res.stdout)
+        self.assertEqual(dispatch_mod.load_job_state("dw-live", job_dir=str(self.job_dir))["status"], "RUNNING")
+
+    def test_wait_is_not_bounded_by_the_worker_timeout(self):
+        # No --timeout / --wait-timeout given: the budget comes from the job record (2*100 + 2*50), not the default timeout.
+        self._save_live_job("dw-budget", timeout=100, verify_timeout=50, status="SUCCESS", exit_code=0)
+        res = self._wait_cli("--wait", "dw-budget")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Waiting up to 300s", res.stderr)
+
+    def test_wait_explicit_timeout_bounds_the_wait(self):
+        self._save_live_job("dw-bounded", timeout=100, verify_timeout=50)
+        for flag in (["--timeout", "1"], ["--timeout=1"]):
+            started = time.time()
+            res = self._wait_cli("--wait", "dw-bounded", *flag)
+            self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+            self.assertIn("Waiting up to 1s", res.stderr)
+            self.assertLess(time.time() - started, 10)
+
+    def test_wait_timeout_flag_beats_explicit_timeout(self):
+        self._save_live_job("dw-prec", status="SUCCESS", exit_code=0)
+        res = self._wait_cli("--wait", "dw-prec", "--timeout", "7", "--wait-timeout", "3")
+        self.assertIn("Waiting up to 3s", res.stderr)
+
+    def test_is_pid_running_treats_permission_error_as_alive(self):
+        with mock.patch.object(dispatch_mod.os, "kill", side_effect=PermissionError):
+            self.assertTrue(dispatch_mod.is_pid_running(12345))
+        with mock.patch.object(dispatch_mod.os, "kill", side_effect=ProcessLookupError):
+            self.assertFalse(dispatch_mod.is_pid_running(12345))
+
+    def test_wait_reaps_a_dead_job_in_the_loop(self):
+        self._save_live_job("dw-wait-dead", pid=self._dead_pid())
+        res = self._wait_cli("--wait", "dw-wait-dead", "--wait-timeout", "5")
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("Status: FAILED_DIED (exit 1)", res.stdout)
+        self.assertEqual(self._status_of("dw-wait-dead"), "FAILED_DIED")
+
+    def test_wait_reports_pidless_pending_job_as_still_running(self):
+        self._save_live_job("dw-nopid", pid=None, status="PENDING")
+        res = self._wait_cli("--wait", "dw-nopid", "--wait-timeout", "1")
+        self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+        self.assertIn("Status: STILL_RUNNING (exit 14)", res.stdout)
+        self.assertEqual(self._status_of("dw-nopid"), "PENDING")
+
+    def test_old_pidless_pending_job_is_reaped(self):
+        self._save_live_job("dw-nopid-old", pid=None, status="PENDING", created_at=time.time() - 600)
+        self._save_live_job("dw-nopid-undated", pid=None, status="PENDING", created_at=None)
+        res = self._wait_cli("--wait", "dw-nopid-old", "--wait-timeout", "5")
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertEqual(self._status_of("dw-nopid-old"), "FAILED_DIED")
+        self._wait_cli("--status")
+        self.assertEqual(self._status_of("dw-nopid-undated"), "PENDING")
+
+    def test_wait_all_timeout_reports_still_running(self):
+        self._save_live_job("dw-live-a")
+        self._save_live_job("dw-live-b")
+        res = self._wait_cli("--wait", "all", "--wait-timeout", "1", "--cwd", str(self.repo_dir))
+        self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+        self.assertEqual(res.stdout.count("STILL_RUNNING"), 2)
+
+    def _dead_pid(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
+
+    def _status_of(self, jid):
+        return dispatch_mod.load_job_state(jid, job_dir=str(self.job_dir))["status"]
+
+    def test_status_persists_failed_died_for_dead_running_and_pending_jobs(self):
+        dead = self._dead_pid()
+        self._save_live_job("dw-dead-running", pid=dead)
+        self._save_live_job("dw-dead-pending", pid=dead, status="PENDING")
+        self._save_live_job("dw-alive")
+        res = self._wait_cli("--status")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.count("FAILED_DIED"), 2)
+        for jid in ("dw-dead-running", "dw-dead-pending"):
+            state = dispatch_mod.load_job_state(jid, job_dir=str(self.job_dir))
+            self.assertEqual((state["status"], state["exit_code"]), ("FAILED_DIED", 1))
+        self.assertEqual(self._status_of("dw-alive"), "RUNNING")
+
+    def test_status_of_one_dead_pending_job_persists_failed_died(self):
+        self._save_live_job("dw-dead-one", pid=self._dead_pid(), status="PENDING")
+        res = self._wait_cli("--status", "dw-dead-one")
+        self.assertIn("FAILED_DIED", res.stdout)
+        self.assertEqual(self._status_of("dw-dead-one"), "FAILED_DIED")
+
+    def test_reap_does_not_overwrite_a_job_that_finished_meanwhile(self):
+        self._save_live_job("dw-raced", pid=self._dead_pid(), status="SUCCESS", exit_code=0)
+        stale_view = {"job_id": "dw-raced", "status": "RUNNING", "pid": self._dead_pid()}
+        result = dispatch_mod.reap_dead_job(stale_view, job_dir=str(self.job_dir))
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(self._status_of("dw-raced"), "SUCCESS")
+
+    def test_wait_all_ignores_jobs_from_another_cwd(self):
+        other = Path(self.temp_dir.name) / "other-repo"
+        other.mkdir()
+        self._save_live_job("dw-elsewhere", cwd=str(other))
+        res = self._wait_cli("--wait", "all", "--wait-timeout", "1", "--cwd", str(self.repo_dir))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("No running jobs to wait for", res.stdout)
+        self.assertIn("1 active job(s) from other repositories", res.stderr)
+        res = self._wait_cli("--wait", "all", "--wait-timeout", "1", "--cwd", str(other))
+        self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+        res = self._wait_cli("--wait", "all", "--all-cwds", "--wait-timeout", "1", "--cwd", str(self.repo_dir))
+        self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+        self.assertNotIn("from other repositories", res.stderr)
+
+    def test_wait_all_includes_subdir_and_sibling_worktree_of_the_same_repo(self):
+        subdir = self.repo_dir / "pkg"
+        subdir.mkdir()
+        sibling = Path(self.temp_dir.name) / "repo-wt"
+        subprocess.run(["git", "worktree", "add", "-q", str(sibling), "-b", "wt"], cwd=self.repo_dir, check=True,
+                       capture_output=True)
+        self._save_live_job("dw-subdir", cwd=str(subdir))
+        self._save_live_job("dw-sibling", cwd=str(sibling))
+        res = self._wait_cli("--wait", "all", "--wait-timeout", "1", "--cwd", str(self.repo_dir))
+        self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+        self.assertEqual(res.stdout.count("STILL_RUNNING"), 2)
+        self.assertNotIn("from other repositories", res.stderr)
 
     def test_extract_tasks_from_plan(self):
         plan_content = """# Plan
@@ -1432,6 +1676,34 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
         self.assertEqual(attestation["effort"], "medium")
+
+    def test_think_with_explicit_agy_routes_to_claude(self):
+        self._fake("claude")
+        for capability in (True, False):
+            proc = self._run("--agent", "agy", "--dry-run", capability=capability)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+            self.assertEqual(proc.stderr.count("NOTICE: thinking mode runs on Claude Opus 5.5 only; ignoring --agent agy"), 1)
+
+    def test_think_with_explicit_agy_fails_closed_without_claude(self):
+        self._fake("agy")
+        proc = self._run("--agent", "agy", "--dry-run")
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertNotIn("Would dispatch", proc.stdout)
+        # plain --think is not the fail-closed capability: it reports quota-style fallback (10), deep-design exits 12.
+        proc = self._run("--agent", "agy", "--dry-run", capability=False)
+        self.assertEqual(proc.returncode, 10, proc.stdout + proc.stderr)
+        self.assertIn("FALLBACK_INTERNAL", proc.stdout)
+        self.assertNotIn("Would dispatch", proc.stdout)
+
+    def test_think_with_explicit_agy_attests_the_agent_that_ran(self):
+        self._fake("claude")
+        self._fake("agy")
+        proc = self._run("--agent", "agy")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("agy", self.calls_log.read_text(encoding="utf-8"))
+        attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
+        self.assertEqual((attestation["agent"], attestation["model"]), ("claude", "claude-opus-5-5"))
 
 
 class TestEffortHelpers(unittest.TestCase):
@@ -2006,6 +2278,157 @@ class TestCodexDisabled(unittest.TestCase):
         self.assertIn("40.0%", proc.stdout)
         self.assertNotIn("codex", proc.stdout.lower())
         self.assertIn("codex is disabled", proc.stderr)
+
+    # 6. a pinned --agent takes its model from the configured preference chain
+    def _configure_preference(self, chain):
+        (self.root / "no-config.env").write_text(f'DISPATCH_ROUTING_PREFERENCE="{chain}"\n', encoding="utf-8")
+
+    def test_explicit_agent_uses_model_from_configured_preference(self):
+        self._configure_preference("cursor:other-model > agy:gemini-3.8-flash-high")
+        proc = self._run("--agent", "agy", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high", proc.stdout)
+
+    def test_explicit_model_beats_configured_preference_model(self):
+        self._configure_preference("agy:gemini-3.8-flash-high")
+        proc = self._run("--agent", "agy", "--model", "gemini-pinned", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-pinned", proc.stdout)
+        self.assertNotIn("gemini-3.8-flash-high", proc.stdout)
+
+    def test_explicit_agent_absent_from_preference_keeps_default_model(self):
+        self._configure_preference("cursor:other-model")
+        proc = self._run("--agent", "agy", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy in ", proc.stdout)
+
+    # 7. --allow-stale proceeds on a stale quota reading
+    def test_cli_allow_stale_proceeds_with_notice(self):
+        old = time.time() - (dispatch_mod.STALE_OBSERVATION_MINUTES + 30) * 60
+        os.utime(self.agy_state, (old, old))
+        proc = self._run("--agent", "agy", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 10, proc.stdout + proc.stderr)
+        proc = self._run("--agent", "agy", "--allow-stale", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy", proc.stdout)
+        self.assertEqual(proc.stderr.count("NOTICE: proceeding on a stale quota reading (--allow-stale)"), 1)
+
+    # 8. "was this flag given" is read from the parsed arguments, so `--x=value` counts like `--x value`
+    def test_cli_priority_equals_form_is_honoured_with_pinned_agent(self):
+        for flag in (["--priority=codex > agy:foo"], ["--priority", "codex > agy:foo"]):
+            proc = self._run("--agent", "agy", *flag, "--dry-run", "--task", "x")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("Would dispatch to agy with foo", proc.stdout)
+            self.assertEqual(proc.stderr.count("codex is disabled"), 1, flag)
+
+    def _think_thresholds(self, *flags):
+        seen = {}
+
+        def fake_route_thinker(**kwargs):
+            seen.update(kwargs)
+            return "claude", "claude-opus-5-5", True, 100.0, 100.0, "ok", None
+
+        argv = [str(self.WORKER_BIN), "--think", *flags, "--dry-run", "--task", "x", "--cwd", str(self.root)]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.dict(os.environ, {"DISPATCH_CONFIG_FILE": str(self.root / "no-config.env")}), \
+                mock.patch.object(dispatch_mod, "route_thinker", fake_route_thinker), \
+                mock.patch("builtins.print"), self.assertRaises(SystemExit) as exited:
+            dispatch_mod.main()
+        self.assertEqual(exited.exception.code, 0)
+        return seen["min_5h"], seen["min_weekly"]
+
+    def test_think_thresholds_honour_equals_form(self):
+        think_defaults = (dispatch_mod.DEFAULT_THINK_MIN_5H, dispatch_mod.DEFAULT_THINK_MIN_WEEKLY)
+        self.assertEqual(self._think_thresholds(), think_defaults)
+        self.assertEqual(self._think_thresholds("--min-5h", "55", "--min-weekly", "44"), (55.0, 44.0))
+        self.assertEqual(self._think_thresholds("--min-5h=55", "--min-weekly=44"), (55.0, 44.0))
+
+    # 9. built-in worker timeout
+    def test_builtin_default_timeout_is_2400s(self):
+        proc = self._run("--help")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("(default: 2400s)", " ".join(proc.stdout.split()))
+        # and the --wait budget derived from it: worker + verify + one retry + verify
+        self.assertEqual(dispatch_mod.wait_budget_seconds([{}], 2400), 2 * 2400 + 2 * dispatch_mod.DEFAULT_VERIFY_TIMEOUT)
+
+    # 10. think mode and batch items
+    def _batch_file(self, items):
+        path = self.root / "batch.json"
+        path.write_text(json.dumps(items), encoding="utf-8")
+        return str(path)
+
+    def test_think_with_claude_agent_rejects_non_claude_model(self):
+        self._fake_claude()
+        proc = self._run("--think", "--agent", "claude", "--model", "gemini-3.8-flash", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertIn("gemini-3.8-flash", proc.stderr)
+        self.assertNotIn("Would dispatch", proc.stdout)
+        proc = self._run("--think", "--agent", "claude", "--model", "opus", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_think_notice_names_agent_flag_only_when_explicit(self):
+        self._fake_claude()
+        proc = self._run("--think", "--dry-run", "--task", "x", script=SCRIPT_PATH)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+        self.assertIn("NOTICE: thinking mode runs on Claude Opus 5.5 only", proc.stderr)
+        self.assertNotIn("--agent", proc.stderr)
+        proc = self._run("--think", "--agent", "agy", "--dry-run", "--task", "x", script=SCRIPT_PATH)
+        self.assertIn("ignoring --agent agy", proc.stderr)
+
+    def test_cli_think_batch_item_agent_is_rerouted_to_claude(self):
+        self._fake_claude()
+        batch = self._batch_file([{"task": "a", "agent": "agy"}, {"task": "b"}])
+        proc = self._run("--think", "--batch-file", batch, "--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stderr.count("ignoring agent agy of batch task #1"), 1)
+
+    def test_cli_think_batch_item_with_non_claude_model_fails_closed(self):
+        self._fake_claude()
+        batch = self._batch_file([{"task": "a", "model": "gemini-3.8-flash"}])
+        proc = self._run("--think", "--batch-file", batch, "--dry-run")
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertNotIn("Would dispatch", proc.stdout)
+
+    def test_think_batch_items_run_on_claude(self):
+        items = [{"task": "a", "agent": "agy"}, {"task": "b"}, {"task": "c", "agent": "claude", "model": "opus"}]
+        notices = dispatch_mod.resolve_batch_item_routing(items, "claude", True, "agy:m1", None)
+        self.assertEqual([i.get("agent") for i in items], ["claude", None, "claude"])
+        self.assertEqual(len(notices), 1)
+        with self.assertRaises(ValueError):
+            dispatch_mod.resolve_batch_item_routing([{"task": "a", "model": "gemini-x"}], "claude", True, None, None)
+
+    def test_batch_item_naming_another_agent_gets_its_own_chain_model(self):
+        items = [{"task": "a", "agent": "cursor"}, {"task": "b", "agent": "claude"}, {"task": "c", "agent": "agy"},
+                 {"task": "d"}, {"task": "e", "agent": "cursor", "model": "pinned"}]
+        notices = dispatch_mod.resolve_batch_item_routing(items, "agy", False, "agy:m1 > cursor:m2", None)
+        self.assertEqual(notices, [])
+        self.assertEqual(items[0]["model"], "m2")
+        self.assertIn("model", items[1])
+        self.assertIsNone(items[1]["model"])
+        self.assertNotIn("model", items[2])
+        self.assertNotIn("model", items[3])
+        self.assertEqual(items[4]["model"], "pinned")
+        # an explicit --model is the caller's decision for every item
+        items = [{"task": "a", "agent": "cursor"}]
+        dispatch_mod.resolve_batch_item_routing(items, "agy", False, "agy:m1 > cursor:m2", "explicit")
+        self.assertNotIn("model", items[0])
+
+    def test_batch_executor_does_not_pass_the_routed_model_to_another_agent(self):
+        seen = {}
+
+        def fake_run(task_text, target_dir, agent, model, *args, **kwargs):
+            seen[task_text] = (agent, model)
+            return 0, "ok", "", 0, "no diff"
+
+        def no_worktree(cwd, execute_fn, merge_lock=None):
+            return execute_fn(cwd)
+
+        tasks = [{"task": "a", "agent": "cursor", "model": None}, {"task": "b"}]
+        with mock.patch.object(dispatch_mod, "run_single_task", fake_run), \
+                mock.patch.object(dispatch_mod, "execute_in_isolated_worktree", no_worktree):
+            dispatch_mod.execute_batch_parallel(tasks, str(self.root), "agy", "m1", 30)
+        self.assertEqual(seen, {"a": ("cursor", None), "b": ("agy", "m1")})
 
     def test_help_does_not_offer_codex(self):
         proc = self._run("--help")
