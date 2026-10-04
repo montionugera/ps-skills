@@ -1068,6 +1068,45 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertEqual(wait_res.returncode, 0)
         self.assertIn("Status: SUCCESS (exit 0)", wait_res.stdout)
 
+    def _save_live_job(self, jid, **fields):
+        # pid of this test process: alive for the whole test, and no worker is launched.
+        state = {"job_id": jid, "agent": "agy", "task": "t", "status": "RUNNING", "pid": os.getpid(),
+                 "cwd": str(self.repo_dir), "created_at": time.time(), **fields}
+        dispatch_mod.save_job_state(jid, state, job_dir=str(self.job_dir))
+
+    def _wait_cli(self, *args):
+        return subprocess.run([sys.executable, str(SCRIPT_PATH), "--job-dir", str(self.job_dir), *args],
+                              capture_output=True, text=True)
+
+    def test_wait_budget_is_derived_from_the_job_record(self):
+        self.assertEqual(dispatch_mod.wait_budget_seconds([{"timeout": 100, "verify_timeout": 50}], 900), 300)
+        self.assertEqual(dispatch_mod.wait_budget_seconds([{}], 900), 2 * 900 + 2 * dispatch_mod.DEFAULT_VERIFY_TIMEOUT)
+        self.assertEqual(dispatch_mod.wait_budget_seconds(
+            [{"timeout": 100, "verify_timeout": 50}, None, {"timeout": 1000, "verify_timeout": 50}], 10), 2100)
+
+    def test_wait_timeout_on_live_job_reports_still_running(self):
+        self._save_live_job("dw-live")
+        res = self._wait_cli("--wait", "dw-live", "--wait-timeout", "1")
+        self.assertEqual(res.returncode, dispatch_mod.WAIT_STILL_RUNNING_EXIT_CODE, res.stdout + res.stderr)
+        self.assertEqual(res.returncode, 14)
+        self.assertIn("Status: STILL_RUNNING (exit 14)", res.stdout)
+        self.assertEqual(dispatch_mod.load_job_state("dw-live", job_dir=str(self.job_dir))["status"], "RUNNING")
+
+    def test_wait_is_not_bounded_by_the_worker_timeout(self):
+        # --timeout 1 used to end the wait after 1s; the wait budget now comes from the job record (2*1 + 2*1 = 4s).
+        self._save_live_job("dw-budget", timeout=1, verify_timeout=1)
+        started = time.time()
+        res = self._wait_cli("--wait", "dw-budget", "--timeout", "1")
+        self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+        self.assertGreaterEqual(time.time() - started, 3.5)
+
+    def test_wait_all_timeout_reports_still_running(self):
+        self._save_live_job("dw-live-a")
+        self._save_live_job("dw-live-b")
+        res = self._wait_cli("--wait", "all", "--wait-timeout", "1", "--cwd", str(self.repo_dir))
+        self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+        self.assertEqual(res.stdout.count("STILL_RUNNING"), 2)
+
     def test_extract_tasks_from_plan(self):
         plan_content = """# Plan
 

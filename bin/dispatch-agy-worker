@@ -64,6 +64,7 @@ DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.env
 DEFAULT_VERIFY_TIMEOUT = int(os.environ.get("DISPATCH_VERIFY_TIMEOUT") or "600")
 DEFAULT_VERIFY_SCRIPT = "scripts/precheck.sh"
 VERIFY_FAILED_EXIT_CODE = 13
+WAIT_STILL_RUNNING_EXIT_CODE = 14  # --wait ran out of budget while the job was still alive
 VERIFY_TAIL_LINES = 40
 STALL_SECONDS = 300  # --status flags a RUNNING job STALLED? after this long without log output
 
@@ -1195,6 +1196,12 @@ def is_pid_running(pid):
         return False
 
 
+def wait_budget_seconds(states, fallback_timeout):
+    """Default --wait budget: a job can be worker + verify + one retry + verify, so 2x its timeouts (longest job wins)."""
+    return max(2 * ((st or {}).get("timeout") or fallback_timeout)
+               + 2 * ((st or {}).get("verify_timeout") or DEFAULT_VERIFY_TIMEOUT) for st in states)
+
+
 def list_all_jobs(job_dir=DEFAULT_JOB_DIR):
     p = Path(job_dir)
     if not p.is_dir():
@@ -1486,7 +1493,8 @@ def format_batch_report(results):
     for idx, r in enumerate(results, 1):
         task_preview = r.get("task", "")[:28] + "..." if len(r.get("task", "")) > 28 else r.get("task", "")
         status_icon = "SUCCESS" if r.get("exit_code") == 0 else (
-            "VERIFY_FAILED" if r.get("exit_code") == VERIFY_FAILED_EXIT_CODE else "FAILED")
+            "VERIFY_FAILED" if r.get("exit_code") == VERIFY_FAILED_EXIT_CODE else
+            "STILL_RUNNING" if r.get("exit_code") == WAIT_STILL_RUNNING_EXIT_CODE else "FAILED")
         agent = r.get("agent", "worker").upper()
         fc = r.get("files_changed", 0)
         ds = r.get("diff_summary", "no diff")
@@ -1821,6 +1829,9 @@ def main():
     parser.add_argument("--detach", "--async", dest="detach", action="store_true", help="Launch task in background and exit immediately")
     parser.add_argument("--status", type=str, nargs="?", const="all", help="Check status of background job(s)")
     parser.add_argument("--wait", type=str, nargs="?", const="all", help="Wait for background job(s) to finish")
+    parser.add_argument("--wait-timeout", type=int, default=None,
+                        help=f"Seconds --wait keeps waiting (default: 2 x the job's timeout + 2 x its verify timeout); "
+                             f"a job still alive after that is reported STILL_RUNNING with exit code {WAIT_STILL_RUNNING_EXIT_CODE}")
     parser.add_argument("--stats", type=float, nargs="?", const=7.0, default=None, metavar="DAYS",
                         help="Per-agent summary of the event log over the last DAYS days (default: 7)")
     parser.add_argument("--tail", type=str, nargs="?", const="latest", help="Show recent log output for a job (default: latest)")
@@ -1907,6 +1918,8 @@ def main():
         else:
             target_ids = [args.wait]
 
+        wait_budget = args.wait_timeout if args.wait_timeout is not None else wait_budget_seconds(
+            [load_job_state(jid, job_dir=args.job_dir) for jid in target_ids], args.timeout)
         start_time = time.time()
         completed_results = {}
         while True:
@@ -1929,9 +1942,17 @@ def main():
                 else:
                     completed_results[jid] = st
 
-            if all_done or (time.time() - start_time) > args.timeout:
+            if all_done or (time.time() - start_time) > wait_budget:
                 break
             time.sleep(0.5)
+
+        still_running = False
+        for jid in target_ids:
+            if jid not in completed_results:
+                st = load_job_state(jid, job_dir=args.job_dir) or {}
+                if is_pid_running(st.get("pid")):
+                    still_running = True
+                    completed_results[jid] = {**st, "status": "STILL_RUNNING", "exit_code": WAIT_STILL_RUNNING_EXIT_CODE}
 
         if len(target_ids) == 1:
             res = completed_results.get(target_ids[0], {})
@@ -1953,7 +1974,7 @@ def main():
         else:
             results_list = [completed_results.get(jid, {"task": jid, "agent": args.agent, "exit_code": 1, "files_changed": 0, "diff_summary": "error"}) for jid in target_ids]
             print(format_batch_report(results_list))
-            sys.exit(batch_overall_exit(results_list))
+            sys.exit(WAIT_STILL_RUNNING_EXIT_CODE if still_running else batch_overall_exit(results_list))
 
     # 4. Quota check / evaluation
     # (the job-inspection commands above stay usable under a disabled agent's program name)
