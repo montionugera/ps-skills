@@ -1196,6 +1196,20 @@ def is_pid_running(pid):
         return False
 
 
+def reap_dead_job(state, job_dir=DEFAULT_JOB_DIR):
+    """Persists FAILED_DIED for a RUNNING/PENDING job whose pid is gone. Returns the state to report."""
+    if (state.get("status") not in ("RUNNING", "PENDING") or not state.get("job_id") or not state.get("pid")
+            or is_pid_running(state["pid"])):
+        return state
+    # Re-read: the runner may have written its final status and exited between our read and the pid check.
+    fresh = load_job_state(state["job_id"], job_dir) or state
+    if fresh.get("status") in ("RUNNING", "PENDING"):
+        fresh["status"] = "FAILED_DIED"
+        fresh["exit_code"] = 1
+        save_job_state(fresh["job_id"], fresh, job_dir)
+    return fresh
+
+
 def wait_budget_seconds(states, fallback_timeout):
     """Default --wait budget: a job can be worker + verify + one retry + verify, so 2x its timeouts (longest job wins)."""
     return max(2 * ((st or {}).get("timeout") or fallback_timeout)
@@ -1894,7 +1908,7 @@ def main():
     # 2. Check status of job(s)
     if args.status:
         if args.status == "all":
-            jobs = list_all_jobs(job_dir=args.job_dir)
+            jobs = [reap_dead_job(j, job_dir=args.job_dir) for j in list_all_jobs(job_dir=args.job_dir)]
             print(format_status_report(jobs))
             sys.exit(0)
         else:
@@ -1902,7 +1916,7 @@ def main():
             if not state:
                 print(f"Job '{args.status}' not found.", file=sys.stderr)
                 sys.exit(1)
-            print(format_status_report([state]))
+            print(format_status_report([reap_dead_job(state, job_dir=args.job_dir)]))
             sys.exit(0)
 
     # 3. Wait for job(s)
@@ -1910,10 +1924,13 @@ def main():
         target_ids = []
         if args.wait == "all":
             all_jobs = list_all_jobs(job_dir=args.job_dir)
-            active = [j for j in all_jobs if j.get("status") in ("RUNNING", "PENDING")]
+            # Only this --cwd's jobs: the job dir is machine-wide and other repos' jobs are not ours to wait on.
+            here = os.path.realpath(args.cwd)
+            active = [j for j in all_jobs if j.get("status") in ("RUNNING", "PENDING")
+                      and (not j.get("cwd") or os.path.realpath(j["cwd"]) == here)]
             target_ids = [j["job_id"] for j in active]
             if not target_ids:
-                print("No running jobs to wait for.")
+                print(f"No running jobs to wait for in {here}.")
                 sys.exit(0)
         else:
             target_ids = [args.wait]

@@ -1107,6 +1107,50 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
         self.assertEqual(res.stdout.count("STILL_RUNNING"), 2)
 
+    def _dead_pid(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
+
+    def _status_of(self, jid):
+        return dispatch_mod.load_job_state(jid, job_dir=str(self.job_dir))["status"]
+
+    def test_status_persists_failed_died_for_dead_running_and_pending_jobs(self):
+        dead = self._dead_pid()
+        self._save_live_job("dw-dead-running", pid=dead)
+        self._save_live_job("dw-dead-pending", pid=dead, status="PENDING")
+        self._save_live_job("dw-alive")
+        res = self._wait_cli("--status")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.count("FAILED_DIED"), 2)
+        for jid in ("dw-dead-running", "dw-dead-pending"):
+            state = dispatch_mod.load_job_state(jid, job_dir=str(self.job_dir))
+            self.assertEqual((state["status"], state["exit_code"]), ("FAILED_DIED", 1))
+        self.assertEqual(self._status_of("dw-alive"), "RUNNING")
+
+    def test_status_of_one_dead_pending_job_persists_failed_died(self):
+        self._save_live_job("dw-dead-one", pid=self._dead_pid(), status="PENDING")
+        res = self._wait_cli("--status", "dw-dead-one")
+        self.assertIn("FAILED_DIED", res.stdout)
+        self.assertEqual(self._status_of("dw-dead-one"), "FAILED_DIED")
+
+    def test_reap_does_not_overwrite_a_job_that_finished_meanwhile(self):
+        self._save_live_job("dw-raced", pid=self._dead_pid(), status="SUCCESS", exit_code=0)
+        stale_view = {"job_id": "dw-raced", "status": "RUNNING", "pid": self._dead_pid()}
+        result = dispatch_mod.reap_dead_job(stale_view, job_dir=str(self.job_dir))
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(self._status_of("dw-raced"), "SUCCESS")
+
+    def test_wait_all_ignores_jobs_from_another_cwd(self):
+        other = Path(self.temp_dir.name) / "other-repo"
+        other.mkdir()
+        self._save_live_job("dw-elsewhere", cwd=str(other))
+        res = self._wait_cli("--wait", "all", "--wait-timeout", "1", "--cwd", str(self.repo_dir))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("No running jobs to wait for", res.stdout)
+        res = self._wait_cli("--wait", "all", "--wait-timeout", "1", "--cwd", str(other))
+        self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+
     def test_extract_tasks_from_plan(self):
         plan_content = """# Plan
 
