@@ -884,7 +884,7 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(dispatch_mod.get_config_preference(cfg), "explicit > chain")
 
     def test_get_config_timeout_precedence_and_default(self):
-        self.assertEqual(dispatch_mod.get_config_timeout({}), 900)
+        self.assertEqual(dispatch_mod.get_config_timeout({}), 2400)
         self.assertEqual(dispatch_mod.get_config_timeout({"DISPATCH_TIMEOUT": "600"}), 600)
         self.assertEqual(dispatch_mod.get_config_timeout({"AI_AGENT_AUTO_DISPATCH_TIMEOUT": "1200", "DISPATCH_TIMEOUT": "600"}), 1200)
 
@@ -2230,6 +2230,14 @@ class TestCodexDisabled(unittest.TestCase):
         self.assertEqual(self._think_thresholds(), think_defaults)
         self.assertEqual(self._think_thresholds("--min-5h", "55", "--min-weekly", "44"), (55.0, 44.0))
         self.assertEqual(self._think_thresholds("--min-5h=55", "--min-weekly=44"), (55.0, 44.0))
+
+    # 9. built-in worker timeout
+    def test_builtin_default_timeout_is_2400s(self):
+        proc = self._run("--help")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("(default: 2400s)", " ".join(proc.stdout.split()))
+        # and the --wait budget derived from it: worker + verify + one retry + verify
+        self.assertEqual(dispatch_mod.wait_budget_seconds([{}], 2400), 2 * 2400 + 2 * dispatch_mod.DEFAULT_VERIFY_TIMEOUT)
 
     def test_help_does_not_offer_codex(self):
         proc = self._run("--help")
