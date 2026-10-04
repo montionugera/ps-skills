@@ -2349,6 +2349,85 @@ class TestCodexDisabled(unittest.TestCase):
         # and the --wait budget derived from it: worker + verify + one retry + verify
         self.assertEqual(dispatch_mod.wait_budget_seconds([{}], 2400), 2 * 2400 + 2 * dispatch_mod.DEFAULT_VERIFY_TIMEOUT)
 
+    # 10. think mode and batch items
+    def _batch_file(self, items):
+        path = self.root / "batch.json"
+        path.write_text(json.dumps(items), encoding="utf-8")
+        return str(path)
+
+    def test_think_with_claude_agent_rejects_non_claude_model(self):
+        self._fake_claude()
+        proc = self._run("--think", "--agent", "claude", "--model", "gemini-3.8-flash", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertIn("gemini-3.8-flash", proc.stderr)
+        self.assertNotIn("Would dispatch", proc.stdout)
+        proc = self._run("--think", "--agent", "claude", "--model", "opus", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_think_notice_names_agent_flag_only_when_explicit(self):
+        self._fake_claude()
+        proc = self._run("--think", "--dry-run", "--task", "x", script=SCRIPT_PATH)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+        self.assertIn("NOTICE: thinking mode runs on Claude Opus 5.5 only", proc.stderr)
+        self.assertNotIn("--agent", proc.stderr)
+        proc = self._run("--think", "--agent", "agy", "--dry-run", "--task", "x", script=SCRIPT_PATH)
+        self.assertIn("ignoring --agent agy", proc.stderr)
+
+    def test_cli_think_batch_item_agent_is_rerouted_to_claude(self):
+        self._fake_claude()
+        batch = self._batch_file([{"task": "a", "agent": "agy"}, {"task": "b"}])
+        proc = self._run("--think", "--batch-file", batch, "--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stderr.count("ignoring agent agy of batch task #1"), 1)
+
+    def test_cli_think_batch_item_with_non_claude_model_fails_closed(self):
+        self._fake_claude()
+        batch = self._batch_file([{"task": "a", "model": "gemini-3.8-flash"}])
+        proc = self._run("--think", "--batch-file", batch, "--dry-run")
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertNotIn("Would dispatch", proc.stdout)
+
+    def test_think_batch_items_run_on_claude(self):
+        items = [{"task": "a", "agent": "agy"}, {"task": "b"}, {"task": "c", "agent": "claude", "model": "opus"}]
+        notices = dispatch_mod.resolve_batch_item_routing(items, "claude", True, "agy:m1", None)
+        self.assertEqual([i.get("agent") for i in items], ["claude", None, "claude"])
+        self.assertEqual(len(notices), 1)
+        with self.assertRaises(ValueError):
+            dispatch_mod.resolve_batch_item_routing([{"task": "a", "model": "gemini-x"}], "claude", True, None, None)
+
+    def test_batch_item_naming_another_agent_gets_its_own_chain_model(self):
+        items = [{"task": "a", "agent": "cursor"}, {"task": "b", "agent": "claude"}, {"task": "c", "agent": "agy"},
+                 {"task": "d"}, {"task": "e", "agent": "cursor", "model": "pinned"}]
+        notices = dispatch_mod.resolve_batch_item_routing(items, "agy", False, "agy:m1 > cursor:m2", None)
+        self.assertEqual(notices, [])
+        self.assertEqual(items[0]["model"], "m2")
+        self.assertIn("model", items[1])
+        self.assertIsNone(items[1]["model"])
+        self.assertNotIn("model", items[2])
+        self.assertNotIn("model", items[3])
+        self.assertEqual(items[4]["model"], "pinned")
+        # an explicit --model is the caller's decision for every item
+        items = [{"task": "a", "agent": "cursor"}]
+        dispatch_mod.resolve_batch_item_routing(items, "agy", False, "agy:m1 > cursor:m2", "explicit")
+        self.assertNotIn("model", items[0])
+
+    def test_batch_executor_does_not_pass_the_routed_model_to_another_agent(self):
+        seen = {}
+
+        def fake_run(task_text, target_dir, agent, model, *args, **kwargs):
+            seen[task_text] = (agent, model)
+            return 0, "ok", "", 0, "no diff"
+
+        def no_worktree(cwd, execute_fn, merge_lock=None):
+            return execute_fn(cwd)
+
+        tasks = [{"task": "a", "agent": "cursor", "model": None}, {"task": "b"}]
+        with mock.patch.object(dispatch_mod, "run_single_task", fake_run), \
+                mock.patch.object(dispatch_mod, "execute_in_isolated_worktree", no_worktree):
+            dispatch_mod.execute_batch_parallel(tasks, str(self.root), "agy", "m1", 30)
+        self.assertEqual(seen, {"a": ("cursor", None), "b": ("agy", "m1")})
+
     def test_help_does_not_offer_codex(self):
         proc = self._run("--help")
         self.assertEqual(proc.returncode, 0)

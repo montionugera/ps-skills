@@ -1789,6 +1789,31 @@ def spawn_detached_process(job_id, cwd, log_file, job_dir=DEFAULT_JOB_DIR, scrip
     return proc.pid
 
 
+def resolve_batch_item_routing(batch_tasks, chosen_agent, is_think, priority, explicit_model):
+    """
+    Per-item fix-ups (in place) for batch tasks that name their own agent. Returns stderr notices.
+    Think mode: every item runs on the routed thinker (Claude); a non-Claude item model raises ValueError.
+    Otherwise: an item naming another agent takes that agent's model from the priority chain (None = the agent's
+    default) instead of inheriting the routed agent's model, unless --model was given explicitly.
+    """
+    notices = []
+    chain_models = {}
+    for agent, model in parse_priority_chain(priority or ""):
+        if model:
+            chain_models.setdefault(agent, model)
+    for idx, item in enumerate(batch_tasks, 1):
+        item_agent = normalize_agent_name(str(item.get("agent") or ""))
+        if is_think:
+            if item.get("model") and str(item["model"]).lower() not in CLAUDE_THINK_MODEL_NAMES:
+                raise ValueError(f"batch task #{idx} names model '{item['model']}'")
+            if item_agent and item_agent != chosen_agent:
+                notices.append(f"NOTICE: thinking mode runs on Claude Opus 5.5 only; ignoring agent {item_agent} of batch task #{idx}.")
+                item["agent"] = chosen_agent
+        elif item_agent and item_agent != chosen_agent and not item.get("model") and not explicit_model:
+            item["model"] = chain_models.get(item_agent)
+    return notices
+
+
 def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, timeout_seconds, max_parallel=4, chosen_effort=None,
                            run_id=None):
     results = [None] * len(tasks)
@@ -1799,7 +1824,7 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
         t_task = item.get("task", "")
         t_cwd = item.get("cwd") or base_repo_dir
         t_agent = item.get("agent") or chosen_agent
-        t_model = item.get("model") or chosen_model
+        t_model = item.get("model") if "model" in item else chosen_model  # "model": None = the item agent's default
         t_effort = item.get("effort") or chosen_effort
         t_timeout = item.get("timeout") or timeout_seconds
         t_context_files = item.get("context_files")
@@ -2089,11 +2114,13 @@ def main():
     think_chain = args.think and chosen_agent == "auto"
     if args.think and chosen_agent not in ("auto", "claude"):
         # Thinking never runs on an execution agent, pinned or not: take the same Claude route as `--agent auto`.
-        print(f"NOTICE: thinking mode runs on Claude Opus 5.5 only; ignoring --agent {chosen_agent}.", file=sys.stderr)
+        ignored = f"ignoring --agent {chosen_agent}" if agent_explicit else f"not using {chosen_agent}, this command's default agent"
+        print(f"NOTICE: thinking mode runs on Claude Opus 5.5 only; {ignored}.", file=sys.stderr)
         think_chain = True
-    if (think_chain and "codex" in DISABLED_AGENTS and chosen_model
-            and chosen_model.lower() not in CLAUDE_THINK_MODEL_NAMES):
-        print(f"FAILED: thinking mode runs Claude Opus 5.5 only (codex is disabled); model '{chosen_model}' is not allowed. "
+    # Checked against the model the caller asked for, on every think run (a pinned `--agent claude` included).
+    if (args.think and "codex" in DISABLED_AGENTS and args.model
+            and args.model.lower() not in CLAUDE_THINK_MODEL_NAMES):
+        print(f"FAILED: thinking mode runs Claude Opus 5.5 only (codex is disabled); model '{args.model}' is not allowed. "
               f"Allowed models: {list(CLAUDE_THINK_MODEL_NAMES)}", file=sys.stderr)
         sys.exit(12)
 
@@ -2188,6 +2215,13 @@ def main():
             if normalize_agent_name(str(item.get("agent") or "")) in DISABLED_AGENTS:
                 print(f"FAILED: {item.get('agent')} is disabled: a batch task names it as its agent.", file=sys.stderr)
                 sys.exit(2)
+        try:
+            for notice in resolve_batch_item_routing(batch_tasks, chosen_agent, args.think, args.priority, args.model):
+                print(notice, file=sys.stderr)
+        except ValueError as e:
+            print(f"FAILED: thinking mode runs Claude Opus 5.5 only; {e}. Allowed models: {list(CLAUDE_THINK_MODEL_NAMES)}",
+                  file=sys.stderr)
+            sys.exit(12)
 
     run_id = new_run_id()
     if not args.dry_run:
@@ -2250,7 +2284,7 @@ def main():
                 state = {
                     "job_id": jid,
                     "agent": item.get("agent") or chosen_agent,
-                    "model": item.get("model") or chosen_model,
+                    "model": item.get("model") if "model" in item else chosen_model,
                     "effort": item.get("effort") or chosen_effort,
                     "task": item.get("task", ""),
                     "cwd": os.path.abspath(item.get("cwd") or args.cwd),
