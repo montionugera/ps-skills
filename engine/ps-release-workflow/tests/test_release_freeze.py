@@ -189,17 +189,67 @@ def test_cleanup_catches_a_straggler_even_when_the_host_deleted_the_branch(
     assert cleanup(repo, version="1.1", gh_runner=Gh(MERGED))["stranded"] == [f2]
 
 
-def test_cleanup_never_resets_a_legacy_entry_without_shipped_sha(
-    tmp_repo_with_release: Path, fixed_owner: str, capsys
+def test_cleanup_refuses_when_a_shipped_feature_cannot_be_verified(
+    tmp_repo_with_release: Path, fixed_owner: str
 ):
-    """No shipped_sha = cannot prove it missing (its branch may have moved on
-    after a ship that did land): warn, never reset."""
+    """No shipped_sha = cannot prove it reached main (its branch may have moved
+    on after a ship that did land). That must STOP cleanup before anything is
+    deleted, not warn and report success; --force-cleanup is the override."""
     repo = tmp_repo_with_release
     (_f1, _), (f2, _wt2) = _release_with_two_claims(repo, fixed_owner)
     promote_release(repo, run_gate2=False, run_deploy=False, gh_runner=Gh())
     _late_ship_then_merge(repo, f2, shipped_sha=False)
-    assert cleanup(repo, version="1.1", gh_runner=Gh(MERGED))["stranded"] == []
+    with pytest.raises(RuntimeError) as exc:
+        cleanup(repo, version="1.1", gh_runner=Gh(MERGED))
+    assert f2 in str(exc.value) and "--force-cleanup" in str(exc.value)
+    assert _rel(repo).exists(), "refused cleanup must not delete the _release worktree"
+    assert git(repo, "rev-parse", "--verify", "release/1.1")
+
+
+def test_cleanup_force_proceeds_but_reports_the_unverified_features(
+    tmp_repo_with_release: Path, fixed_owner: str, capsys
+):
+    """Never reset on missing proof (stranded stays empty), but the result and
+    stderr both name what could not be verified."""
+    repo = tmp_repo_with_release
+    (_f1, _), (f2, _wt2) = _release_with_two_claims(repo, fixed_owner)
+    promote_release(repo, run_gate2=False, run_deploy=False, gh_runner=Gh())
+    _late_ship_then_merge(repo, f2, shipped_sha=False)
+    result = cleanup(repo, version="1.1", gh_runner=Gh(MERGED), force=True)
+    assert result["stranded"] == [] and result["unverified"] == [f2]
     assert "no shipped_sha" in capsys.readouterr().err
+
+
+def test_cleanup_refuses_when_the_merged_release_head_cannot_be_found(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch
+):
+    repo = tmp_repo_with_release
+    (_f1, _), (f2, _wt2) = _release_with_two_claims(repo, fixed_owner)
+    promote_release(repo, run_gate2=False, run_deploy=False, gh_runner=Gh())
+    _squash_merge_origin_release_into_origin_main(repo)
+    import scripts.promote_release as pr
+    monkeypatch.setattr(pr, "_merged_release_head", lambda *a, **k: (None, ""))
+    with pytest.raises(RuntimeError, match="--force-cleanup"):
+        cleanup(repo, version="1.1", gh_runner=Gh(MERGED))
+    assert _rel(repo).exists()
+    assert git(repo, "rev-parse", "--verify", "release/1.1"), "refusal must keep the release branch"
+    result = cleanup(repo, version="1.1", gh_runner=Gh(MERGED), force=True)
+    assert result["unverified"] == [_f1], "only features the catalog marks shipped can be unverified"
+
+
+def test_cleanup_cli_says_not_verified_instead_of_promoted(
+    tmp_repo_with_release: Path, monkeypatch, capsys
+):
+    import sys
+    import scripts.promote_release as pr
+    monkeypatch.chdir(tmp_repo_with_release)
+    monkeypatch.setattr(sys, "argv", ["promote_release.py", "--cleanup-only", "1.1"])
+    monkeypatch.setattr(pr, "cleanup", lambda *a, **k: {
+        "ok": True, "version": "1.1", "stranded": [], "unverified": ["F-009"]})
+    assert pr.main() == 0
+    cap = capsys.readouterr()
+    assert "NOT verified" in cap.err and "F-009" in cap.err
+    assert "Promoted" not in cap.out + cap.err
 
 
 def test_cleanup_rerun_after_a_stranded_reset_is_a_no_op(

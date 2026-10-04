@@ -85,3 +85,14 @@ the protection added when adopting the workflow):
 ```bash
 gh api repos/<owner>/<repo>/branches/main/protection -X DELETE
 ```
+
+## Gate concurrency
+
+Heavy gates (Gate 1 `precheck.sh` in `psrw ship`, Gate 2 `integration.sh` in `psrw promote`) take a
+machine-wide slot (`lib/gate_lock.py`) so concurrent sessions do not starve each other of CPU and memory.
+A gate that cannot get a slot prints `[gate-lock] ... waiting` and retries every 5 s for up to an hour.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `PSRW_GATE_SLOTS` | `2` | Max gates running at once on this machine |
+| `PSRW_GATE_LOCK_DIR` | `~/.cache/psrw/gate-locks` | Where slot files live (`flock`; released by the kernel if a gate dies) |

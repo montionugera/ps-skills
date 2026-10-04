@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# pandoc-shim — drop-in `pandoc` wrapper (symlink it as ~/.local/bin/pandoc).
+#
+# pandoc turns 4+-space-indented raw HTML (metric tiles, callouts) into literal
+# code blocks. This shim dedents HTML-tag lines (outside fences) in .md INPUT
+# files, but ONLY for HTML-output renders from markdown. Everything else —
+# other output formats, non-markdown input, stdin, -o x.md — passes straight
+# through to the real pandoc, so the shim can't change unrelated calls.
+# Heuristic: only ``` fences are tracked (not ~~~); real indented code blocks that
+# START with an HTML tag are dedented too. Set PANDOC_SHIM_OFF=1 to bypass.
+set -uo pipefail
+
+self="${BASH_SOURCE[0]}"
+real="${PANDOC_REAL:-}"
+if [[ -z "$real" ]]; then
+  IFS=: read -ra _dirs <<< "$PATH"
+  for d in "${_dirs[@]}"; do
+    c="$d/pandoc"
+    [[ -x "$c" && ! "$c" -ef "$self" ]] && { real="$c"; break; }
+  done
+fi
+[[ -n "$real" ]] || { echo "pandoc-shim: ❌ real pandoc not found on PATH" >&2; exit 127; }
+[[ "${PANDOC_SHIM_OFF:-0}" == "1" ]] && exec "$real" "$@"
+
+args=("$@")
+t_fmt=""; o_html=0; md_in=1; prev=""
+# bash 3.2 (macOS) + set -u: never expand an empty array bare, hence the ${arr[@]+...} guards.
+for a in ${args[@]+"${args[@]}"}; do
+  case "$prev" in
+    -t|--to|-w|--write) t_fmt="$a" ;;
+    -o|--output) [[ "$a" == *.html || "$a" == *.htm ]] && o_html=1 ;;
+    -f|--from|-r|--read) [[ "$a" =~ ^(markdown|gfm|commonmark) ]] || md_in=0 ;;
+  esac
+  case "$a" in
+    --to=*|--write=*) t_fmt="${a#*=}" ;;
+    -t?*|-w?*) [[ "$a" != --* ]] && t_fmt="${a:2}" ;;
+    --output=*.html|--output=*.htm) o_html=1 ;;
+    -o?*.html|-o?*.htm) [[ "$a" != --* ]] && o_html=1 ;;
+    --from=*|--read=*) [[ "${a#*=}" =~ ^(markdown|gfm|commonmark) ]] || md_in=0 ;;
+    -f?*|-r?*) [[ "$a" != --* && ! "${a:2}" =~ ^(markdown|gfm|commonmark) ]] && md_in=0 ;;
+  esac
+  prev="$a"
+done
+# An explicit target format wins over the -o extension.
+if [[ -n "$t_fmt" ]]; then
+  [[ "$t_fmt" == html* ]] && html_out=1 || html_out=0
+else
+  html_out="$o_html"
+fi
+[[ "$html_out" == "1" && "$md_in" == "1" ]] || exec "$real" "$@"
+
+# Options whose VALUE may be a .md path that must NOT be rewritten.
+skip_val=" -o --output -H --include-in-header -B --include-before-body -A --include-after-body --template --metadata-file -d --defaults -L --lua-filter -F --filter --bibliography --csl --reference-doc --css -c -V --variable -M --metadata --extract-media --resource-path --data-dir --highlight-style --syntax-definition "
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/pandoc-shim-XXXXXX")" || exec "$real" "$@"
+trap 'rm -rf "$tmp"' EXIT
+out=(); prev=""; n=0
+for a in ${args[@]+"${args[@]}"}; do
+  if [[ "$a" == *.md && "$a" != -* && -f "$a" && "$skip_val" != *" $prev "* ]]; then
+    n=$((n+1)); mkdir -p "$tmp/$n"
+    awk '/^[ \t]*```/ {f=!f} { if (!f && $0 ~ /^[ \t]+<\/?[A-Za-z]/) sub(/^[ \t]+/, ""); print }' "$a" > "$tmp/$n/$(basename "$a")"
+    out+=("$tmp/$n/$(basename "$a")")
+  else
+    out+=("$a")
+  fi
+  prev="$a"
+done
+"$real" ${out[@]+"${out[@]}"}
+exit $?

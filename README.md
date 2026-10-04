@@ -25,7 +25,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **ps-release-workflow-status** | Read-only one-screen report of the release, features, claims, and what to do next. |
 | **ps-release-workflow-unclaim** | Abandon a claimed feature: remove its worktree and clear the claim (keeps the branch). |
 | **handoff** | Compact the session into an action-first handoff doc and spawn a fresh agent tab in Herdr; ships an optional Stop hook (`hooks/auto-handoff-stop.py`) that triggers it when context grows large. |
-| **agy-worker** | Offloads coding tasks to Antigravity CLI (`agy`) or Codex (`gpt-5.6-terra`) with proactive quota checking (`>30%` 5h, `>10%` weekly), auto-routing, fallback to Claude Sonnet, and standard ≤15-line reports. Binaries: `dispatch-agy-worker`, `dispatch-codex-worker`, `dispatch-worker`. |
+| **agy-worker** | Offloads coding tasks to Antigravity CLI (`agy`) or Cursor CLI (`cursor-agent`) with proactive quota checking (`>30%` 5h, `>10%` weekly), auto-routing, fallback to Claude Sonnet, and standard ≤15-line reports. Binaries: `dispatch-agy-worker`, `dispatch-cursor-worker`, `dispatch-worker`. |
 | **url-state-resilience** | Enforces URL-as-State, deep-linking, and reload resilience across web dashboards and SPAs; provides `check-url-state.sh` linter and `url-state-guard.py` hook for non-regression. |
 | **macos-audio-hud** | Engineering standards for macOS native floating HUDs and real-time CoreAudio/AVFoundation voice companion clients (`AUVoiceProcessing`, channel 0 extraction, dynamic converters, NSRecursiveLock, floating `NSPanel`, Carbon hotkeys). |
 | **rokid-glasses-companion** | Engineering standards and hardware trap mitigations for Rokid AI Smart Glasses and Android AR wearables (direct Wi-Fi WebSocket architecture, `AudioSource.MIC` + AGC/limiter, walkie-talkie echo suppression, raw key debouncing, priority 999 `KeyReceiver`). |
@@ -69,7 +69,7 @@ Then restart your agent session so the new skills are discovered.
 
 - `ps-commu-explain` is self-contained and works immediately.
 - `ps-release-workflow-*` use the engine installed at `~/.claude/ps-release-workflow`.
-- `dispatch-worker` / `dispatch-agy-worker` / `dispatch-codex-worker` / `dispatch-cursor-worker` are linked into `~/.local/bin/`.
+- `dispatch-worker` / `dispatch-agy-worker` / `dispatch-cursor-worker` are linked into `~/.local/bin/`. (`dispatch-codex-worker` is still linked, and only prints the "codex is disabled" refusal.)
 - `ps-plugin-bridge` is linked into `~/.local/bin/` to bridge Claude plugins to Antigravity CLI.
 - `ps-work` is linked into `~/.local/bin/`: `ps-work link` records a vault project's repo + feature ID, and `ps-work show` prints the project goal beside the live `psrw status --json` feature status (read-only; never writes release state into the vault).
 
@@ -79,15 +79,18 @@ Install into a non-default Claude home with `CLAUDE_HOME=/path ./install.sh`.
 
 ## Multi-Agent External Fan-out (`dispatch-worker`)
 
-Offload token-heavy code editing and test cycles from Claude to external coding CLIs (**Antigravity CLI**, **OpenAI Codex `gpt-5.6-terra`**, or **Cursor CLI `cursor-agent`**) with quota/on-demand guarding and automated fallback to Claude internal subagents:
+Offload token-heavy code editing and test cycles from Claude to external coding CLIs (**Antigravity CLI** or **Cursor CLI `cursor-agent`**) with quota/on-demand guarding and automated fallback to Claude internal subagents.
+
+**Codex is disabled (2026-10-03).** The dispatcher never routes to OpenAI Codex, in any mode: `--agent codex` exits 2 with `codex is disabled`, a `--priority` chain entry naming codex is dropped with a one-line notice on stderr (a chain naming only codex exits 2), and `--agent auto` considers agy alone. The single switch is `DISABLED_AGENTS` at the top of `bin/dispatch-agy-worker`.
+
 
 ```bash
 # Check quota and authentication status across providers
 dispatch-worker --agent auto --check-quota
 dispatch-cursor-worker --check-quota
 
-# Priority chain routing (Cost-efficient Cursor On-Demand -> AGY -> Codex)
-dispatch-worker --priority "cursor:gemini-3.8-flash > agy > codex" --allow-on-demand --task "Write unit test and implement feature"
+# Priority chain routing (Cost-efficient Cursor On-Demand -> AGY)
+dispatch-worker --priority "cursor:gemini-3.8-flash > agy" --allow-on-demand --task "Write unit test and implement feature"
 
 # Run in an isolated temporary git worktree
 dispatch-worker --agent auto --isolated --task "Refactor module X"
@@ -97,21 +100,19 @@ Configure default preferences in `~/.config/dispatch/config.env` or via environm
 ```bash
 # Mode: "subscription_quota_remaining" (strict flat rate, $0 extra) or "on_demand" (metered pay-as-you-go)
 export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE="subscription_quota_remaining"
-export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3.8-flash > agy > codex"
+export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3.8-flash > agy"
 ```
 
 ### Thinking tasks (`dispatch-thinker`)
 
-`dispatch-thinker` (= `dispatch-worker --capability deep-design-v1`; `--think` uses the same routing) sends deep-reasoning work to **Claude Opus 5.5 first** (`claude -p --model claude-opus-5-5`, available when `claude` is on `PATH`), then **Codex `gpt-5.6-sol`** (quota 5h > 80%, weekly > 20%). Reasoning effort defaults to **`high`** (`--effort` on CLI overrides). Claude runs least-privilege (read tools + Write/Edit only; no Bash or web). If the Claude run fails, it retries once on Codex when eligible; outside `--isolated`, a partial `--output-file` is discarded first, and if Claude left any other changes the retry is refused (exit 12) and those files are listed — the working tree is never reset. Exit `12` (fail closed) only when neither is available or a non-thinker model is requested. `--agent claude` / `--agent codex` pins one provider.
+`dispatch-thinker` (= `dispatch-worker --capability deep-design-v1`; `--think` uses the same routing) sends deep-reasoning work to **Claude Opus 5.5 only** (`claude -p --model claude-opus-5-5`, available when `claude` is on `PATH`). Reasoning effort defaults to **`high`** (`--effort` on CLI overrides). Claude runs least-privilege (read tools + Write/Edit only; no Bash or web). There is no fallback thinker: a failed Claude run is reported as a failure. `dispatch-thinker` exits `12` (fail closed) when Claude is unavailable or a non-Claude model is requested; plain `--think` exits `12` for a non-Claude model and `10` when Claude is unavailable. `--agent claude` pins the provider.
 
 | Env var | Default | Purpose |
 | :--- | :--- | :--- |
 | `CLAUDE_THINK_MODEL` | `claude-opus-5-5` | Claude thinker model id |
-| `CODEX_THINK_MODEL` | `gpt-5.6-sol` | Codex fallback thinker model id |
 | `THINK_EFFORT` | `high` | Default reasoning effort for thinking tasks (`--effort` overrides) |
 | `CLAUDE_THINK_EFFORT` | unset | Claude-specific thinker effort override |
-| `CODEX_THINK_EFFORT` | unset | Codex-specific thinker effort override |
-| `DISPATCH_THINKER_SKIP_CLAUDE` | unset | `1` skips Claude and routes straight to Codex |
+| `DISPATCH_THINKER_SKIP_CLAUDE` | unset | `1` marks Claude unavailable, so thinking mode fails closed |
 
 ## Plugin Bridge & Antigravity (agy) Context Budget (`ps-plugin-bridge`)
 
@@ -202,7 +203,7 @@ pytest -q
 bash skills/ps-commu-explain/tests/lifecycle_test.sh
 
 # ps-interactive-learning-builder contract, installer, and repository integration suite
-python3 -m unittest discover -s skills/ps-interactive-learning-builder/tests -v
+python3 -m pytest skills/ps-interactive-learning-builder/tests -v
 
 # ps-commu-explain React template builds
 cd skills/ps-commu-explain/assets/template-react
@@ -214,9 +215,13 @@ go test -cover ./pkg/...
 ./test_e2e.sh
 ```
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all four on every push and PR:
-the engine and interactive-learning-builder tests on Linux, the lifecycle suite on macOS, and the
-React template build on Linux.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all of these on every push and PR,
+plus the root `tests/` suite (`python3 -m pytest tests -v`). The lifecycle suite runs on macOS and
+everything else on Linux. A `test-coverage` job
+([`.github/scripts/check_test_coverage.py`](.github/scripts/check_test_coverage.py)) fails the
+build when any tracked test file is not run by a CI step, when a step uses `unittest` (it never
+collects pytest-style tests), or when a test step can be skipped or have its failures ignored
+(`if:`, `continue-on-error`, `|| true`). A new test suite therefore needs a CI step.
 
 ## License
 

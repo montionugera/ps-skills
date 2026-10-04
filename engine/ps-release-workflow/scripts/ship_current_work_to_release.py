@@ -24,6 +24,7 @@ from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped, upd
 from lib.epic import epic_children, epic_completeness, epic_folder_path, try_begin_verification
 from lib.epic_gate import run_and_record
 from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
+from lib.gate_lock import gate_slot
 from lib.hooks import HookPathError, resolve_hook
 from lib.main_sync import (
     MainSyncConflictError, missing_main_commits, resolve_main_ref, sync_main_into_release,
@@ -62,7 +63,8 @@ def _run_precheck(tree: Path) -> int | None:
     if not precheck.exists():
         print(f"⚠️ Gate 1 SKIPPED — {precheck} not found in {tree}", file=sys.stderr)
         return None
-    return subprocess.run([str(precheck)], cwd=tree).returncode
+    with gate_slot(f"gate1 {tree.name}"):
+        return subprocess.run([str(precheck)], cwd=tree).returncode
 
 
 def _find_marker(worktree: Path) -> dict:
@@ -186,8 +188,9 @@ def ship_current_work(
         # _release worktree itself, so it checks the combined release code.
         try:
             rc = _run_precheck(rel_wt)
-        except GateFailedError:
-            # A bad hooks.precheck path must not leave the merge standing: the
+        except BaseException:
+            # Any failure (bad hooks.precheck path, gate-slot timeout, Ctrl-C) must not
+            # leave the merge standing: the
             # raise would otherwise skip the rollback below and escape the lock
             # with the feature merged on release/<v> while ship reports failure.
             git_run(rel_wt, "reset", "--hard", pre_sha)

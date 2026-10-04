@@ -1,22 +1,24 @@
 ---
 name: agy-worker
-description: "Dispatch coding and implementation tasks to Antigravity CLI (agy), OpenAI Codex (gpt-5.6-terra), or Cursor CLI (cursor-agent) with proactive quota/on-demand checking and automated fallback to Claude internal subagents."
-argument-hint: "[task prompt] [--agent agy|codex|cursor|auto] [--priority <chain>] [--allow-on-demand] [--cwd <dir>]"
+description: "Dispatch coding and implementation tasks to Antigravity CLI (agy) or Cursor CLI (cursor-agent) with proactive quota/on-demand checking and automated fallback to Claude internal subagents."
+argument-hint: "[task prompt] [--agent agy|cursor|claude|auto] [--priority <chain>] [--allow-on-demand] [--cwd <dir>]"
 ---
 
-# External Worker Dispatcher (`agy-worker`, `codex-worker`, `cursor-worker`)
+# External Worker Dispatcher (`agy-worker`, `cursor-worker`)
 
 ## Overview
 
-Offloads coding, refactoring, and test execution tasks to **Google Antigravity CLI (`agy`)**, **OpenAI Codex (`codex` with `gpt-5.6-terra`)**, or **Cursor CLI (`cursor-agent`)** running in headless mode.
+Offloads coding, refactoring, and test execution tasks to **Google Antigravity CLI (`agy`)** or **Cursor CLI (`cursor-agent`)** running in headless mode.
+
+**Codex is disabled (2026-10-03): never dispatch to it.** `--agent codex` and `dispatch-codex-worker` exit 2 with `codex is disabled`; a `--priority` chain entry naming codex is dropped with a one-line stderr notice and routing continues with the rest (a chain naming only codex exits 2).
 
 This workflow:
 1. **Preserves Primary Token Quota**: Coding tasks run on external provider infrastructure instead of depleting Claude limits.
 2. **Proactive Rate Limit Protection**: Reads live provider quota before dispatching. If remaining quota is **< 30% for 5-hour** or **< 10% for weekly**, it returns exit code `10` (`FALLBACK_INTERNAL`), instructing caller orchestrators to seamlessly route to Claude's internal `sonnet` subagents.
 3. **Preference Chain & Dynamic Auto-Routing**:
-   - Supports declarative priority chains via `--priority` or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE` (e.g. `cursor:gemini-3.8-flash > agy > codex:terra:5.6`).
+   - Supports declarative priority chains via `--priority` or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE` (e.g. `cursor:gemini-3.8-flash > agy`).
    - Evaluates left-to-right, respecting `--mode {subscription_quota_remaining,on_demand}` (or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE`) to guard against unexpected metered billing.
-   - Defaults to best-runway auto-routing across flat providers (`agy` vs `codex`).
+   - `--agent auto` with no chain routes to `agy` when its quota allows.
 4. **Prompt Contract & Scoped Verification**: Wraps prompts with non-negotiable standing rules (TDD cycle, new commits only / never amend, preserving protected configs like `.release.json`, running targeted tests for touched modules, and visual integrity forbidding invented CSS classes).
 5. **Isolated Execution (`--isolated`) & Salvage**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success. If a worker fails or times out (default 900s / 15m, configurable via `AI_AGENT_AUTO_DISPATCH_TIMEOUT`), any partial work is automatically preserved to `/tmp/worker-salvage-<timestamp>.patch` before cleanup.
 6. **Enforces Thin Orchestration**: Returns a standardized **≤ 15-line report** (status, modified files, diff summary, and execution output) so orchestrator context windows remain clean and free from archaeological bloat.
@@ -25,24 +27,21 @@ This workflow:
 
 ## CLI Usage
 
-The dispatcher binary is symlinked to `dispatch-agy-worker`, `dispatch-codex-worker`, `dispatch-cursor-worker`, and `dispatch-worker`:
+The dispatcher binary is symlinked to `dispatch-agy-worker`, `dispatch-cursor-worker`, and `dispatch-worker`:
 
 ```bash
 # Check quota / auth status
 dispatch-agy-worker --check-quota            # Checks Antigravity quota
-dispatch-codex-worker --check-quota          # Checks Codex quota
 dispatch-cursor-worker --check-quota         # Checks Cursor authentication
 dispatch-worker --agent auto --check-quota    # Evaluates preference chain or best runway
 
-# Priority chain routing (Cursor On-Demand -> AGY -> Codex)
-dispatch-worker --priority "cursor:gemini-3.8-flash > agy > codex" --mode on_demand --task "..."
+# Priority chain routing (Cursor On-Demand -> AGY)
+dispatch-worker --priority "cursor:gemini-3.8-flash > agy" --mode on_demand --task "..."
 
 # Dispatch a coding task to Cursor with specific model
 dispatch-cursor-worker --model gemini-3.8-flash --task "Implement task from brief..." --cwd "$WORKTREE_DIR"
 
-# Dispatch a coding task to Codex Terra 5.6
-dispatch-codex-worker --task "Implement task from brief..." --cwd "$WORKTREE_DIR"
-# or
+# Dispatch a coding task to whichever agent the router picks
 dispatch-worker --agent auto --task "..." --cwd "$WORKTREE_DIR" --isolated
 
 # --- Parallel Batch Mode (Zero Cold-Start LLM Tax, Python Concurrency) ---
@@ -57,10 +56,10 @@ dispatch-worker --batch-file tasks.json --max-parallel 4 --cwd "$REPO_DIR"
 dispatch-worker --task "Heavy refactor in src/engine" --detach --cwd "$REPO_DIR"
 
 # --- Heavy Thinking & Architecture Mode (Capability deep-design-v1) ---
-# Offload deep reasoning, RFC generation, or code reviews: Claude Opus 5.5 first (`claude -p`),
-# Codex GPT-5.6-Sol fallback (also used once if the Claude run fails). Pin one with --agent claude|codex.
+# Offload deep reasoning, RFC generation, or code reviews: Claude Opus 5.5 only (`claude -p`).
+# There is no fallback thinker: a failed Claude run is reported as a failure.
 # Defaults reasoning effort to 'high' (--effort overrides, or THINK_EFFORT env var).
-# Fails closed (exit code 12) if both thinkers are unavailable or an unapproved model is specified.
+# Fails closed (exit code 12) if Claude is unavailable or a non-Claude model is specified.
 dispatch-thinker --task "Synthesize multi-wave portal architecture" \
   --context docs/specs/hub.md \
   --output-file /tmp/portal-synthesis.md
@@ -83,6 +82,15 @@ dispatch-worker --from-plan docs/superpowers/specs/2026-09-plan.md --phase 1 --c
 dispatch-worker --tail latest -n 20
 dispatch-worker --tail dw-1789785000-a1b2 -f    # Follow live output stream
 ```
+
+### Observability
+
+- **Event log**: every run appends JSONL records to `~/.local/state/dispatch/events.jsonl` (override with `DISPATCH_EVENTS_FILE`): `route`, `start`, `fallback`, `timeout`, `verify_failed`, `finish` (agent, model, status, exit code, duration, files changed). Sync, detached and batch runs are all covered; only a task hash is logged, never any prompt text, and the file is created owner-only (0600).
+- **Live output**: detached jobs stream worker stdout/stderr into their log as it arrives, so `dispatch-worker --tail <job> -f` shows progress before the worker exits.
+- **Stall detection**: `dispatch-worker --status` shows `last output Ns ago` for RUNNING jobs and marks `STALLED?` after 300s of silence. Check `--tail` before killing it.
+- **Stats**: `dispatch-worker --stats [DAYS]` (default 7) prints runs, success %, timeouts, fallbacks, verify failures and median duration per agent.
+- **Recovery**: an `--agent auto` / `--priority` run whose worker fails retries once on the next eligible agent (never for a pinned `--agent` or a verify failure), and a quota observation older than 60 minutes counts as not eligible.
+- **Detached jobs do not get the runtime fallback**: a `--detach` job runs only the agent it was routed to; if it fails, re-dispatch it yourself.
 
 ### Exit Codes Contract
 
@@ -119,7 +127,7 @@ When using `subagent-driven-development`:
 
 ### 1. Synchronous or Detached Single Batch
 ```bash
-dispatch-codex-worker \
+dispatch-worker \
   --task "Read brief: [BRIEF_FILE]. Implement exactly what is specified. Run tests and keep output." \
   --cwd "[directory]"
 ```

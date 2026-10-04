@@ -18,12 +18,21 @@ BIN_DIR = REPO_ROOT / "bin"
 SCRIPT_PATH = BIN_DIR / "dispatch-agy-worker"
 CODEX_SCRIPT_PATH = BIN_DIR / "dispatch-codex-worker"
 
+# Keep every in-process and CLI test run out of the user's real ~/.local/state/dispatch/events.jsonl.
+_EVENTS_TMP = tempfile.TemporaryDirectory()
+os.environ["DISPATCH_EVENTS_FILE"] = str(Path(_EVENTS_TMP.name) / "events.jsonl")
+
 import importlib.machinery
 import importlib.util
 loader = importlib.machinery.SourceFileLoader("dispatch_agy_worker", str(SCRIPT_PATH))
 spec = importlib.util.spec_from_loader("dispatch_agy_worker", loader)
 dispatch_mod = importlib.util.module_from_spec(spec)
 loader.exec_module(dispatch_mod)
+
+
+def codex_enabled():
+    """Codex is in DISABLED_AGENTS. Tests of the dormant codex code paths switch it back on in-process."""
+    return mock.patch.object(dispatch_mod, "DISABLED_AGENTS", frozenset())
 
 
 class TestQuotaLogic(unittest.TestCase):
@@ -168,7 +177,37 @@ class TestWindowRollover(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertEqual(rem_5h, 100.0)
 
+    def _write_healthy_state(self, age_minutes, now):
+        content = {"snapshot": {"windows": [
+            {"kind": "five_hour", "remaining_percent": 90.0, "resets_at": now + 5000},
+            {"kind": "weekly", "remaining_percent": 90.0, "resets_at": now + 50000},
+        ]}}
+        self.state_file.write_text(json.dumps(content), encoding="utf-8")
+        mtime = now - age_minutes * 60
+        os.utime(self.state_file, (mtime, mtime))
 
+    def test_stale_observation_is_not_eligible(self):
+        now = time.time()
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, now)
+        eligible, rem_5h, _rem_weekly, msg = dispatch_mod.check_quota(
+            "agy", str(self.state_file), min_5h=30.0, min_weekly=10.0, current_time=now
+        )
+        self.assertFalse(eligible)
+        self.assertEqual(rem_5h, 90.0)
+        self.assertIn("stale", msg)
+        self.assertIn("not eligible", msg)
+
+    def test_fresh_observation_within_threshold_stays_eligible(self):
+        now = time.time()
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES - 5, now)
+        eligible, _r5, _rw, msg = dispatch_mod.check_quota(
+            "agy", str(self.state_file), min_5h=30.0, min_weekly=10.0, current_time=now
+        )
+        self.assertTrue(eligible)
+        self.assertNotIn("stale", msg)
+
+
+@codex_enabled()
 class TestBestRunwayAutoRouting(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -241,6 +280,39 @@ class TestBestRunwayAutoRouting(unittest.TestCase):
         )
         self.assertFalse(eligible)
         self.assertIn("Auto routing failed", msg)
+
+    def _age(self, file_path, now):
+        mtime = now - (dispatch_mod.STALE_OBSERVATION_MINUTES + 30) * 60
+        os.utime(file_path, (mtime, mtime))
+
+    def test_auto_skips_stale_agent_even_with_higher_runway(self):
+        now = time.time()
+        self._write_quota(self.agy_file, 95.0, 95.0)  # best runway, but the observation is stale
+        self._write_quota(self.codex_file, 50.0, 90.0)
+        self._age(self.agy_file, now)
+
+        agent, eligible, r5, _rw, _msg = dispatch_mod.route_best_agent(
+            min_5h=30.0, min_weekly=10.0, agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file), current_time=now
+        )
+        self.assertEqual(agent, "codex")
+        self.assertTrue(eligible)
+        self.assertEqual(r5, 50.0)
+
+    def test_auto_fails_when_both_observations_are_stale(self):
+        now = time.time()
+        self._write_quota(self.agy_file, 95.0, 95.0)
+        self._write_quota(self.codex_file, 90.0, 90.0)
+        self._age(self.agy_file, now)
+        self._age(self.codex_file, now)
+
+        _agent, eligible, _r5, _rw, msg = dispatch_mod.route_best_agent(
+            min_5h=30.0, min_weekly=10.0, agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file), current_time=now
+        )
+        self.assertFalse(eligible)
+        self.assertIn("Auto routing failed", msg)
+        self.assertIn("stale", msg)
 
 
 class TestPromptContract(unittest.TestCase):
@@ -329,26 +401,6 @@ class TestCLIExecution(unittest.TestCase):
         )
         self.assertEqual(res.returncode, 1)
         self.assertIn("20.0%", res.stdout)
-
-    def test_cli_codex_binary_invocation(self):
-        self._write_state(85.0, 95.0)
-        res = subprocess.run(
-            [str(CODEX_SCRIPT_PATH), "--check-quota", "--state-file", str(self.state_file)],
-            capture_output=True,
-            text=True
-        )
-        self.assertEqual(res.returncode, 0)
-        self.assertIn("[CODEX]", res.stdout)
-
-    def test_cli_codex_dry_run_with_terra(self):
-        self._write_state(85.0, 95.0)
-        res = subprocess.run(
-            [str(CODEX_SCRIPT_PATH), "--task", "test", "--dry-run", "--state-file", str(self.state_file)],
-            capture_output=True,
-            text=True
-        )
-        self.assertEqual(res.returncode, 0)
-        self.assertIn("gpt-5.6-terra", res.stdout)
 
     def test_cli_fallback_exit_code_10_when_quota_insufficient(self):
         self._write_state(15.0, 80.0)
@@ -496,6 +548,97 @@ class TestTimeoutAndGitInspection(unittest.TestCase):
         self.assertIn("FAILED: test-worker timed out after 1s.", stderr)
         self.assertIn("partial output", stdout)
 
+    def test_execute_worker_process_timeout_kills_grandchildren_holding_pipes(self):
+        # A backgrounded grandchild inherits stdout/stderr. Killing only the direct child either hangs
+        # communicate() (older Pythons) or leaves the grandchild running; the whole group must die.
+        pid_file = Path(self.temp_dir.name) / "grandchild.pid"
+        cmd = ["sh", "-c", f"sleep 30 & echo $! > {pid_file}; sleep 30"]
+        start = time.monotonic()
+        exit_code, _stdout, stderr, is_timeout = dispatch_mod.execute_worker_process(
+            cmd, str(self.repo_dir), timeout_seconds=1, agent_name="test-worker"
+        )
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertTrue(is_timeout)
+        self.assertEqual(exit_code, 124)
+        self.assertIn("FAILED: test-worker timed out after 1s.", stderr)
+        grandchild = int(pid_file.read_text().strip())
+        deadline = time.monotonic() + 5
+        alive = True
+        while alive and time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+                time.sleep(0.1)
+            except ProcessLookupError:
+                alive = False
+        if alive:
+            os.kill(grandchild, 9)
+        self.assertFalse(alive, "grandchild survived the worker timeout")
+
+    def test_execute_worker_process_returns_promptly_when_descendant_holds_pipes(self):
+        # The worker exits 0 at once, but a backgrounded descendant keeps stdout/stderr open.
+        cmd = ["sh", "-c", "echo hi; sleep 8 & exit 0"]
+        start = time.monotonic()
+        exit_code, stdout, _stderr, is_timeout = dispatch_mod.execute_worker_process(
+            cmd, str(self.repo_dir), timeout_seconds=3, agent_name="test-worker"
+        )
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(is_timeout)
+        self.assertIn("hi", stdout)
+
+    def test_execute_worker_process_gives_worker_eof_on_stdin(self):
+        # A worker waiting on an interactive prompt must see EOF, not block on the dispatcher's stdin.
+        read_end, write_end = os.pipe()  # never written to: inheriting it would block `read` until timeout
+        saved_stdin = os.dup(0)
+        try:
+            os.dup2(read_end, 0)
+            exit_code, stdout, _stderr, is_timeout = dispatch_mod.execute_worker_process(
+                ["sh", "-c", "read x; echo got:$x"], str(self.repo_dir), timeout_seconds=3, agent_name="test-worker"
+            )
+        finally:
+            os.dup2(saved_stdin, 0)
+            os.close(saved_stdin)
+            os.close(read_end)
+            os.close(write_end)
+        self.assertFalse(is_timeout)
+        self.assertEqual(stdout, "got:")
+        self.assertNotEqual(exit_code, 124)
+
+    def test_execute_worker_process_streams_to_log_before_exit(self):
+        log = Path(self.temp_dir.name) / "stream.log"
+        cmd = ["python3", "-c", "import sys, time; print('early line', flush=True); "
+                                "sys.stderr.write('err line\\n'); sys.stderr.flush(); time.sleep(3); print('late')"]
+        result = {}
+        t = __import__("threading").Thread(target=lambda: result.update(r=dispatch_mod.execute_worker_process(
+            cmd, str(self.repo_dir), timeout_seconds=20, agent_name="test-worker", log_path=str(log))))
+        t.start()
+        deadline = time.monotonic() + 2.5
+        seen = ""
+        while time.monotonic() < deadline and "err line" not in seen:
+            seen = log.read_text(encoding="utf-8") if log.exists() else ""
+            time.sleep(0.05)
+        self.assertTrue(t.is_alive(), "worker already exited; streaming not demonstrated")
+        self.assertIn("early line", seen)
+        self.assertIn("err line", seen)
+        t.join(30)
+        exit_code, stdout, stderr, is_timeout = result["r"]
+        self.assertEqual((exit_code, is_timeout), (0, False))
+        self.assertEqual(stdout, "early line\nlate")
+        self.assertEqual(stderr, "err line")
+        self.assertIn("late", log.read_text(encoding="utf-8"))
+
+    def test_execute_worker_process_timeout_with_log_path_still_kills_group(self):
+        log = Path(self.temp_dir.name) / "stream.log"
+        start = time.monotonic()
+        exit_code, stdout, stderr, is_timeout = dispatch_mod.execute_worker_process(
+            ["sh", "-c", "echo partial; sleep 30 & sleep 30"], str(self.repo_dir), timeout_seconds=1,
+            agent_name="test-worker", log_path=str(log))
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual((exit_code, is_timeout), (124, True))
+        self.assertIn("partial", stdout)
+        self.assertIn("timed out after 1s", stderr)
+        self.assertIn("partial", log.read_text(encoding="utf-8"))
+
     def test_inspect_git_changes_with_commits_and_working_tree(self):
         # 1. Create a commit
         (self.repo_dir / "committed_file.txt").write_text("committed content\n", encoding="utf-8")
@@ -587,6 +730,7 @@ class TestPriorityChainRouting(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertEqual(agent, "agy")
 
+    @codex_enabled()
     def test_waterfall_routes_to_codex_when_agy_low(self):
         self.agy_file.write_text(json.dumps({
             "windows": [
@@ -935,6 +1079,24 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         rep = dispatch_mod.format_status_report(jobs)
         self.assertIn("tail: running pytest", rep)
 
+    def test_format_status_report_last_output_and_stalled(self):
+        fresh = Path(self.temp_dir.name) / "fresh.log"
+        fresh.write_text("working\n", encoding="utf-8")
+        stale = Path(self.temp_dir.name) / "stale.log"
+        stale.write_text("last words\n", encoding="utf-8")
+        old = time.time() - dispatch_mod.STALL_SECONDS - 60
+        os.utime(stale, (old, old))
+        rep = dispatch_mod.format_status_report([
+            {"job_id": "dw-fresh", "agent": "agy", "status": "RUNNING", "log_file": str(fresh), "created_at": time.time() - 5},
+            {"job_id": "dw-stale", "agent": "agy", "status": "RUNNING", "log_file": str(stale), "created_at": old},
+        ])
+        fresh_line = next(l for l in rep.splitlines() if "dw-fresh" in l)
+        stale_line = next(l for l in rep.splitlines() if "dw-stale" in l)
+        self.assertIn("last output 0s ago", fresh_line)
+        self.assertNotIn("STALLED?", fresh_line)
+        self.assertIn("STALLED?", stale_line)
+        self.assertRegex(stale_line, r"last output 3\d\ds ago")
+
     def test_format_batch_report_retry_hint(self):
         results = [
             {"task": "task 1", "agent": "cursor", "exit_code": 0, "files_changed": 1, "diff_summary": "ok"},
@@ -1060,7 +1222,7 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
 
 
 class TestThinkerRouting(unittest.TestCase):
-    """dispatch-thinker (deep-design-v1): Claude Opus 5.5 first, Codex gpt-5.6-sol fallback, exit 12 if neither.
+    """dispatch-thinker (deep-design-v1): Claude Opus 5.5 only (codex is disabled), exit 12 if it is unavailable.
 
     Hermetic: PATH holds only fake binaries plus system dirs, and codex quota comes from a temp --state-file.
     """
@@ -1134,18 +1296,13 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("to claude with claude-opus-9", proc.stdout)
 
-    def test_dry_run_falls_back_to_codex_sol_when_claude_missing(self):
-        self._codex_quota(100.0, 100.0)
-        proc = self._run("--dry-run")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("to codex with gpt-5.6-sol", proc.stdout)
-
-    def test_skip_claude_env_forces_codex(self):
+    def test_skip_claude_env_fails_closed_instead_of_using_codex(self):
         self._fake("claude")
         self._codex_quota(100.0, 100.0)
         proc = self._run("--dry-run", env_extra={"DISPATCH_THINKER_SKIP_CLAUDE": "1"})
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("to codex with gpt-5.6-sol", proc.stdout)
+        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
+        self.assertIn("Thinker unavailable", proc.stderr)
+        self.assertNotIn("Would dispatch", proc.stdout)
 
     def test_both_unavailable_fails_closed_12(self):
         self._codex_quota(10.0, 5.0)
@@ -1153,7 +1310,7 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertEqual(proc.returncode, 12)
         self.assertIn("Thinker unavailable", proc.stderr)
         self.assertIn("claude", proc.stderr.lower())
-        self.assertIn("CODEX", proc.stderr)
+        self.assertNotIn("CODEX", proc.stderr)
 
     def test_forbidden_model_fails_closed_12(self):
         self._fake("claude")
@@ -1167,12 +1324,12 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("to claude with claude-opus-5-5", proc.stdout)
 
-    def test_explicit_agent_codex_is_respected(self):
+    def test_explicit_agent_codex_is_refused(self):
         self._fake("claude")
         self._codex_quota(100.0, 100.0)
         proc = self._run("--dry-run", "--agent", "codex")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("to codex with gpt-5.6-sol", proc.stdout)
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("codex is disabled", proc.stderr)
 
     def test_explicit_agent_claude_is_respected(self):
         self._fake("claude")
@@ -1180,24 +1337,10 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("to claude with claude-opus-5-5", proc.stdout)
 
-    def test_runtime_claude_failure_falls_back_to_codex(self):
+    def test_runtime_claude_failure_never_falls_back_to_codex(self):
         self._fake("claude", exit_code=1, output="claude-boom")
         self._fake("codex", exit_code=0, output="sol-ok")
         self._codex_quota(100.0, 100.0)
-        proc = self._run()
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("sol-ok", proc.stdout)
-        calls = self.calls_log.read_text(encoding="utf-8").splitlines()
-        self.assertTrue(calls[0].startswith("claude -p --model claude-opus-5-5"), calls)
-        self.assertTrue(calls[1].startswith("codex exec"), calls)
-        self.assertIn('model="gpt-5.6-sol"', calls[1])
-        attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
-        self.assertEqual(attestation["agent"], "codex")
-        self.assertEqual(attestation["model"], "gpt-5.6-sol")
-
-    def test_runtime_claude_failure_without_eligible_codex_returns_failure(self):
-        self._fake("claude", exit_code=1, output="claude-boom")
-        self._codex_quota(10.0, 5.0)
         proc = self._run()
         self.assertEqual(proc.returncode, 1)
         calls = self.calls_log.read_text(encoding="utf-8").splitlines()
@@ -1217,31 +1360,6 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertIn("--allowedTools", args)
         self.assertNotIn("Bash", args[args.index("--allowedTools") + 1].split(","))
         self.assertIn("--add-dir", args)
-
-    def test_runtime_fallback_discards_claude_partial_output_file_then_retries(self):
-        out = self.repo / "design.md"
-        self._fake("claude", exit_code=1, body=f"echo partial > '{out}'")
-        self._fake("codex", output="sol-ok")
-        self._codex_quota(100.0, 100.0)
-        proc = self._run("--output-file", str(out))
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        calls = self.calls_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual([c.split()[0] for c in calls], ["claude", "codex"])
-        self.assertFalse(out.exists(), "Claude's partial output must not be attributed to codex")
-
-    def test_runtime_fallback_refused_when_claude_left_other_changes(self):
-        (self.repo / "user-wip.txt").write_text("mine", encoding="utf-8")  # user's own uncommitted work
-        self._fake("claude", exit_code=1, body=f"echo stray > '{self.repo}/stray.txt'")
-        self._fake("codex", output="sol-ok")
-        self._codex_quota(100.0, 100.0)
-        proc = self._run()
-        self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
-        self.assertIn("stray.txt", proc.stderr)
-        self.assertNotIn("user-wip.txt", proc.stderr)
-        calls = self.calls_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(calls), 1, calls)
-        self.assertTrue((self.repo / "stray.txt").exists())
-        self.assertTrue((self.repo / "user-wip.txt").exists())
 
     def test_plain_think_both_unavailable_falls_back_internal_10(self):
         self._codex_quota(10.0, 5.0)
@@ -1307,26 +1425,6 @@ class TestThinkerRouting(unittest.TestCase):
         self.assertEqual(proc.returncode, 12)
         self.assertIn("strictly forbidden", proc.stderr)
 
-    def test_codex_run_passes_reasoning_effort_config(self):
-        self._fake("claude")
-        self._fake("codex", output="sol-ok")
-        self._codex_quota(100.0, 100.0)
-        proc = self._run("--agent", "codex")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        calls = self.calls_log.read_text(encoding="utf-8").splitlines()
-        self.assertTrue(calls[0].startswith("codex exec"), calls)
-        args = self._args("codex")
-        self.assertIn('model_reasoning_effort="medium"', args)
-
-    def test_codex_run_normalizes_max_effort_to_high(self):
-        self._fake("claude")
-        self._fake("codex", output="sol-ok")
-        self._codex_quota(100.0, 100.0)
-        proc = self._run("--agent", "codex", "--effort", "max")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        args = self._args("codex")
-        self.assertIn('model_reasoning_effort="high"', args)
-
     def test_attestation_records_effort(self):
         self._fake("claude")
         self._codex_quota(100.0, 100.0)
@@ -1365,6 +1463,7 @@ class TestEffortHelpers(unittest.TestCase):
             # Not in thinking mode, env overrides do not take effect:
             self.assertEqual(dispatch_mod.resolve_agent_effort("claude", "high", is_thinking=False), "high")
 
+    @codex_enabled()
     def test_build_agent_command_effort_flags(self):
         # Codex
         cmd_c = dispatch_mod.build_agent_command("codex", "gpt-5.6-sol", "task", "/tmp", effort="high")
@@ -1384,6 +1483,534 @@ class TestEffortHelpers(unittest.TestCase):
         # Cursor - no effort flag
         cmd_cur = dispatch_mod.build_agent_command("cursor", "gemini-3.8-flash", "task", "/tmp", effort=None)
         self.assertNotIn('--effort', cmd_cur)
+
+
+class TestExecutionRuntimeFallback(unittest.TestCase):
+    """Non-think single tasks routed by --agent auto / --priority get one retry on the next eligible agent."""
+
+    WORKER_BIN = BIN_DIR / "dispatch-worker"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.fake_bin = self.root / "bin"
+        self.fake_bin.mkdir()
+        self.agy_state = self.root / "agy-status.json"
+        self.codex_state = self.root / "codex-status.json"
+        self.calls_log = self.root / "calls.log"
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"],
+                       cwd=self.repo, check=True)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _quota(self, path, five_hour, weekly):
+        path.write_text(json.dumps({"windows": [
+            {"kind": "five_hour", "remaining_percent": five_hour},
+            {"kind": "weekly", "remaining_percent": weekly},
+        ]}), encoding="utf-8")
+
+    def _fake(self, name, exit_code=0, output="ok", body=""):
+        path = self.fake_bin / name
+        path.write_text(f"#!/bin/sh\necho \"{name}\" >> '{self.calls_log}'\n{body}\necho '{output}'\nexit {exit_code}\n",
+                        encoding="utf-8")
+        path.chmod(0o755)
+
+    def _calls(self):
+        return self.calls_log.read_text(encoding="utf-8").splitlines() if self.calls_log.exists() else []
+
+    def _run(self, *extra):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE", "DISPATCH_ROUTING_PREFERENCE",
+                            "DISPATCH_EFFORT")}
+        env.update({
+            "PATH": f"{self.fake_bin}:/usr/bin:/bin",
+            "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
+        })
+        return subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--cwd", str(self.repo), "--task", "x", *extra],
+            capture_output=True, text=True, env=env,
+        )
+
+    # --- routing helper ---
+
+    @codex_enabled()
+    def test_fallback_helper_auto_yields_other_eligible_agent(self):
+        self._quota(self.agy_state, 90.0, 90.0)
+        self._quota(self.codex_state, 80.0, 80.0)
+        fb = dispatch_mod.route_execution_fallback(
+            "agy", agy_state_file=str(self.agy_state), codex_state_file=str(self.codex_state))
+        self.assertEqual(fb, ("codex", None))
+
+    def test_fallback_helper_none_when_other_agent_ineligible(self):
+        self._quota(self.agy_state, 90.0, 90.0)
+        self._quota(self.codex_state, 1.0, 1.0)
+        fb = dispatch_mod.route_execution_fallback(
+            "agy", agy_state_file=str(self.agy_state), codex_state_file=str(self.codex_state))
+        self.assertIsNone(fb)
+
+    def test_fallback_helper_priority_chain_skips_chosen_agent_and_keeps_model(self):
+        self._quota(self.agy_state, 90.0, 90.0)
+        self._quota(self.codex_state, 90.0, 90.0)
+        chain = dispatch_mod.parse_priority_chain("codex:gpt-5.6-terra > agy:gemini-x")
+        fb = dispatch_mod.route_execution_fallback(
+            "codex", chain=chain, agy_state_file=str(self.agy_state), codex_state_file=str(self.codex_state))
+        self.assertEqual(fb[0], "agy")
+        self.assertEqual(fb, chain[1])
+
+    def test_fallback_helper_priority_chain_respects_on_demand_gate(self):
+        self._quota(self.agy_state, 90.0, 90.0)
+        chain = dispatch_mod.parse_priority_chain("agy > cursor")
+        fb = dispatch_mod.route_execution_fallback("agy", chain=chain, allow_on_demand=False,
+                                                   agy_state_file=str(self.agy_state))
+        self.assertIsNone(fb)
+
+    # --- retry decision (end to end with fake workers) ---
+
+    def test_chain_agy_failure_falls_back_once_to_claude(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._fake("agy", exit_code=1, output="agy-boom")
+        self._fake("claude", output="claude-ok")
+        proc = self._run("--priority", "agy > claude", "--no-verify")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self._calls(), ["agy", "claude"])
+        self.assertIn("claude-ok", proc.stdout)
+        self.assertIn("falling back once to claude", proc.stderr)
+        self.assertNotIn("with None", proc.stderr)
+        events = [json.loads(l) for l in (self.root / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([e["event"] for e in events], ["route", "start", "fallback", "start", "finish"])
+        self.assertEqual(len({e["run_id"] for e in events}), 1)
+        fb = events[2]
+        self.assertEqual((fb["from_agent"], fb["to_agent"], fb["exit_code"]), ("agy", "claude", 1))
+        self.assertEqual((events[-1]["agent"], events[-1]["status"]), ("claude", "SUCCESS"))
+
+    def test_auto_agy_failure_does_not_fall_back_to_codex(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        self._fake("agy", exit_code=1, output="agy-boom")
+        self._fake("codex", output="codex-ok")
+        proc = self._run("--agent", "auto", "--no-verify")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self._calls(), ["agy"])
+
+    def test_pinned_agent_does_not_fall_back(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        self._fake("agy", exit_code=1, output="agy-boom")
+        self._fake("codex", output="codex-ok")
+        proc = self._run("--agent", "agy", "--no-verify")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self._calls(), ["agy"])
+
+    def test_pinned_agent_in_equals_form_does_not_fall_back(self):
+        # An explicit --priority routes through the chain; an explicit --agent still pins, however it is spelled.
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        self._fake("agy", exit_code=1, output="agy-boom")
+        self._fake("codex", output="codex-ok")
+        for agent_args in (["--agent", "agy"], ["--agent=agy"]):
+            self.calls_log.unlink(missing_ok=True)
+            proc = self._run(*agent_args, "--priority", "agy > codex", "--no-verify")
+            self.assertNotEqual(proc.returncode, 0, agent_args)
+            self.assertEqual(self._calls(), ["agy"], agent_args)
+
+    def test_isolated_execution_error_still_emits_finish(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._fake("agy")
+        import shutil
+        shutil.rmtree(self.repo / ".git")  # `git worktree add` now fails inside the isolated runner
+        proc = self._run("--agent", "agy", "--no-verify", "--isolated")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("isolated execution error", proc.stderr)
+        events = [json.loads(l) for l in (self.root / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        fin = [e for e in events if e["event"] == "finish"]
+        self.assertEqual([(e["status"], e["exit_code"], e["agent"]) for e in fin], [("ERROR", 1, "agy")])
+
+    def test_verify_failure_does_not_fall_back(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        self._fake("agy", output="agy-ok")
+        self._fake("codex", output="codex-ok")
+        proc = self._run("--agent", "auto", "--verify-cmd", "false")
+        self.assertEqual(proc.returncode, dispatch_mod.VERIFY_FAILED_EXIT_CODE, proc.stdout + proc.stderr)
+        self.assertNotIn("codex", self._calls())
+
+    def test_failed_agent_leaving_changes_blocks_fallback(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        self._fake("agy", exit_code=1, body=f"echo half > '{self.repo}/half.txt'")
+        self._fake("claude", output="claude-ok")
+        proc = self._run("--priority", "agy > claude", "--no-verify")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self._calls(), ["agy"])
+        self.assertIn("left changes behind", proc.stderr)
+
+    def test_fallback_refusal_decision(self):
+        refusal = dispatch_mod.fallback_refusal
+        self.assertIsNone(refusal("No changes", [], head_moved=False))
+        self.assertIsNone(refusal(None, [], head_moved=False))
+        self.assertIn("merge conflict", refusal("MERGE_CONFLICT (saved patch: /tmp/x.patch)", [], head_moved=False))
+        self.assertIn("could not be compared", refusal("No changes", None, head_moved=False))
+        self.assertIn("HEAD moved", refusal("No changes", [], head_moved=True))
+        left = refusal("No changes", ["a.txt", "b.txt"], head_moved=False)
+        self.assertIn("left changes behind", left)
+        self.assertIn("a.txt", left)
+
+    def test_isolated_merge_conflict_after_partial_merge_blocks_fallback(self):
+        self._quota(self.agy_state, 95.0, 95.0)
+        self._quota(self.codex_state, 60.0, 60.0)
+        (self.repo / "a.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "a.txt"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "a"],
+                       cwd=self.repo, check=True)
+        # The base tree's own uncommitted edit makes the worker's patch conflict; its new file is still copied.
+        (self.repo / "a.txt").write_text("user edit\n", encoding="utf-8")
+        self._fake("agy", body="echo worker > a.txt; echo new > new.txt")
+        self._fake("claude", output="claude-ok")
+        proc = self._run("--priority", "agy > claude", "--no-verify", "--isolated")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self._calls(), ["agy"])
+        self.assertIn("refusing fallback", proc.stderr)
+
+
+class TestEventLog(unittest.TestCase):
+    """Append-only JSONL event log: one line per routing/run event, never raises."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.events = Path(self.temp_dir.name) / "state" / "events.jsonl"
+        self.env = mock.patch.dict(os.environ, {"DISPATCH_EVENTS_FILE": str(self.events)})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.temp_dir.cleanup()
+
+    def _events(self):
+        return [json.loads(l) for l in self.events.read_text(encoding="utf-8").splitlines()]
+
+    def test_emit_event_appends_one_json_line_with_ts_and_pid(self):
+        dispatch_mod.emit_event("start", run_id="r1", agent="agy")
+        dispatch_mod.emit_event("finish", run_id="r1", agent="agy", status="SUCCESS")
+        evs = self._events()
+        self.assertEqual([e["event"] for e in evs], ["start", "finish"])
+        self.assertEqual(evs[0]["run_id"], "r1")
+        self.assertEqual(evs[0]["pid"], os.getpid())
+        self.assertIsInstance(evs[0]["ts"], float)
+        self.assertEqual(evs[1]["status"], "SUCCESS")
+
+    def test_emit_event_never_raises_on_unwritable_path(self):
+        self.events.parent.mkdir(parents=True)
+        self.events.mkdir()  # a directory where the file should be
+        dispatch_mod.emit_event("start", run_id="r1")  # must not raise
+
+    def test_emit_event_never_raises_on_unserializable_field(self):
+        dispatch_mod.emit_event("start", run_id="r1", weird=object())
+
+    def test_task_digest_is_hash_only(self):
+        d = dispatch_mod.task_digest("short secret prompt")
+        self.assertEqual(list(d), ["task_sha"])
+        self.assertEqual(len(d["task_sha"]), 12)
+
+    def test_event_log_is_created_owner_only(self):
+        old_umask = os.umask(0)
+        try:
+            dispatch_mod.emit_event("start", run_id="r1")
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(self.events.stat().st_mode & 0o777, 0o600)
+
+    def test_run_internal_job_emits_start_and_finish(self):
+        job_dir = str(Path(self.temp_dir.name) / "jobs")
+        dispatch_mod.save_job_state("job-ev", {
+            "job_id": "job-ev", "agent": "agy", "task": "t", "cwd": self.temp_dir.name,
+            "isolated": False, "timeout": 30,
+        }, job_dir=job_dir)
+        with mock.patch.object(dispatch_mod, "run_single_task", return_value=(0, "ok", "", 2, "2 files")):
+            with self.assertRaises(SystemExit):
+                dispatch_mod.run_internal_job("job-ev", job_dir=job_dir)
+        fin = [e for e in self._events() if e["event"] == "finish"]
+        self.assertEqual(len(fin), 1)
+        self.assertEqual(fin[0]["run_id"], "job-ev")
+        self.assertEqual(fin[0]["status"], "SUCCESS")
+        self.assertEqual(fin[0]["files_changed"], 2)
+        self.assertIn("duration_s", fin[0])
+
+    def test_run_single_task_emits_start_and_timeout(self):
+        repo = Path(self.temp_dir.name) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        with mock.patch.object(dispatch_mod, "build_agent_command", return_value=["sh", "-c", "sleep 5"]):
+            dispatch_mod.run_single_task("secret task text", str(repo), "agy", "m1", 1,
+                                         verify_opts={"no_verify": True}, run_id="r9")
+        evs = self._events()
+        start = next(e for e in evs if e["event"] == "start")
+        self.assertEqual((start["run_id"], start["agent"], start["model"], start["timeout"]), ("r9", "agy", "m1", 1))
+        self.assertTrue(any(e["event"] == "timeout" and e["run_id"] == "r9" for e in evs))
+        self.assertNotIn("secret", self.events.read_text(encoding="utf-8"))
+
+    def test_verify_start_is_written_to_job_log(self):
+        repo = Path(self.temp_dir.name) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        log = Path(self.temp_dir.name) / "job.log"
+        with mock.patch.object(dispatch_mod, "build_agent_command", return_value=["sh", "-c", "echo worked"]):
+            dispatch_mod.run_single_task("t", str(repo), "agy", None, 30, verify_opts={"verify_cmd": "true"},
+                                         run_id="r1", log_path=str(log))
+        self.assertIn("[Verify] running: true", log.read_text(encoding="utf-8"))
+
+    def test_batch_emits_finish_per_task(self):
+        def _fake(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, **_kw):
+            return 1, "", "boom", 0, "no diff"
+        with mock.patch.object(dispatch_mod, "run_single_task", side_effect=_fake), \
+                mock.patch.object(dispatch_mod, "execute_in_isolated_worktree", side_effect=lambda cwd, fn, merge_lock=None: fn(cwd)):
+            dispatch_mod.execute_batch_parallel([{"task": "a"}, {"task": "b"}], self.temp_dir.name, "agy", None, 30,
+                                                run_id="batch1")
+        fin = sorted(e["run_id"] for e in self._events() if e["event"] == "finish")
+        self.assertEqual(fin, ["batch1-1", "batch1-2"])
+
+
+class TestStats(unittest.TestCase):
+    """--stats [DAYS] summarizes events.jsonl per agent and tolerates junk lines."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.events = Path(self.temp_dir.name) / "events.jsonl"
+        now = time.time()
+        old = now - 30 * 86400
+        recs = [
+            {"ts": now, "event": "start", "run_id": "a", "agent": "agy"},
+            {"ts": now, "event": "fallback", "run_id": "a", "from_agent": "agy", "to_agent": "codex"},
+            {"ts": now, "event": "start", "run_id": "a", "agent": "codex"},
+            {"ts": now, "event": "finish", "run_id": "a", "agent": "codex", "status": "SUCCESS", "duration_s": 10},
+            {"ts": now, "event": "start", "run_id": "b", "agent": "agy"},
+            {"ts": now, "event": "timeout", "run_id": "b", "agent": "agy"},
+            {"ts": now, "event": "finish", "run_id": "b", "agent": "agy", "status": "TIMEOUT_NO_PROGRESS", "duration_s": 900},
+            {"ts": now, "event": "start", "run_id": "c", "agent": "agy"},
+            {"ts": now, "event": "verify_failed", "run_id": "c", "agent": "agy"},
+            {"ts": now, "event": "finish", "run_id": "c", "agent": "agy", "status": "VERIFY_FAILED", "duration_s": 100},
+            {"ts": now, "event": "start", "run_id": "d", "agent": "agy"},
+            {"ts": now, "event": "finish", "run_id": "d", "agent": "agy", "status": "SUCCESS", "duration_s": 50},
+            {"ts": old, "event": "start", "run_id": "z", "agent": "cursor"},
+            {"ts": old, "event": "finish", "run_id": "z", "agent": "cursor", "status": "SUCCESS", "duration_s": 1},
+        ]
+        lines = [json.dumps(r) for r in recs]
+        lines.insert(3, "{not json")
+        lines.insert(5, "")
+        lines.append('["a list"]')
+        self.events.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_format_stats_report_counts_per_agent(self):
+        rep = dispatch_mod.format_stats_report(dispatch_mod.load_events(str(self.events)), days=7)
+        row = {l.split()[0]: l.split() for l in rep.splitlines() if l.split() and l.split()[0] in ("agy", "codex", "cursor")}
+        # agent runs ok% timeouts fallbacks verify_failed median
+        self.assertEqual(row["agy"][1:], ["4", "25%", "1", "1", "1", "100s"])
+        self.assertEqual(row["codex"][1:], ["1", "100%", "0", "0", "0", "10s"])
+        self.assertNotIn("cursor", row)  # older than the window
+
+    def test_stats_cli_exits_zero_and_tolerates_malformed_lines(self):
+        env = dict(os.environ, DISPATCH_EVENTS_FILE=str(self.events))
+        proc = subprocess.run([sys.executable, str(SCRIPT_PATH), "--stats"], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("agy", proc.stdout)
+        proc = subprocess.run([sys.executable, str(SCRIPT_PATH), "--stats", "60"], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("cursor", proc.stdout)
+
+    def test_stats_missing_file_exits_zero(self):
+        env = dict(os.environ, DISPATCH_EVENTS_FILE=str(Path(self.temp_dir.name) / "nope.jsonl"))
+        proc = subprocess.run([sys.executable, str(SCRIPT_PATH), "--stats"], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("No dispatch events", proc.stdout)
+
+
+class TestCodexDisabled(unittest.TestCase):
+    """Codex is switched off in DISABLED_AGENTS: no route, mode or fallback may pick it."""
+
+    WORKER_BIN = BIN_DIR / "dispatch-worker"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.agy_state = self.root / "agy.json"
+        self.codex_state = self.root / "codex.json"
+        self.fake_bin = self.root / "bin"
+        self.fake_bin.mkdir()
+        self._quota(self.agy_state, 40.0, 80.0)
+        self._quota(self.codex_state, 100.0, 100.0)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _quota(self, path, five_hour, weekly):
+        path.write_text(json.dumps({"windows": [
+            {"kind": "five_hour", "remaining_percent": five_hour},
+            {"kind": "weekly", "remaining_percent": weekly},
+        ]}), encoding="utf-8")
+
+    def _run(self, *args, script=None):
+        # Hermetic: no user config, agy and codex quota from temp files, PATH without a real claude/codex.
+        env = {k: v for k, v in os.environ.items()
+               if "DISPATCH" not in k and k not in ("CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL")}
+        env.update({
+            "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
+            "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "PATH": f"{self.fake_bin}:/usr/bin:/bin",
+        })
+        # cwd is passed explicitly: the checkout path is echoed in dry-run output and may itself contain "codex".
+        return subprocess.run([sys.executable, str(script or self.WORKER_BIN), "--cwd", str(self.root), *args],
+                              capture_output=True, text=True, env=env)
+
+    def _fake_claude(self):
+        path = self.fake_bin / "claude"
+        path.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    def test_codex_is_in_disabled_agents(self):
+        self.assertIn("codex", dispatch_mod.DISABLED_AGENTS)
+
+    # 1. auto and the default chain never pick codex
+    def test_auto_route_ignores_codex_with_higher_runway(self):
+        agent, eligible, r5, _rw, msg = dispatch_mod.route_best_agent(
+            min_5h=30.0, min_weekly=10.0, agy_state_file=str(self.agy_state), codex_state_file=str(self.codex_state))
+        self.assertEqual((agent, eligible, r5), ("agy", True, 40.0))
+        self.assertNotIn("codex", msg.lower())
+
+    def test_auto_route_with_agy_low_does_not_pick_codex(self):
+        self._quota(self.agy_state, 5.0, 5.0)
+        agent, eligible, _r5, _rw, _msg = dispatch_mod.route_best_agent(
+            min_5h=30.0, min_weekly=10.0, agy_state_file=str(self.agy_state), codex_state_file=str(self.codex_state))
+        self.assertEqual((agent, eligible), ("agy", False))
+
+    def test_default_runtime_fallback_has_no_codex(self):
+        self.assertIsNone(dispatch_mod.route_execution_fallback(
+            "agy", agy_state_file=str(self.agy_state), codex_state_file=str(self.codex_state)))
+
+    def test_priority_router_skips_codex(self):
+        agent, _model, eligible, _r5, _rw, _msg = dispatch_mod.route_priority_chain(
+            [("codex", None), ("agy", None)], agy_state_file=str(self.agy_state), codex_state_file=str(self.codex_state))
+        self.assertEqual((agent, eligible), ("agy", True))
+
+    def test_cli_auto_dry_run_picks_agy(self):
+        proc = self._run("--agent", "auto", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Would dispatch to agy", proc.stdout)
+        self.assertNotIn("codex", proc.stdout.lower())
+
+    def test_cli_auto_with_agy_low_falls_back_internal_not_codex(self):
+        self._quota(self.agy_state, 5.0, 5.0)
+        proc = self._run("--agent", "auto", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 10)
+        self.assertNotIn("codex", proc.stdout.lower())
+
+    # 2. a priority chain that names codex
+    def test_cli_priority_chain_drops_codex_and_uses_agy(self):
+        proc = self._run("--priority", "codex > agy", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Would dispatch to agy", proc.stdout)
+        self.assertEqual(proc.stderr.count("codex is disabled"), 1)
+
+    def test_cli_priority_chain_codex_only_fails(self):
+        proc = self._run("--priority", "codex:gpt-5.6-terra", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("codex is disabled", proc.stderr)
+        self.assertNotIn("Would dispatch", proc.stdout)
+        self.assertNotIn("FALLBACK_INTERNAL", proc.stdout)
+
+    # 3. --agent codex is refused
+    def test_cli_agent_codex_is_refused(self):
+        proc = self._run("--agent", "codex", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("codex is disabled", proc.stderr)
+        self.assertNotIn("Would dispatch", proc.stdout)
+
+    def test_cli_codex_named_binary_is_refused(self):
+        proc = self._run("--dry-run", "--task", "x", script=CODEX_SCRIPT_PATH)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("codex is disabled", proc.stderr)
+
+    def test_codex_named_binary_can_still_inspect_jobs(self):
+        proc = self._run("--status", "all", "--job-dir", str(self.root / "jobs"), script=CODEX_SCRIPT_PATH)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_cli_explicit_auto_thinker_uses_claude_not_agy(self):
+        self._fake_claude()
+        proc = self._run("--think", "--agent", "auto", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+
+    def test_batch_item_naming_codex_is_refused(self):
+        batch_file = self.root / "batch.json"
+        batch_file.write_text(json.dumps([{"task": "x", "agent": "codex"}]), encoding="utf-8")
+        proc = self._run("--agent", "agy", "--dry-run", "--batch-file", str(batch_file))
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("codex is disabled", proc.stderr)
+
+    def test_build_command_refuses_codex(self):
+        with self.assertRaises(ValueError):
+            dispatch_mod.build_agent_command("codex", None, "task", "/tmp")
+
+    # 4. the thinker is Claude Opus only
+    def test_thinker_route_has_no_codex_fallback(self):
+        with mock.patch.object(dispatch_mod, "check_quota", return_value=(True, 100.0, 100.0, "ok")):
+            agent, model, eligible, _r5, _rw, _msg, fallback = dispatch_mod.route_thinker(
+                codex_state_file=str(self.codex_state))
+        self.assertEqual((agent, model, eligible, fallback), ("claude", "claude-opus-5-5", True, None))
+
+    def test_cli_thinker_without_claude_fails_closed(self):
+        proc = self._run("--capability", "deep-design-v1", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 12)
+        self.assertNotIn("Would dispatch", proc.stdout)
+
+    def test_cli_think_flag_without_claude_does_not_use_codex(self):
+        proc = self._run("--think", "--dry-run", "--task", "x")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("Would dispatch", proc.stdout)
+
+    def test_cli_think_with_non_claude_model_fails(self):
+        self._fake_claude()
+        for flags in (["--think"], ["--capability", "deep-design-v1"], ["--think", "--agent", "auto"]):
+            for model in ("gpt-5.6-sol", "sol"):
+                proc = self._run(*flags, "--model", model, "--dry-run", "--task", "x")
+                self.assertEqual(proc.returncode, 12, (flags, model, proc.stdout, proc.stderr))
+                self.assertIn(model, proc.stderr)
+                self.assertNotIn("Would dispatch", proc.stdout)
+
+    def test_cli_thinker_uses_claude_opus(self):
+        self._fake_claude()
+        proc = self._run("--think", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+
+    # 5. --check-quota neither reports nor depends on codex
+    def test_check_quota_auto_ignores_codex(self):
+        self.codex_state.unlink()
+        proc = self._run("--check-quota")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("codex", proc.stdout.lower())
+
+    def test_check_quota_priority_chain_with_codex_reports_agy(self):
+        proc = self._run("--check-quota", "--priority", "codex > agy")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("40.0%", proc.stdout)
+        self.assertNotIn("codex", proc.stdout.lower())
+        self.assertIn("codex is disabled", proc.stderr)
+
+    def test_help_does_not_offer_codex(self):
+        proc = self._run("--help")
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("codex", proc.stdout.lower())
 
 
 if __name__ == "__main__":

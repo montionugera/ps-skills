@@ -199,6 +199,10 @@ the one promote recorded when it pushed (or `--direct` squashed) the release, el
 PR's `headRefOid`, else `origin`'s `release/<v>`, so a host that auto-deletes merged
 branches does not blind the check. An entry without `shipped_sha` (older psrw) is only
 warned about, never reset. A feature that fails this check is stranded.
+A feature whose presence cannot be proven either way (no `shipped_sha`, no merged head found, or the
+ancestry check errored) is *unverified*: cleanup refuses before deleting anything and names it;
+`--force-cleanup` proceeds after a manual check, and the final line then says "NOT verified"
+instead of "Promoted".
 Cleanup flags it loudly and resets it in `main`'s catalog to `claimed` (the worktree
 survives) or `open`, with `release_version` cleared and `stranded_from: <v>` set. Its
 branch and folder are kept, so the next release can ship it. Cleanup returns the list as
