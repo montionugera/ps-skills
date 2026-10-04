@@ -50,6 +50,7 @@ DEFAULT_THINK_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_5H_QUOTA"
 DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKLY_QUOTA", "20.0"))
 # A quota observation older than this may hide quota spent since; it is not trusted for routing.
 STALE_OBSERVATION_MINUTES = 60
+ALLOW_STALE = False  # set by --allow-stale: a stale quota observation is reported but does not make the agent ineligible
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 
@@ -201,18 +202,21 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
     windows = data.get("windows") or data.get("snapshot", {}).get("windows") or []
     rem_5h = None
     rem_weekly = None
+    rolled_over = set()  # windows whose resets_at has passed: read as 100%, so the observation's age cannot make them stale
     for w in windows:
         if w.get("kind") == "five_hour":
             rem_val = float(w.get("remaining_percent", 0.0))
             resets_at_ts = _parse_resets_at(w.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
+                rolled_over.add("five_hour")
             rem_5h = rem_val
         elif w.get("kind") == "weekly":
             rem_val = float(w.get("remaining_percent", 0.0))
             resets_at_ts = _parse_resets_at(w.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
+                rolled_over.add("weekly")
             rem_weekly = rem_val
 
     # Fallback to payload.quota (Gemini structure) if snapshot windows missing
@@ -224,6 +228,7 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
             resets_at_ts = _parse_resets_at(g5.get("reset_time") or g5.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
+                rolled_over.add("five_hour")
             rem_5h = rem_val
         if rem_weekly is None and "gemini-weekly" in quota:
             gw = quota["gemini-weekly"]
@@ -231,6 +236,7 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
             resets_at_ts = _parse_resets_at(gw.get("reset_time") or gw.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
+                rolled_over.add("weekly")
             rem_weekly = rem_val
 
     if rem_5h is None or rem_weekly is None:
@@ -239,12 +245,19 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
     eligible = (rem_5h >= min_5h) and (rem_weekly >= min_weekly)
     stale_suffix = ""
     try:
-        mtime = os.path.getmtime(target_file)
-        age_minutes = int((current_time - mtime) / 60)
-        if age_minutes > STALE_OBSERVATION_MINUTES:
-            eligible = False
-            stale_suffix = (f" [stale: observation {age_minutes}m old, over {STALE_OBSERVATION_MINUTES}m"
-                            f" - not eligible until the quota telemetry refreshes]")
+        snapshot = data.get("snapshot")
+        observed_at = snapshot.get("fetched_at_unix") if isinstance(snapshot, dict) else None
+        if isinstance(observed_at, bool) or not isinstance(observed_at, (int, float)):
+            observed_at = os.path.getmtime(target_file)
+        age_minutes = int((current_time - observed_at) / 60)
+        if age_minutes > STALE_OBSERVATION_MINUTES and len(rolled_over) < 2:
+            if ALLOW_STALE:
+                stale_suffix = (f" [stale: observation {age_minutes}m old, over {STALE_OBSERVATION_MINUTES}m"
+                                f" - proceeding (--allow-stale)]")
+            else:
+                eligible = False
+                stale_suffix = (f" [stale: observation {age_minutes}m old, over {STALE_OBSERVATION_MINUTES}m"
+                                f" - not eligible until the quota telemetry refreshes]")
     except Exception:
         pass
 
@@ -1821,6 +1834,8 @@ def main():
     parser.add_argument("--timeout", type=int, default=default_timeout,
                         help=f"Timeout in seconds for execution (default: {default_timeout}s)")
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
+    parser.add_argument("--allow-stale", action="store_true",
+                        help=f"Proceed on a quota observation older than {STALE_OBSERVATION_MINUTES} minutes instead of treating the agent as ineligible")
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
     parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Claude Opus 5.5 only (`claude -p`)")
@@ -1843,6 +1858,9 @@ def main():
     parser.add_argument("--internal-run-job", type=str, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+    if args.allow_stale:
+        global ALLOW_STALE
+        ALLOW_STALE = True
     # Explicit --agent (any spelling: `--agent X`, `--agent=X`) vs the default derived from the program name.
     agent_explicit = args.agent is not None
     if not agent_explicit:
@@ -2046,6 +2064,9 @@ def main():
             # A pinned agent still runs the model the preference chain configures for it (e.g. agy:gemini-3.8-flash-high).
             chosen_model = next((m for a, m in parse_priority_chain(args.priority) if a == chosen_agent and m), None)
         eligible, rem_5h, rem_weekly, msg = check_quota(chosen_agent, args.state_file, min_5h, min_weekly)
+
+    if ALLOW_STALE and eligible and "[stale:" in msg:
+        print(f"NOTICE: proceeding on a stale quota reading (--allow-stale): {msg}", file=sys.stderr)
 
     if args.check_quota:
         if eligible:

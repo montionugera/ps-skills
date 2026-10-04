@@ -206,6 +206,57 @@ class TestWindowRollover(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertNotIn("stale", msg)
 
+    def _write_state(self, now, fetched_age_minutes=None, mtime_age_minutes=0, reset_5h=5000, reset_weekly=50000):
+        snapshot = {"windows": [
+            {"kind": "five_hour", "remaining_percent": 90.0, "resets_at": now + reset_5h},
+            {"kind": "weekly", "remaining_percent": 90.0, "resets_at": now + reset_weekly},
+        ]}
+        if fetched_age_minutes is not None:
+            snapshot["fetched_at_unix"] = int(now - fetched_age_minutes * 60)
+        self.state_file.write_text(json.dumps({"snapshot": snapshot}), encoding="utf-8")
+        mtime = now - mtime_age_minutes * 60
+        os.utime(self.state_file, (mtime, mtime))
+
+    def _check(self, now):
+        return dispatch_mod.check_quota("agy", str(self.state_file), min_5h=30.0, min_weekly=10.0, current_time=now)
+
+    def test_age_is_judged_from_fetched_at_not_mtime(self):
+        now = time.time()
+        self._write_state(now, fetched_age_minutes=5, mtime_age_minutes=dispatch_mod.STALE_OBSERVATION_MINUTES + 30)
+        eligible, _r5, _rw, msg = self._check(now)
+        self.assertTrue(eligible, msg)
+        self.assertNotIn("stale", msg)
+
+        self._write_state(now, fetched_age_minutes=dispatch_mod.STALE_OBSERVATION_MINUTES + 30, mtime_age_minutes=0)
+        eligible, _r5, _rw, msg = self._check(now)
+        self.assertFalse(eligible)
+        self.assertIn("stale", msg)
+
+    def test_old_observation_is_not_stale_once_both_windows_have_reset(self):
+        now = time.time()
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600, reset_5h=-60, reset_weekly=-60)
+        eligible, rem_5h, rem_weekly, msg = self._check(now)
+        self.assertTrue(eligible, msg)
+        self.assertEqual((rem_5h, rem_weekly), (100.0, 100.0))
+        self.assertNotIn("stale", msg)
+
+    def test_old_observation_stays_stale_while_one_window_has_not_reset(self):
+        now = time.time()
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600, reset_5h=-60)
+        eligible, rem_5h, _rw, msg = self._check(now)
+        self.assertFalse(eligible)
+        self.assertEqual(rem_5h, 100.0)
+        self.assertIn("stale", msg)
+
+    def test_allow_stale_keeps_a_stale_observation_eligible(self):
+        now = time.time()
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600)
+        with mock.patch.object(dispatch_mod, "ALLOW_STALE", True, create=True):
+            eligible, _r5, _rw, msg = self._check(now)
+        self.assertTrue(eligible, msg)
+        self.assertIn("stale", msg)
+        self.assertIn("--allow-stale", msg)
+
 
 @codex_enabled()
 class TestBestRunwayAutoRouting(unittest.TestCase):
@@ -2055,6 +2106,17 @@ class TestCodexDisabled(unittest.TestCase):
         proc = self._run("--agent", "agy", "--dry-run", "--task", "x")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("Would dispatch to agy in ", proc.stdout)
+
+    # 7. --allow-stale proceeds on a stale quota reading
+    def test_cli_allow_stale_proceeds_with_notice(self):
+        old = time.time() - (dispatch_mod.STALE_OBSERVATION_MINUTES + 30) * 60
+        os.utime(self.agy_state, (old, old))
+        proc = self._run("--agent", "agy", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 10, proc.stdout + proc.stderr)
+        proc = self._run("--agent", "agy", "--allow-stale", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy", proc.stdout)
+        self.assertEqual(proc.stderr.count("NOTICE: proceeding on a stale quota reading (--allow-stale)"), 1)
 
     def test_help_does_not_offer_codex(self):
         proc = self._run("--help")
