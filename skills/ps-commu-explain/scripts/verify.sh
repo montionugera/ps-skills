@@ -342,7 +342,9 @@ finally:
     if proc is not None and proc.poll() is None:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # PermissionError: the process exited between poll() and killpg(), so
+            # the group holds only an unreaped zombie — macOS reports that as EPERM.
             pass
     if proc is not None:
         try:
