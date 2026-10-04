@@ -2042,6 +2042,9 @@ def main():
             codex_state_file=args.state_file if default_agent == "codex" else None,
         )
     else:
+        if not chosen_model and args.priority:
+            # A pinned agent still runs the model the preference chain configures for it (e.g. agy:gemini-3.8-flash-high).
+            chosen_model = next((m for a, m in parse_priority_chain(args.priority) if a == chosen_agent and m), None)
         eligible, rem_5h, rem_weekly, msg = check_quota(chosen_agent, args.state_file, min_5h, min_weekly)
 
     if args.check_quota:

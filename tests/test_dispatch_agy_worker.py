@@ -2033,6 +2033,29 @@ class TestCodexDisabled(unittest.TestCase):
         self.assertNotIn("codex", proc.stdout.lower())
         self.assertIn("codex is disabled", proc.stderr)
 
+    # 6. a pinned --agent takes its model from the configured preference chain
+    def _configure_preference(self, chain):
+        (self.root / "no-config.env").write_text(f'DISPATCH_ROUTING_PREFERENCE="{chain}"\n', encoding="utf-8")
+
+    def test_explicit_agent_uses_model_from_configured_preference(self):
+        self._configure_preference("cursor:other-model > agy:gemini-3.8-flash-high")
+        proc = self._run("--agent", "agy", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high", proc.stdout)
+
+    def test_explicit_model_beats_configured_preference_model(self):
+        self._configure_preference("agy:gemini-3.8-flash-high")
+        proc = self._run("--agent", "agy", "--model", "gemini-pinned", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-pinned", proc.stdout)
+        self.assertNotIn("gemini-3.8-flash-high", proc.stdout)
+
+    def test_explicit_agent_absent_from_preference_keeps_default_model(self):
+        self._configure_preference("cursor:other-model")
+        proc = self._run("--agent", "agy", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy in ", proc.stdout)
+
     def test_help_does_not_offer_codex(self):
         proc = self._run("--help")
         self.assertEqual(proc.returncode, 0)
