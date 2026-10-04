@@ -2201,6 +2201,36 @@ class TestCodexDisabled(unittest.TestCase):
         self.assertIn("Would dispatch to agy", proc.stdout)
         self.assertEqual(proc.stderr.count("NOTICE: proceeding on a stale quota reading (--allow-stale)"), 1)
 
+    # 8. "was this flag given" is read from the parsed arguments, so `--x=value` counts like `--x value`
+    def test_cli_priority_equals_form_is_honoured_with_pinned_agent(self):
+        for flag in (["--priority=codex > agy:foo"], ["--priority", "codex > agy:foo"]):
+            proc = self._run("--agent", "agy", *flag, "--dry-run", "--task", "x")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("Would dispatch to agy with foo", proc.stdout)
+            self.assertEqual(proc.stderr.count("codex is disabled"), 1, flag)
+
+    def _think_thresholds(self, *flags):
+        seen = {}
+
+        def fake_route_thinker(**kwargs):
+            seen.update(kwargs)
+            return "claude", "claude-opus-5-5", True, 100.0, 100.0, "ok", None
+
+        argv = [str(self.WORKER_BIN), "--think", *flags, "--dry-run", "--task", "x", "--cwd", str(self.root)]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.dict(os.environ, {"DISPATCH_CONFIG_FILE": str(self.root / "no-config.env")}), \
+                mock.patch.object(dispatch_mod, "route_thinker", fake_route_thinker), \
+                mock.patch("builtins.print"), self.assertRaises(SystemExit) as exited:
+            dispatch_mod.main()
+        self.assertEqual(exited.exception.code, 0)
+        return seen["min_5h"], seen["min_weekly"]
+
+    def test_think_thresholds_honour_equals_form(self):
+        think_defaults = (dispatch_mod.DEFAULT_THINK_MIN_5H, dispatch_mod.DEFAULT_THINK_MIN_WEEKLY)
+        self.assertEqual(self._think_thresholds(), think_defaults)
+        self.assertEqual(self._think_thresholds("--min-5h", "55", "--min-weekly", "44"), (55.0, 44.0))
+        self.assertEqual(self._think_thresholds("--min-5h=55", "--min-weekly=44"), (55.0, 44.0))
+
     def test_help_does_not_offer_codex(self):
         proc = self._run("--help")
         self.assertEqual(proc.returncode, 0)

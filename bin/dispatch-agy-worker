@@ -1829,7 +1829,8 @@ def main():
                         help="Model override for the chosen agent")
     parser.add_argument("--effort", type=str, default=None,
                         help="Reasoning effort level (e.g. low, medium, high, max). Thinking mode defaults to 'high'.")
-    parser.add_argument("--priority", type=str, default=default_preference,
+    # default=None on --priority / --min-5h / --min-weekly: "was it given" is read off the parsed value (resolved below).
+    parser.add_argument("--priority", type=str, default=None,
                         help="Priority chain preference (e.g. 'cursor:gemini-3.8-flash > agy')")
     parser.add_argument("--mode", choices=["subscription_quota_remaining", "on_demand"], default=default_mode_str,
                         help="Dispatch mode: 'subscription_quota_remaining' (flat quota) or 'on_demand'")
@@ -1854,8 +1855,8 @@ def main():
     parser.add_argument("--from-plan", type=str, help="Extract tasks from a markdown plan file (e.g. plan.md)")
     parser.add_argument("--phase", type=str, default=None, help="Phase to extract from plan (e.g. 1 or 'Phase 1')")
     parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
-    parser.add_argument("--min-5h", type=float, default=DEFAULT_MIN_5H, help="Minimum 5h quota remaining percent")
-    parser.add_argument("--min-weekly", type=float, default=DEFAULT_MIN_WEEKLY, help="Minimum weekly quota remaining percent")
+    parser.add_argument("--min-5h", type=float, default=None, help="Minimum 5h quota remaining percent")
+    parser.add_argument("--min-weekly", type=float, default=None, help="Minimum weekly quota remaining percent")
     parser.add_argument("--timeout", type=int, default=default_timeout,
                         help=f"Timeout in seconds for execution (default: {default_timeout}s)")
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
@@ -1888,6 +1889,9 @@ def main():
         ALLOW_STALE = True
     # Explicit --agent (any spelling: `--agent X`, `--agent=X`) vs the default derived from the program name.
     agent_explicit = args.agent is not None
+    priority_explicit = args.priority is not None
+    if not priority_explicit:
+        args.priority = default_preference
     if not agent_explicit:
         args.agent = default_agent
 
@@ -2021,13 +2025,10 @@ def main():
             print(f"FAILED: capability 'deep-design-v1' strictly forbids model '{chosen_model}'. Allowed models: {ALLOWED_DEEP_DESIGN_MODELS}", file=sys.stderr)
             sys.exit(12)  # Fail-closed: THINKER_UNAVAILABLE / FORBIDDEN_MODEL
 
-    min_5h = args.min_5h
-    min_weekly = args.min_weekly
+    min_5h = args.min_5h if args.min_5h is not None else (DEFAULT_THINK_MIN_5H if args.think else DEFAULT_MIN_5H)
+    min_weekly = args.min_weekly if args.min_weekly is not None else (
+        DEFAULT_THINK_MIN_WEEKLY if args.think else DEFAULT_MIN_WEEKLY)
     if args.think:
-        if "--min-5h" not in sys.argv:
-            min_5h = DEFAULT_THINK_MIN_5H
-        if "--min-weekly" not in sys.argv:
-            min_weekly = DEFAULT_THINK_MIN_WEEKLY
         # route_thinker picks Claude Opus 5.5 (below), whatever --agent says.
         if chosen_agent == "codex":
             chosen_model = normalize_model_name("codex", chosen_model) if chosen_model else DEFAULT_CODEX_THINK_MODEL
@@ -2063,7 +2064,7 @@ def main():
         chosen_agent, chosen_model, eligible, rem_5h, rem_weekly, msg, runtime_fallback = route_thinker(
             model=chosen_model, codex_state_file=args.state_file, min_5h=min_5h, min_weekly=min_weekly,
         )
-    elif args.priority and (chosen_agent == "auto" or "--priority" in sys.argv):
+    elif args.priority and (chosen_agent == "auto" or priority_explicit):
         chain, dropped = drop_disabled_agents(parse_priority_chain(args.priority))
         for name in dropped:
             print(f"NOTICE: {name} is disabled; dropped from priority chain '{args.priority}'.", file=sys.stderr)
