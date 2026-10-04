@@ -296,7 +296,7 @@ class TestWindowRollover(unittest.TestCase):
     def test_allow_stale_keeps_a_stale_observation_eligible(self):
         now = time.time()
         self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600)
-        with mock.patch.object(dispatch_mod, "ALLOW_STALE", True, create=True):
+        with mock.patch.object(dispatch_mod, "ALLOW_STALE", True):
             eligible, _r5, _rw, msg = self._check(now)
         self.assertTrue(eligible, msg)
         self.assertIn("stale", msg)
@@ -1690,8 +1690,10 @@ class TestThinkerRouting(unittest.TestCase):
         proc = self._run("--agent", "agy", "--dry-run")
         self.assertEqual(proc.returncode, 12, proc.stdout + proc.stderr)
         self.assertNotIn("Would dispatch", proc.stdout)
+        # plain --think is not the fail-closed capability: it reports quota-style fallback (10), deep-design exits 12.
         proc = self._run("--agent", "agy", "--dry-run", capability=False)
-        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(proc.returncode, 10, proc.stdout + proc.stderr)
+        self.assertIn("FALLBACK_INTERNAL", proc.stdout)
         self.assertNotIn("Would dispatch", proc.stdout)
 
     def test_think_with_explicit_agy_attests_the_agent_that_ran(self):
