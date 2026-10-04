@@ -60,7 +60,7 @@ dispatch-worker --task "Heavy refactor in src/engine" --detach --cwd "$REPO_DIR"
 # There is no fallback thinker: a failed Claude run is reported as a failure.
 # Defaults reasoning effort to 'high' (--effort overrides, or THINK_EFFORT env var).
 # Fails closed (exit code 12) if Claude is unavailable or a non-Claude model is specified.
-# --think / deep-design-v1 always run on Claude: an explicit `--agent agy` is ignored with a stderr NOTICE.
+# --think / deep-design-v1 always run on Claude: an explicit `--agent agy` (or a batch item's agent) is ignored with a stderr NOTICE.
 dispatch-thinker --task "Synthesize multi-wave portal architecture" \
   --context docs/specs/hub.md \
   --output-file /tmp/portal-synthesis.md
@@ -90,10 +90,10 @@ dispatch-worker --tail dw-1789785000-a1b2 -f    # Follow live output stream
 - **Live output**: detached jobs stream worker stdout/stderr into their log as it arrives, so `dispatch-worker --tail <job> -f` shows progress before the worker exits.
 - **Stall detection**: `dispatch-worker --status` shows `last output Ns ago` for RUNNING jobs and marks `STALLED?` after 300s of silence. Check `--tail` before killing it.
 - **Stats**: `dispatch-worker --stats [DAYS]` (default 7) prints runs, success %, timeouts, fallbacks, verify failures and median duration per agent.
-- **Recovery**: an `--agent auto` / `--priority` run whose worker fails retries once on the next eligible agent (never for a pinned `--agent` or a verify failure), and a quota observation older than 60 minutes counts as not eligible. Age is read from the observation's `snapshot.fetched_at_unix` (file mtime when absent), a reading whose 5h and weekly windows have both reset is never stale, and `--allow-stale` proceeds on a stale reading with a stderr NOTICE.
-- **Pinned agent model**: `--agent X` without `--model` runs the model the routing preference chain lists for X (e.g. `agy:gemini-3.8-flash-high`); `--model` still wins.
-- **Waiting**: `--wait <job>` waits up to `--wait-timeout` seconds (default: 2 x the job's timeout + 2 x its verify timeout, not `--timeout`). A job still alive after that is reported `STILL_RUNNING` with exit `14`: wait again, do not re-dispatch. `--wait all` only waits on jobs dispatched for the current `--cwd`.
-- **Dead jobs**: `--status` and `--wait` mark a RUNNING or PENDING job whose process is gone as `FAILED_DIED` and save that to the job record.
+- **Recovery**: an `--agent auto` / `--priority` run whose worker fails retries once on the next eligible agent (never for a pinned `--agent` or a verify failure), and a quota observation older than 60 minutes counts as not eligible. Age is read from the observation's `snapshot.fetched_at_unix` (file mtime when absent), an implausible value (future, milliseconds, NaN) falls back to the mtime. Once both the 5h and weekly windows have reset, the age is counted from the later reset, with the same 60-minute limit. `--allow-stale` proceeds on a stale reading with a stderr NOTICE.
+- **Pinned agent model**: `--agent X` without `--model` runs the model the routing preference chain lists for X (e.g. `agy:gemini-3.8-flash-high`); `--model` still wins. A batch item naming another agent gets that agent's chain model, not the routed agent's.
+- **Waiting**: `--wait <job>` waits up to `--wait-timeout` seconds; without it, an explicitly given `--timeout`; without either, 2 x the job's timeout + 2 x its verify timeout. The budget is printed on stderr. A job still running (or not started yet) after that is reported `STILL_RUNNING` with exit `14`: wait again, do not re-dispatch. `--wait all` waits on the jobs of the current `--cwd`'s repository (any subdirectory or worktree) and reports on stderr how many other active jobs it skipped; add `--all-cwds` to wait on every job.
+- **Dead jobs**: `--status` and `--wait` mark a RUNNING or PENDING job whose process is gone as `FAILED_DIED` and save that to the job record. A PENDING job that never got a process is marked the same way 120 seconds after it was created.
 - **Detached jobs do not get the runtime fallback**: a `--detach` job runs only the agent it was routed to; if it fails, re-dispatch it yourself.
 
 ### Exit Codes Contract
