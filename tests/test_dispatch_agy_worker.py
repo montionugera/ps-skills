@@ -1120,8 +1120,14 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         dispatch_mod.save_job_state(jid, state, job_dir=str(self.job_dir))
 
     def _wait_cli(self, *args):
+        # Hermetic: no user config.env, no real event log, job dir in the temp dir.
+        env = {k: v for k, v in os.environ.items() if "DISPATCH" not in k}
+        env.update({
+            "DISPATCH_CONFIG_FILE": str(Path(self.temp_dir.name) / "no-config.env"),
+            "DISPATCH_EVENTS_FILE": str(Path(self.temp_dir.name) / "events.jsonl"),
+        })
         return subprocess.run([sys.executable, str(SCRIPT_PATH), "--job-dir", str(self.job_dir), *args],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=env)
 
     def test_wait_budget_is_derived_from_the_job_record(self):
         self.assertEqual(dispatch_mod.wait_budget_seconds([{"timeout": 100, "verify_timeout": 50}], 900), 300)
@@ -1138,12 +1144,54 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertEqual(dispatch_mod.load_job_state("dw-live", job_dir=str(self.job_dir))["status"], "RUNNING")
 
     def test_wait_is_not_bounded_by_the_worker_timeout(self):
-        # --timeout 1 used to end the wait after 1s; the wait budget now comes from the job record (2*1 + 2*1 = 4s).
-        self._save_live_job("dw-budget", timeout=1, verify_timeout=1)
-        started = time.time()
-        res = self._wait_cli("--wait", "dw-budget", "--timeout", "1")
+        # No --timeout / --wait-timeout given: the budget comes from the job record (2*100 + 2*50), not the default timeout.
+        self._save_live_job("dw-budget", timeout=100, verify_timeout=50, status="SUCCESS", exit_code=0)
+        res = self._wait_cli("--wait", "dw-budget")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Waiting up to 300s", res.stderr)
+
+    def test_wait_explicit_timeout_bounds_the_wait(self):
+        self._save_live_job("dw-bounded", timeout=100, verify_timeout=50)
+        for flag in (["--timeout", "1"], ["--timeout=1"]):
+            started = time.time()
+            res = self._wait_cli("--wait", "dw-bounded", *flag)
+            self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+            self.assertIn("Waiting up to 1s", res.stderr)
+            self.assertLess(time.time() - started, 10)
+
+    def test_wait_timeout_flag_beats_explicit_timeout(self):
+        self._save_live_job("dw-prec", status="SUCCESS", exit_code=0)
+        res = self._wait_cli("--wait", "dw-prec", "--timeout", "7", "--wait-timeout", "3")
+        self.assertIn("Waiting up to 3s", res.stderr)
+
+    def test_is_pid_running_treats_permission_error_as_alive(self):
+        with mock.patch.object(dispatch_mod.os, "kill", side_effect=PermissionError):
+            self.assertTrue(dispatch_mod.is_pid_running(12345))
+        with mock.patch.object(dispatch_mod.os, "kill", side_effect=ProcessLookupError):
+            self.assertFalse(dispatch_mod.is_pid_running(12345))
+
+    def test_wait_reaps_a_dead_job_in_the_loop(self):
+        self._save_live_job("dw-wait-dead", pid=self._dead_pid())
+        res = self._wait_cli("--wait", "dw-wait-dead", "--wait-timeout", "5")
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("Status: FAILED_DIED (exit 1)", res.stdout)
+        self.assertEqual(self._status_of("dw-wait-dead"), "FAILED_DIED")
+
+    def test_wait_reports_pidless_pending_job_as_still_running(self):
+        self._save_live_job("dw-nopid", pid=None, status="PENDING")
+        res = self._wait_cli("--wait", "dw-nopid", "--wait-timeout", "1")
         self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
-        self.assertGreaterEqual(time.time() - started, 3.5)
+        self.assertIn("Status: STILL_RUNNING (exit 14)", res.stdout)
+        self.assertEqual(self._status_of("dw-nopid"), "PENDING")
+
+    def test_old_pidless_pending_job_is_reaped(self):
+        self._save_live_job("dw-nopid-old", pid=None, status="PENDING", created_at=time.time() - 600)
+        self._save_live_job("dw-nopid-undated", pid=None, status="PENDING", created_at=None)
+        res = self._wait_cli("--wait", "dw-nopid-old", "--wait-timeout", "5")
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertEqual(self._status_of("dw-nopid-old"), "FAILED_DIED")
+        self._wait_cli("--status")
+        self.assertEqual(self._status_of("dw-nopid-undated"), "PENDING")
 
     def test_wait_all_timeout_reports_still_running(self):
         self._save_live_job("dw-live-a")
@@ -1193,8 +1241,25 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         res = self._wait_cli("--wait", "all", "--wait-timeout", "1", "--cwd", str(self.repo_dir))
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("No running jobs to wait for", res.stdout)
+        self.assertIn("1 active job(s) from other repositories", res.stderr)
         res = self._wait_cli("--wait", "all", "--wait-timeout", "1", "--cwd", str(other))
         self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+        res = self._wait_cli("--wait", "all", "--all-cwds", "--wait-timeout", "1", "--cwd", str(self.repo_dir))
+        self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+        self.assertNotIn("from other repositories", res.stderr)
+
+    def test_wait_all_includes_subdir_and_sibling_worktree_of_the_same_repo(self):
+        subdir = self.repo_dir / "pkg"
+        subdir.mkdir()
+        sibling = Path(self.temp_dir.name) / "repo-wt"
+        subprocess.run(["git", "worktree", "add", "-q", str(sibling), "-b", "wt"], cwd=self.repo_dir, check=True,
+                       capture_output=True)
+        self._save_live_job("dw-subdir", cwd=str(subdir))
+        self._save_live_job("dw-sibling", cwd=str(sibling))
+        res = self._wait_cli("--wait", "all", "--wait-timeout", "1", "--cwd", str(self.repo_dir))
+        self.assertEqual(res.returncode, 14, res.stdout + res.stderr)
+        self.assertEqual(res.stdout.count("STILL_RUNNING"), 2)
+        self.assertNotIn("from other repositories", res.stderr)
 
     def test_extract_tasks_from_plan(self):
         plan_content = """# Plan

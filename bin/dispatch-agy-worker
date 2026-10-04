@@ -67,6 +67,7 @@ DEFAULT_VERIFY_SCRIPT = "scripts/precheck.sh"
 VERIFY_FAILED_EXIT_CODE = 13
 WAIT_STILL_RUNNING_EXIT_CODE = 14  # --wait ran out of budget while the job was still alive
 VERIFY_TAIL_LINES = 40
+PENDING_NO_PID_GRACE_SECONDS = 120  # a PENDING job with no pid this long after creation never got its runner
 STALL_SECONDS = 300  # --status flags a RUNNING job STALLED? after this long without log output
 
 PROTECTED_CONFIG_PATTERNS = [
@@ -1199,22 +1200,47 @@ def is_pid_running(pid):
     try:
         os.kill(pid, 0)
         return True
-    except (OSError, ProcessLookupError):
+    except ProcessLookupError:
         return False
+    except OSError:
+        # e.g. PermissionError: the process exists but is not ours to signal. Not proof of death.
+        return True
+
+
+def job_looks_dead(state):
+    """A RUNNING/PENDING job whose pid is gone, or a PENDING job that never got a pid within the grace period."""
+    if state.get("status") not in ("RUNNING", "PENDING"):
+        return False
+    if state.get("pid"):
+        return not is_pid_running(state["pid"])
+    created = state.get("created_at")
+    return (state.get("status") == "PENDING" and isinstance(created, (int, float))
+            and time.time() - created > PENDING_NO_PID_GRACE_SECONDS)
 
 
 def reap_dead_job(state, job_dir=DEFAULT_JOB_DIR):
-    """Persists FAILED_DIED for a RUNNING/PENDING job whose pid is gone. Returns the state to report."""
-    if (state.get("status") not in ("RUNNING", "PENDING") or not state.get("job_id") or not state.get("pid")
-            or is_pid_running(state["pid"])):
+    """Persists FAILED_DIED for a job that job_looks_dead. Returns the state to report."""
+    if not state.get("job_id") or not job_looks_dead(state):
         return state
     # Re-read: the runner may have written its final status and exited between our read and the pid check.
     fresh = load_job_state(state["job_id"], job_dir) or state
-    if fresh.get("status") in ("RUNNING", "PENDING"):
+    if job_looks_dead(fresh):
         fresh["status"] = "FAILED_DIED"
         fresh["exit_code"] = 1
         save_job_state(fresh["job_id"], fresh, job_dir)
     return fresh
+
+
+def repo_identity(path):
+    """What `--wait all` scopes by: the git common dir (shared by a repo's subdirs and worktrees), else the real path."""
+    real = os.path.realpath(path)
+    try:
+        res = subprocess.run(["git", "-C", real, "rev-parse", "--git-common-dir"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return real
+    if res.returncode != 0 or not res.stdout.strip():
+        return real
+    return os.path.realpath(os.path.join(real, res.stdout.strip()))
 
 
 def wait_budget_seconds(states, fallback_timeout):
@@ -1864,7 +1890,9 @@ def main():
     parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
     parser.add_argument("--min-5h", type=float, default=None, help="Minimum 5h quota remaining percent")
     parser.add_argument("--min-weekly", type=float, default=None, help="Minimum weekly quota remaining percent")
-    parser.add_argument("--timeout", type=int, default=default_timeout,
+    parser.add_argument("--all-cwds", action="store_true",
+                        help="With `--wait all`: wait on every active job, not only those of the current --cwd's repository")
+    parser.add_argument("--timeout", type=int, default=None,
                         help=f"Timeout in seconds for execution (default: {default_timeout}s)")
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
     parser.add_argument("--allow-stale", action="store_true",
@@ -1897,6 +1925,9 @@ def main():
     # Explicit --agent (any spelling: `--agent X`, `--agent=X`) vs the default derived from the program name.
     agent_explicit = args.agent is not None
     priority_explicit = args.priority is not None
+    timeout_explicit = args.timeout is not None
+    if not timeout_explicit:
+        args.timeout = default_timeout
     if not priority_explicit:
         args.priority = default_preference
     if not agent_explicit:
@@ -1935,19 +1966,38 @@ def main():
         target_ids = []
         if args.wait == "all":
             all_jobs = list_all_jobs(job_dir=args.job_dir)
-            # Only this --cwd's jobs: the job dir is machine-wide and other repos' jobs are not ours to wait on.
+            active = [j for j in all_jobs if j.get("status") in ("RUNNING", "PENDING")]
             here = os.path.realpath(args.cwd)
-            active = [j for j in all_jobs if j.get("status") in ("RUNNING", "PENDING")
-                      and (not j.get("cwd") or os.path.realpath(j["cwd"]) == here)]
+            if not args.all_cwds:
+                # Only this repository's jobs (any subdir or worktree of it): the job dir is machine-wide.
+                identities = {}
+
+                def identity(path):
+                    if path not in identities:
+                        identities[path] = repo_identity(path)
+                    return identities[path]
+
+                ours = [j for j in active if not j.get("cwd") or identity(j["cwd"]) == identity(here)]
+                if len(ours) < len(active):
+                    print(f"NOTICE: {len(active) - len(ours)} active job(s) from other repositories not waited on "
+                          f"(use --all-cwds to include them).", file=sys.stderr)
+                active = ours
             target_ids = [j["job_id"] for j in active]
             if not target_ids:
-                print(f"No running jobs to wait for in {here}.")
+                print("No running jobs to wait for." if args.all_cwds else f"No running jobs to wait for in {here}.")
                 sys.exit(0)
         else:
             target_ids = [args.wait]
 
-        wait_budget = args.wait_timeout if args.wait_timeout is not None else wait_budget_seconds(
-            [load_job_state(jid, job_dir=args.job_dir) for jid in target_ids], args.timeout)
+        # Budget: --wait-timeout, else an explicitly given --timeout, else derived from the job record(s).
+        if args.wait_timeout is not None:
+            wait_budget = args.wait_timeout
+        elif timeout_explicit:
+            wait_budget = args.timeout
+        else:
+            wait_budget = wait_budget_seconds(
+                [load_job_state(jid, job_dir=args.job_dir) for jid in target_ids], args.timeout)
+        print(f"Waiting up to {wait_budget}s for {len(target_ids)} job(s).", file=sys.stderr)
         start_time = time.time()
         completed_results = {}
         while True:
@@ -1957,16 +2007,9 @@ def main():
                 if not st:
                     completed_results[jid] = {"exit_code": 1, "status": "NOT_FOUND"}
                     continue
-                status = st.get("status")
-                pid = st.get("pid")
-                if status in ("RUNNING", "PENDING"):
-                    if pid and not is_pid_running(pid):
-                        st["status"] = "FAILED_DIED"
-                        st["exit_code"] = 1
-                        save_job_state(jid, st, job_dir=args.job_dir)
-                        completed_results[jid] = st
-                    else:
-                        all_done = False
+                st = reap_dead_job(st, job_dir=args.job_dir)
+                if st.get("status") in ("RUNNING", "PENDING"):
+                    all_done = False
                 else:
                     completed_results[jid] = st
 
@@ -1978,7 +2021,8 @@ def main():
         for jid in target_ids:
             if jid not in completed_results:
                 st = load_job_state(jid, job_dir=args.job_dir) or {}
-                if is_pid_running(st.get("pid")):
+                # Dead jobs were reaped in the loop: what is left RUNNING/PENDING is alive or has not started yet.
+                if st.get("status") in ("RUNNING", "PENDING"):
                     still_running = True
                     completed_results[jid] = {**st, "status": "STILL_RUNNING", "exit_code": WAIT_STILL_RUNNING_EXIT_CODE}
 
