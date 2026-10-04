@@ -96,6 +96,17 @@ dispatch-worker --priority "cursor:gemini-3.8-flash > agy" --allow-on-demand --t
 dispatch-worker --agent auto --isolated --task "Refactor module X"
 ```
 
+Defaults and flags worth knowing:
+
+- **Worker timeout**: 2400s built in (`--timeout`, `AI_AGENT_AUTO_DISPATCH_TIMEOUT` or `DISPATCH_TIMEOUT` override it).
+- **Pinned agent model**: `--agent X` without `--model` runs the model the routing preference chain lists for X; `--model` still wins.
+- **Stale quota**: a quota observation older than 60 minutes makes the agent ineligible (exit `10`). Age comes from the observation's `snapshot.fetched_at_unix` (file mtime when absent); a reading whose 5h and weekly windows have both reset is not stale. `--allow-stale` proceeds anyway with a stderr notice.
+- **`--wait` / `--wait-timeout`**: waiting has its own budget, by default 2 x the job's timeout + 2 x its verify timeout. A job still alive when it runs out is reported `STILL_RUNNING` with exit code `14` (wait again, do not re-dispatch). `--wait all` only waits on jobs dispatched for the current `--cwd`.
+- **Dead jobs**: `--status` and `--wait` mark a RUNNING or PENDING job whose process is gone as `FAILED_DIED` and save that to the job record.
+- **`--key=value`** works for every flag, including `--priority=...`, `--min-5h=...` and `--min-weekly=...`.
+
+Exit codes: `0` success, `1` failed, `2` invalid arguments, `10` quota too low (fall back to an internal agent), `12` thinker unavailable, `13` verify failed, `14` `--wait` budget spent with the job still running.
+
 Configure default preferences in `~/.config/dispatch/config.env` or via environment variables:
 ```bash
 # Mode: "subscription_quota_remaining" (strict flat rate, $0 extra) or "on_demand" (metered pay-as-you-go)
@@ -105,7 +116,7 @@ export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3
 
 ### Thinking tasks (`dispatch-thinker`)
 
-`dispatch-thinker` (= `dispatch-worker --capability deep-design-v1`; `--think` uses the same routing) sends deep-reasoning work to **Claude Opus 5.5 only** (`claude -p --model claude-opus-5-5`, available when `claude` is on `PATH`). Reasoning effort defaults to **`high`** (`--effort` on CLI overrides). Claude runs least-privilege (read tools + Write/Edit only; no Bash or web). There is no fallback thinker: a failed Claude run is reported as a failure. `dispatch-thinker` exits `12` (fail closed) when Claude is unavailable or a non-Claude model is requested; plain `--think` exits `12` for a non-Claude model and `10` when Claude is unavailable. `--agent claude` pins the provider.
+`dispatch-thinker` (= `dispatch-worker --capability deep-design-v1`; `--think` uses the same routing) sends deep-reasoning work to **Claude Opus 5.5 only** (`claude -p --model claude-opus-5-5`, available when `claude` is on `PATH`). That holds even with an explicit `--agent agy` or `--agent cursor`: the flag is ignored with a one-line notice on stderr, and the attestation records the agent that actually ran. Reasoning effort defaults to **`high`** (`--effort` on CLI overrides). Claude runs least-privilege (read tools + Write/Edit only; no Bash or web). There is no fallback thinker: a failed Claude run is reported as a failure. `dispatch-thinker` exits `12` (fail closed) when Claude is unavailable or a non-Claude model is requested; plain `--think` exits `12` for a non-Claude model and `10` when Claude is unavailable. `--agent claude` pins the provider.
 
 | Env var | Default | Purpose |
 | :--- | :--- | :--- |
