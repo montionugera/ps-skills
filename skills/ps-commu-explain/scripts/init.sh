@@ -4,13 +4,15 @@
 #   slug       kebab-case topic id, e.g. jwt-refresh-rotation
 #   --tier     infographic (default) | html | react
 #              infographic  cream Markdown-driven explainer (cherry-markdown);
-#                           author app/content.md
+#                           author app/content.md: fill the chain, then run
+#                           skeleton.sh <slug> to draft it. The exemplar ships
+#                           at app/example-content.md (read-only reference).
 #              html         classic bespoke hand-written HTML; edit app/index.html
 #              react        interactive React+TS tier
 #   --example  scaffold the filled exemplar chain instead of empty skeletons:
 #              assets/workspace/example/'s filled 00-brief.md/01-facts.md/
-#              02-storyboard.md, plus the infographic tier's shipped
-#              app/content.md (itself that same exemplar). Forces --tier
+#              02-storyboard.md, plus the exemplar as app/content.md (not
+#              moved to example-content.md). Forces --tier
 #              infographic (errors if combined with another --tier).
 #              `init.sh --example <slug> && serve.sh <slug>` passes lint.sh
 #              and verify.sh out of the box — no authoring required.
@@ -65,6 +67,7 @@ done
 # --- workspace ---
 ws="$PS_COMMU_ROOT/$slug"
 mkdir -p "$ws"
+trap 'log_timing init.sh "$SECONDS"' EXIT
 
 # --- scaffold app/ from the tier template ---
 # Copy the template (incl. mermaid.min.js for the HTML tier) so the agent edits
@@ -75,6 +78,12 @@ tpl="$(cd "$(dirname "$0")/.." && pwd)/assets/template-$tier"
 if [[ -d "$tpl" && ! -e "$ws/app/index.html" ]]; then
   mkdir -p "$ws/app"
   cp -R "$tpl"/. "$ws/app"/
+  # F-018: the model should not start by reading and deleting a 281-line exemplar.
+  # A plain infographic init keeps it at app/example-content.md; skeleton.sh writes
+  # app/content.md from the storyboard. --example keeps the exemplar AS content.md.
+  if [[ "$tier" == "infographic" && "$example" == 0 && -f "$ws/app/content.md" ]]; then
+    mv "$ws/app/content.md" "$ws/app/example-content.md"
+  fi
   echo "scaffolded app/ from template-$tier"
 fi
 

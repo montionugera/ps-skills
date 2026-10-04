@@ -9,11 +9,14 @@ ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 skip() { echo "SKIP: $1"; SKIP=$((SKIP+1)); }
 CHECK_LOG="$(mktemp)"
+_selected() { [[ -z "${ONLY:-}" || "$1" =~ $ONLY ]]; }   # ONLY=<regex>: run only matching test names
 check(){               # on FAIL, show the test's output so CI logs say why
+  _selected "$1" || return 0
   local name="$1"; shift
   if "$@" >"$CHECK_LOG" 2>&1; then ok "$name"; else bad "$name"; tail -n 25 "$CHECK_LOG" | sed 's/^/    /'; fi
 }
 check_or_skip(){       # like check, but exit code 2 = visible SKIP (e.g. no Chrome) — never a pass
+  _selected "$1" || return 0
   local name="$1"; shift; local rc
   "$@" >"$CHECK_LOG" 2>&1; rc=$?
   if (( rc == 0 )); then ok "$name"
@@ -1175,19 +1178,16 @@ verify_run() {           # args... → verify.sh output on stdout; rc 2 = cannot
   if command -v timeout >/dev/null; then timeout 150 "$S/verify.sh" "$@"; else "$S/verify.sh" "$@"; fi
 }
 test_verify_passes_template() {
-  # --no-lint: deliberate deviation from --no-lint's "html/react dev loop
-  # only" framing in serve.sh's usage text. This test scaffolds a PLAIN
-  # (no --example) infographic workspace: app/content.md ships as the real,
-  # lint-clean Task 7 exemplar (it cites F1-F19), but 01-facts.md/etc. scaffold
-  # as the EMPTY authoring-chain skeleton (see init.sh, no --example flag), so
-  # lint.sh would correctly reject content.md's citations against an empty
-  # facts sheet. init.sh --example (see init_example_* tests above) is the
-  # flow that pairs content.md with a matching filled chain and lints clean.
-  "$S/init.sh" t-verify >/dev/null
-  "$S/serve.sh" t-verify --no-lint >/dev/null
+  # --example pairs the shipped exemplar content.md with its matching filled
+  # 00-brief/01-facts/02-storyboard, so it lints clean and serves through the
+  # real lint gate (F-018: a plain init no longer ships app/content.md).
+  rm -rf /tmp/ps-commu/t-verify
+  "$S/init.sh" t-verify --example >/dev/null
+  "$S/serve.sh" t-verify >/dev/null
   local out rc; out="$(verify_run t-verify)"; rc=$?
   echo "$out"
   (( rc == 2 )) && return 2
+  [[ -s /tmp/ps-commu/t-verify/page-text.txt ]] || { echo "no page-text.txt after a real run"; return 1; }
   # F-013's content migration (Task 4) landed: the shipped content.md now
   # carries its real, migrated ```drawio fence (Task 0's verified 6-node
   # flowchart) instead of the pre-migration ```mermaid one. Assert 1 sees
@@ -1203,6 +1203,7 @@ test_verify_dump_text() {  # --dump-text: clean reader-visible text on stdout, e
   local out rc; out="$(verify_run t-verify --dump-text)"; rc=$?
   echo "chars=${#out}"
   (( rc == 2 )) && return 2
+  [[ "$out" == "$(cat /tmp/ps-commu/t-verify/page-text.txt 2>/dev/null)" ]] || { echo "stdout != page-text.txt"; return 1; }
   (( rc == 0 )) &&
   [[ -n "$out" ]] &&
   ! grep -q 'data-nav' <<<"$out" &&
@@ -1650,6 +1651,373 @@ check_or_skip verify_html_passes_template               test_verify_html_passes_
 check_or_skip verify_html_fails_on_mermaid_error        test_verify_html_fails_on_mermaid_error
 check_or_skip verify_html_fails_on_svg_count_mismatch   test_verify_html_fails_on_svg_count_mismatch
 for s in t-vh-ok t-vh-err t-vh-cnt t-mm-serve; do "$S/stop.sh" "$s" >/dev/null 2>&1; done
+
+# --- F-018: speed quick wins ---
+_stub_chrome() {  # dir page|fail — fake Chrome at $dir/chrome; one line in $dir/launches per launch
+  local dir="$1" mode="$2"
+  mkdir -p "$dir"; : > "$dir/launches"
+  if [[ "$mode" == page ]]; then
+    printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="mxgraph" style="margin-top: 10px"><svg><rect></rect></svg></div><p>Stub page text for F-018.</p></div></body></html>' > "$dir/page.html"
+  else
+    : > "$dir/page.html"          # a failed load: no DOM at all
+  fi
+  cat > "$dir/chrome" <<EOF
+#!/usr/bin/env bash
+echo launch >> "$dir/launches"
+cat "$dir/page.html"
+EOF
+  chmod +x "$dir/chrome"
+}
+_vstub_ws() {  # a served, lint-clean infographic workspace t-vstub (reused by F-018 verify tests)
+  [[ -f /tmp/ps-commu/t-vstub/meta.json ]] || "$S/init.sh" t-vstub --example >/dev/null || return 1
+  local pid; pid="$(meta_get t-vstub pid)"
+  [[ -n "$pid" ]] && pid_has_marker "$pid" t-vstub && return 0
+  "$S/serve.sh" t-vstub >/dev/null
+}
+test_log_timing_appends() {
+  mkdir -p /tmp/ps-commu/t-timing; rm -f /tmp/ps-commu/t-timing/timings.log
+  ( ws=/tmp/ps-commu/t-timing; log_timing demo.sh 3; log_timing demo.sh 4 )
+  [[ "$(wc -l < /tmp/ps-commu/t-timing/timings.log | tr -d ' ')" == 2 ]] &&
+  grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z demo\.sh 3$' /tmp/ps-commu/t-timing/timings.log
+}
+test_log_timing_noop_without_workspace() { ( unset ws; log_timing demo.sh 1 ) && ( ws=/nonexistent/x; log_timing demo.sh 1 ); }
+test_scripts_log_timing() {  # init, serve and verify each add exactly one line per call
+  rm -rf /tmp/ps-commu/t-timelog
+  local d=/tmp/ps-commu/t-stub-timelog log=/tmp/ps-commu/t-timelog/timings.log
+  _stub_chrome "$d" fail
+  "$S/init.sh" t-timelog --example >/dev/null &&
+  "$S/serve.sh" t-timelog >/dev/null || return 1
+  CHROME_BIN="$d/chrome" "$S/verify.sh" t-timelog >/dev/null 2>&1   # fails fast on the empty DOM; still logged
+  "$S/stop.sh" t-timelog >/dev/null
+  cat "$log"
+  [[ "$(grep -cE ' init\.sh [0-9]+$' "$log")" == 1 ]] &&
+  [[ "$(grep -cE ' serve\.sh [0-9]+$' "$log")" == 1 ]] &&
+  [[ "$(grep -cE ' verify\.sh [0-9]+$' "$log")" == 1 ]]
+}
+check log_timing_appends              test_log_timing_appends
+check log_timing_noop_without_workspace test_log_timing_noop_without_workspace
+check scripts_log_timing              test_scripts_log_timing
+
+test_verify_one_load_writes_page_text() {  # asserts + page-text.txt from ONE Chrome launch
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-one pt=/tmp/ps-commu/t-vstub/page-text.txt out
+  _stub_chrome "$d" page; rm -f "$pt"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub)"
+  echo "$out"
+  [[ "$(wc -l < "$d/launches" | tr -d ' ')" == 1 ]] &&
+  grep -q '^PASS: 2 ' <<<"$out" && grep -q '^PASS: 3 ' <<<"$out" && grep -q '^PASS: 8 ' <<<"$out" &&
+  grep -q '^PASS: 6 ' <<<"$out" &&
+  [[ "$(cat "$pt")" == "Stub page text for F-018." ]]
+}
+test_verify_dump_text_same_path() {  # --dump-text: one launch, stdout == page-text.txt
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-dump pt=/tmp/ps-commu/t-vstub/page-text.txt out rc
+  _stub_chrome "$d" page; rm -f "$pt"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --dump-text)"; rc=$?
+  (( rc == 0 )) && [[ "$(wc -l < "$d/launches" | tr -d ' ')" == 1 ]] &&
+  [[ "$out" == "Stub page text for F-018." ]] && [[ "$out" == "$(cat "$pt")" ]]
+}
+test_verify_failed_load_leaves_no_page_text() {  # stale copy from an earlier run must not survive
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-fail pt=/tmp/ps-commu/t-vstub/page-text.txt rc
+  _stub_chrome "$d" fail; echo STALE > "$pt"
+  CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub >/dev/null 2>&1; rc=$?
+  (( rc == 1 )) && [[ ! -e "$pt" ]] || return 1
+  # Also when the DOM renders but the page shows an explainer-error panel (asserts 0 and 1 fail): no page-text.txt
+  mkdir -p "$d"
+  printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="explainer-error"><div>fail</div></div></div></body></html>' > "$d/page.html"
+  echo STALE > "$pt"
+  CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub >/dev/null 2>&1; rc=$?
+  (( rc == 1 )) && [[ ! -e "$pt" ]]
+}
+test_verify_url_writes_no_page_text() {  # --url may load another doc: never written, stale copy removed
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-url pt=/tmp/ps-commu/t-vstub/page-text.txt port out
+  _stub_chrome "$d" page; echo STALE > "$pt"; port="$(meta_get t-vstub port)"
+  CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --url "http://127.0.0.1:$port/" >/dev/null 2>&1
+  [[ ! -e "$pt" ]] || return 1
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --url "http://127.0.0.1:$port/" --dump-text)" &&
+  [[ "$out" == "Stub page text for F-018." ]] && [[ ! -e "$pt" ]]
+}
+check verify_one_load_writes_page_text        test_verify_one_load_writes_page_text
+check verify_dump_text_same_path              test_verify_dump_text_same_path
+check verify_failed_load_leaves_no_page_text  test_verify_failed_load_leaves_no_page_text
+check verify_url_writes_no_page_text          test_verify_url_writes_no_page_text
+
+test_verify_assert6_failure_removes_page_text() {  # every python assert passes; only the CSS check fails
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-a6 ws=/tmp/ps-commu/t-vstub pt=/tmp/ps-commu/t-vstub/page-text.txt out rc
+  _stub_chrome "$d" page
+  cp "$ws/app/explainer.css" "$d/explainer.css.bak"
+  printf 'html { scroll-behavior: smooth; }\n' >> "$ws/app/explainer.css"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub 2>&1)"; rc=$?
+  cp "$d/explainer.css.bak" "$ws/app/explainer.css"
+  echo "$out" | grep -E '^(FAIL|PASS): (1|6) '
+  (( rc == 1 )) && grep -q '^PASS: 1 ' <<<"$out" && grep -q '^FAIL: 6 ' <<<"$out" && [[ ! -e "$pt" ]]
+}
+test_verify_dump_text_failed_render_no_page_text() {  # --dump-text keeps stdout/exit codes; failed renders leave no file
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-dfail pt=/tmp/ps-commu/t-vstub/page-text.txt out rc
+  _stub_chrome "$d" page; rm -f "$pt"
+  # never reached .is-ready
+  printf '%s\n' '<html><body><div class="cherry-previewer"><p>Half rendered.</p></div></body></html>' > "$d/page.html"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --dump-text 2>/dev/null)"; rc=$?
+  (( rc == 0 )) && [[ "$out" == "Half rendered." ]] && [[ ! -e "$pt" ]] || return 1
+  # explainer-error panel
+  printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="explainer-error"><div>boom</div></div><p>Some text.</p></div></body></html>' > "$d/page.html"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --dump-text 2>/dev/null)"; rc=$?
+  (( rc == 0 )) && [[ -n "$out" ]] && [[ ! -e "$pt" ]]
+}
+test_verify_page_text_oserror_warns() {  # unwritable workspace dir: one-line warning, asserts + exit code intact
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-ro ws=/tmp/ps-commu/t-vstub out rc
+  _stub_chrome "$d" page; rm -f "$ws/page-text.txt"
+  chmod a-w "$ws"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub 2>&1)"; rc=$?
+  chmod u+w "$ws"
+  echo "$out" | grep -E 'warning|^(PASS|FAIL): (2|8) '
+  (( rc == 0 )) && grep -q '^PASS: 8 ' <<<"$out" && grep -q 'warning: could not write' <<<"$out" && [[ ! -e "$ws/page-text.txt" ]]
+}
+check verify_assert6_failure_removes_page_text     test_verify_assert6_failure_removes_page_text
+check verify_dump_text_failed_render_no_page_text  test_verify_dump_text_failed_render_no_page_text
+check verify_page_text_oserror_warns               test_verify_page_text_oserror_warns
+
+test_reader_prompt_needs_page_text() {
+  _vstub_ws || return 1
+  rm -f /tmp/ps-commu/t-vstub/page-text.txt
+  local out rc; out="$("$S/verify.sh" t-vstub --reader-prompt 2>&1)"; rc=$?
+  echo "$out"
+  (( rc == 2 )) && grep -qF 'run verify.sh t-vstub first' <<<"$out"
+}
+test_reader_prompt_fills_brief_and_path() {  # path, not contents; no Chrome; Sonnet first line
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-rp ws=/tmp/ps-commu/t-vstub out rc q
+  _stub_chrome "$d" page
+  printf 'PAGE BODY SENTINEL 7f3a\n' > "$ws/page-text.txt"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --reader-prompt)"; rc=$?
+  echo "$out" | head -n 12
+  (( rc == 0 )) || return 1
+  [[ "$(head -n1 <<<"$out")" == "Agent model: sonnet" ]] || return 1
+  grep -qF "THE PAGE'S INTENDED READER: $(sed -n 's/^Reader:[[:space:]]*//p' "$ws/00-brief.md")" <<<"$out" || return 1
+  for q in Q1 Q2 Q3; do grep -qF "$(grep "^$q:" "$ws/00-brief.md")" <<<"$out" || return 1; done
+  grep -qxF "$ws/page-text.txt" <<<"$out" &&
+  ! grep -q 'SENTINEL 7f3a' <<<"$out" &&
+  [[ ! -s "$d/launches" ]] &&
+  [[ -f "$ws/page-text.txt" ]]          # --reader-prompt must not delete its own input
+}
+check reader_prompt_needs_page_text      test_reader_prompt_needs_page_text
+check reader_prompt_fills_brief_and_path test_reader_prompt_fills_brief_and_path
+
+test_reader_prompt_non_utf8_brief_exits_2() {
+  _vstub_ws || return 1
+  local ws=/tmp/ps-commu/t-vstub out rc
+  cp "$ws/00-brief.md" "$ws/00-brief.md.bak"
+  printf 'Reader: caf\xe9 \xff\xfe\n' > "$ws/00-brief.md"
+  printf 'x\n' > "$ws/page-text.txt"
+  out="$("$S/verify.sh" t-vstub --reader-prompt 2>&1)"; rc=$?
+  mv "$ws/00-brief.md.bak" "$ws/00-brief.md"
+  echo "$out" | head -n 3
+  (( rc == 2 )) && ! grep -q Traceback <<<"$out"
+}
+test_reader_prompt_stale_page_text_exits_2() {  # compares app/content.md only; -nt has 1s granularity
+  _vstub_ws || return 1
+  local ws=/tmp/ps-commu/t-vstub out rc
+  printf 'x\n' > "$ws/page-text.txt"; sleep 1; touch "$ws/app/content.md"
+  out="$("$S/verify.sh" t-vstub --reader-prompt 2>&1)"; rc=$?
+  echo "$out" | head -n 3
+  (( rc == 2 )) && grep -qF 'stale page text' <<<"$out" || return 1
+  sleep 1; touch "$ws/page-text.txt"      # fresh again: accepted
+  "$S/verify.sh" t-vstub --reader-prompt >/dev/null 2>&1
+}
+test_reader_prompt_html_tier_hand_written_page_text() {  # html/react: page-text.txt is saved by the haiku render subagent
+  local ws=/tmp/ps-commu/t-rphtml out rc
+  rm -rf "$ws"; "$S/init.sh" t-rphtml --tier html >/dev/null 2>&1 || return 1
+  printf 'Q1: what is A?\nQ2: what is B?\nQ3: what is C?\nReader: a newcomer\n' > "$ws/00-brief.md"
+  out="$("$S/verify.sh" t-rphtml --reader-prompt 2>&1)"; rc=$?
+  (( rc == 2 )) && grep -qF 'run verify.sh t-rphtml first' <<<"$out" || return 1
+  printf 'hand-written visible text\n' > "$ws/page-text.txt"
+  out="$("$S/verify.sh" t-rphtml --reader-prompt 2>&1)"; rc=$?
+  echo "$out" | head -n 6
+  (( rc == 0 )) && [[ "$(head -n1 <<<"$out")" == "Agent model: sonnet" ]] &&
+  grep -qxF "$ws/page-text.txt" <<<"$out" && grep -qF 'Q2: what is B?' <<<"$out" &&
+  grep -qE ' verify\.sh:reader-prompt [0-9]+$' "$ws/timings.log" &&
+  ! grep -qE ' verify\.sh [0-9]+$' "$ws/timings.log"   # logged apart from a Chrome run
+}
+check reader_prompt_html_tier_hand_written_page_text test_reader_prompt_html_tier_hand_written_page_text
+check reader_prompt_non_utf8_brief_exits_2     test_reader_prompt_non_utf8_brief_exits_2
+check reader_prompt_stale_page_text_exits_2    test_reader_prompt_stale_page_text_exits_2
+"$S/stop.sh" t-vstub >/dev/null 2>&1
+
+test_init_default_moves_exemplar() {
+  rm -rf /tmp/ps-commu/t-initex
+  "$S/init.sh" t-initex >/dev/null &&
+  [[ ! -e /tmp/ps-commu/t-initex/app/content.md ]] &&
+  cmp -s /tmp/ps-commu/t-initex/app/example-content.md "$SKILL_DIR/assets/template-infographic/content.md"
+}
+test_lint_flags_missing_content_infographic() {
+  rm -rf /tmp/ps-commu/t-lint-nocontent
+  "$S/init.sh" t-lint-nocontent >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-nocontent
+  local out; out="$("$S/lint.sh" t-lint-nocontent)" && return 1
+  echo "$out"
+  grep -qxF 'missing app/content.md: run skeleton.sh t-lint-nocontent' <<<"$out"
+}
+test_lint_rejects_todo_line_infographic() {
+  rm -rf /tmp/ps-commu/t-lint-todo
+  "$S/init.sh" t-lint-todo >/dev/null
+  _lint_valid_brief_facts_storyboard t-lint-todo
+  printf 'Intro (F1).\n\nTODO(Q1; F1): 1\n' > /tmp/ps-commu/t-lint-todo/app/content.md
+  local out; out="$("$S/lint.sh" t-lint-todo)" && return 1
+  echo "$out"
+  grep -qxF 'app/content.md: unfilled skeleton line: TODO(Q1; F1): 1' <<<"$out" || return 1
+  printf 'Intro (F1).\n\nFilled in plain words (F1).\n' > /tmp/ps-commu/t-lint-todo/app/content.md
+  "$S/lint.sh" t-lint-todo
+}
+test_lint_help_describes_drawio_not_mermaid_scanner() {
+  local h; h="$("$S/lint.sh" --help)"
+  ! grep -q 'Mermaid flowchart edges' <<<"$h" && ! grep -q 'sequenceDiagram' <<<"$h" &&
+  grep -q 'drawio' <<<"$h" && grep -qF 'TODO(' <<<"$h" && grep -q 'skeleton.sh' <<<"$h"
+}
+check init_default_moves_exemplar                  test_init_default_moves_exemplar
+check lint_flags_missing_content_infographic       test_lint_flags_missing_content_infographic
+check lint_rejects_todo_line_infographic           test_lint_rejects_todo_line_infographic
+check lint_help_describes_drawio_not_mermaid       test_lint_help_describes_drawio_not_mermaid_scanner
+
+_skel_ws() {  # t-skel: the filled --example chain with NO app/content.md
+  rm -rf /tmp/ps-commu/t-skel
+  "$S/init.sh" t-skel --example >/dev/null && rm -f /tmp/ps-commu/t-skel/app/content.md
+}
+test_skeleton_writes_todo_per_row() {
+  _skel_ws || return 1
+  "$S/skeleton.sh" t-skel || return 1
+  local c=/tmp/ps-commu/t-skel/app/content.md rows
+  rows="$(grep -cE '^\| *[0-9]' /tmp/ps-commu/t-skel/02-storyboard.md)"
+  (( rows == 7 )) && [[ "$(grep -c '^TODO(' "$c")" == "$rows" ]] &&
+  grep -qxF 'TODO(Q1; F1,F2): 1 Overview' "$c" &&
+  ! grep -qF '<!--' "$c" &&
+  grep -q 'class="reader-questions"' "$c" &&
+  grep -qF '<span class="receipts-fact">F19</span>' "$c" &&
+  [[ "$(grep -cE ' skeleton\.sh [0-9]+$' /tmp/ps-commu/t-skel/timings.log)" == 1 ]]
+}
+test_skeleton_lint_gate() {  # unfilled: lint rejects; every TODO( replaced with cited prose: lint accepts
+  _skel_ws && "$S/skeleton.sh" t-skel >/dev/null || return 1
+  local c=/tmp/ps-commu/t-skel/app/content.md out
+  out="$("$S/lint.sh" t-skel)" && return 1
+  [[ "$(grep -c 'unfilled skeleton line' <<<"$out")" == 7 ]] || { echo "$out"; return 1; }
+  sed -i.bak -E 's/^TODO\(.*$/This section is explained in plain words (F1)./' "$c" && rm -f "$c.bak"
+  "$S/lint.sh" t-skel
+}
+test_skeleton_refuses_overwrite() {
+  _skel_ws || return 1
+  local c=/tmp/ps-commu/t-skel/app/content.md rc
+  echo 'authored work' > "$c"
+  "$S/skeleton.sh" t-skel 2>/dev/null; rc=$?
+  (( rc == 1 )) && grep -qx 'authored work' "$c" &&
+  "$S/skeleton.sh" t-skel --force >/dev/null && grep -q '^TODO(' "$c"
+}
+test_skeleton_preconditions() {  # exit 2: no workspace; non-infographic tier
+  local rc
+  "$S/skeleton.sh" t-no-such-ws-xyz 2>/dev/null; rc=$?; (( rc == 2 )) || return 1
+  rm -rf /tmp/ps-commu/t-skel-html; "$S/init.sh" t-skel-html --tier html >/dev/null
+  "$S/skeleton.sh" t-skel-html 2>/dev/null; rc=$?; (( rc == 2 )) &&
+  "$S/skeleton.sh" --help | grep -q 'Usage: skeleton.sh'
+}
+test_skeleton_no_filled_rows() {  # plain init: storyboard has no filled rows -> exit 1, nothing written
+  rm -rf /tmp/ps-commu/t-skel-plain; "$S/init.sh" t-skel-plain >/dev/null || return 1
+  rm -f /tmp/ps-commu/t-skel-plain/app/content.md
+  local rc; "$S/skeleton.sh" t-skel-plain 2>/dev/null; rc=$?
+  (( rc == 1 )) && [[ ! -e /tmp/ps-commu/t-skel-plain/app/content.md ]]
+}
+test_skeleton_missing_chain_file() {
+  _skel_ws && rm -f /tmp/ps-commu/t-skel/02-storyboard.md || return 1
+  local rc; "$S/skeleton.sh" t-skel 2>/dev/null; rc=$?
+  (( rc == 2 )) && [[ ! -e /tmp/ps-commu/t-skel/app/content.md ]]
+}
+test_skeleton_non_utf8_chain() {  # exit 2, one-line message, no traceback
+  _skel_ws && printf 'F1 | bad \377 byte | src\n' >> /tmp/ps-commu/t-skel/01-facts.md || return 1
+  local rc err; err="$("$S/skeleton.sh" t-skel 2>&1 >/dev/null)"; rc=$?
+  (( rc == 2 )) && ! grep -q Traceback <<<"$err" && [[ "$(wc -l <<<"$err")" -le 1 ]] &&
+  [[ ! -e /tmp/ps-commu/t-skel/app/content.md ]]
+}
+check skeleton_writes_todo_per_row test_skeleton_writes_todo_per_row
+check skeleton_lint_gate           test_skeleton_lint_gate
+check skeleton_refuses_overwrite   test_skeleton_refuses_overwrite
+check skeleton_preconditions       test_skeleton_preconditions
+check skeleton_no_filled_rows      test_skeleton_no_filled_rows
+check skeleton_missing_chain_file  test_skeleton_missing_chain_file
+check skeleton_non_utf8_chain      test_skeleton_non_utf8_chain
+
+test_components_index_covers_every_section() {
+  local a="$SKILL_DIR/assets/template-infographic" ids id rc=0
+  [[ -f "$a/components-index.md" ]] || { echo "no components-index.md"; return 1; }
+  (( $(wc -l < "$a/components-index.md") <= 40 )) || { echo "index over 40 lines"; return 1; }
+  # section-head lines, id= and class= in either order; then the reverse direction
+  ids="$(grep 'class="section-head' "$a/components.md" | grep -oE ' id="[^"]+"' | sed -E 's/ id="([^"]+)"/\1/')"
+  [[ -n "$ids" ]] || { echo "no section ids parsed from components.md"; return 1; }
+  for id in $ids; do
+    grep -qF "id=\"$id\"" "$a/components-index.md" || { echo "index misses section: $id"; rc=1; }
+  done
+  for id in $(grep -oE '^\| `id="[^"]+"`' "$a/components-index.md" | sed -E 's/.*id="([^"]+)".*/\1/'); do
+    grep 'class="section-head' "$a/components.md" | grep -qF " id=\"$id\"" || { echo "index lists id not in components.md: $id"; rc=1; }
+  done
+  return $rc
+}
+check components_index_covers_every_section test_components_index_covers_every_section
+
+test_handoff_prints_everything() {
+  _vstub_ws || return 1
+  rm -f /tmp/ps-commu/t-vstub/timings.log
+  local port out; port="$(meta_get t-vstub port)"
+  out="$("$S/handoff.sh" t-vstub)" || { echo "$out"; return 1; }
+  echo "$out"
+  grep -qxF "URL: http://localhost:$port" <<<"$out" &&
+  grep -q '^Q1: ' <<<"$out" && grep -q '^Q2: ' <<<"$out" && grep -q '^Q3: ' <<<"$out" &&
+  grep -q '^Reader-gate answers:' <<<"$out" &&
+  grep -qE '^SLUG +TIER' <<<"$out" && grep -qE '^t-vstub +infographic .*running' <<<"$out" &&
+  grep -qF "$S/stop.sh t-vstub" <<<"$out" && grep -qF "$S/clean.sh" <<<"$out" &&
+  grep -qxF "Re-serve: $S/serve.sh t-vstub" <<<"$out" &&
+  [[ "$(grep -cE ' handoff\.sh [0-9]+$' /tmp/ps-commu/t-vstub/timings.log)" == 1 ]]
+}
+test_handoff_without_server_or_workspace() {
+  rm -rf /tmp/ps-commu/t-hoff; "$S/init.sh" t-hoff --example >/dev/null
+  local out rc
+  out="$("$S/handoff.sh" t-hoff)"; rc=$?
+  (( rc == 1 )) && grep -q '^URL: none, no live server' <<<"$out" || return 1
+  "$S/handoff.sh" t-no-such-ws-xyz >/dev/null 2>&1; rc=$?
+  (( rc == 2 )) && "$S/handoff.sh" --help | grep -q 'Usage: handoff.sh'
+}
+test_handoff_rejects_bad_slug() {
+  # a real brief outside the root, so only slug validation (not "no workspace") can give exit 2
+  local rc=0 out="/tmp/hf-trav-x"
+  mkdir -p "$out" && echo "Q1: x" > "$out/00-brief.md"
+  out="$("$S/handoff.sh" ../../hf-trav-x 2>&1)" || rc=$?
+  rm -rf /tmp/hf-trav-x
+  [[ "$rc" == 2 && "$out" == *"bad slug"* ]]
+}
+check handoff_rejects_bad_slug          test_handoff_rejects_bad_slug
+check handoff_prints_everything           test_handoff_prints_everything
+check handoff_without_server_or_workspace test_handoff_without_server_or_workspace
+
+test_skill_md_budget_and_routing() {
+  local m="$SKILL_DIR/SKILL.md"
+  (( $(wc -l < "$m") <= 110 )) || { echo "SKILL.md is $(wc -l < "$m") lines"; return 1; }
+  grep -qF 'model: haiku' "$m" && grep -qF 'model: sonnet' "$m" &&
+  grep -qF -- '--reader-prompt' "$m" && grep -qF 'skeleton.sh' "$m" &&
+  grep -qF 'handoff.sh' "$m" && grep -qF 'components-index.md' "$m" &&
+  grep -qi 'main thread' "$m" &&
+  ! grep -qF 'You are an independent reader' "$m" &&        # verbatim prompt lives in verify.sh now
+  grep -qF 'You are an independent reader' "$S/verify.sh" &&
+  grep -qF 'TODO(' "$m" && grep -qF 'role=accent' "$m" && grep -qF 'scroll-behavior' "$m"
+}
+test_serve_help_not_stale() { ! "$S/serve.sh" --help | grep -q 'Task 6/7'; }
+test_readme_mentions_new_scripts() {
+  local r="$SKILL_DIR/../../README.md"
+  grep -F 'ps-commu-explain' "$r" | grep -qF 'skeleton.sh' &&
+  grep -qF 'handoff.sh' "$r" && grep -qF -- '--reader-prompt' "$r"
+}
+check skill_md_budget_and_routing test_skill_md_budget_and_routing
+check serve_help_not_stale        test_serve_help_not_stale
+check readme_mentions_new_scripts test_readme_mentions_new_scripts
 
 # --- list.sh / clean.sh ---
 # NOTE: clean tests wipe /tmp/ps-commu entirely — keep them registered last.
