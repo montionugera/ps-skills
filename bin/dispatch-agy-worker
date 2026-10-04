@@ -26,6 +26,7 @@ from contextlib import nullcontext
 import datetime
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -203,21 +204,21 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
     windows = data.get("windows") or data.get("snapshot", {}).get("windows") or []
     rem_5h = None
     rem_weekly = None
-    rolled_over = set()  # windows whose resets_at has passed: read as 100%, so the observation's age cannot make them stale
+    rolled_over = {}  # window kind -> its resets_at, for windows that have reset since the observation (read as 100%)
     for w in windows:
         if w.get("kind") == "five_hour":
             rem_val = float(w.get("remaining_percent", 0.0))
             resets_at_ts = _parse_resets_at(w.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
-                rolled_over.add("five_hour")
+                rolled_over["five_hour"] = resets_at_ts
             rem_5h = rem_val
         elif w.get("kind") == "weekly":
             rem_val = float(w.get("remaining_percent", 0.0))
             resets_at_ts = _parse_resets_at(w.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
-                rolled_over.add("weekly")
+                rolled_over["weekly"] = resets_at_ts
             rem_weekly = rem_val
 
     # Fallback to payload.quota (Gemini structure) if snapshot windows missing
@@ -229,7 +230,7 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
             resets_at_ts = _parse_resets_at(g5.get("reset_time") or g5.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
-                rolled_over.add("five_hour")
+                rolled_over["five_hour"] = resets_at_ts
             rem_5h = rem_val
         if rem_weekly is None and "gemini-weekly" in quota:
             gw = quota["gemini-weekly"]
@@ -237,7 +238,7 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
             resets_at_ts = _parse_resets_at(gw.get("reset_time") or gw.get("resets_at"))
             if resets_at_ts is not None and current_time > resets_at_ts:
                 rem_val = 100.0
-                rolled_over.add("weekly")
+                rolled_over["weekly"] = resets_at_ts
             rem_weekly = rem_val
 
     if rem_5h is None or rem_weekly is None:
@@ -245,13 +246,21 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
 
     eligible = (rem_5h >= min_5h) and (rem_weekly >= min_weekly)
     stale_suffix = ""
-    try:
-        snapshot = data.get("snapshot")
-        observed_at = snapshot.get("fetched_at_unix") if isinstance(snapshot, dict) else None
-        if isinstance(observed_at, bool) or not isinstance(observed_at, (int, float)):
-            observed_at = os.path.getmtime(target_file)
-        age_minutes = int((current_time - observed_at) / 60)
-        if age_minutes > STALE_OBSERVATION_MINUTES and len(rolled_over) < 2:
+    snapshot = data.get("snapshot")
+    known_at = snapshot.get("fetched_at_unix") if isinstance(snapshot, dict) else None
+    # Trust fetched_at_unix only when it is a plausible unix-seconds time (not NaN, milliseconds or the future).
+    if (isinstance(known_at, bool) or not isinstance(known_at, (int, float)) or not math.isfinite(known_at)
+            or not 0 <= known_at <= current_time + 60):
+        try:
+            known_at = os.path.getmtime(target_file)
+        except OSError:
+            known_at = None
+    if known_at is not None:
+        if len(rolled_over) == 2:
+            # Both windows have reset since the observation: the state (100%/100%) is known as of the later reset.
+            known_at = max(known_at, *rolled_over.values())
+        age_minutes = int((current_time - known_at) / 60)
+        if age_minutes > STALE_OBSERVATION_MINUTES:
             if ALLOW_STALE:
                 stale_suffix = (f" [stale: observation {age_minutes}m old, over {STALE_OBSERVATION_MINUTES}m"
                                 f" - proceeding (--allow-stale)]")
@@ -259,8 +268,6 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
                 eligible = False
                 stale_suffix = (f" [stale: observation {age_minutes}m old, over {STALE_OBSERVATION_MINUTES}m"
                                 f" - not eligible until the quota telemetry refreshes]")
-    except Exception:
-        pass
 
     msg = f"[{agent.upper()}] 5h: {rem_5h:.1f}% (min {min_5h:.1f}%), Weekly: {rem_weekly:.1f}% (min {min_weekly:.1f}%){stale_suffix}"
     return eligible, rem_5h, rem_weekly, msg

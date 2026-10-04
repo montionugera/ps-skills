@@ -206,13 +206,16 @@ class TestWindowRollover(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertNotIn("stale", msg)
 
-    def _write_state(self, now, fetched_age_minutes=None, mtime_age_minutes=0, reset_5h=5000, reset_weekly=50000):
+    def _write_state(self, now, fetched_age_minutes=None, mtime_age_minutes=0, reset_5h=5000, reset_weekly=50000,
+                     fetched_at=None):
         snapshot = {"windows": [
             {"kind": "five_hour", "remaining_percent": 90.0, "resets_at": now + reset_5h},
             {"kind": "weekly", "remaining_percent": 90.0, "resets_at": now + reset_weekly},
         ]}
         if fetched_age_minutes is not None:
             snapshot["fetched_at_unix"] = int(now - fetched_age_minutes * 60)
+        if fetched_at is not None:
+            snapshot["fetched_at_unix"] = fetched_at
         self.state_file.write_text(json.dumps({"snapshot": snapshot}), encoding="utf-8")
         mtime = now - mtime_age_minutes * 60
         os.utime(self.state_file, (mtime, mtime))
@@ -247,6 +250,48 @@ class TestWindowRollover(unittest.TestCase):
         self.assertFalse(eligible)
         self.assertEqual(rem_5h, 100.0)
         self.assertIn("stale", msg)
+
+    def test_implausible_fetched_at_falls_back_to_mtime(self):
+        now = time.time()
+        old = dispatch_mod.STALE_OBSERVATION_MINUTES + 30
+        for bad in (now + 86400, now * 1000, float("nan"), float("inf"), -5):
+            self._write_state(now, fetched_at=bad, mtime_age_minutes=old)
+            eligible, _r5, _rw, msg = self._check(now)
+            self.assertFalse(eligible, (bad, msg))
+            self.assertIn("stale", msg, bad)
+            self._write_state(now, fetched_at=bad, mtime_age_minutes=5)
+            eligible, _r5, _rw, msg = self._check(now)
+            self.assertTrue(eligible, (bad, msg))
+            self.assertNotIn("stale", msg, bad)
+
+    def test_fetched_at_slightly_ahead_of_the_clock_is_accepted(self):
+        now = time.time()
+        self._write_state(now, fetched_at=now + 30, mtime_age_minutes=dispatch_mod.STALE_OBSERVATION_MINUTES + 30)
+        eligible, _r5, _rw, msg = self._check(now)
+        self.assertTrue(eligible, msg)
+
+    def test_resets_long_past_do_not_waive_staleness(self):
+        now = time.time()
+        day = 86400
+        self._write_state(now, fetched_age_minutes=6 * 24 * 60, mtime_age_minutes=6 * 24 * 60,
+                          reset_5h=-5 * day, reset_weekly=-5 * day)
+        eligible, _r5, _rw, msg = self._check(now)
+        self.assertFalse(eligible, msg)
+        self.assertIn("stale", msg)
+
+    def test_age_after_both_resets_runs_from_the_later_reset(self):
+        now = time.time()
+        limit = dispatch_mod.STALE_OBSERVATION_MINUTES * 60
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600, reset_5h=-(limit + 600), reset_weekly=-60)
+        self.assertTrue(self._check(now)[0])
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600, reset_5h=-60, reset_weekly=-(limit + 600))
+        self.assertTrue(self._check(now)[0])
+        self._write_state(now, fetched_age_minutes=600, mtime_age_minutes=600,
+                          reset_5h=-(limit + 600), reset_weekly=-(limit + 900))
+        eligible, _r5, _rw, msg = self._check(now)
+        self.assertFalse(eligible, msg)
+        with mock.patch.object(dispatch_mod, "ALLOW_STALE", True):
+            self.assertTrue(self._check(now)[0])
 
     def test_allow_stale_keeps_a_stale_observation_eligible(self):
         now = time.time()
