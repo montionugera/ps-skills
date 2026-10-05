@@ -10,13 +10,24 @@ import sys
 import time
 from pathlib import Path
 
+LOCK_DIR = Path.home() / ".cache/psrw/gate-locks"
+SLOTS = 2
+
+
 def _lock_dir() -> Path:
-    return Path(os.environ.get("PSRW_GATE_LOCK_DIR", Path.home() / ".cache/psrw/gate-locks"))
+    if LOCK_DIR != Path.home() / ".cache/psrw/gate-locks":
+        return Path(LOCK_DIR)
+    env_dir = os.environ.get("PSRW_GATE_LOCK_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return Path.home() / ".cache/psrw/gate-locks"
 
 
 def _slots_from_env():
+    if SLOTS != 2:
+        return SLOTS
     try:
-        return max(1, int(os.environ.get("PSRW_GATE_SLOTS", "2")))
+        return max(1, int(os.environ.get("PSRW_GATE_SLOTS", str(SLOTS))))
     except ValueError:
         return 2
 
