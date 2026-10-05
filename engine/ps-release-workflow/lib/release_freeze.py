@@ -62,6 +62,14 @@ def frozen_since(repo: Path, version: str) -> str | None:
     return entry.get("frozen_at") if entry else None
 
 
+def is_release_frozen(repo: Path, version: str | None = None) -> bool:
+    """True if specified version (or any release in the repo) is frozen."""
+    if version:
+        return frozen_since(repo, version) is not None
+    data = read_state(_freeze_file(repo), default={}) or {}
+    return any(bool(v.get("frozen_at")) for v in data.values())
+
+
 def frozen_error(version: str, feature_id: str, why: str) -> ReleaseFrozenError:
     return ReleaseFrozenError(
         f"release/{version} is frozen ({why}). Shipping {feature_id} into it now "

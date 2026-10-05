@@ -151,6 +151,22 @@ def _next_hint(in_progress: bool, pending_cleanup: bool, cleanup_version: str | 
     if counts["shipped"]:
         return "psrw promote"
     return "refined backlog is empty — psrw idea then psrw refine"
+def _reclaimable_worktrees_count(repo: Path) -> int:
+    try:
+        wt_root = repo / ".claude" / "worktrees"
+        if not wt_root.is_dir():
+            return 0
+        from lib.worktree_gc import removable
+        count = 0
+        for wt in wt_root.iterdir():
+            if not wt.is_dir() or wt.name == "_release":
+                continue
+            ok, _ = removable(repo, wt, idle_window_hours=0.0, skip_liveness=True)
+            if ok:
+                count += 1
+        return count
+    except Exception:
+        return 0
 
 
 def collect_status(repo: Path) -> dict:
@@ -270,6 +286,7 @@ def collect_status(repo: Path) -> dict:
         "own_claims": own_claims,
         "leftover_worktrees": leftover_worktrees,
         "pending_cleanup": pending_cleanup,
+        "reclaimable_count": _reclaimable_worktrees_count(repo),
         "next": _next_hint(in_progress, pending_cleanup, cleanup_version, counts),
     }
 
@@ -322,6 +339,8 @@ def render_brief(st: dict) -> str:
                      f"({', '.join(f['id'] for f in drifted[:3])})")
     for w in st.get("warnings", [])[:2]:  # keep the brief within its line budget
         lines.append(f"warning: {w}")
+    if st.get("reclaimable_count", 0) > 0:
+        lines.append(f"reclaimable: {st['reclaimable_count']} worktree(s) (run psrw gc)")
     lines.append(f"Next: {st['next']}")
     return "\n".join(lines)
 
@@ -389,6 +408,9 @@ def render_full(st: dict) -> str:
             f"{len(st['leftover_worktrees'])} worktree(s) / "
             f"unarchived features remain: {', '.join(st['leftover_worktrees'][:5]) or '-'}"
         )
+    if st.get("reclaimable_count", 0) > 0:
+        lines.append("")
+        lines.append(f"Reclaimable: {st['reclaimable_count']} worktree(s) eligible for GC (run psrw gc)")
     lines.append("")
     lines.append(f"Next: {st['next']}")
     return "\n".join(lines)
