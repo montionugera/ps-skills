@@ -1,7 +1,8 @@
 ---
 title: "Worktree GC and claim reopen for ps-release-workflow"
-id: I-025
-status: idea
+id: F-019
+status: refined
+from_idea: I-025
 ---
 
 # Worktree GC and claim reopen for ps-release-workflow
