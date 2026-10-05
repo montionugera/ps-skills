@@ -177,6 +177,20 @@ if [[ -z "$TAB_LABEL" ]]; then
   fi
 fi
 
+# Ensure Graft context graph is seeded if TARGET_CWD is a worktree or repo
+if command -v graft >/dev/null 2>&1; then
+  if git -C "$TARGET_CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    _git_common="$(git -C "$TARGET_CWD" rev-parse --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$_git_common" && ! -d "$TARGET_CWD/graft" ]]; then
+      _main_repo="$(cd "$TARGET_CWD" && cd "$_git_common/.." 2>/dev/null && pwd)"
+      if [[ -d "$_main_repo/graft" ]]; then
+        echo "🌱 Seeding graft context graph for worktree from $(basename "$_main_repo")..."
+        (cd "$TARGET_CWD" && graft build >/dev/null 2>&1 || true)
+      fi
+    fi
+  fi
+fi
+
 echo "🚀 Creating Herdr tab in '$TARGET_CWD'..."
 CREATE_RES=$(herdr tab create --cwd "$TARGET_CWD" --label "$TAB_LABEL" "$FOCUS_FLAG")
 TAB_ID=$(echo "$CREATE_RES" | jq -r '.result.tab.tab_id // .result.tab_id // empty')

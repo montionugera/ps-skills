@@ -92,11 +92,11 @@ fi
 
 html_path="${file_path%.md}.html"
 
-# Mermaid validation (best-effort): the HTML renders Mermaid client-side, so a
-# bad diagram silently shows "Syntax error in text" to the reader. If mmdc
-# (@mermaid-js/mermaid-cli) is installed, validate each ```mermaid block here
-# and WARN loudly to stderr. Never blocks the render (always falls through).
-if command -v mmdc >/dev/null 2>&1 && command -v awk >/dev/null 2>&1; then
+# Mermaid validation (opt-in): the HTML renders Mermaid client-side in the browser.
+# Running headless Chrome via mmdc on every edit takes ~19s per diagram, which
+# freezes agent loops and causes background task timeouts.
+# Disabled by default for sub-second renders; enable with QUANT_VALIDATE_MERMAID=1.
+if [[ "${QUANT_VALIDATE_MERMAID:-0}" == "1" ]] && command -v mmdc >/dev/null 2>&1 && command -v awk >/dev/null 2>&1; then
   # Use the installed system Chrome (mmdc's bundled puppeteer pins a Chrome version that is often not in the cache).
   _mmd_pp=""; [[ -f "$HOME/.claude/puppeteer-mmdc.json" ]] && _mmd_pp="$HOME/.claude/puppeteer-mmdc.json"
   _mmd_dir="$(mktemp -d 2>/dev/null || echo '')"
