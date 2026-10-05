@@ -10,7 +10,8 @@ import sys
 import time
 from pathlib import Path
 
-LOCK_DIR = Path(os.environ.get("PSRW_GATE_LOCK_DIR", Path.home() / ".cache/psrw/gate-locks"))
+def _lock_dir() -> Path:
+    return Path(os.environ.get("PSRW_GATE_LOCK_DIR", Path.home() / ".cache/psrw/gate-locks"))
 
 
 def _slots_from_env():
@@ -20,17 +21,16 @@ def _slots_from_env():
         return 2
 
 
-SLOTS = _slots_from_env()
-
-
 @contextlib.contextmanager
 def gate_slot(label, poll=5.0, timeout=3600.0):
-    LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    lock_dir = _lock_dir()
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    slots = _slots_from_env()
     deadline = time.monotonic() + timeout
     announced = False
     while True:
-        for i in range(SLOTS):
-            fd = os.open(LOCK_DIR / f"slot{i}.lock", os.O_CREAT | os.O_RDWR)
+        for i in range(slots):
+            fd = os.open(lock_dir / f"slot{i}.lock", os.O_CREAT | os.O_RDWR)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:

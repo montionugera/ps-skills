@@ -201,9 +201,12 @@ def _read_claims(repo: Path) -> dict:
     return json.loads((repo / ".claude" / "state" / "claims.json").read_text())
 
 
+def _release_catalog_path(repo: Path) -> Path:
+    return repo / ".claude" / "worktrees" / "_release" / ".claude" / "refined_backlog" / "_catalog.json"
+
+
 def _release_catalog_entry(repo: Path, feature_id: str) -> dict:
-    wt = repo / ".claude" / "worktrees" / "_release"
-    cat = json.loads((wt / ".claude" / "refined_backlog" / "_catalog.json").read_text())
+    cat = json.loads(_release_catalog_path(repo).read_text())
     return next(e for e in cat if e["id"] == feature_id)
 
 
@@ -510,3 +513,91 @@ def test_claim_main_reports_unknown_feature_cleanly(
     err = capsys.readouterr().err
     assert "F-999" in err
     assert "Traceback" not in err
+
+
+def test_claim_shipped_feature_without_reopen_refuses(tmp_repo_with_release: Path, fixed_owner: str):
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+    claimed = claim_feature(repo, feat["id"], owner=fixed_owner)
+
+    # Mark shipped in catalog
+    cat = _release_catalog_path(repo)
+    entries = json.loads(cat.read_text())
+    for e in entries:
+        if e["id"] == feat["id"]:
+            e["status"] = "shipped"
+            e["release_version"] = "1.1"
+            e["shipped_sha"] = "abcdef"
+    cat.write_text(json.dumps(entries))
+
+    with pytest.raises(RuntimeError, match="has already shipped.*--reopen"):
+        claim_feature(repo, feat["id"], owner="new-owner")
+
+
+def test_claim_reopen_shipped_feature_success(tmp_repo_with_release: Path, fixed_owner: str):
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+    claimed = claim_feature(repo, feat["id"], owner=fixed_owner)
+    wt = Path(claimed["worktree"])
+
+    # Make commit and mark shipped
+    (wt / "file.txt").write_text("done\n")
+    subprocess.run(["git", "add", "."], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-m", "feat: done"], cwd=wt, check=True)
+    head_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=wt).decode().strip()
+
+    cat = _release_catalog_path(repo)
+    entries = json.loads(cat.read_text())
+    for e in entries:
+        if e["id"] == feat["id"]:
+            e["status"] = "shipped"
+            e["release_version"] = "1.1"
+            e["shipped_sha"] = head_sha
+    cat.write_text(json.dumps(entries))
+
+    # Remove the worktree to simulate post-ship teardown
+    subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=repo, check=True)
+    assert not wt.exists()
+
+    # Reopen
+    result = claim_feature(repo, feat["id"], owner="new-session", reopen=True)
+    assert result["reopened"] is True
+    assert wt.is_dir()
+    assert (wt / "file.txt").read_text() == "done\n"
+
+    # Catalog status MUST remain "shipped"
+    entry = _release_catalog_entry(repo, feat["id"])
+    assert entry["status"] == "shipped"
+
+    # Marker has reopened: True
+    marker = _read_marker(repo, wt)
+    assert marker["reopened"] is True
+    assert marker["owner"] == "new-session"
+
+
+def test_claim_reopen_promoted_feature_refused(tmp_repo_with_release: Path, fixed_owner: str):
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+
+    cat = _release_catalog_path(repo)
+    entries = json.loads(cat.read_text())
+    for e in entries:
+        if e["id"] == feat["id"]:
+            e["status"] = "promoted"
+    cat.write_text(json.dumps(entries))
+
+    with pytest.raises(RuntimeError, match="already been promoted"):
+        claim_feature(repo, feat["id"], owner="new-session", reopen=True)
+
+
+def test_claim_reopen_open_feature_refused(tmp_repo_with_release: Path, fixed_owner: str):
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+
+    with pytest.raises(RuntimeError, match="status 'open', not 'shipped'"):
+        claim_feature(repo, feat["id"], owner="new-session", reopen=True)
+

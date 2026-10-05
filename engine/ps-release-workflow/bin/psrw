@@ -41,6 +41,7 @@ VERBS = {
     "sync-main":   Verb("sync_main.py", "Merge main (hotfixes) into release/<v>, then Gate 1", True),
     "epic":        Verb("epic.py", "Open an epic, fan it out, verify it, plan or sync an epic run", True),
     "sync":        Verb("sync_feature.py", "Merge release/<v> into current feature worktree", True),
+    "gc":          Verb("gc_worktrees.py", "Garbage collect and prune merged feature worktrees", True),
 }
 
 # Scripts with no verb, on purpose.

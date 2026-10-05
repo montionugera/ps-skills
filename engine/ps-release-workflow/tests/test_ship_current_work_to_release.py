@@ -714,7 +714,43 @@ def test_ship_main_no_sync_main_flag_is_wired_and_announced(
     above; _ship_main opens the release itself, so a hotfix cannot be landed
     in between here.)"""
     assert _ship_main(tmp_repo_with_release, fixed_owner, monkeypatch,
-                      "--no-sync-main", "--no-deploy") == 0
+                      "--no-sync-main", "--no-deploy", "--keep-worktree") == 0
     text = "".join(capsys.readouterr())
     assert "Main sync SKIPPED (--no-sync-main)" in text and "psrw sync-main" in text
     assert '"main_synced": null' in text
+
+
+def test_ship_teardown_removes_worktree_and_drops_claim(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
+    wt = Path(claim["worktree"])
+    _commit_feature_file(wt)
+
+    claims_file = tmp_repo_with_release / ".claude" / "state" / "claims.json"
+    assert feat["id"] in json.loads(claims_file.read_text())
+
+    res = ship_current_work(wt, teardown=True)
+    assert res["ok"]
+    assert res["teardown"]["ok"] is True
+    assert not wt.exists()
+    assert feat["id"] not in json.loads(claims_file.read_text())
+
+
+def test_ship_main_teardown_and_keep_worktree_flag(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, capsys
+):
+    # With --keep-worktree, worktree must stay intact
+    feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
+    wt = Path(claim["worktree"])
+    _commit_feature_file(wt)
+    monkeypatch.chdir(wt)
+
+    import sys as _sys
+    import scripts.ship_current_work_to_release as ship_mod
+    monkeypatch.setattr(_sys, "argv", ["ship_current_work_to_release.py", "--no-deploy", "--keep-worktree"])
+    assert ship_mod.main() == 0
+    assert wt.is_dir()
+    out = capsys.readouterr().out
+    assert "kept (--keep-worktree)" in out
+
