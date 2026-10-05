@@ -30,9 +30,10 @@ from lib.main_sync import (
     MainSyncConflictError, missing_main_commits, resolve_main_ref, sync_main_into_release,
 )
 from lib.release_freeze import ReleaseFrozenError, frozen_error, frozen_since
-from lib.repo import is_ps_release_workflow_repo
+from lib.repo import find_repo_root, is_ps_release_workflow_repo
 from lib.slug import slugify
-from lib.state import file_lock
+from lib.state import file_lock, mutate_state
+from lib.worktree_gc import removable
 
 
 class DirtyTreeError(Exception): pass
@@ -81,11 +82,29 @@ def _find_marker(worktree: Path) -> dict:
     raise NotInFeatureWorktreeError(f"{worktree} has no working-feature.json marker")
 
 
+def teardown_worktree(repo: Path, wt: Path, feature_id: str) -> tuple[bool, str]:
+    """Teardown a shipped feature worktree if all safety checks pass."""
+    ok, reason = removable(repo, wt, skip_liveness=True)
+    if not ok:
+        return False, reason
+    try:
+        git_run(repo, "worktree", "remove", "--force", str(wt))
+        claims_file = repo / ".claude" / "state" / "claims.json"
+        def drop(claims: dict) -> dict:
+            claims.pop(feature_id, None)
+            return claims
+        mutate_state(claims_file, drop, default={})
+        return True, "removed"
+    except GitError as e:
+        return False, str(e)
+
+
 def ship_current_work(
     worktree: Path,
     *,
     skip_readiness: bool = False,
     no_sync_main: bool = False,
+    teardown: bool = False,
 ) -> dict:
     """Gate 1, then merge this feature worktree into release/<v>.
 
@@ -263,9 +282,14 @@ def ship_current_work(
                                      epic_dir, release_version)
         epic_outcome = {"epic": epic_id, "rc": rc, "sha": cas_sha}
 
+    teardown_status = None
+    if teardown:
+        teardown_ok, teardown_reason = teardown_worktree(repo, worktree, feature_id)
+        teardown_status = {"ok": teardown_ok, "reason": teardown_reason}
+
     return {"ok": True, "feature": feature_id, "release": release_version,
             "rel_wt": str(rel_wt), "epic_outcome": epic_outcome,
-            "main_synced": main_synced}
+            "main_synced": main_synced, "teardown": teardown_status}
 
 
 def main() -> int:
@@ -287,6 +311,8 @@ def main() -> int:
     p.add_argument("--no-sync-main", action="store_true", dest="no_sync_main",
                    help="EMERGENCY BYPASS: do not absorb main (hotfixes) into release/<v> "
                         "before merging; the release may then lag main until psrw sync-main")
+    p.add_argument("--keep-worktree", action="store_true",
+                   help="keep feature worktree after shipping (do not tear down)")
     args = p.parse_args()
 
     cwd = Path.cwd()
@@ -402,6 +428,17 @@ def main() -> int:
         else:
             print(f"\n⏭️  Local deploy skipped. Run it manually when ready: "
                   f"cd {rel_wt} && {deploy_script}")
+
+    if not args.keep_worktree:
+        repo = find_repo_root(cwd)
+        ok, reason = teardown_worktree(repo, cwd, result["feature"])
+        if ok:
+            print(f"\n🧹 Worktree {cwd.name} removed.")
+            print(f"👉 Change directory: cd {rel_wt}")
+        else:
+            print(f"\nℹ️  Worktree {cwd.name} kept: {reason}")
+    else:
+        print(f"\nℹ️  Worktree {cwd.name} kept (--keep-worktree).")
 
     print(f"\n   Continue with next feature, or promote: psrw promote")
     return 0

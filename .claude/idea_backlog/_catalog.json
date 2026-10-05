@@ -115,5 +115,46 @@
     "title": "ps-commu-explain diagram DSL with auto-layout that emits drawio XML",
     "created_at": "2026-09-30T00:27:23.394575+00:00",
     "promoted_to": null
+  },
+  {
+    "id": "I-020",
+    "title": "Session-true claim ownership",
+    "created_at": "2026-10-04T07:20:08.440996+00:00",
+    "promoted_to": null,
+    "epic": "E-002"
+  },
+  {
+    "id": "I-021",
+    "title": "Safe release transaction and cleanup",
+    "created_at": "2026-10-04T07:20:08.444929+00:00",
+    "promoted_to": null,
+    "epic": "E-002"
+  },
+  {
+    "id": "I-022",
+    "title": "Freeze and drift invariants",
+    "created_at": "2026-10-04T07:20:08.446832+00:00",
+    "promoted_to": null,
+    "epic": "E-002"
+  },
+  {
+    "id": "I-023",
+    "title": "Gate result cache and single gate runner",
+    "created_at": "2026-10-04T07:20:08.449432+00:00",
+    "promoted_to": null,
+    "epic": "E-002"
+  },
+  {
+    "id": "I-024",
+    "title": "Truthful status and one-command release tail",
+    "created_at": "2026-10-04T07:20:08.450671+00:00",
+    "promoted_to": null,
+    "epic": "E-002"
+  },
+  {
+    "id": "I-025",
+    "title": "Worktree GC and claim reopen for ps-release-workflow",
+    "created_at": "2026-10-05T08:11:36.446127+00:00",
+    "promoted_to": "F-019"
   }
 ]

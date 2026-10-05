@@ -63,7 +63,7 @@ def _drop_claim(claims_file: Path, feature_id: str) -> None:
 
 def claim_feature(
     repo: Path, feature_id: Optional[str], *, owner: str, select_next: bool = False,
-    skip_readiness: bool = False
+    skip_readiness: bool = False, reopen: bool = False
 ) -> dict:
     repo = Path(repo)
     if not is_ps_release_workflow_repo(repo):
@@ -79,6 +79,8 @@ def claim_feature(
     claims_file = repo / ".claude" / "state" / "claims.json"
 
     if select_next:
+        if reopen:
+            raise ValueError("--reopen and --next are mutually exclusive")
         feature_id = None
         for e in list_entries(refined_cat):
             if e.get("status") == "open":
@@ -94,12 +96,29 @@ def claim_feature(
     if feat is None:
         raise FeatureNotFoundError(feature_id)
 
+    status = feat.get("status")
+    if status == "shipped" and not reopen:
+        raise RuntimeError(
+            f"Feature {feature_id} has already shipped on release {feat.get('release_version')}. "
+            f"If you need to inspect or fix it before release promote, run `psrw claim --reopen {feature_id}`."
+        )
+    if status == "promoted":
+        raise RuntimeError(
+            f"Feature {feature_id} has already been promoted to main. "
+            f"Reopen is only permitted for features shipped in the current active release."
+        )
+    if reopen and status != "shipped":
+        raise RuntimeError(
+            f"Feature {feature_id} has status '{status}', not 'shipped'. "
+            f"--reopen is only permitted for shipped features."
+        )
+
     # Wave 0 Readiness Enforcement: Feature spec must not be an unrefined skeleton
     # Enforced when repo opts into quality_profile (e.g. web-ui) or enforce_readiness=True,
     # unless skip_readiness is explicitly passed.
     state = read_release_state(repo) or {}
     enforce = state.get("enforce_readiness") or bool(state.get("quality_profile"))
-    if enforce and not skip_readiness:
+    if enforce and not skip_readiness and not reopen:
         from lib.readiness import check_spec_readiness
         feat_folder = wt / ".claude" / "refined_backlog" / f"{feature_id}-{slugify(feat['title'])}"
         spec_path = feat_folder / "spec.md"
@@ -115,7 +134,7 @@ def claim_feature(
 
     # Atomic claim attempt — flock around claims.json (in the main checkout).
     def try_claim(claims: dict) -> dict:
-        if feature_id in claims:
+        if feature_id in claims and not reopen:
             raise AlreadyClaimedError(
                 f"{feature_id} held by owner={claims[feature_id]['owner']}"
             )
@@ -127,6 +146,8 @@ def claim_feature(
             # when a different session abandons this claim).
             "session_id": current_session_id(),
         }
+        if reopen:
+            claims[feature_id]["reopened"] = True
         return claims
 
     mutate_state(claims_file, try_claim, default={})
@@ -142,45 +163,49 @@ def claim_feature(
     reattached = False
     try:
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
-        if branch_exists(repo, branch_name):
+        if worktree_path.is_dir():
+            reattached = True
+        elif branch_exists(repo, branch_name):
             # Re-attach (B-1): the branch survives an unclaim (branches are
             # always kept), so attach a fresh worktree to it — prior commits
             # stay intact — instead of dying on "branch already exists".
             add_worktree(repo, worktree_path, branch_name)
             reattached = True
+            created_worktree = True
         else:
-            # No prior branch: cut feat/<F-NNN> off main.
-            add_worktree_new_branch(repo, worktree_path, branch_name, "main")
+            # Cut feat/<F-NNN> off shipped_sha (if reopening) or main.
+            base_ref = feat.get("shipped_sha") or "main"
+            add_worktree_new_branch(repo, worktree_path, branch_name, base_ref)
             created_branch = True
-        created_worktree = True
+            created_worktree = True
 
         # Write working-feature.json marker into .git/worktrees/<id>-<slug>/.
         wt_meta = repo / ".git" / "worktrees" / f"{feature_id}-{slug}"
-        marker = wt_meta / "working-feature.json"
-        marker.write_text(
-            json.dumps(
-                {"feature": feature_id, "owner": owner, "claimed_at": _now(),
-                 "session_id": current_session_id()}, indent=2
-            )
-        )
+        marker_data = {
+            "feature": feature_id,
+            "owner": owner,
+            "claimed_at": _now(),
+            "session_id": current_session_id(),
+        }
+        if reopen:
+            marker_data["reopened"] = True
+
+        if wt_meta.exists():
+            (wt_meta / "working-feature.json").write_text(json.dumps(marker_data, indent=2))
+        elif (worktree_path / ".git").is_dir():
+            (worktree_path / ".git" / "working-feature.json").write_text(json.dumps(marker_data, indent=2))
 
         # SR-1: mark catalog status=claimed in the _release worktree and commit
-        # THERE. Serialized under the same lock ship takes on the shared
-        # _release worktree, so a concurrent ship/claim can't interleave
-        # mutate+commit and commit the wrong snapshot (audit A4).
-        # update_entry raises CatalogEntryNotFoundError if the id drifted out
-        # of the catalog since the find_entry check above (A6); claimed_at is
-        # freshly stamped so a real claim always changes the entry. Commit also
-        # when the worktree is dirty (M-2): a previous run that crashed between
-        # mutate and commit left the change uncommitted — sweep it in now.
-        def mark_claimed(e: dict) -> None:
-            e["status"] = "claimed"
-            e["claimed_by"] = owner
-            e["claimed_at"] = _now()
+        # THERE. If reopening an already-shipped feature, status remains "shipped".
+        if not reopen:
+            def mark_claimed(e: dict) -> None:
+                e["status"] = "claimed"
+                e["claimed_by"] = owner
+                e["claimed_at"] = _now()
 
-        with file_lock(wt):
-            if update_entry(refined_cat, feature_id, mark_claimed) or is_dirty(wt):
-                commit_all(wt, f"chore(catalog): claim {feature_id}")
+            with file_lock(wt):
+                if update_entry(refined_cat, feature_id, mark_claimed) or is_dirty(wt):
+                    commit_all(wt, f"chore(catalog): claim {feature_id}")
     except BaseException:
         if created_worktree:
             # Best-effort: tear down what this claim created so a retry is clean.
@@ -198,7 +223,7 @@ def claim_feature(
         _drop_claim(claims_file, feature_id)
         raise
 
-    if reattached:
+    if reattached and not reopen:
         print(
             f"ℹ️  re-attached to existing branch {branch_name} (has prior commits "
             f"from a previous claim — review before building on top)",
@@ -211,6 +236,7 @@ def claim_feature(
         "branch": branch_name,
         "owner": owner,
         "reattached": reattached,
+        "reopened": reopen,
     }
 
 
@@ -336,6 +362,11 @@ def main() -> int:
         help="re-own (or recreate) the worktree of a feature already claimed "
         "in the catalog — e.g. a fresh session resuming in-flight work",
     )
+    p.add_argument(
+        "--reopen",
+        action="store_true",
+        help="recreate feature worktree for an already-shipped feature (status remains shipped)",
+    )
     p.add_argument("--owner", default=None)
     p.add_argument("--skip-readiness", action="store_true", help="bypass spec readiness check (for legacy features only)")
     args = p.parse_args()
@@ -346,6 +377,15 @@ def main() -> int:
     if args.resume and not args.feature_id:
         print("ERROR: --resume requires a feature id (F-NNN)", file=sys.stderr)
         return 1
+    if args.reopen and args.select_next:
+        print("ERROR: --reopen and --next are mutually exclusive", file=sys.stderr)
+        return 1
+    if args.reopen and args.resume:
+        print("ERROR: --reopen and --resume are mutually exclusive", file=sys.stderr)
+        return 1
+    if args.reopen and not args.feature_id:
+        print("ERROR: --reopen requires a feature id (F-NNN)", file=sys.stderr)
+        return 1
 
     owner = args.owner or resolve_owner_id()
     repo = find_repo_root(Path.cwd())
@@ -355,7 +395,7 @@ def main() -> int:
         else:
             result = claim_feature(
                 repo, args.feature_id, owner=owner, select_next=args.select_next,
-                skip_readiness=args.skip_readiness
+                skip_readiness=args.skip_readiness, reopen=args.reopen
             )
     except (
         AlreadyClaimedError,
@@ -377,10 +417,13 @@ def main() -> int:
         verb = "Recreated worktree for" if result["recreated"] else "Resumed"
         print(f"\n✅ {verb} {result['feature']} (worktree: {result['worktree']})")
         print(f"   Owner is now {result['owner']} (marker + claims ledger rewritten)")
+    elif args.reopen:
+        print(f"\n✅ Reopened {result['feature']} (worktree: {result['worktree']})")
+        print(f"   Catalog status remains 'shipped'. Edit and run `psrw ship` when done.")
     else:
         print(f"\n✅ Claimed {result['feature']} (worktree: {result['worktree']})")
-    print("   Implement: /superpowers:subagent-driven-development")
-    print(f"   (reads {result['worktree']}/plan.md)")
+        print("   Implement: /superpowers:subagent-driven-development")
+        print(f"   (reads {result['worktree']}/plan.md)")
     return 0
 
 

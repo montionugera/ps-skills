@@ -22,8 +22,9 @@ init            # once per repo — opt in
             └─ cleanup         # REQUIRED after the PR merges: --cleanup-only <v>
 ```
 
-`psrw` mirrors these steps as verbs: `psrw init`, `new-release`, `idea`, `refine`, `claim`,
-`ship`, `promote`, `unclaim`, `status`, `hotfix`, `sync-main`. The guard fires automatically on Claude's
+`psrw` mirrors these steps as verbs: `psrw init`, `new-release`, `idea`, `refine`, `claim` (supports `--reopen`),
+`ship` (auto-teardown unless `--keep-worktree`), `promote`, `unclaim`, `status` (surfaces reclaimable worktrees),
+`hotfix`, `sync-main`, `gc` (safely prune eligible merged feature worktrees). The guard fires automatically on Claude's
 own edit tools; see [`docs/lifecycle.md#guard-guarantees`](docs/lifecycle.md#guard-guarantees).
 
 ## Scripts
@@ -34,14 +35,15 @@ own edit tools; see [`docs/lifecycle.md#guard-guarantees`](docs/lifecycle.md#gua
 | `init_work_new_release.py` (`psrw new-release`) | Open `release/<v>`, mark `.release.json` in-progress, create the long-lived `_release` worktree. |
 | `new_idea.py` (`psrw idea`) | Mint `I-NNN`, create the idea folder with spec/research skeletons, commit on `release/<v>`. |
 | `promote_idea_to_refined.py` (`psrw refine`) | Promote `I-NNN` → `F-NNN`, carry the idea's content forward into the refined backlog, update catalogs. |
-| `init_work_refined_backlog.py` (`psrw claim`) | Atomically claim `F-NNN` (or `--next`), create a per-feature worktree with an owner marker. |
-| `ship_current_work_to_release.py` (`psrw ship`) | Run Gate 1 (`precheck.sh`), merge the feature branch into `release/<v>`, mark catalog shipped. |
+| `init_work_refined_backlog.py` (`psrw claim`) | Atomically claim `F-NNN` (or `--next`), create a per-feature worktree with an owner marker. Use `--reopen` to recreate the worktree for an already-shipped feature. |
+| `ship_current_work_to_release.py` (`psrw ship`) | Run Gate 1 (`precheck.sh`), merge the feature branch into `release/<v>`, mark catalog shipped, and automatically tear down the worktree (unless `--keep-worktree`). |
 | `promote_release.py` (`psrw promote`) | Run Gate 2 (`integration.sh`), push `release/<v>`, open a PR to `main` (default) or squash-merge locally (`--direct`). After the PR merges, `--cleanup-only <v>` archives + prunes. See *Promote lifecycle* below. |
 | `unclaim.py` (`psrw unclaim`) | Abandon a claim, keeping the feature branch. |
-| `status.py` (`psrw status`) | One-screen report of what is in flight. |
+| `status.py` (`psrw status`) | One-screen report of what is in flight, including reclaimable worktrees count. |
 | `hotfix.py` (`psrw hotfix`) | Create a sibling hotfix worktree (`--sync-release` is an alias for `psrw sync-main`). |
 | `sync_main.py` (`psrw sync-main`) | Merge `main` (hotfixes) into the open `release/<v>`, verify with Gate 1, roll back on failure; `--deploy` redeploys locally. |
-| `cleanup_legacy_worktrees.py` | Interactive GC of marker-less ("legacy") worktrees, showing merged-to-main status. **Deferred** — garbage collection has no `psrw` verb yet (later spec); invoke directly with `python3 scripts/cleanup_legacy_worktrees.py`. |
+| `gc_worktrees.py` (`psrw gc`) | Garbage collect and prune shipped/merged feature worktrees using rigorous safety (S1–S8) and liveness (L1–L3) checks. Report-only by default; `--apply` executes removal; `--force` overrides uncommitted/ignored/idle checks; `--json` emits machine-readable reports. |
+| `cleanup_legacy_worktrees.py` | Interactive GC of marker-less ("legacy") worktrees, showing merged-to-main status. |
 | `guard_check.py` | PreToolUse hook: blocks edits on `main` of an opted-in repo, or in a worktree owned by another session. See *Guard guarantees* in `docs/lifecycle.md`. |
 
 ## Promote lifecycle
