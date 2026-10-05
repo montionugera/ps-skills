@@ -109,7 +109,7 @@ def test_non_allowlisted_ignored_file_is_kept(tmp_repo_with_release: Path, fixed
     claim = claim_feature(tmp_repo_with_release, feat["id"], owner=fixed_owner)
     wt = Path(claim["worktree"])
 
-    (wt / ".gitignore").write_text(".env.local\nnode_modules/\n")
+    (wt / ".gitignore").write_text(".env.local\nnode_modules/\n.pytest_cache/\n")
     (wt / "feature.txt").write_text("done")
     subprocess.run(["git", "add", "."], cwd=wt, check=True)
     subprocess.run(["git", "commit", "-m", "feat: done"], cwd=wt, check=True)
@@ -126,8 +126,12 @@ def test_non_allowlisted_ignored_file_is_kept(tmp_repo_with_release: Path, fixed
     # Allowlisted ignored file (node_modules) should pass S5
     (wt / "node_modules").mkdir()
     (wt / "node_modules" / "dummy.js").write_text("console.log(1)")
-    ok, _ = removable(tmp_repo_with_release, wt, skip_liveness=True)
-    assert ok
+    # Nested allowlisted directory should also pass S5
+    nested_cache = wt / "packages" / "sub" / ".pytest_cache"
+    nested_cache.mkdir(parents=True)
+    (nested_cache / "cache.json").write_text("{}")
+    ok, reason = removable(tmp_repo_with_release, wt, skip_liveness=True)
+    assert ok, reason
 
     # Non-allowlisted ignored file (.env.local) must fail S5
     (wt / ".env.local").write_text("SECRET=123")

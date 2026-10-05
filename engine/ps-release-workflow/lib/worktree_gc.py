@@ -2,6 +2,7 @@
 
 Implements safety checks S1–S8 and liveness checks L1–L3 per Thinker architectural ruling.
 """
+import fnmatch
 import json
 import os
 import subprocess
@@ -243,13 +244,21 @@ def removable(
 
     # S5: Ignored files regenerable
     try:
-        cp_ignored = git_run(wt, "status", "--porcelain", "--ignored", check=False)
+        cp_ignored = git_run(wt, "status", "--porcelain", "--ignored=matching", check=False)
         for line in cp_ignored.stdout.splitlines():
             line = line.strip()
             if line.startswith("!! "):
                 rel_path = line[3:].strip()
-                top_part = rel_path.split("/", 1)[0]
-                if top_part not in effective_allowlist and rel_path not in effective_allowlist:
+                path_parts = Path(rel_path.rstrip("/")).parts
+                matched = False
+                for part in path_parts:
+                    for pattern in effective_allowlist:
+                        if part == pattern or fnmatch.fnmatch(part, pattern):
+                            matched = True
+                            break
+                    if matched:
+                        break
+                if not matched and not any(fnmatch.fnmatch(rel_path, pat) for pat in effective_allowlist):
                     return False, f"S5: non-allowlisted ignored file present: {rel_path}"
     except Exception as e:
         return False, f"S5: error checking ignored files: {e}"
