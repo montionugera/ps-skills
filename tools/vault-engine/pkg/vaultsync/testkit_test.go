@@ -1,6 +1,7 @@
 package vaultsync
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -192,4 +193,32 @@ func readSHA(t *testing.T, root, id string) string {
 		t.Fatalf("read %s in %s: %v", id, root, err)
 	}
 	return env.SHA256
+}
+
+// engineCLI runs the built engine against one folder. VAULT_ROOT is always set
+// explicitly; without it main.go falls back to the real vault.
+func engineCLI(root string, args ...string) (string, string, int) {
+	cmd := exec.Command(engineBin, args...)
+	cmd.Dir = root
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "VAULT_ROOT=") && !strings.HasPrefix(kv, "VAULT_PLACE=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	cmd.Env = append(cmd.Env, "VAULT_ROOT="+root)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+	if ee, ok := err.(*exec.ExitError); ok {
+		return out.String(), errb.String(), ee.ExitCode()
+	}
+	if err != nil {
+		return out.String(), err.Error(), -1
+	}
+	return out.String(), errb.String(), 0
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	return lines[len(lines)-1]
 }

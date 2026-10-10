@@ -63,12 +63,20 @@ func main() {
 
 	engine := vault.NewVaultEngine(vaultRoot)
 
+	syncCfg, err := vaultsync.LoadConfig(engine.Root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Sync config error: %v\n", err)
+		os.Exit(1)
+	}
+
 	switch command {
 	case "rebuild-index":
+		unlock := lockIfSynced(engine, syncCfg)
 		if err := engine.RebuildIndexes(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error rebuilding indexes: %v\n", err)
 			os.Exit(1)
 		}
+		unlock()
 		fmt.Printf("Successfully rebuilt indexes in %s\n", filepath.Join(engine.Root, "_meta", "indexes"))
 
 	case "ingest":
@@ -76,12 +84,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: vault-engine ingest <file_path>")
 			os.Exit(1)
 		}
-		assignedID, err := engine.IngestFile(os.Args[2])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Ingest failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Ingested note as %s\n", assignedID)
+		runMutating(engine, syncCfg, vaultsync.IngestOp(engine, os.Args[2], actorFromEnv()))
 
 	case "validate":
 		if len(os.Args) < 3 {
@@ -209,21 +212,21 @@ func main() {
 			reason = os.Args[7]
 		}
 
-		err := engine.CommitRecord(vault.CommitRequest{
+		if syncCfg != nil && expectedSHA == "" {
+			finish("Commit FAILED", "", vaultsync.Outcome{Line: "REFUSED note-changed", Exit: vaultsync.ExitNoteChanged,
+				Detail: "a save in a shared folder needs the fingerprint (sha256) from read-record; read the note and save again"})
+		}
+		runMutating(engine, syncCfg, vaultsync.CommitOp(engine, vault.CommitRequest{
 			RecordID:       recordID,
 			ExpectedSHA256: expectedSHA,
 			Updates:        updates,
 			Actor:          actor,
 			IdempotencyKey: idempotencyKey,
 			Reason:         reason,
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Commit FAILED: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Commit SUCCESS for %s by %s (OCC validated)\n", recordID, actor)
+		}))
 
 	case "run-workflow":
+		refuseIfSynced(syncCfg, "run-workflow")
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: vault-engine run-workflow <workflow_file> [payload_json]")
 			os.Exit(1)
@@ -314,6 +317,7 @@ func main() {
 		fmt.Printf("Workflow %s completed with status: %s (Instance ID: %s)\n", wf.WorkflowID, inst.Status, inst.InstanceID)
 
 	case "daemon":
+		refuseIfSynced(syncCfg, "daemon")
 		interval := 3 * time.Second
 		runOnce := false
 		wfPath := filepath.Join(engine.Root, "_meta", "workflows", "idea-lifecycle.json")
@@ -352,14 +356,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: vault-engine capture <idempotency_key> <category> <origin> <payload>")
 			os.Exit(1)
 		}
-		ledger := vault.NewCaptureLedger(filepath.Join(engine.Root, "_meta", "ledger"))
-		entry, err := ledger.RecordCapture(os.Args[2], vault.CategoryTrack(os.Args[3]), os.Args[4], os.Args[5])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Capture failed: %v\n", err)
-			os.Exit(1)
-		}
-		data, _ := json.Marshal(entry)
-		fmt.Println(string(data))
+		runMutating(engine, syncCfg, vaultsync.CaptureOp(engine, os.Args[2], os.Args[3], os.Args[4], os.Args[5]))
 
 	case "route":
 		if len(os.Args) < 5 {
@@ -397,12 +394,14 @@ func main() {
 		if len(os.Args) > 4 {
 			author = os.Args[4]
 		}
-		assignedID, err := engine.PublishKnowledge(filePath, category, author)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Publish knowledge failed: %v\n", err)
+		runMutating(engine, syncCfg, vaultsync.PublishOp(engine, filePath, category, author))
+
+	case "whoami":
+		if syncCfg == nil {
+			fmt.Fprintln(os.Stderr, "no sync config (_meta/bin/sync.json); this folder is not shared")
 			os.Exit(1)
 		}
-		fmt.Printf("Published knowledge note as %s\n", assignedID)
+		fmt.Println(syncCfg.Place)
 
 	case "search":
 		if len(os.Args) < 3 {
@@ -456,6 +455,7 @@ func printUsage() {
 	fmt.Println("  unlock <record_id>                  Release lock")
 	fmt.Println("  validate-dag <workflow_file>        Validate workflow DAG acyclicity")
 	fmt.Println("  validate-agent <manifest_file>      Validate agent recruitment manifest")
+	fmt.Println("  whoami                              Print this place's name (shared folders)")
 }
 
 
