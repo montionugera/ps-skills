@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"strings"
 	"syscall"
@@ -14,6 +15,9 @@ import (
 )
 
 var ErrNoConnection = errors.New("no connection to the shared copy")
+
+// ErrNothingToCommit is returned by Commit when it is given no paths.
+var ErrNothingToCommit = errors.New("nothing to commit: no paths given")
 
 const localTimeout = 30 * time.Second
 
@@ -27,7 +31,12 @@ type Repo struct {
 	Remote     string
 	Branch     string
 	NetTimeout time.Duration
-	lock       *FolderLock // set while the folder lock is held; inherited by git children
+	// lock must be set by the caller (NewRepo leaves it nil) right after taking
+	// the folder lock; while set, every git child inherits its descriptor, so a
+	// git still running after the engine is killed keeps the folder locked.
+	// That protection holds only when the engine dies WITHOUT calling
+	// FolderLock.Release (Release unlocks for inheritors too).
+	lock *FolderLock
 }
 
 func NewRepo(root string, cfg *Config) *Repo {
@@ -41,18 +50,28 @@ type gitResult struct {
 	Err    error
 }
 
+// exitOnSignal ends the engine after a termination signal has stopped the git
+// child. A variable so tests can observe it; production value is os.Exit.
+var exitOnSignal = os.Exit
+
+// gitSafetyFlags keep git from starting long-lived descendants (file-system
+// monitor, background gc or maintenance, hooks) that would inherit the folder
+// lock descriptor and outlive the engine. credential.helper is left alone.
+var gitSafetyFlags = []string{"--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "gc.auto=0",
+	"-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null"}
+
 // run executes git with a time limit. While the folder lock is held, the child
 // inherits the lock's descriptor: if this process is killed, a still-running
-// git keeps the folder locked until it has finished.
+// git keeps the folder locked until it has finished. git runs in its own
+// process group; a time-out, SIGINT, SIGTERM or SIGHUP kills the whole group,
+// and a signal then ends the engine with status 128+signal.
 func (r *Repo) run(timeout time.Duration, args ...string) gitResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"--no-optional-locks"}, args...)...)
+	cmd := exec.CommandContext(ctx, "git", append(append([]string{}, gitSafetyFlags...), args...)...)
 	cmd.Dir = r.Root
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "VAULT_HUB_PLACE="+r.Place)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_LITERAL_PATHSPECS=1", "LC_ALL=C", "VAULT_HUB_PLACE="+r.Place)
 	cmd.WaitDelay = 2 * time.Second
-	// Own process group, so a timeout kills git and every helper it started
-	// (ssh, remote helpers) instead of leaving them running.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	if r.lock != nil && r.lock.f != nil {
@@ -60,7 +79,26 @@ func (r *Repo) run(timeout time.Duration, args ...string) gitResult {
 	}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
-	err := cmd.Run()
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigs)
+	err := cmd.Start()
+	if err == nil {
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case err = <-done:
+		case sig := <-sigs:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			<-done
+			code := 128
+			if s, ok := sig.(syscall.Signal); ok {
+				code += int(s)
+			}
+			exitOnSignal(code)
+			err = fmt.Errorf("interrupted by %v", sig)
+		}
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		err = fmt.Errorf("timed out after %v", timeout)
 	}
@@ -119,8 +157,13 @@ func (r *Repo) isAncestor(a, b string) bool {
 }
 
 // Commit records exactly the given paths (additions, changes and deletions)
-// as <actor>@<place>. A non-empty key is stored as a Vault-Op-Key trailer.
+// as <actor>@<place>; anything else staged stays staged, and paths are literal
+// names, not patterns. No paths gives ErrNothingToCommit and touches nothing.
+// A non-empty key is stored as a Vault-Op-Key trailer.
 func (r *Repo) Commit(paths []string, actor, subject, key string) error {
+	if len(paths) == 0 {
+		return ErrNothingToCommit
+	}
 	if _, err := r.local(append([]string{"add", "-A", "--"}, paths...)...); err != nil {
 		return err
 	}
@@ -133,7 +176,7 @@ func (r *Repo) Commit(paths []string, actor, subject, key string) error {
 	if key != "" {
 		msg += "\n\nVault-Op-Key: " + key
 	}
-	_, err := r.local("-c", "user.name="+who, "-c", "user.email="+who+".vault.invalid", "-c", "commit.gpgsign=false",
-		"commit", "--quiet", "--no-verify", "-m", msg)
+	_, err := r.local(append([]string{"-c", "user.name=" + who, "-c", "user.email=" + who + ".vault.invalid", "-c", "commit.gpgsign=false",
+		"commit", "--quiet", "--no-verify", "-m", msg, "--"}, paths...)...)
 	return err
 }

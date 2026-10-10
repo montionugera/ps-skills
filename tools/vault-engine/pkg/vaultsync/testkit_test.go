@@ -37,6 +37,20 @@ func TestMain(m *testing.M) {
 		fmt.Println("locked")
 		time.Sleep(time.Hour)
 	}
+	// Helper mode for TestRepo_SignalKillsTheGitGroupAndEndsTheEngine: take the
+	// lock, start a long git child through Repo.run, then idle until signalled.
+	if root := os.Getenv("VAULTSYNC_SIGNAL_CHILD"); root != "" {
+		lock, err := AcquireFolderLock(root, time.Second)
+		if err != nil {
+			os.Exit(3)
+		}
+		r := &Repo{Root: root, Place: "helper", lock: lock}
+		alias := "alias.nap=!echo $$ > " + os.Getenv("VAULTSYNC_SIGNAL_PID") + "; exec sleep 30"
+		go r.run(time.Minute, "-c", alias, "nap")
+		time.Sleep(900 * time.Millisecond) // let the child start
+		fmt.Println("started")
+		time.Sleep(time.Hour)
+	}
 	_ = os.Unsetenv("VAULT_ROOT")
 	_ = os.Unsetenv("VAULT_PLACE")
 	dir, err := os.MkdirTemp("", "vault-engine-bin-")
