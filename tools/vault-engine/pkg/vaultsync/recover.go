@@ -219,21 +219,43 @@ func (r *Repo) names(args ...string) ([]string, error) {
 	return out, nil
 }
 
-// blobAt returns the id of p in rev, and whether rev has p.
-func (r *Repo) blobAt(rev, p string) (string, bool) {
-	id, err := r.local("rev-parse", "--verify", "--quiet", rev+":"+p)
-	return id, err == nil
+// blobAt returns the id of p in rev and whether rev has p. Only a clear answer
+// from git counts: ls-tree succeeds with no entry when the path is not in the
+// commit, and fails (error) for anything else - a killed or timed-out git, an
+// unknown rev. The caller must treat an error as "do not know", never as absent.
+func (r *Repo) blobAt(rev, p string) (string, bool, error) {
+	res := r.run(localTimeout, "ls-tree", "-z", rev, "--", p)
+	if res.Err != nil {
+		return "", false, fmt.Errorf("git ls-tree %s: %w: %s", rev, res.Err, strings.TrimSpace(res.Stderr))
+	}
+	for _, rec := range strings.Split(res.Stdout, "\x00") {
+		meta, name, ok := strings.Cut(rec, "\t")
+		if !ok || name != p {
+			continue
+		}
+		if f := strings.Fields(meta); len(f) == 3 {
+			return f[2], true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // sameAs reports whether the file on disk holds exactly what rev holds for p
-// (both absent counts as the same). Any doubt answers false.
-func (r *Repo) sameAs(p, rev string) bool {
-	want, inRev := r.blobAt(rev, p)
+// (both absent counts as the same). Only a failed lookup of rev's version is
+// an error; any doubt about the file on disk answers false (callers then keep a copy).
+func (r *Repo) sameAs(p, rev string) (bool, error) {
+	want, inRev, err := r.blobAt(rev, p)
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Lstat(filepath.Join(r.Root, filepath.FromSlash(p))); os.IsNotExist(err) {
+		return !inRev, nil
+	}
 	have, err := r.local("hash-object", "--", p)
 	if err != nil {
-		return !inRev
+		return false, nil // doubt about the file's content: not the same; the caller keeps a copy
 	}
-	return inRev && have == want
+	return inRev && have == want, nil
 }
 
 // restoreHandEdit copies a note changed outside the engine to quarantine and
@@ -302,9 +324,17 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 			case dirtyBefore:
 				// Hand-edited at Begin, written over since: never proven; copy first.
 			case m.Op == "update":
-				proven = r.sameAs(p, r.remoteRef())
+				if proven, err = r.sameAs(p, r.remoteRef()); err != nil {
+					return err
+				}
 			case !sweep && wrote[p]:
-				proven = !committed || r.sameAs(p, preHead)
+				if committed {
+					if proven, err = r.sameAs(p, preHead); err != nil {
+						return err
+					}
+				} else {
+					proven = true
+				}
 			}
 			if !proven {
 				if err := r.setAside(p, "changed during an interrupted "+m.Op+"; not proven to be written by it (git status "+strings.TrimSpace(st[p])+")", false); err != nil {
@@ -323,7 +353,17 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 			}
 		case wrote[p]:
 			if committed {
-				if _, inCommit := r.blobAt(preHead, p); inCommit && !r.sameAs(p, preHead) {
+				_, inCommit, err := r.blobAt(preHead, p)
+				if err != nil {
+					return err
+				}
+				same := true
+				if inCommit {
+					if same, err = r.sameAs(p, preHead); err != nil {
+						return err
+					}
+				}
+				if inCommit && !same {
 					if err := r.setAside(p, "no longer holds what the "+m.Op+" wrote; kept, not deleted", true); err != nil {
 						return err
 					}

@@ -53,6 +53,20 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// the hook turns it into a cancel, and Run returns nil.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// After a stop no further git command is started (the one place all of them
+	// pass through is the Repo's gate). Passes run on this goroutine only.
+	r := d.S.Repo
+	prevGate := r.gate
+	r.gate = func(args []string) error {
+		if ctx.Err() != nil {
+			return ErrStopped
+		}
+		if prevGate != nil {
+			return prevGate(args)
+		}
+		return nil
+	}
+	defer func() { r.gate = prevGate }()
 	prevExit := exitOnSignal
 	exitOnSignal = func(int) { cancel() }
 	defer func() { exitOnSignal = prevExit }()
@@ -162,6 +176,9 @@ func (d *Daemon) tick(ctx context.Context) error {
 		case state == pushRace:
 			return fmt.Errorf("inbox files not sent yet (they stay on disk): the shared copy kept moving")
 		default:
+			if err := ctx.Err(); err != nil {
+				return err // stopped: end the pass quietly, nothing was refused
+			}
 			if state == pushRefused {
 				d.backOff()
 			}

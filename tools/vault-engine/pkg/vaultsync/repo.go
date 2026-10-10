@@ -22,6 +22,10 @@ var ErrNothingToCommit = errors.New("nothing to commit: no paths given")
 // ErrTimedOut marks a git command that was stopped by its own time limit.
 var ErrTimedOut = errors.New("timed out")
 
+// ErrStopped marks a git command that was not started because the program is
+// shutting down (see Repo.gate).
+var ErrStopped = errors.New("stopped")
+
 const localTimeout = 30 * time.Second
 
 var unsafeActorChars = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
@@ -40,6 +44,11 @@ type Repo struct {
 	// That protection holds only when the engine dies WITHOUT calling
 	// FolderLock.Release (Release unlocks for inheritors too).
 	lock *FolderLock
+	// gate, when set, is asked before every git command (the one place they all
+	// pass through); a non-nil answer is returned as the command's error and
+	// nothing is started. The daemon uses it to stop at once after a stop signal;
+	// tests use it to count commands or to fail one.
+	gate func(args []string) error
 }
 
 func NewRepo(root string, cfg *Config) *Repo {
@@ -69,6 +78,11 @@ var gitSafetyFlags = []string{"--no-optional-locks", "-c", "core.fsmonitor=false
 // process group; a time-out, SIGINT, SIGTERM or SIGHUP kills the whole group,
 // and a signal then ends the engine with status 128+signal.
 func (r *Repo) run(timeout time.Duration, args ...string) gitResult {
+	if r.gate != nil {
+		if err := r.gate(args); err != nil {
+			return gitResult{Err: err}
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append(append([]string{}, gitSafetyFlags...), args...)...)

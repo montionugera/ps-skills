@@ -727,3 +727,71 @@ func TestBegin_TwoSavesOverTheSameUnchangedHandEditKeepOneCopyAndDoNotFail(t *te
 		t.Errorf("want exactly one copy of the hand edit, got %q", c)
 	}
 }
+
+// A failed lookup of the committed version is not "the file is not in the
+// commit": nothing is removed and the marker stays for the next lock-taker.
+func TestUndo_AFailedBlobLookupRemovesNothingAndKeepsTheMarker(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	p := filepath.Join(w.Mac, "01_Ideas", "new.md")
+	writeFile(t, p, []byte("what the save wrote\n"))
+	if err := r.Commit([]string{"01_Ideas/new.md"}, "agent-olivier", "vault: commit", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	writeFile(t, p, []byte("a person rewrote this\n")) // so a wrong "absent" answer would delete a person's text
+	r.gate = func(args []string) error {
+		for _, a := range args {
+			if a == "ls-tree" {
+				return errors.New("git was killed")
+			}
+		}
+		return nil
+	}
+	if err := r.Undo(m, []string{"01_Ideas/new.md"}, noRebuild); err == nil {
+		t.Fatalf("undo must report the failed lookup")
+	}
+	if got, err := os.ReadFile(p); err != nil || string(got) != "a person rewrote this\n" {
+		t.Fatalf("file must stay as it is: (%q, %v)", got, err)
+	}
+	if !r.hasMarker() {
+		t.Fatalf("marker must stay")
+	}
+	r.gate = nil
+	if err := r.Undo(m, []string{"01_Ideas/new.md"}, noRebuild); err != nil {
+		t.Fatalf("undo after the lookup works: %v", err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("file should have been moved aside by the working undo")
+	}
+}
+
+// A clear "not in that commit" answer still lets the undo remove a file.
+func TestUndo_AListedFileNotInTheCommitIsStillRemoved(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	committed := filepath.Join(w.Mac, "01_Ideas", "committed.md")
+	writeFile(t, committed, []byte("committed\n"))
+	if err := r.Commit([]string{"01_Ideas/committed.md"}, "agent-olivier", "vault: commit", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	other := filepath.Join(w.Mac, "01_Ideas", "written-not-committed.md")
+	writeFile(t, other, []byte("written, not committed\n"))
+	if err := r.Undo(m, []string{"01_Ideas/committed.md", "01_Ideas/written-not-committed.md"}, noRebuild); err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+	for _, f := range []string{committed, other} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Errorf("%s should have been removed", f)
+		}
+	}
+}

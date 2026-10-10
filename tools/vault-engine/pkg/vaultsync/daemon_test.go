@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -331,9 +332,17 @@ func TestDaemon_BacksOffAfterARefusedSendButKeepsUpdating(t *testing.T) {
 	attempts := 0
 	mac.S.Hooks.BeforePush = func(int) { attempts++ }
 
+	// Waits of 1, 2, 4, 8 passes: sends on passes 0, 2, 5, 10, 19; passes 6-9
+	// are certainly waiting ones.
 	const passes = 20
+	stray := filepath.Join(w.Mac, "01_Ideas", "stray-in-wait.md")
 	for i := 0; i < passes; i++ {
-		if i == 5 { // someone else saves while the wait runs
+		if i == 7 || i == 8 {
+			if mac.skip == 0 {
+				t.Fatalf("pass %d should be a waiting pass", i)
+			}
+		}
+		if i == 7 { // someone else saves while the daemon waits to send
 			restore()
 			srv := newSyncer(t, w.Srv)
 			if _, out := srv.Save(commitOp(srv, note2, readSHA(t, w.Srv, note2), 4)); out.Exit != 0 {
@@ -341,12 +350,22 @@ func TestDaemon_BacksOffAfterARefusedSendButKeepsUpdating(t *testing.T) {
 			}
 			restore = tightHub(t, w.Hub)
 		}
+		if i == 8 {
+			quietDrop(t, w.Mac, "01_Ideas/stray-in-wait.md", []byte("made by hand\n"))
+		}
 		err := mac.Tick()
-		if i == 5 && readSHA(t, w.Mac, note2) != readSHA(t, w.Srv, note2) {
-			t.Fatalf("pass %d (err %v): update must still run during the wait", i, err)
+		if i == 7 && readSHA(t, w.Mac, note2) != readSHA(t, w.Srv, note2) {
+			t.Fatalf("pass %d (err %v): update must still run on a waiting pass", i, err)
+		}
+		if i == 8 {
+			if _, serr := os.Stat(stray); !os.IsNotExist(serr) {
+				t.Fatalf("pass %d (err %v): a stray file must be set aside on a waiting pass", i, err)
+			}
+			if got := quarantined(t, w.Mac, "mac-test", "01_Ideas/stray-in-wait.md"); string(got) != "made by hand\n" {
+				t.Fatalf("quarantined bytes differ: %q", got)
+			}
 		}
 	}
-	// Waits of 1, 2, 4, 8 passes: sends on passes 1, 3, 6, 11, 20.
 	if attempts < 3 || attempts > 6 {
 		t.Fatalf("%d send attempts in %d passes; the wait should grow", attempts, passes)
 	}
@@ -454,5 +473,50 @@ func TestDaemon_DropIsSentAfterARace(t *testing.T) {
 	}
 	if readSHA(t, w.Mac, note2) != readSHA(t, w.Srv, note2) {
 		t.Fatalf("the race did not happen or the daemon did not catch up")
+	}
+}
+
+// A stop signal that lands on the push ends the pass at once: no further git
+// command is started, nothing is reported as refused, Run returns nil.
+func TestDaemon_StopSignalDuringPushStartsNoFurtherGitCommand(t *testing.T) {
+	w := newWorld(t)
+	quietDrop(t, w.Mac, "_inbox/human/hi.md", []byte("hi\n"))
+	mac := newDaemon(t, w.Mac)
+	mac.S.Cfg.PollIntervalMS = 50
+	log := &bytes.Buffer{}
+	mac.Log = log
+	// Everything below runs on Run's own goroutine, so no lock is needed.
+	signalled := false
+	var after []string
+	mac.S.Repo.gate = func(args []string) error {
+		if signalled {
+			after = append(after, strings.Join(args, " "))
+		}
+		return nil
+	}
+	mac.S.Hooks.PushResult = func(_ int, res gitResult) gitResult {
+		// The signal lands while the push runs: the handler fires, the push ends in error.
+		signalled = true
+		exitOnSignal(143)
+		return gitResult{Err: errors.New("interrupted by terminated")}
+	}
+	done := make(chan error, 1)
+	go func() { done <- mac.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("Run did not stop")
+	}
+	if !signalled {
+		t.Fatalf("the push never ran")
+	}
+	if len(after) != 0 {
+		t.Fatalf("git commands asked for after the stop signal: %v", after)
+	}
+	if strings.Contains(log.String(), "refused") || strings.Contains(log.String(), "not sent") {
+		t.Fatalf("a stop must not be reported as a refusal:\n%s", log)
 	}
 }
