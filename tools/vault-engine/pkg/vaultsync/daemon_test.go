@@ -1,11 +1,16 @@
 package vaultsync
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -182,7 +187,10 @@ func TestDaemon_DropSurvivesAKillAndARefusedSend(t *testing.T) {
 		t.Fatalf("the drop should be an ordinary unsent file again:\n%s", st)
 	}
 
-	// 3. Next try with the limit restored: it arrives.
+	// 3. Next try with the limit restored: it arrives once the short wait is over.
+	for mac.skip > 0 {
+		_ = mac.Tick()
+	}
 	if err := os.WriteFile(settings, original, 0644); err != nil {
 		t.Fatalf("restore settings: %v", err)
 	}
@@ -218,37 +226,67 @@ func TestDaemon_OnlyOneRunsPerPlace(t *testing.T) {
 	}
 }
 
+// signalWriter reports each log line on a channel, so a test waits on the
+// daemon's own words instead of sleeping.
+type signalWriter struct {
+	lines chan string
+}
+
+func (w *signalWriter) Write(p []byte) (int, error) {
+	select {
+	case w.lines <- string(p):
+	default:
+	}
+	return len(p), nil
+}
+
 func TestDaemon_RunStopsCleanlyOnCancelAndFollowsTheHub(t *testing.T) {
 	w := newWorld(t)
 	mac := newSyncer(t, w.Mac)
 	srv := newDaemon(t, w.Srv)
+	sw := &signalWriter{lines: make(chan string, 64)}
+	srv.Log = sw
 	srv.S.Cfg.PollIntervalMS = 50
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- srv.Run(ctx) }()
+	stopped := false
+	stop := func() error { // idempotent: every path ends with Run returned
+		if !stopped {
+			stopped = true
+			cancel()
+			select {
+			case err := <-done:
+				return err
+			case <-time.After(30 * time.Second):
+				return fmt.Errorf("Run did not return after cancel")
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { _ = stop() })
 
 	if _, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5)); out.Exit != 0 {
-		cancel()
 		t.Fatalf("mac save: %+v", out)
 	}
 	want := readSHA(t, w.Mac, note1)
-	deadline := time.Now().Add(20 * time.Second)
-	for readSHA(t, w.Srv, note1) != want {
-		if time.Now().After(deadline) {
-			cancel()
-			<-done
-			t.Fatalf("running daemon never brought the change")
+	timeout := time.After(30 * time.Second)
+wait:
+	for {
+		select {
+		case line := <-sw.lines:
+			if strings.Contains(line, "updated to the newest version") {
+				break wait
+			}
+		case <-timeout:
+			t.Fatalf("running daemon never reported the update")
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run after cancel: %v", err)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatalf("Run did not return after cancel")
+	if err := stop(); err != nil {
+		t.Fatalf("Run after cancel: %v", err)
+	}
+	if got := readSHA(t, w.Srv, note1); got != want {
+		t.Fatalf("srv note fingerprint %s, want %s", got, want)
 	}
 	// Run has returned: the folder lock and the guard are free again.
 	lock, err := AcquireFolderLock(w.Srv, time.Second)
@@ -260,6 +298,137 @@ func TestDaemon_RunStopsCleanlyOnCancelAndFollowsTheHub(t *testing.T) {
 	cancel2()
 	if err := newDaemon(t, w.Srv).Run(ctx2); err != nil {
 		t.Fatalf("guard still held after stop: %v", err)
+	}
+}
+
+// tightHub makes the hub refuse every send (allowance of 1 byte) and returns a
+// function that restores the original limits.
+func tightHub(t *testing.T, hub string) (restore func()) {
+	t.Helper()
+	settings := filepath.Join(hub, "hooks", "vault-limits.json")
+	original, _ := os.ReadFile(settings)
+	tight := strings.Replace(string(original), `"daily_bytes_per_place": 52428800`, `"daily_bytes_per_place": 1`, 1)
+	if tight == string(original) {
+		t.Fatalf("settings not changed")
+	}
+	if err := os.WriteFile(settings, []byte(tight), 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	return func() {
+		if err := os.WriteFile(settings, original, 0644); err != nil {
+			t.Fatalf("restore settings: %v", err)
+		}
+	}
+}
+
+func TestDaemon_BacksOffAfterARefusedSendButKeepsUpdating(t *testing.T) {
+	w := newWorld(t)
+	quietDrop(t, w.Mac, "_inbox/agent/agent-olivier/mac-test-refused.md", []byte("refused\n"))
+	restore := tightHub(t, w.Hub)
+	mac := newDaemon(t, w.Mac)
+	log := &bytes.Buffer{}
+	mac.Log = log
+	attempts := 0
+	mac.S.Hooks.BeforePush = func(int) { attempts++ }
+
+	const passes = 20
+	for i := 0; i < passes; i++ {
+		if i == 5 { // someone else saves while the wait runs
+			restore()
+			srv := newSyncer(t, w.Srv)
+			if _, out := srv.Save(commitOp(srv, note2, readSHA(t, w.Srv, note2), 4)); out.Exit != 0 {
+				t.Fatalf("srv save: %+v", out)
+			}
+			restore = tightHub(t, w.Hub)
+		}
+		err := mac.Tick()
+		if i == 5 && readSHA(t, w.Mac, note2) != readSHA(t, w.Srv, note2) {
+			t.Fatalf("pass %d (err %v): update must still run during the wait", i, err)
+		}
+	}
+	// Waits of 1, 2, 4, 8 passes: sends on passes 1, 3, 6, 11, 20.
+	if attempts < 3 || attempts > 6 {
+		t.Fatalf("%d send attempts in %d passes; the wait should grow", attempts, passes)
+	}
+	if n := strings.Count(log.String(), "waiting"); n > attempts {
+		t.Fatalf("more wait lines (%d) than refusals (%d):\n%s", n, attempts, log)
+	}
+
+	// An accepted send resets the wait: a new drop goes out on the very next pass.
+	restore()
+	for i := 0; i < 100 && mac.skip > 0; i++ {
+		_ = mac.Tick()
+	}
+	if err := mac.Tick(); err != nil {
+		t.Fatalf("tick after the wait: %v", err)
+	}
+	if mac.skip != 0 || mac.refusals != 0 {
+		t.Fatalf("wait not reset: skip=%d refusals=%d", mac.skip, mac.refusals)
+	}
+	quietDrop(t, w.Mac, "_inbox/human/after-reset.md", []byte("after\n"))
+	if err := mac.Tick(); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if text := mustGit(t, w.Hub, "show", "refs/heads/main:_inbox/human/after-reset.md"); text != "after" {
+		t.Fatalf("drop not on the hub right after the reset: %q", text)
+	}
+}
+
+// A signal that stops a git command must end the daemon quietly (exit 0), not
+// with 128+signal as for the other commands.
+func TestDaemon_StopSignalDuringGitIsAQuietStop(t *testing.T) {
+	w := newWorld(t)
+	quietDrop(t, w.Mac, "_inbox/human/hi.md", []byte("hi\n"))
+	mac := newDaemon(t, w.Mac)
+	mac.S.Cfg.PollIntervalMS = 50
+	var once sync.Once
+	mac.S.Hooks.BeforePush = func(int) { once.Do(func() { exitOnSignal(143) }) }
+	done := make(chan error, 1)
+	go func() { done <- mac.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("Run did not stop")
+	}
+}
+
+// Through the real program: SIGTERM while running always exits 0.
+func TestDaemon_CLIExitsZeroOnSigterm(t *testing.T) {
+	w := newWorld(t)
+	cmd := exec.Command(engineBin, "sync-daemon")
+	cmd.Dir = w.Srv
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "VAULT_ROOT=") && !strings.HasPrefix(kv, "VAULT_PLACE=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	cmd.Env = append(cmd.Env, "VAULT_ROOT="+w.Srv)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	if _, err := bufio.NewReader(stdout).ReadString('\n'); err != nil { // "Starting vault sync ..."
+		t.Fatalf("no start line: %v", err)
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waited = true
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("daemon should exit 0 on SIGTERM: %v", err)
 	}
 }
 

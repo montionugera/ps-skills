@@ -19,6 +19,10 @@ import (
 type Daemon struct {
 	S   *Syncer
 	Log io.Writer
+
+	// Back-off after a refused send (see tick). Only the send step waits.
+	refusals int // refused sends in a row
+	skip     int // passes left in which the send step is skipped
 }
 
 func NewDaemon(engine *vault.VaultEngine, cfg *Config) *Daemon {
@@ -44,6 +48,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := syscall.Flock(int(guard.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return fmt.Errorf("sync daemon already running: %w", err)
 	}
+	// A stop signal that lands while a git command runs must end the daemon
+	// quietly (exit 0), not with the 128+signal that the other commands use:
+	// the hook turns it into a cancel, and Run returns nil.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	prevExit := exitOnSignal
+	exitOnSignal = func(int) { cancel() }
+	defer func() { exitOnSignal = prevExit }()
 	ticker := time.NewTicker(time.Duration(d.S.Cfg.PollIntervalMS) * time.Millisecond)
 	defer ticker.Stop()
 	for ctx.Err() == nil {
@@ -62,8 +74,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 // small request to the shared copy and takes no lock.
 func (d *Daemon) Tick() error { return d.tick(context.Background()) }
 
+// maxWaitPasses caps the back-off after refused sends.
+const maxWaitPasses = 100
+
 func (d *Daemon) tick(ctx context.Context) error {
 	r := d.S.Repo
+	// After a refused send only the send step waits (1, 2, 4 ... passes);
+	// update, recovery and stray handling run every pass.
+	waiting := d.skip > 0
+	if waiting {
+		d.skip--
+	}
 	hub, err := r.RemoteHead()
 	if err != nil {
 		return err
@@ -75,6 +96,9 @@ func (d *Daemon) tick(ctx context.Context) error {
 	drops, strays, handEdit, err := d.scan()
 	if err != nil {
 		return err
+	}
+	if waiting {
+		drops = nil
 	}
 	if hub == head && !handEdit && len(drops) == 0 && len(strays) == 0 && !r.hasMarker() {
 		return nil
@@ -110,6 +134,9 @@ func (d *Daemon) tick(ctx context.Context) error {
 	if drops, strays, _, err = d.scan(); err != nil {
 		return err
 	}
+	if waiting {
+		drops = nil
+	}
 	// The lock is held and no save is in progress (Recover cleared the marker),
 	// so a quiet untracked file outside _inbox/ was made by hand: it is not
 	// sent, it is moved to _quarantine/<place>/ and reported.
@@ -125,6 +152,7 @@ func (d *Daemon) tick(ctx context.Context) error {
 		state, out := d.S.sendDrops(drops, attempt)
 		switch {
 		case state == pushOK:
+			d.refusals, d.skip = 0, 0
 			return nil
 		case state == pushRace && attempt < d.S.Cfg.MaxRetries && ctx.Err() == nil:
 			// The shared copy moved while sending: catch up, then send again.
@@ -134,9 +162,34 @@ func (d *Daemon) tick(ctx context.Context) error {
 		case state == pushRace:
 			return fmt.Errorf("inbox files not sent yet (they stay on disk): the shared copy kept moving")
 		default:
+			if state == pushRefused {
+				d.backOff()
+			}
 			return fmt.Errorf("inbox files not sent yet (they stay on disk): %s %s", out.Line, out.Detail)
 		}
 	}
+}
+
+// backOff doubles the number of passes the send step waits after a refusal
+// and logs one line when the wait changes. A lost push race does not come here.
+func (d *Daemon) backOff() {
+	d.refusals++
+	d.skip = waitAfter(d.refusals)
+	if d.skip != waitAfter(d.refusals-1) {
+		fmt.Fprintf(d.Log, "vault-sync: send refused; waiting %d passes before the next try\n", d.skip)
+	}
+}
+
+// waitAfter is the number of passes to wait after n refusals in a row:
+// 1, 2, 4 ... capped at maxWaitPasses (0 before any refusal).
+func waitAfter(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	if n > 8 { // 1<<7 = 128 is already past the cap
+		return maxWaitPasses
+	}
+	return min(1<<(n-1), maxWaitPasses)
 }
 
 // scan lists the untracked files that have been quiet long enough to act on -
