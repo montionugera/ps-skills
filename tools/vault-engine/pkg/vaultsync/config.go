@@ -50,5 +50,18 @@ func LoadConfig(vaultRoot string) (*Config, error) {
 	if !placeRegex.MatchString(cfg.Place) {
 		return nil, fmt.Errorf("%w: place name %q must match %s", ErrConfig, cfg.Place, placeRegex)
 	}
+	for _, f := range []struct {
+		name string
+		ok   bool
+	}{
+		{"remote", cfg.Remote != ""}, {"branch", cfg.Branch != ""},
+		{"poll_interval_ms", cfg.PollIntervalMS > 0}, {"inbox_quiet_ms", cfg.InboxQuietMS > 0},
+		{"net_timeout_ms", cfg.NetTimeoutMS > 0}, {"lock_timeout_ms", cfg.LockTimeoutMS > 0},
+		{"max_retries", cfg.MaxRetries > 0},
+	} {
+		if !f.ok {
+			return nil, fmt.Errorf("%w: %s must be set and positive", ErrConfig, f.name)
+		}
+	}
 	return cfg, nil
 }

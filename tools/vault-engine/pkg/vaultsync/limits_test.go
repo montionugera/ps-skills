@@ -1,6 +1,9 @@
 package vaultsync
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -55,5 +58,39 @@ func TestDefaultLimitsCarryTheSpecValues(t *testing.T) {
 	}
 	if len(l.DeniedPrefixes) != 9 || len(l.AllowedExt) != 7 || len(l.ImageExt) != 3 {
 		t.Fatalf("limit lists differ from the spec: %+v", l)
+	}
+}
+
+func TestLoadLimits(t *testing.T) {
+	good, err := json.Marshal(DefaultLimits())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	dir := t.TempDir()
+	write := func(body []byte) string {
+		f := filepath.Join(dir, "limits.json")
+		if err := os.WriteFile(f, body, 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		return f
+	}
+	l, err := LoadLimits(write(good))
+	if err != nil || l.MaxInputBytes != 20971520 || len(l.DeniedPrefixes) != 9 {
+		t.Fatalf("good file should load, got (%+v, %v)", l, err)
+	}
+	for _, key := range []string{"ref", "max_input_bytes", "max_file_bytes", "max_image_bytes",
+		"max_files_per_push", "daily_bytes_per_place", "allowed_ext", "denied_prefixes"} {
+		var m map[string]any
+		if err := json.Unmarshal(good, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		delete(m, key)
+		body, _ := json.Marshal(m)
+		if _, err := LoadLimits(write(body)); err == nil {
+			t.Errorf("file missing %q should be refused", key)
+		}
+	}
+	if _, err := LoadLimits(filepath.Join(dir, "absent.json")); err == nil {
+		t.Errorf("absent file should be refused")
 	}
 }

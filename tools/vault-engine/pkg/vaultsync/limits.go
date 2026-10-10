@@ -54,7 +54,7 @@ func LoadLimits(file string) (Limits, error) {
 	if err := json.Unmarshal(data, &l); err != nil {
 		return l, fmt.Errorf("parsing limits: %w", err)
 	}
-	if l.Ref == "" || l.MaxFileBytes <= 0 || l.MaxImageBytes <= 0 || l.MaxFilesPerPush <= 0 ||
+	if l.Ref == "" || l.MaxInputBytes <= 0 || len(l.DeniedPrefixes) == 0 || l.MaxFileBytes <= 0 || l.MaxImageBytes <= 0 || l.MaxFilesPerPush <= 0 ||
 		l.DailyBytesPerPlace <= 0 || len(l.AllowedExt) == 0 {
 		return l, fmt.Errorf("limits file %s is incomplete", file)
 	}
