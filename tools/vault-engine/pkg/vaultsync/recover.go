@@ -1,6 +1,7 @@
 package vaultsync
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -83,6 +84,20 @@ func (r *Repo) Begin(op, actor string) (*Marker, error) {
 		m.DirtyBefore[p] = h
 	}
 	sort.Strings(m.UntrackedBefore)
+	// Keep the text of every hand-edited note now, before the operation can
+	// write over it. A failure here stops the save before any marker exists.
+	dirty := make([]string, 0, len(m.DirtyBefore))
+	for p, h := range m.DirtyBefore {
+		if h != "" { // a deleted note has no text to keep
+			dirty = append(dirty, p)
+		}
+	}
+	sort.Strings(dirty)
+	for _, p := range dirty {
+		if err := r.setAside(p, "hand edit found before a "+op+" began", false); err != nil {
+			return nil, err
+		}
+	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return nil, err
@@ -412,6 +427,19 @@ func (r *Repo) quarantineHandEdits() error {
 	return nil
 }
 
+// hasCopy reports whether _quarantine/<place>/ already holds a copy of rel
+// with exactly this content.
+func (r *Repo) hasCopy(rel string, data []byte) bool {
+	dir := filepath.Join(r.Root, "_quarantine", r.Place)
+	stamps, _ := os.ReadDir(dir)
+	for _, st := range stamps {
+		if old, err := os.ReadFile(filepath.Join(dir, st.Name(), filepath.FromSlash(rel))); err == nil && bytes.Equal(old, data) {
+			return true
+		}
+	}
+	return false
+}
+
 // setAside copies (or moves) a file into _quarantine/<place>/ and writes one
 // report line. _quarantine/ is local to the place and never synced.
 func (r *Repo) setAside(rel, why string, move bool) error {
@@ -429,8 +457,14 @@ func (r *Repo) setAside(rel, why string, move bool) error {
 			return err
 		}
 	} else if data, err := os.ReadFile(src); err == nil {
-		if err := os.WriteFile(dst, data, 0644); err != nil {
-			return err
+		// A copy of this exact text for this path is already kept (a second save
+		// or the later no-marker pass over the same unchanged edit): keep one.
+		if !r.hasCopy(rel, data) {
+			if err := os.WriteFile(dst, data, 0644); err != nil {
+				return err
+			}
+		} else {
+			why += " (identical copy already in quarantine)"
 		}
 	} else if !os.IsNotExist(err) {
 		return err // cannot keep the text, so the caller must not overwrite the note

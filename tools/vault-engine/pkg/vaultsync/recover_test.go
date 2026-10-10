@@ -535,8 +535,8 @@ func TestUndo_ANoteEditedByHandBeforeBeginIsNotListedAndSurvivesARefusedSave(t *
 	if now, _ := os.ReadFile(note); string(now) != "typed by a person before the save began\n" {
 		t.Errorf("hand edit lost or altered: %q", now)
 	}
-	if n := reportLines(t, w.Mac, "mac-test"); n != 0 {
-		t.Errorf("a left-alone hand edit is not reported by an undo, got %d lines", n)
+	if n := reportLines(t, w.Mac, "mac-test"); n != 1 { // the copy Begin made; the undo adds none
+		t.Errorf("expected only Begin's report line, got %d", n)
 	}
 	// The next pass with no marker handles it as before.
 	if err := r.End(); err != nil {
@@ -605,11 +605,14 @@ func TestUndo_ANoteEditedByHandThenWrittenByTheSaveIsCopiedBeforeItIsPutBack(t *
 			if head, _ := r.Head(); head != base {
 				t.Errorf("head %s, want %s", head, base)
 			}
-			if got := quarantined(t, w.Mac, "mac-test", rel); string(got) != "written by the save over the hand edit\n" {
-				t.Errorf("no copy kept before the note was put back: %q", got)
+			// Begin kept the hand text; the undo kept what the save wrote over it.
+			got := copiesOf(t, w.Mac, "mac-test", rel)
+			sort.Strings(got)
+			if len(got) != 2 || got[0] != "hand edit\n" || got[1] != "written by the save over the hand edit\n" {
+				t.Errorf("copies kept = %q", got)
 			}
-			if n := reportLines(t, w.Mac, "mac-test"); n != 1 {
-				t.Errorf("expected one report line, got %d", n)
+			if n := reportLines(t, w.Mac, "mac-test"); n != 2 {
+				t.Errorf("expected two report lines, got %d", n)
 			}
 		})
 	}
@@ -636,5 +639,80 @@ func TestRecover_AMarkerWrittenBeforeDirtyBeforeExistedStillLoadsAndBehavesAsBef
 	}
 	if r.hasMarker() {
 		t.Errorf("marker should be cleared")
+	}
+}
+
+// copiesOf returns the text of every copy of rel kept under _quarantine/<place>/.
+func copiesOf(t *testing.T, root, place, rel string) []string {
+	t.Helper()
+	stamps, _ := os.ReadDir(filepath.Join(root, "_quarantine", place))
+	var out []string
+	for _, s := range stamps {
+		if data, err := os.ReadFile(filepath.Join(root, "_quarantine", place, s.Name(), filepath.FromSlash(rel))); err == nil {
+			out = append(out, string(data))
+		}
+	}
+	return out
+}
+
+func TestBegin_CopiesAHandEditedNoteBeforeTheSaveCanOverwriteIt(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
+	rel := "01_Ideas/" + filepath.Base(note)
+	writeFile(t, note, []byte("the person's original text\n"))
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	writeFile(t, note, []byte("written by the save over it\n"))
+	if err := r.Undo(m, []string{rel}, noRebuild); err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+	found := false
+	for _, c := range copiesOf(t, w.Mac, "mac-test", rel) {
+		found = found || c == "the person's original text\n"
+	}
+	if !found {
+		t.Errorf("the person's original text is not in quarantine: %q", copiesOf(t, w.Mac, "mac-test", rel))
+	}
+}
+
+func TestBegin_FailsWithNoMarkerWhenTheCopyCannotBeKept(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
+	writeFile(t, note, []byte("hand edit\n"))
+	writeFile(t, filepath.Join(w.Mac, "_quarantine"), []byte("a file where the folder should be\n"))
+	if _, err := r.Begin("commit", "agent-olivier"); err == nil {
+		t.Fatalf("begin must fail when the hand edit cannot be copied")
+	}
+	if r.hasMarker() {
+		t.Errorf("no marker may be left behind")
+	}
+}
+
+func TestBegin_TwoSavesOverTheSameUnchangedHandEditKeepOneCopyAndDoNotFail(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
+	rel := "01_Ideas/" + filepath.Base(note)
+	writeFile(t, note, []byte("hand edit\n"))
+	for i := 0; i < 2; i++ {
+		if _, err := r.Begin("commit", "agent-olivier"); err != nil {
+			t.Fatalf("begin %d: %v", i, err)
+		}
+		if err := r.End(); err != nil {
+			t.Fatalf("end: %v", err)
+		}
+	}
+	if err := r.Recover(noRebuild); err != nil { // the no-marker pass copies it once more
+		t.Fatalf("recover: %v", err)
+	}
+	if c := copiesOf(t, w.Mac, "mac-test", rel); len(c) != 1 || c[0] != "hand edit\n" {
+		t.Errorf("want exactly one copy of the hand edit, got %q", c)
 	}
 }
