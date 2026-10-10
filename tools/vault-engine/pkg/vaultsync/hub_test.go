@@ -233,8 +233,10 @@ func TestPreReceive_RefusesInputItCannotRead(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var stderr strings.Builder
 			code := PreReceive(in, &stderr, limits, "mac-test", time.Now())
-			if code == 0 || !strings.Contains(stderr.String(), "vault-hub: REFUSED type-not-allowed: ") {
-				t.Fatalf("expected refusal, got code=%d stderr=%q", code, stderr.String())
+			// git itself writes these lines; one the hub cannot read is the hub's
+			// own fault, not a rule the sender broke.
+			if code == 0 || !strings.Contains(stderr.String(), "vault-hub: REFUSED engine-error: ") {
+				t.Fatalf("expected an engine-error refusal, got code=%d stderr=%q", code, stderr.String())
 			}
 		})
 	}
@@ -275,4 +277,90 @@ func TestChargeDaily_RefusesAnUnreadableOrCorruptLedger(t *testing.T) {
 			t.Fatalf("ledger = %s (%v)", data, err)
 		}
 	})
+}
+
+// hubLimitsCopy puts the shipped settings into a temp "hooks" folder; the
+// usage ledger then goes to <hooks>/../vault-usage, also in the temp folder.
+func hubLimitsCopy(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "hub", "vault-limits.json"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	limits := filepath.Join(t.TempDir(), "hooks", "vault-limits.json")
+	writeFile(t, limits, data)
+	return limits
+}
+
+// The hub could not read or compute something: that is its own fault. It still
+// refuses the send, but with engine-error, never with a label that tells the
+// sender its file is too large or of the wrong type.
+func TestPreReceive_OwnFaultsAreEngineErrors(t *testing.T) {
+	zero, unknown := strings.Repeat("0", 40), strings.Repeat("1", 40)
+	t.Run("settings unreadable", func(t *testing.T) {
+		var stderr strings.Builder
+		code := PreReceive(strings.NewReader(""), &stderr, filepath.Join(t.TempDir(), "missing.json"), "mac-test", time.Now())
+		if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: hub settings unreadable") {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+	})
+	t.Run("settings corrupt", func(t *testing.T) {
+		limits := filepath.Join(t.TempDir(), "hooks", "vault-limits.json")
+		writeFile(t, limits, []byte("{not json"))
+		var stderr strings.Builder
+		code := PreReceive(strings.NewReader(""), &stderr, limits, "mac-test", time.Now())
+		if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: hub settings unreadable") {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+	})
+	t.Run("git cannot list the incoming commits", func(t *testing.T) {
+		var stderr strings.Builder
+		code := PreReceive(strings.NewReader(zero+" "+unknown+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
+		if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: cannot list incoming commits") {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+	})
+	t.Run("an object cannot be measured", func(t *testing.T) {
+		code, msg := batchCheck(unknown+"\n", "%(objectname) %(objectsize)", "cannot measure incoming files",
+			func(string, int64) (string, string) { return "", "" })
+		if code != "engine-error" || !strings.Contains(msg, "cannot be measured") {
+			t.Fatalf("code=%q msg=%q", code, msg)
+		}
+	})
+	t.Run("a rule the sender broke keeps its label", func(t *testing.T) {
+		for name, c := range map[string]struct{ place, line, want string }{
+			"no sender name": {"", zero + " " + unknown + " refs/heads/main\n", "vault-hub: REFUSED type-not-allowed: sender identity"},
+			"other ref":      {"mac-test", zero + " " + unknown + " refs/heads/side\n", "vault-hub: REFUSED type-not-allowed: refs/heads/side is not accepted"},
+			"delete":         {"mac-test", unknown + " " + zero + " refs/heads/main\n", "vault-hub: REFUSED type-not-allowed: deleting"},
+		} {
+			var stderr strings.Builder
+			code := PreReceive(strings.NewReader(c.line), &stderr, hubLimitsCopy(t), c.place, time.Now())
+			if code == 0 || !strings.HasPrefix(stderr.String(), c.want) {
+				t.Errorf("%s: code=%d stderr=%q", name, code, stderr.String())
+			}
+		}
+	})
+}
+
+// A usage ledger the hub cannot write is the hub's fault too: the send is
+// refused (fail closed) with engine-error, not with too-large.
+func TestHub_UnwritableUsageLedgerIsAnEngineError(t *testing.T) {
+	hub := newHub(t)
+	writeFile(t, filepath.Join(hub, "vault-usage"), []byte("a file where the ledger folder should be\n"))
+	dir := filepath.Join(t.TempDir(), "place")
+	writeFile(t, filepath.Join(dir, "README.md"), []byte("seed\n"))
+	mustGit(t, dir, "init", "--quiet", "--initial-branch=main")
+	mustGit(t, dir, "remote", "add", "origin", hub)
+	mustGit(t, dir, "add", "-A")
+	mustGit(t, dir, "commit", "--quiet", "-m", "seed")
+	out, err := pushAs(t, dir, "mac-test", "HEAD:refs/heads/main")
+	if err == nil || !strings.Contains(out, "vault-hub: REFUSED engine-error: daily allowance cannot be recorded") {
+		t.Fatalf("expected an engine-error refusal, got err=%v\n%s", err, out)
+	}
+	if strings.Contains(out, "REFUSED too-large") {
+		t.Fatalf("a hub fault must not read as a size limit:\n%s", out)
+	}
+	if refs := mustGit(t, hub, "for-each-ref"); refs != "" {
+		t.Fatalf("the hub must not have taken the send:\n%s", refs)
+	}
 }

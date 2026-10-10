@@ -34,9 +34,10 @@ func refused(code string, exit int, detail string) Outcome {
 	return Outcome{Line: "REFUSED " + code, Exit: exit, Detail: detail}
 }
 
-// violationOutcome maps a hub label to the fixed outcome line. The hub also
-// prints "engine-error" for its own faults; any label this engine does not
-// know is read as an engine error too, never as a success.
+// violationOutcome maps a hub label to the fixed outcome line. The hub prints
+// "engine-error" (hubFault in hub.go) when it could not read or compute
+// something itself; any label this engine does not know is read as an engine
+// error too, never as a success.
 func violationOutcome(v *Violation) Outcome {
 	switch v.Code {
 	case "too-large":

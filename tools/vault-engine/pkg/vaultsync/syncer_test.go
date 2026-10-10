@@ -704,3 +704,38 @@ func TestIngestKey_DropNameWithGlobCharactersIsLookedUpLiterally(t *testing.T) {
 		t.Fatalf("ingestKey = (%q, %v): a file never seen must give no key, not the key of na.md", key, err)
 	}
 }
+
+// Both sides together: a hub that cannot read its own settings refuses the
+// send, and the place reports it as an engine error (exit 1), never as a size
+// or type limit, which would tell an agent "do not retry". Once the hub is
+// repaired the very same save goes through.
+func TestSave_HubFaultIsAnEngineErrorAndTheSameSaveWorksAfterRepair(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	settings := filepath.Join(w.Hub, "hooks", "vault-limits.json")
+	original, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if err := os.WriteFile(settings, []byte("{not json"), 0644); err != nil {
+		t.Fatalf("break settings: %v", err)
+	}
+	sha := readSHA(t, w.Mac, note1)
+	_, out := mac.Save(commitOp(mac, note1, sha, 5))
+	if out.Line != "REFUSED engine-error" || out.Exit != ExitEngineError || !strings.Contains(out.Detail, "hub settings unreadable") {
+		t.Fatalf("outcome = %+v, want REFUSED engine-error naming the hub settings", out)
+	}
+	if mac.Repo.hasMarker() {
+		t.Fatalf("marker left behind")
+	}
+	cleanExceptIgnored(t, w.Mac)
+	if hub := mustGit(t, w.Hub, "rev-list", "--count", "refs/heads/main"); hub != "1" {
+		t.Fatalf("the hub must not have taken the send, has %s commits", hub)
+	}
+	if err := os.WriteFile(settings, original, 0644); err != nil {
+		t.Fatalf("restore settings: %v", err)
+	}
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "SAVED" {
+		t.Fatalf("after the repair = %+v, want SAVED", out)
+	}
+}

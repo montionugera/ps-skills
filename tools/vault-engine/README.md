@@ -49,7 +49,7 @@ The last stdout line is always one of:
 | Last line | Exit | Meaning |
 |---|---|---|
 | `SAVED` | 0 | The shared copy has it |
-| `REFUSED engine-error` | 1 | The engine did not accept the input (reason on stderr) |
+| `REFUSED engine-error` | 1 | The engine did not accept the input, or the engine or the shared copy hit a fault of its own, such as hub settings it cannot read (reason on stderr) |
 | `REFUSED note-changed` | 3 | The note changed since it was read, or no fingerprint was given |
 | `REFUSED no-connection` | 4 | The shared copy cannot be reached |
 | `REFUSED too-large` | 5 | A size, count or daily limit was exceeded |
@@ -77,7 +77,7 @@ creates a bare repository that only moves forward on `refs/heads/main` (`receive
 | Files per send | 500 |
 | Per place per day | 52428800 bytes (50 MB), counted per UTC day in `<hub>/vault-usage/<date>.json` |
 
-Every file in every commit of a send is checked. A refusal reads `vault-hub: REFUSED <too-large|type-not-allowed>: <message>`.
+Every file in every commit of a send is checked. A refusal reads `vault-hub: REFUSED <too-large|type-not-allowed|engine-error>: <message>`. `too-large` and `type-not-allowed` mean the send broke a rule in the table above. `engine-error` means the hub itself could not read or compute something (its settings file, git's own input, a git command inside the hook, the usage file): the send is still refused, and the place answers `REFUSED engine-error` (exit 1), not a size or type refusal.
 
 ### Known limits
 

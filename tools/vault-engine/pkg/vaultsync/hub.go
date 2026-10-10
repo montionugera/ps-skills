@@ -20,6 +20,13 @@ import (
 
 const zeroSHA = "0000000000000000000000000000000000000000"
 
+// hubFault labels a refusal that is the hub's own fault: it could not read or
+// compute something (settings, git's own input, a git command, the usage
+// ledger). The send is still refused, but the place reports it as an engine
+// error (exit 1), not as a size or type limit, which would tell an agent not
+// to retry. Rules the sender broke keep "too-large" / "type-not-allowed".
+const hubFault = "engine-error"
+
 // hubGit runs git inside the hook: cwd is the bare repository and the
 // environment (including git's quarantine variables) is inherited untouched.
 func hubGit(stdin string, args ...string) (string, error) {
@@ -35,21 +42,21 @@ func hubGit(stdin string, args ...string) (string, error) {
 
 // batchCheck feeds input to `git cat-file --batch-check=<format>` (format is
 // "<word> <size>") and calls visit for each output line. A git failure or an
-// unparseable line is a "type-not-allowed" refusal; a non-empty code returned
-// by visit stops the scan and is returned as the refusal.
+// unparseable line is the hub's own fault and is refused as hubFault; a
+// non-empty code returned by visit stops the scan and is returned as the refusal.
 func batchCheck(input, format, gitFail string, visit func(word string, size int64) (code, msg string)) (string, string) {
 	out, err := hubGit(input, "cat-file", "--batch-check="+format)
 	if err != nil {
-		return "type-not-allowed", fmt.Sprintf("%s: %v", gitFail, err)
+		return hubFault, fmt.Sprintf("%s: %v", gitFail, err)
 	}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		f := strings.Fields(line)
 		if len(f) != 2 {
-			return "type-not-allowed", "incoming object cannot be measured: " + line
+			return hubFault, "incoming object cannot be measured: " + line
 		}
 		n, err := strconv.ParseInt(f[1], 10, 64)
 		if err != nil { // git prints "<name> missing" for an object it does not have
-			return "type-not-allowed", "incoming object cannot be measured: " + line
+			return hubFault, "incoming object cannot be measured: " + line
 		}
 		if code, msg := visit(f[0], n); code != "" {
 			return code, msg
@@ -59,7 +66,9 @@ func batchCheck(input, format, gitFail string, visit func(word string, size int6
 }
 
 // PreReceive is the hub's door check. It returns the hook's exit code. Every
-// refusal is one line: "vault-hub: REFUSED <code>: <message naming the limit>".
+// refusal is one line: "vault-hub: REFUSED <code>: <message>", where <code> is
+// "too-large" or "type-not-allowed" for a broken rule (the message names the
+// limit) and hubFault for a fault of the hub itself.
 func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now time.Time) int {
 	refuse := func(code, format string, a ...interface{}) int {
 		fmt.Fprintf(stderr, "vault-hub: REFUSED %s: %s\n", code, fmt.Sprintf(format, a...))
@@ -67,7 +76,7 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 	}
 	l, err := LoadLimits(limitsFile)
 	if err != nil {
-		return refuse("type-not-allowed", "hub settings unreadable: %v", err)
+		return refuse(hubFault, "hub settings unreadable: %v", err)
 	}
 	if !placeRegex.MatchString(place) {
 		return refuse("type-not-allowed", "sender identity missing or invalid (VAULT_HUB_PLACE=%q)", place)
@@ -83,7 +92,7 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 	for sc.Scan() {
 		f := strings.Fields(sc.Text())
 		if len(f) != 3 {
-			return refuse("type-not-allowed", "cannot read the update line %q; expected <old> <new> <ref>", sc.Text())
+			return refuse(hubFault, "cannot read the update line %q; expected <old> <new> <ref>", sc.Text())
 		}
 		oldSHA, newSHA, ref := f[0], f[1], f[2]
 		if ref != l.Ref {
@@ -100,18 +109,18 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 		tips = append(tips, newSHA)
 		commits, err := hubGit("", "rev-list", newSHA, "--not", "--all")
 		if err != nil {
-			return refuse("type-not-allowed", "cannot list incoming commits: %v", err)
+			return refuse(hubFault, "cannot list incoming commits: %v", err)
 		}
 		for _, c := range strings.Fields(commits) {
 			raw, err := hubGit("", "diff-tree", "-r", "--root", "-m", "--no-renames", "--no-commit-id", "--raw", "-z", c)
 			if err != nil {
-				return refuse("type-not-allowed", "cannot read commit %s: %v", c, err)
+				return refuse(hubFault, "cannot read commit %s: %v", c, err)
 			}
 			rec := strings.Split(raw, "\x00")
 			for i := 0; i+1 < len(rec); i += 2 {
 				meta := strings.Fields(rec[i]) // :oldmode newmode oldsha newsha status
 				if len(meta) < 5 {
-					return refuse("type-not-allowed", "cannot read a file record of commit %s: %q", c, rec[i])
+					return refuse(hubFault, "cannot read a file record of commit %s: %q", c, rec[i])
 				}
 				if meta[4] == "D" {
 					continue
@@ -127,7 +136,7 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 	}
 
 	if err := sc.Err(); err != nil {
-		return refuse("type-not-allowed", "cannot read the list of updated refs: %v", err)
+		return refuse(hubFault, "cannot read the list of updated refs: %v", err)
 	}
 	if len(paths) > l.MaxFilesPerPush {
 		return refuse("too-large", "the send changes %d files; limit max_files_per_push=%d", len(paths), l.MaxFilesPerPush)
@@ -155,7 +164,7 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 	if len(tips) > 0 {
 		listed, err := hubGit("", append(append([]string{"rev-list", "--objects"}, tips...), "--not", "--all")...)
 		if err != nil {
-			return refuse("type-not-allowed", "cannot list incoming objects: %v", err)
+			return refuse(hubFault, "cannot list incoming objects: %v", err)
 		}
 		var in strings.Builder
 		for _, line := range strings.Split(listed, "\n") {
@@ -177,7 +186,7 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 	usageDir := filepath.Join(filepath.Dir(limitsFile), "..", "vault-usage")
 	used, ok, err := chargeDaily(usageDir, place, now, total, l.DailyBytesPerPlace)
 	if err != nil {
-		return refuse("too-large", "daily allowance cannot be recorded: %v", err)
+		return refuse(hubFault, "daily allowance cannot be recorded: %v", err)
 	}
 	if !ok {
 		return refuse("too-large", "place %s has sent %d bytes today and this send adds %d; limit daily_bytes_per_place=%d",
