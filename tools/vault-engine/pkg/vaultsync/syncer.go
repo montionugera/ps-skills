@@ -166,8 +166,6 @@ func (s *Syncer) attempt(op Op, attempt int) (string, Outcome, bool) {
 		if out, ok := s.checkDropVisible(op.Drop); !ok {
 			return "", out, false
 		}
-	}
-	if op.Drop != "" {
 		switch state, out := s.sendDrops([]string{op.Drop}, attempt); state {
 		case pushOK:
 		case pushRace:
@@ -291,9 +289,6 @@ func (s *Syncer) precheck(paths []string) *Violation {
 // caller must undo; on pushUnconfirmed the caller must leave everything as it is.
 func (s *Syncer) record(paths []string, actor, subject, key string, m *Marker, attempt int) (pushState, Outcome) {
 	r := s.Repo
-	if len(paths) == 0 {
-		return pushRefused, refused("engine-error", ExitEngineError, "nothing to record")
-	}
 	if err := r.Commit(paths, actor, subject, key); err != nil {
 		return pushRefused, errorOutcome(err)
 	}
