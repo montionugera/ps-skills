@@ -11,7 +11,7 @@ REAL_VAULT="$HOME/workspace/agentic-vault"
 EXTRA_GUARDED_DIR="${VAULT_HARNESS_EXTRA_GUARDED_DIR:-}"
 
 usage() {
-    echo "usage: sync-harness.sh setup <empty-dir> <engine-binary>" >&2
+    echo "usage: sync-harness.sh setup <empty-dir> <engine-binary> | run" >&2
     exit 2
 }
 
@@ -106,7 +106,7 @@ in_real_vault() { # <physical-dir>
 
 setup() { # <empty-dir> <engine-binary>
     local root engine
-    root="$(cd "$1" && pwd -P)"
+    root="$(cd "$1" 2>/dev/null && pwd -P)" || { echo "sync-harness: target folder $1 does not exist" >&2; exit 1; }
     engine="$2"
     ! in_real_vault "$root" || { echo "sync-harness: refusing to work inside the real vault" >&2; exit 1; }
     [ -z "$(ls -A "$root")" ] || { echo "sync-harness: $root is not empty" >&2; exit 1; }
@@ -131,7 +131,19 @@ setup() { # <empty-dir> <engine-binary>
     echo "srv-test=$root/srv-test"
 }
 
+run() {
+    cd "$ENGINE_DIR"
+    mkdir -p bin
+    go build -o bin/vault-engine ./cmd/vault-engine
+    echo "--- all packages, short rounds ---"
+    go test ./... -count=1 2>&1 | tail -n 12
+    echo "--- sync scenarios, full rounds (100 / 100 / 100 / 1000 / 50) ---"
+    VAULT_SYNC_ROUNDS=full go test ./pkg/vaultsync/ -run 'TestScenario' -count=1 -timeout 90m -v 2>&1 \
+        | grep -E '^(--- |ok|FAIL|LATENCY|panic)'
+}
+
 case "${1:-}" in
     setup) [ $# -eq 3 ] || usage; setup "$2" "$3" ;;
+    run) [ $# -eq 1 ] || usage; run ;;
     *) usage ;;
 esac
