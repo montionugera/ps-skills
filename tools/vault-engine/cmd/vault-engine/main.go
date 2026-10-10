@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"obsidian-vault-engine/pkg/agent"
@@ -426,6 +428,28 @@ func main() {
 		}
 		fmt.Println("Git privacy check PASSED: all quarantine paths strictly ignored.")
 
+	case "sync-daemon":
+		if syncCfg == nil {
+			fmt.Fprintln(os.Stderr, "sync-daemon needs a sync config (_meta/bin/sync.json)")
+			os.Exit(1)
+		}
+		d := vaultsync.NewDaemon(engine, syncCfg)
+		if len(os.Args) > 2 && os.Args[2] == "--once" {
+			if err := d.Tick(); err != nil {
+				fmt.Fprintf(os.Stderr, "Sync failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Sync pass complete")
+			return
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		defer stop()
+		fmt.Printf("Starting vault sync on %s as %s (every %d ms)...\n", engine.Root, syncCfg.Place, syncCfg.PollIntervalMS)
+		if err := d.Run(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Sync daemon error: %v\n", err)
+			os.Exit(1)
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		printUsage()
@@ -452,6 +476,7 @@ func printUsage() {
 	fmt.Println("  validate-dag <workflow_file>        Validate workflow DAG acyclicity")
 	fmt.Println("  validate-agent <manifest_file>      Validate agent recruitment manifest")
 	fmt.Println("  whoami                              Print this place's name (shared folders)")
+	fmt.Println("  sync-daemon [--once]                Keep this place in step with the shared copy")
 }
 
 
