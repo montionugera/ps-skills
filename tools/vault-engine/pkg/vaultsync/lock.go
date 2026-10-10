@@ -15,11 +15,13 @@ var ErrLockTimeout = errors.New("folder lock: timed out waiting for another save
 // kernel flock on an open file (same technique as the per-record guards in
 // vault.go and the daemon guard in watcher.go): when the process ends for any
 // reason the kernel releases it, so a leftover file can never block the folder.
-// Git children started through Repo.run inherit the descriptor and (with the
-// safety flags in gitSafetyFlags, which stop git starting daemons or hooks) end
-// with git itself. So after an unclean engine exit the folder stays locked only
-// until the git command that was running has finished or been killed; nothing
-// else keeps it locked.
+// Git children started through Repo.run inherit the descriptor. The safety
+// flags in gitSafetyFlags disable git's own hooks, file-system monitor and
+// automatic gc / maintenance for those children, so after an unclean engine
+// exit the folder normally stays locked only until the git command that was
+// running has finished or been killed. This does not stop a credential-helper
+// daemon started by git, or the hub's hooks, which could hold the descriptor
+// longer.
 type FolderLock struct{ f *os.File }
 
 func AcquireFolderLock(vaultRoot string, timeout time.Duration) (*FolderLock, error) {
