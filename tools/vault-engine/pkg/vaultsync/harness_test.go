@@ -1,0 +1,61 @@
+package vaultsync
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestHarness_BuildsHubAndTwoPlaces(t *testing.T) {
+	w := newWorld(t)
+	hubTip := mustGit(t, w.Hub, "rev-parse", "refs/heads/main")
+	for place, root := range map[string]string{"mac-test": w.Mac, "srv-test": w.Srv} {
+		if got := mustGit(t, root, "rev-parse", "HEAD"); got != hubTip {
+			t.Fatalf("%s is at %s, hub at %s", place, got, hubTip)
+		}
+		if st := mustGit(t, root, "status", "--porcelain"); st != "" {
+			t.Fatalf("%s is not clean after setup:\n%s", place, st)
+		}
+		cfg, err := LoadConfig(root)
+		if err != nil || cfg == nil || cfg.Place != place || cfg.PollIntervalMS != 200 || cfg.InboxQuietMS != 300 {
+			t.Fatalf("%s: unexpected sync config (%+v, %v)", place, cfg, err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "_meta", "bin", "vault-engine")); err != nil {
+			t.Fatalf("%s: engine not installed: %v", place, err)
+		}
+		for _, id := range []string{"IDEA-2026-000001", "IDEA-2026-000002"} {
+			if m, _ := filepath.Glob(filepath.Join(root, "01_Ideas", id+"--*.md")); len(m) != 1 {
+				t.Fatalf("%s: fixture note %s missing", place, id)
+			}
+		}
+	}
+}
+
+func TestHarness_InstallsTheRulesFiles(t *testing.T) {
+	w := newWorld(t)
+	agents, err := os.ReadFile(filepath.Join(w.Mac, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("AGENTS.md: %v", err)
+	}
+	for _, want := range []string{
+		"_meta/bin/vault-engine whoami", "SAVED", "REFUSED note-changed", "REFUSED no-connection",
+		"REFUSED too-large", "REFUSED type-not-allowed", "REFUSED busy", "REFUSED engine-error",
+		"_inbox/agent/<your-agent-id>/", "Never run git in this folder",
+	} {
+		if !strings.Contains(string(agents), want) {
+			t.Errorf("AGENTS.md does not mention %q", want)
+		}
+	}
+	if claude, _ := os.ReadFile(filepath.Join(w.Mac, "CLAUDE.md")); string(claude) != "@AGENTS.md\n" {
+		t.Errorf("CLAUDE.md should contain only the import line, got %q", claude)
+	}
+	if gemini, _ := os.ReadFile(filepath.Join(w.Mac, "GEMINI.md")); string(gemini) != "@./AGENTS.md\n" {
+		t.Errorf("GEMINI.md should contain only the import line, got %q", gemini)
+	}
+	// The rules travel with the folder: they are on the hub.
+	if out := mustGit(t, w.Hub, "ls-tree", "--name-only", "refs/heads/main"); !strings.Contains(out, "AGENTS.md") ||
+		!strings.Contains(out, "CLAUDE.md") || !strings.Contains(out, "GEMINI.md") {
+		t.Errorf("rules files are not on the hub:\n%s", out)
+	}
+}

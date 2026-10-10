@@ -113,3 +113,17 @@ func dirSize(t *testing.T, dir string) int64 {
 	})
 	return total
 }
+
+type world struct{ Root, Hub, Mac, Srv string }
+
+// newWorld builds a hub and two test places from the synthetic fixture.
+func newWorld(t *testing.T) world {
+	t.Helper()
+	root := t.TempDir()
+	cmd := exec.Command("bash", filepath.Join("..", "..", "scripts", "sync-harness.sh"), "setup", root, engineBin)
+	cmd.Env = append(os.Environ(), "POLL_MS=200", "QUIET_MS=300")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("harness setup: %v\n%s", err, out)
+	}
+	return world{Root: root, Hub: filepath.Join(root, "hub.git"), Mac: filepath.Join(root, "mac-test"), Srv: filepath.Join(root, "srv-test")}
+}
