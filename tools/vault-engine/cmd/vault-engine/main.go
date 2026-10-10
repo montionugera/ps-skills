@@ -11,6 +11,7 @@ import (
 	"obsidian-vault-engine/pkg/agent"
 	"obsidian-vault-engine/pkg/daemon"
 	"obsidian-vault-engine/pkg/vault"
+	"obsidian-vault-engine/pkg/vaultsync"
 	"obsidian-vault-engine/pkg/workflow"
 )
 
@@ -21,6 +22,15 @@ func main() {
 	}
 
 	command := os.Args[1]
+
+	// The hub's hook calls this inside a bare repository; it needs no vault root.
+	if command == "hub-pre-receive" {
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: vault-engine hub-pre-receive <limits_file>")
+			os.Exit(1)
+		}
+		os.Exit(vaultsync.PreReceive(os.Stdin, os.Stderr, os.Args[2], os.Getenv("VAULT_HUB_PLACE"), time.Now()))
+	}
 
 	// Determine vault root: if VAULT_ROOT env is set, use it; otherwise search up or use system canonical vault
 	vaultRoot := os.Getenv("VAULT_ROOT")

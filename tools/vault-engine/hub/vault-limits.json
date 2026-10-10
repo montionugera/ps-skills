@@ -1,0 +1,13 @@
+{
+  "ref": "refs/heads/main",
+  "max_input_bytes": 20971520,
+  "max_file_bytes": 1048576,
+  "max_image_bytes": 307200,
+  "max_files_per_push": 500,
+  "daily_bytes_per_place": 52428800,
+  "allowed_ext": [".md", ".json", ".jsonl", ".yaml", ".yml", ".txt", ".csv"],
+  "image_ext": [".png", ".jpg", ".svg"],
+  "allowed_names": [".gitignore", ".gitkeep"],
+  "ext_under_prefix": {".sh": "_meta/scripts/", ".raw": "_meta/ledger/raw/"},
+  "denied_prefixes": [".obsidian/", "_tmp/", "_quarantine/", "_meta/bin/", "_meta/locks/", "_meta/guards/", "_meta/logs/", "_meta/indexes/", "graft/"]
+}
