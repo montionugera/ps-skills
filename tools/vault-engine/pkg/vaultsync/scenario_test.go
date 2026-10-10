@@ -18,6 +18,20 @@ import (
 	"obsidian-vault-engine/pkg/vault"
 )
 
+// newScenarioWorld is newWorld plus the first index build in both places: a
+// fresh place has no index until its first save or update, and the checks
+// below treat a missing index as a failure.
+func newScenarioWorld(t *testing.T) world {
+	t.Helper()
+	w := newWorld(t)
+	for _, root := range []string{w.Mac, w.Srv} {
+		if _, errOut, code := engineCLI(root, "rebuild-index"); code != 0 {
+			t.Fatalf("first index build in %s: %s", root, errOut)
+		}
+	}
+	return w
+}
+
 func rounds(full, short int) int {
 	if os.Getenv("VAULT_SYNC_ROUNDS") == "full" {
 		return full
@@ -41,14 +55,20 @@ func both(w world, f func(root string) int) [2]int {
 }
 
 // wholeFolder reports the first way in which a folder is not whole: a changed
-// tracked file, or an index entry whose fingerprint is not the file's.
+// tracked file, a missing or unreadable index, an index that lists a different
+// set of notes than the folder holds, or an entry whose fingerprint is not the
+// file's.
 func wholeFolder(root string) string {
 	out, err := exec.Command("git", "-C", root, "status", "--porcelain", "--untracked-files=no").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "" {
 		return fmt.Sprintf("tracked files differ from the recorded version (%v):\n%s", err, out)
 	}
 	e := vault.NewVaultEngine(root)
-	data, _ := os.ReadFile(filepath.Join(root, "_meta", "indexes", "ideas.jsonl"))
+	data, err := os.ReadFile(filepath.Join(root, "_meta", "indexes", "ideas.jsonl"))
+	if err != nil {
+		return fmt.Sprintf("the index cannot be read: %v", err)
+	}
+	indexed := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if line == "" {
 			continue
@@ -57,9 +77,24 @@ func wholeFolder(root string) string {
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			return "unreadable index line: " + line
 		}
+		indexed[filepath.ToSlash(entry.Path)] = true
 		if sha, _ := e.ComputeSHA256(filepath.Join(root, entry.Path)); sha != entry.SHA256 {
 			return fmt.Sprintf("index says %s for %s, file is %s", entry.SHA256, entry.Path, sha)
 		}
+	}
+	notes, _ := filepath.Glob(filepath.Join(root, "01_Ideas", "IDEA-*.md"))
+	if len(notes) == 0 {
+		return "the folder holds no notes at all"
+	}
+	for _, n := range notes {
+		rel, _ := filepath.Rel(root, n)
+		if !indexed[filepath.ToSlash(rel)] {
+			return "note missing from the index: " + rel
+		}
+		delete(indexed, filepath.ToSlash(rel))
+	}
+	for rel := range indexed {
+		return "index lists a note that is not in the folder: " + rel
 	}
 	return ""
 }
@@ -117,7 +152,7 @@ func saveImpact(root, id string, impact int) int {
 }
 
 func TestScenario01_DifferentNotesAtTheSameMoment(t *testing.T) {
-	w := newWorld(t)
+	w := newScenarioWorld(t)
 	n := rounds(100, 5)
 	for i := 0; i < n; i++ {
 		codes := both(w, func(root string) int {
@@ -137,7 +172,7 @@ func TestScenario01_DifferentNotesAtTheSameMoment(t *testing.T) {
 }
 
 func TestScenario02_SameNoteAtTheSameMoment(t *testing.T) {
-	w := newWorld(t)
+	w := newScenarioWorld(t)
 	n := rounds(100, 5)
 	for i := 0; i < n; i++ {
 		converge(t, w)
@@ -173,7 +208,7 @@ func atoi(t *testing.T, s string) int {
 }
 
 func TestScenario04_NewNotesNeverShareANumber(t *testing.T) {
-	w := newWorld(t)
+	w := newScenarioWorld(t)
 	n := rounds(100, 5)
 	for i := 0; i < n; i++ {
 		codes := both(w, func(root string) int {
@@ -204,18 +239,51 @@ func TestScenario04_NewNotesNeverShareANumber(t *testing.T) {
 	}
 }
 
-func startDaemon(ctx context.Context, root string) *exec.Cmd {
+// daemonProc is a sync-daemon the test has started and must stop.
+type daemonProc struct {
+	cmd    *exec.Cmd
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+}
+
+func startDaemon(t *testing.T, root string) *daemonProc {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, engineBin, "sync-daemon")
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) } // a stop signal, so it exits 0 and releases its lock
 	cmd.WaitDelay = 10 * time.Second
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "VAULT_ROOT="+root)
-	_ = cmd.Start()
-	return cmd
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Fatalf("sync-daemon did not start in %s: %v", root, err)
+	}
+	d := &daemonProc{cmd: cmd, cancel: cancel, done: make(chan struct{})}
+	go func() { _ = cmd.Wait(); close(d.done) }()
+	return d
+}
+
+// stop ends the daemon with SIGTERM and fails the test unless it was still
+// running and exits with status 0. Safe to call more than once.
+func (d *daemonProc) stop(t *testing.T) {
+	t.Helper()
+	d.once.Do(func() {
+		select {
+		case <-d.done:
+			t.Errorf("sync-daemon had already stopped before the test ended")
+		default:
+		}
+		d.cancel()
+		<-d.done
+		if st := d.cmd.ProcessState; st == nil || st.ExitCode() != 0 {
+			t.Errorf("sync-daemon did not exit 0 on the stop signal: %v", st)
+		}
+	})
 }
 
 func TestScenario05_SaveRacesIncomingUpdate(t *testing.T) {
-	w := newWorld(t)
+	w := newScenarioWorld(t)
 	n := rounds(1000, 20)
 	// 1,000 saves from one place add up to more than the real daily allowance
 	// (about 70 KB per save was counted), so this race test raises it; the
@@ -229,16 +297,33 @@ func TestScenario05_SaveRacesIncomingUpdate(t *testing.T) {
 	if err := os.WriteFile(settings, []byte(roomy), 0644); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	daemon := startDaemon(ctx, w.Srv) // srv keeps receiving while it also saves
+	daemon := startDaemon(t, w.Srv) // srv keeps receiving while it also saves
+	defer daemon.stop(t)
 
 	problems := make(chan string, 1)
-	observed := make(chan int)
+	observed := make(chan int, 1)
+	stopObserver := make(chan struct{})
+	var stopOnce sync.Once
+	finalLooks := 0
+	endObserver := func() int { // safe to call twice
+		stopOnce.Do(func() {
+			close(stopObserver)
+			finalLooks = <-observed
+		})
+		return finalLooks
+	}
 	go func() { // whoever holds the lock must always see a whole folder
 		looks := 0
-		for ctx.Err() == nil {
+		defer func() { observed <- looks }()
+		for {
+			select {
+			case <-stopObserver:
+				return
+			default:
+			}
 			lock, err := AcquireFolderLock(w.Srv, 5*time.Second)
 			if err != nil {
+				time.Sleep(5 * time.Millisecond)
 				continue
 			}
 			msg := ""
@@ -255,8 +340,8 @@ func TestScenario05_SaveRacesIncomingUpdate(t *testing.T) {
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		observed <- looks
 	}()
+	defer func() { _ = endObserver() }()
 
 	for i := 0; i < n; i++ {
 		codes := both(w, func(root string) int {
@@ -266,13 +351,11 @@ func TestScenario05_SaveRacesIncomingUpdate(t *testing.T) {
 			return saveImpact(root, note2, i%5+1)
 		})
 		if codes != [2]int{0, 0} {
-			cancel()
 			t.Fatalf("round %d: exit codes %v, want both 0", i, codes)
 		}
 	}
-	cancel()
-	looks := <-observed
-	_ = daemon.Wait()
+	looks := endObserver()
+	daemon.stop(t)
 	select {
 	case msg := <-problems:
 		t.Fatalf("the folder was seen half-updated: %s", msg)
@@ -285,16 +368,15 @@ func TestScenario05_SaveRacesIncomingUpdate(t *testing.T) {
 }
 
 func TestScenario06_DelayBetweenPlaces(t *testing.T) {
-	w := newWorld(t)
+	w := newScenarioWorld(t)
 	n := rounds(50, 3)
 	// The real interval, not the fast one the other tests use.
 	cfg := `{"place":"srv-test","poll_interval_ms":3000,"inbox_quiet_ms":3000}` + "\n"
 	if err := os.WriteFile(filepath.Join(w.Srv, "_meta", "bin", "sync.json"), []byte(cfg), 0644); err != nil {
 		t.Fatalf("write sync.json: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	daemon := startDaemon(ctx, w.Srv)
+	daemon := startDaemon(t, w.Srv)
+	defer daemon.stop(t)
 	srvNote := fixtureNote(t, w.Srv, note1)
 	e := vault.NewVaultEngine(w.Srv)
 
@@ -317,8 +399,7 @@ func TestScenario06_DelayBetweenPlaces(t *testing.T) {
 		delays = append(delays, time.Since(saved))
 		time.Sleep(time.Duration(rand.Intn(1500)) * time.Millisecond) // do not save in step with the poll
 	}
-	cancel()
-	_ = daemon.Wait()
+	daemon.stop(t)
 	sort.Slice(delays, func(i, j int) bool { return delays[i] < delays[j] })
 	median, worst := delays[len(delays)/2], delays[len(delays)-1]
 	fmt.Printf("LATENCY runs=%d median=%dms worst=%dms target_worst<5000ms\n", n, median.Milliseconds(), worst.Milliseconds())
@@ -328,44 +409,83 @@ func TestScenario06_DelayBetweenPlaces(t *testing.T) {
 	converge(t, w)
 }
 
+// waitFor polls f every millisecond until it is true or the time is up.
+func waitFor(limit time.Duration, f func() bool) bool {
+	for deadline := time.Now().Add(limit); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if f() {
+			return true
+		}
+	}
+	return false
+}
+
+func headOf(root string) string {
+	out, _ := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	return strings.TrimSpace(string(out))
+}
+
+// killWhen starts an engine command in root, waits until the folder shows the
+// operation has begun to change things (its marker is on disk AND changed()
+// is true), kills it with SIGKILL at once, and reports whether the marker was
+// still there afterwards, which proves the kill landed before the operation
+// ended.
+func killWhen(t *testing.T, root string, changed func() bool, args ...string) bool {
+	t.Helper()
+	cmd := exec.Command(engineBin, args...)
+	cmd.Dir, cmd.Env = root, append(os.Environ(), "VAULT_ROOT="+root)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %v: %v", args, err)
+	}
+	marker := filepath.Join(root, "_meta", "guards", "save-in-progress.json")
+	waitFor(5*time.Second, func() bool {
+		if _, err := os.Stat(marker); err != nil {
+			return false
+		}
+		return changed()
+	})
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	_, err := os.Stat(marker)
+	return err == nil
+}
+
 func TestScenario07_KilledMidSaveAndMidUpdate(t *testing.T) {
-	w := newWorld(t)
+	w := newScenarioWorld(t)
 	n := rounds(30, 8)
-	midSave := 0
+	e := vault.NewVaultEngine(w.Mac)
+	macNote := fixtureNote(t, w.Mac, note1)
+	midUpdate, midSave := 0, 0
 	for i := 0; i < n; i++ {
-		// srv saves normally, so mac has an update to receive.
+		// Mid-update: srv saves, so mac is behind the shared copy and has an
+		// update to pull. The daemon on mac is killed a random moment after
+		// its update has begun, and the kill counts only if the update had not ended.
 		if code := saveImpact(w.Srv, note2, i%5+1); code != 0 {
 			t.Fatalf("round %d: srv save exit %d", i, code)
 		}
-		sha := readSHA(t, w.Mac, note1)
-		save := exec.Command(engineBin, "commit", note1, sha, "agent-olivier", fmt.Sprintf(`{"impact":%d}`, i%5+1))
-		save.Dir, save.Env = w.Mac, append(os.Environ(), "VAULT_ROOT="+w.Mac)
-		update := exec.Command(engineBin, "sync-daemon")
-		update.Dir, update.Env = w.Srv, append(os.Environ(), "VAULT_ROOT="+w.Srv)
-		if err := save.Start(); err != nil {
-			t.Fatalf("start save: %v", err)
+		later := func() bool { // a random moment shortly after the update has begun
+			time.Sleep(time.Duration(rand.Intn(40)) * time.Millisecond)
+			return true
 		}
-		if err := update.Start(); err != nil {
-			t.Fatalf("start update: %v", err)
+		if killWhen(t, w.Mac, later, "sync-daemon") {
+			midUpdate++
 		}
-		// Kill the save as soon as its marker shows it is mid-way; the update
-		// is cut at a random moment around it.
-		marker := filepath.Join(w.Mac, "_meta", "guards", "save-in-progress.json")
-		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
-			if _, err := os.Stat(marker); err == nil {
-				midSave++
-				break
-			}
-		}
-		time.Sleep(time.Duration(rand.Intn(250)) * time.Millisecond)
-		_ = save.Process.Kill() // SIGKILL mid-save
-		_ = update.Process.Kill()
-		_ = save.Wait()
-		_ = update.Wait()
 		converge(t, w) // after restart: healthy and identical
+
+		// Mid-save: mac saves a note and is killed once the note or the head
+		// has changed but before the save has finished.
+		sha := readSHA(t, w.Mac, note1)
+		headBefore := headOf(w.Mac)
+		changed := func() bool {
+			now, _ := e.ComputeSHA256(macNote)
+			return now != sha || headOf(w.Mac) != headBefore
+		}
+		if killWhen(t, w.Mac, changed, "commit", note1, sha, "agent-olivier", fmt.Sprintf(`{"impact":%d}`, i%5+1)) {
+			midSave++
+		}
+		converge(t, w)
 	}
-	if midSave < n/2 {
-		t.Fatalf("only %d of %d saves were seen mid-save when killed", midSave, n)
+	if midSave < n/2 || midUpdate < n/2 {
+		t.Fatalf("kills proven mid-operation: %d saves and %d updates out of %d rounds, want at least %d of each", midSave, midUpdate, n, n/2)
 	}
 	if code := saveImpact(w.Mac, note1, 3); code != 0 && code != ExitNoteChanged {
 		t.Fatalf("a normal save after the kills ended with exit %d", code)
@@ -374,7 +494,7 @@ func TestScenario07_KilledMidSaveAndMidUpdate(t *testing.T) {
 }
 
 func TestScenario18_OnePlaceOverItsAllowance(t *testing.T) {
-	w := newWorld(t)
+	w := newScenarioWorld(t)
 	settings := filepath.Join(w.Hub, "hooks", "vault-limits.json")
 	original, _ := os.ReadFile(settings)
 	tight := strings.Replace(string(original), `"daily_bytes_per_place": 52428800`, `"daily_bytes_per_place": 3000`, 1)
