@@ -151,6 +151,20 @@ func saveImpact(root, id string, impact int) int {
 	return code
 }
 
+// setAllowance rewrites the daily per-place byte allowance in the shared copy's settings.
+func setAllowance(t *testing.T, w world, bytes int64) {
+	t.Helper()
+	settings := filepath.Join(w.Hub, "hooks", "vault-limits.json")
+	original, _ := os.ReadFile(settings)
+	changed := strings.Replace(string(original), `"daily_bytes_per_place": 52428800`, fmt.Sprintf(`"daily_bytes_per_place": %d`, bytes), 1)
+	if changed == string(original) {
+		t.Fatalf("could not change the allowance in %s", settings)
+	}
+	if err := os.WriteFile(settings, []byte(changed), 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+}
+
 func TestScenario01_DifferentNotesAtTheSameMoment(t *testing.T) {
 	w := newScenarioWorld(t)
 	n := rounds(100, 5)
@@ -288,15 +302,7 @@ func TestScenario05_SaveRacesIncomingUpdate(t *testing.T) {
 	// 1,000 saves from one place add up to more than the real daily allowance
 	// (about 70 KB per save was counted), so this race test raises it; the
 	// allowance itself is tested in Scenario18.
-	settings := filepath.Join(w.Hub, "hooks", "vault-limits.json")
-	original, _ := os.ReadFile(settings)
-	roomy := strings.Replace(string(original), `"daily_bytes_per_place": 52428800`, `"daily_bytes_per_place": 52428800000`, 1)
-	if roomy == string(original) {
-		t.Fatalf("could not raise the allowance in %s", settings)
-	}
-	if err := os.WriteFile(settings, []byte(roomy), 0644); err != nil {
-		t.Fatalf("write settings: %v", err)
-	}
+	setAllowance(t, w, 52428800000)
 	daemon := startDaemon(t, w.Srv) // srv keeps receiving while it also saves
 	defer daemon.stop(t)
 
@@ -495,15 +501,7 @@ func TestScenario07_KilledMidSaveAndMidUpdate(t *testing.T) {
 
 func TestScenario18_OnePlaceOverItsAllowance(t *testing.T) {
 	w := newScenarioWorld(t)
-	settings := filepath.Join(w.Hub, "hooks", "vault-limits.json")
-	original, _ := os.ReadFile(settings)
-	tight := strings.Replace(string(original), `"daily_bytes_per_place": 52428800`, `"daily_bytes_per_place": 3000`, 1)
-	if tight == string(original) {
-		t.Fatalf("could not tighten the allowance in %s", settings)
-	}
-	if err := os.WriteFile(settings, []byte(tight), 0644); err != nil {
-		t.Fatalf("write settings: %v", err)
-	}
+	setAllowance(t, w, 3000)
 	refusedAt := -1
 	for i := 0; i < 30; i++ {
 		sha := readSHA(t, w.Mac, note1)
