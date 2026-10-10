@@ -629,10 +629,21 @@ func TestRecover_AMarkerWrittenBeforeDirtyBeforeExistedStillLoadsAndBehavesAsBef
 	if err != nil || m == nil || m.DirtyBefore != nil {
 		t.Fatalf("old marker should load with a nil DirtyBefore: (%+v, %v)", m, err)
 	}
+	// A tracked note edited by hand: undo reads DirtyBefore (nil here) for it.
+	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
+	noteRel := "01_Ideas/" + filepath.Base(note)
+	original, _ := os.ReadFile(note)
+	writeFile(t, note, []byte("hand edit\n"))
 	stray := filepath.Join(w.Mac, "01_Ideas", "stray.md")
 	writeFile(t, stray, []byte("stray\n"))
 	if err := r.Recover(noRebuild); err != nil {
 		t.Fatalf("recover: %v", err)
+	}
+	if now, _ := os.ReadFile(note); string(now) != string(original) {
+		t.Errorf("tracked note not put back")
+	}
+	if got := quarantined(t, w.Mac, "mac-test", noteRel); string(got) != "hand edit\n" {
+		t.Errorf("hand edit not kept: %q", got)
 	}
 	if got := quarantined(t, w.Mac, "mac-test", "01_Ideas/stray.md"); string(got) != "stray\n" {
 		t.Errorf("stray file not set aside: %q", got)

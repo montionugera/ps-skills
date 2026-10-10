@@ -102,25 +102,10 @@ func (r *Repo) Begin(op, actor string) (*Marker, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Temp file + fsync + rename, as CommitRecord does for notes.
 	if err := os.MkdirAll(filepath.Dir(r.markerPath()), 0755); err != nil {
 		return nil, err
 	}
-	tmp := r.markerPath() + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	_ = f.Close()
-	if err := os.Rename(tmp, r.markerPath()); err != nil {
+	if err := writeFileAtomic(r.markerPath(), data); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -134,9 +119,6 @@ func (r *Repo) End() error {
 	return err
 }
 
-// changed lists what differs from the marker's starting point. It leaves out
-// files that were already untracked then, and untracked files under _inbox/
-// (drops that arrived meanwhile): neither was written by the operation.
 // workHash is the git hash of the file on disk, "" when there is no file.
 func (r *Repo) workHash(p string) (string, error) {
 	if _, err := os.Lstat(filepath.Join(r.Root, filepath.FromSlash(p))); os.IsNotExist(err) {
@@ -157,6 +139,9 @@ func (r *Repo) unchangedSinceBegin(m *Marker, p string) (bool, error) {
 	return err == nil && now == was, err
 }
 
+// changed lists what differs from the marker's starting point. It leaves out
+// files that were already untracked then, and untracked files under _inbox/
+// (drops that arrived meanwhile): neither was written by the operation.
 func (r *Repo) changed(m *Marker) (map[string]string, error) {
 	st, err := r.Status()
 	if err != nil {
@@ -440,31 +425,64 @@ func (r *Repo) hasCopy(rel string, data []byte) bool {
 	return false
 }
 
-// setAside copies (or moves) a file into _quarantine/<place>/ and writes one
-// report line. _quarantine/ is local to the place and never synced.
-func (r *Repo) setAside(rel, why string, move bool) error {
-	src := filepath.Join(r.Root, filepath.FromSlash(rel))
-	dir := filepath.Join(r.Root, "_quarantine", r.Place)
-	dst := filepath.Join(dir, time.Now().UTC().Format("20060102T150405.000000000"), filepath.FromSlash(rel))
+// writeFileAtomic writes data to path through a temp file, fsync and rename,
+// so a crash leaves either the old file or the whole new one.
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(data)
+	if serr := f.Sync(); werr == nil {
+		werr = serr
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return werr
+	}
+	return os.Rename(tmp, path)
+}
+
+// freshTarget makes the folder for dst and refuses a dst that already exists.
+func freshTarget(dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
 	if _, err := os.Lstat(dst); err == nil {
 		return fmt.Errorf("quarantine target %s already exists", dst)
 	}
+	return nil
+}
+
+// setAside copies (or moves) a file into _quarantine/<place>/ and writes one
+// report line. _quarantine/ is local to the place and never synced.
+func (r *Repo) setAside(rel, why string, move bool) error {
+	src := filepath.Join(r.Root, filepath.FromSlash(rel))
+	dir := filepath.Join(r.Root, "_quarantine", r.Place)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	dst := filepath.Join(dir, time.Now().UTC().Format("20060102T150405.000000000"), filepath.FromSlash(rel))
 	if move {
+		if err := freshTarget(dst); err != nil {
+			return err
+		}
 		if err := os.Rename(src, dst); err != nil {
 			return err
 		}
 	} else if data, err := os.ReadFile(src); err == nil {
 		// A copy of this exact text for this path is already kept (a second save
 		// or the later no-marker pass over the same unchanged edit): keep one.
-		if !r.hasCopy(rel, data) {
-			if err := os.WriteFile(dst, data, 0644); err != nil {
-				return err
-			}
-		} else {
+		if r.hasCopy(rel, data) {
 			why += " (identical copy already in quarantine)"
+		} else if err := freshTarget(dst); err != nil {
+			return err
+		} else if err := writeFileAtomic(dst, data); err != nil {
+			return err
 		}
 	} else if !os.IsNotExist(err) {
 		return err // cannot keep the text, so the caller must not overwrite the note
@@ -528,7 +546,7 @@ func (r *Repo) Update(rebuild func() error) (bool, error) {
 		return false, err
 	}
 	for _, p := range added {
-		if p == "" || st[p] != "??" {
+		if st[p] != "??" {
 			continue
 		}
 		mine, err1 := r.local("hash-object", "--", p)
