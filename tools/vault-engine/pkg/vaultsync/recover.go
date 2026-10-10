@@ -357,17 +357,17 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 				if err != nil {
 					return err
 				}
-				same := true
 				if inCommit {
-					if same, err = r.sameAs(p, preHead); err != nil {
+					same, err := r.sameAs(p, preHead)
+					if err != nil {
 						return err
 					}
-				}
-				if inCommit && !same {
-					if err := r.setAside(p, "no longer holds what the "+m.Op+" wrote; kept, not deleted", true); err != nil {
-						return err
+					if !same {
+						if err := r.setAside(p, "no longer holds what the "+m.Op+" wrote; kept, not deleted", true); err != nil {
+							return err
+						}
+						continue
 					}
-					continue
 				}
 			}
 			if err := os.Remove(filepath.Join(r.Root, filepath.FromSlash(p))); err != nil && !os.IsNotExist(err) {
