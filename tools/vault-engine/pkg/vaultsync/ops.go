@@ -15,13 +15,14 @@ import (
 // Op is one existing engine operation, wrapped so that the same closure serves
 // the plain path (no sync config) and the save step.
 type Op struct {
-	Name       string                 // "commit", "ingest", "capture", "publish-knowledge"
-	Actor      string                 // recorded as <actor>@<place>
-	FailPrefix string                 // today's stderr prefix, e.g. "Commit FAILED"
-	Key        string                 // one-time key; "" = no duplicate check
-	Drop       string                 // vault-relative inbox file that must be sent first, or ""
-	Refuse     string                 // non-empty: the save step refuses this op before anything is touched
-	Run        func() (string, error) // returns exactly what main.go prints on success
+	Name       string                        // "commit", "ingest", "capture", "publish-knowledge"
+	Actor      string                        // recorded as <actor>@<place>
+	FailPrefix string                        // today's stderr prefix, e.g. "Commit FAILED"
+	Key        string                        // fixed one-time key; "" = no duplicate check
+	KeyFn      func(r *Repo) (string, error) // if set, replaces Key: asked by the save step after recovery and update, so it sees the folder as it is then
+	Drop       string                        // vault-relative inbox file that must be sent first, or ""
+	Refuse     string                        // non-empty: the save step refuses this op before anything is touched
+	Run        func() (string, error)        // returns exactly what main.go prints on success
 }
 
 func shortHash(parts ...string) string {
@@ -89,13 +90,33 @@ func IngestOp(e *vault.VaultEngine, filePath, actor string) Op {
 		return op
 	}
 	op.Refuse, op.Drop = "", rel
-	// Path plus content while the file exists; path only once it is gone (a
-	// retry after the first try arrived), which matches the earlier key as a prefix.
-	op.Key = "ingest:" + rel + ":"
-	if data, err := os.ReadFile(abs); err == nil {
-		op.Key += shortHash(string(data))
-	}
+	op.KeyFn = func(r *Repo) (string, error) { return ingestKey(r, abs, rel) }
 	return op
+}
+
+// ingestKey is the path plus the content of the drop, never the path alone (a
+// bare path would match an older ingest of a reused name). While the file is
+// there its content is read; once it is gone (the first try arrived and
+// deleted it) the content comes from the commit that deleted it, so the retry
+// finds its own earlier save. If no such commit is known the key is empty: no
+// duplicate check, and the engine reports the missing file itself.
+func ingestKey(r *Repo, abs, rel string) (string, error) {
+	data, err := os.ReadFile(abs)
+	if err == nil {
+		return "ingest:" + rel + ":" + shortHash(string(data)), nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+	rev, err := r.local("log", "-1", "--format=%H", "--since=24.hours.ago", "--diff-filter=D", r.remoteRef(), "--", rel)
+	if err != nil || rev == "" {
+		return "", err
+	}
+	res := r.run(localTimeout, "show", rev+"^:"+rel)
+	if res.Err != nil {
+		return "", fmt.Errorf("git show: %w: %s", res.Err, strings.TrimSpace(res.Stderr))
+	}
+	return "ingest:" + rel + ":" + shortHash(res.Stdout), nil
 }
 
 func PublishOp(e *vault.VaultEngine, filePath, category, author string) Op {

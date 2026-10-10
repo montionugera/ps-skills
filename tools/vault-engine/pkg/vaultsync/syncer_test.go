@@ -464,8 +464,9 @@ func TestSave_UnclearAnswerWithUnmovedHubKeepsMarkerAndCommitThenRecovers(t *tes
 	mac.Hooks.PushResult = func(_ int, res gitResult) gitResult {
 		return gitResult{Stderr: "something git never says", Err: errors.New("exit status 128")}
 	}
-	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "REFUSED no-connection" || out.Exit != ExitNoConnection {
-		t.Fatalf("outcome = %+v", out)
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "REFUSED no-connection" || out.Exit != ExitNoConnection ||
+		!strings.Contains(out.Detail, "something git never says") || !strings.Contains(out.Detail, "exit status 128") {
+		t.Fatalf("outcome = %+v; the Detail must carry git's own words", out)
 	}
 	if !mac.Repo.hasMarker() {
 		t.Fatalf("marker must stay")
@@ -518,6 +519,98 @@ func TestSave_FiveLostRacesEndAsBusyAndLeaveNothingBehind(t *testing.T) {
 	}
 	if text, err := os.ReadFile(drop); err != nil || !strings.Contains(string(text), "Original g1") {
 		t.Errorf("the inbox original must survive: %v", err)
+	}
+	cleanExceptIgnored(t, w.Mac)
+}
+
+// P1: an older ingest of the same path must not make a later, unsettled one look "already saved".
+func TestSave_RetryOfAnUnsettledIngestIsNotMistakenForAnOlderIngestOfTheSamePath(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	const rel = "_inbox/human/untitled.md"
+	drop := filepath.Join(w.Mac, filepath.FromSlash(rel))
+	writeFile(t, drop, []byte("---\ntitle: Older one\n---\nFirst\n"))
+	if _, out := mac.Save(IngestOp(mac.Engine, drop, "agent-olivier")); out.Line != "SAVED" {
+		t.Fatalf("older ingest: %+v", out)
+	}
+	// A new file with the same name; its drop reaches the hub, its ingest does not.
+	writeFile(t, drop, []byte("---\ntitle: Newer one\n---\nSecond\n"))
+	if state, out := mac.sendDrops([]string{rel}, 1); state != pushOK {
+		t.Fatalf("sending the new drop: %+v", out)
+	}
+	settings := filepath.Join(w.Hub, "hooks", "vault-limits.json")
+	original, _ := os.ReadFile(settings)
+	tight := strings.Replace(string(original), `"daily_bytes_per_place": 52428800`, `"daily_bytes_per_place": 1`, 1)
+	if tight == string(original) {
+		t.Fatalf("could not tighten the allowance")
+	}
+	if err := os.WriteFile(settings, []byte(tight), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mac.Hooks.PushResult = func(_ int, res gitResult) gitResult {
+		return gitResult{Stderr: "unreadable answer", Err: errors.New("exit status 128")}
+	}
+	if _, out := mac.Save(IngestOp(mac.Engine, drop, "agent-olivier")); out.Line != "REFUSED no-connection" {
+		t.Fatalf("unsettled ingest: %+v", out)
+	}
+	mac.Hooks = Hooks{}
+	if err := os.WriteFile(settings, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	msg, out := mac.Save(IngestOp(mac.Engine, drop, "agent-olivier"))
+	if out.Line != "SAVED" || out.Exit != 0 || strings.Contains(msg, "Already saved") {
+		t.Fatalf("retry = %+v (%q): the new drop must really be ingested", out, msg)
+	}
+	if n := mustGit(t, w.Hub, "log", "--format=%s", "--grep=vault: ingest", "refs/heads/main"); strings.Count(n, "\n") != 1 {
+		t.Errorf("hub should hold two ingest commits:\n%s", n)
+	}
+	if m, _ := filepath.Glob(filepath.Join(w.Mac, "01_Ideas", "IDEA-*--newer-one.md")); len(m) != 1 {
+		t.Errorf("the second note is missing: %v", m)
+	}
+	cleanExceptIgnored(t, w.Mac)
+}
+
+// P3 (coverage of existing behaviour): an inbox file that git cannot see is refused, not lost.
+func TestSave_IngestOfAnInboxFileGitCannotSeeIsRefusedAndStays(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	exclude := filepath.Join(w.Mac, ".git", "info", "exclude")
+	old, _ := os.ReadFile(exclude)
+	if err := os.WriteFile(exclude, append(old, []byte("\n_inbox/human/hidden.md\n")...), 0644); err != nil {
+		t.Fatal(err)
+	}
+	drop := filepath.Join(w.Mac, "_inbox", "human", "hidden.md")
+	writeFile(t, drop, []byte("---\ntitle: Hidden\n---\nBody\n"))
+	_, out := mac.Save(IngestOp(mac.Engine, drop, "agent-olivier"))
+	if out.Line != "REFUSED engine-error" || out.Exit != ExitEngineError || !strings.Contains(out.Detail, "inbox") {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if _, err := os.Stat(drop); err != nil || mac.Repo.hasMarker() {
+		t.Fatalf("the file must stay and no marker may remain: %v", err)
+	}
+}
+
+// P3 (coverage of existing behaviour): ingest through a link to a real inbox drop.
+func TestSave_IngestThroughALinkToARealInboxDropRemovesTheLinkOnly(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	real := filepath.Join(w.Mac, "_inbox", "human", "linked.md")
+	writeFile(t, real, []byte("---\ntitle: Linked one\n---\nBody\n"))
+	link := filepath.Join(t.TempDir(), "via.md")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, out := mac.Save(IngestOp(mac.Engine, link, "agent-olivier")); out.Line != "SAVED" || out.Exit != 0 {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("the link is what the engine removes")
+	}
+	if _, err := os.Stat(real); err != nil {
+		t.Errorf("the real drop must stay: %v", err)
+	}
+	if m, _ := filepath.Glob(filepath.Join(w.Mac, "01_Ideas", "IDEA-*--linked-one.md")); len(m) != 1 {
+		t.Errorf("expected one note, got %v", m)
 	}
 	cleanExceptIgnored(t, w.Mac)
 }

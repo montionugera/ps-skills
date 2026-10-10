@@ -146,8 +146,15 @@ func (s *Syncer) attempt(op Op, attempt int) (string, Outcome, bool) {
 	if _, err := r.Update(s.Engine.RebuildIndexes); err != nil {
 		return "", errorOutcome(err), false
 	}
-	if op.Key != "" {
-		done, err := s.alreadySaved(op.Key)
+	key := op.Key
+	if op.KeyFn != nil {
+		var err error
+		if key, err = op.KeyFn(r); err != nil {
+			return "", errorOutcome(err), false // never a shortened key: it could match another save
+		}
+	}
+	if key != "" {
+		done, err := s.alreadySaved(key)
 		if err != nil {
 			return "", errorOutcome(err), false // never guess: a second create would duplicate
 		}
@@ -208,7 +215,7 @@ func (s *Syncer) attempt(op Op, attempt int) (string, Outcome, bool) {
 	if v := s.precheck(written); v != nil {
 		return fail(violationOutcome(v))
 	}
-	state, out := s.record(written, op.Actor, "vault: "+op.Name, op.Key, m, attempt)
+	state, out := s.record(written, op.Actor, "vault: "+op.Name, key, m, attempt)
 	switch state {
 	case pushOK:
 		_ = r.End()
@@ -348,8 +355,11 @@ func (s *Syncer) record(paths []string, actor, subject, key string, m *Marker, a
 	if timedOut {
 		why = "the send ran into its time limit"
 	}
+	if text := strings.TrimSpace(res.Stderr); text != "" {
+		why += " (git said: " + text + ")"
+	}
 	return pushUnconfirmed, refused("no-connection", ExitNoConnection,
-		why+"; whether it arrived is settled on the next command")
+		why+" ["+res.Err.Error()+"]; whether it arrived is settled on the next command")
 }
 
 // sendDrops sends inbox files the shared copy does not have yet. A file that
