@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // engineBin is the engine built once per test run. Every CLI call through the
@@ -15,6 +16,27 @@ import (
 var engineBin string
 
 func TestMain(m *testing.M) {
+	// Helper mode for TestFolderLock_ReleasedWhenTheHolderIsKilled.
+	if root := os.Getenv("VAULTSYNC_HOLD_LOCK"); root != "" {
+		if _, err := AcquireFolderLock(root, time.Second); err != nil {
+			os.Exit(3)
+		}
+		fmt.Println("locked")
+		time.Sleep(time.Hour)
+	}
+	// Helper mode for TestRepo_GitChildKeepsTheFolderLockAfterTheEngineDies:
+	// take the lock, start a slow git child through Repo.run, then idle.
+	if root := os.Getenv("VAULTSYNC_HOLD_GIT_CHILD"); root != "" {
+		lock, err := AcquireFolderLock(root, time.Second)
+		if err != nil {
+			os.Exit(3)
+		}
+		r := &Repo{Root: root, Place: "helper", lock: lock}
+		go r.run(time.Minute, "-c", "alias.nap=!sleep 3", "nap")
+		time.Sleep(700 * time.Millisecond) // let the child start
+		fmt.Println("locked")
+		time.Sleep(time.Hour)
+	}
 	_ = os.Unsetenv("VAULT_ROOT")
 	_ = os.Unsetenv("VAULT_PLACE")
 	dir, err := os.MkdirTemp("", "vault-engine-bin-")
@@ -126,4 +148,13 @@ func newWorld(t *testing.T) world {
 		t.Fatalf("harness setup: %v\n%s", err, out)
 	}
 	return world{Root: root, Hub: filepath.Join(root, "hub.git"), Mac: filepath.Join(root, "mac-test"), Srv: filepath.Join(root, "srv-test")}
+}
+
+func newRepo(t *testing.T, root string) *Repo {
+	t.Helper()
+	cfg, err := LoadConfig(root)
+	if err != nil || cfg == nil {
+		t.Fatalf("sync config of %s: (%v, %v)", root, cfg, err)
+	}
+	return NewRepo(root, cfg)
 }
