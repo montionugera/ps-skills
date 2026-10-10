@@ -13,6 +13,8 @@ bash scripts/build-release.sh              # darwin/amd64, darwin/arm64, linux/a
 bin/vault-engine version                   # prints "vault-engine dev" for a plain go build
 ```
 
+**Keep the `env -u VAULT_ROOT` prefix on `test_e2e.sh`.** The script uses an already-exported `VAULT_ROOT` as its work folder and ends with `rm -rf "$VAULT_ROOT"`, so running it while `VAULT_ROOT` points at a real notes folder deletes that folder. With the prefix it works in a fresh temporary folder of its own.
+
 `build-release.sh` stamps the version `0.2.0-sync+<short commit>` (override with `VERSION=...`) and writes `bin/release/SHA256SUMS`. It installs nothing; the same version must be installed in every place.
 
 **Always set `VAULT_ROOT` when running the binary by hand.** Without it the engine looks at the current folder (or two levels up) for a `_meta` folder and then falls back to `~/workspace/agentic-vault` or `~/Documents/Obsidian Vault`, if either exists.
@@ -38,7 +40,7 @@ Only `place` is required (lower-case letters, digits and `-`, up to 63 character
 | `VAULT_ROOT` | The vault folder |
 | `VAULT_PLACE` | Overrides `place` (for containers: the pod name) |
 | `VAULT_ACTOR` | Who is recorded for `ingest` (default `agent`) |
-| `VAULT_HUB_PLACE` | Read by the hub's door check; the engine sets it on every git command it runs |
+| `VAULT_HUB_PLACE` | Read by the hub's door check; the engine sets it on every git command it runs. The hub takes this name as sent and does not check who the sender is (see Known limits) |
 
 ### What a save does
 
@@ -81,9 +83,22 @@ Every file in every commit of a send is checked. A refusal reads `vault-hub: REF
 
 ### Known limits
 
-- **Hub-side check is not complete.** Plan 1 turns on `receive.fsckObjects` but does not tell thin-pack base objects from smuggled ones. A place holding a login and a hand-built pack could leave up to 20 MB per send of unchecked, unreachable data on the hub until git cleans it up. A correct fix belongs with the real receive path and is deferred to Plan 2 (hub on the server).
-- **The daily allowance counts the full size of every changed file**, not just the new data (the hub measures every new object in a send). The cost of a save therefore grows with file size. The default is 52428800 bytes per place per day; in the scenario tests one place ran out after about 740 saves in one day (`REFUSED too-large`, exit 5).
-- **A freshly set-up place has no index file until its first save or update.**
+- **Hub-side check is not complete.** Plan 1 turns on `receive.fsckObjects` but does not tell thin-pack base objects from smuggled ones. Anything that can send to the hub (in this plan: anything that can write to the hub folder; there is no login) could, with a hand-built pack, leave up to 20 MB per send of unchecked, unreachable data on the hub until git cleans it up. A correct fix belongs with the real receive path and is deferred to Plan 2 (hub on the server).
+- **The hub trusts the place name as sent.** The door check reads the sender's name from `VAULT_HUB_PLACE` and nothing verifies it: there is no login in this plan. A sender that gives another place's name is counted against that place's daily allowance, and there is no enforced way to cut off one place. One login per place belongs to the plan that puts the hub on a server.
+- **The daily allowance charges much more than the new data, and the charge grows with the number of event files. Known gap, owner decision needed.** What the code does (`pkg/vaultsync/hub.go`, the allowance block of `PreReceive`): every send is charged the full, uncompressed size of every object that is new to the hub. That is the whole of every changed file (not only the changed lines), the commit record, and the whole listing of every folder in which anything changed. Every save writes one new event file into `_meta/events/<year>/<month>/`, so every save is charged that folder's complete listing again, about 66 bytes per event file already there (28 bytes plus the file name; 66 with a 13-character agent id). The cost of a save therefore grows with the number of saves all places have made that month, not with the size of the note. Measured in the final review (scratch repository): a 402-byte save was charged 47,109 bytes with 700 event files in the month's folder, 98% of it the one folder listing. Consequences:
+  - In the scenario tests one place ran out of the default 52428800 bytes after about 740 saves in one day (`REFUSED too-large`, exit 5).
+  - A place can be refused because of event files other places wrote.
+  - Near 15,900 event files in one month (1048576 / 66) the folder listing itself passes the 1 MB limit for one record (`max_file_bytes`), and every save from every place is refused until the month changes.
+  - `_meta/ledger/captures.jsonl` (`pkg/vault/ledger.go`) is one growing, synced file: every `capture` is charged the whole file, and once it passes 1 MB every capture from every place is refused.
+
+  This is a known gap against the design's "50 MB of new data per day". It fails closed and loses nothing, and it is deliberately not changed in this plan. It needs an owner decision before the real notes folder is moved onto sync.
+- **Rebuild the indexes when you set up a place.** A freshly set-up place has no index file until its first save or update, and until then `search` answers "No matching records found" with no error, even for notes that are there. After setting up a place run `VAULT_ROOT=<place> vault-engine rebuild-index` once.
+- **An inbox file can be sent half-written.** `sync-daemon` sends an inbox file once it has been untouched for `inbox_quiet_ms` (3 s by default). If the writer pauses longer than that in the middle, the half-written file is sent, and the full text written afterwards is treated as a hand edit and lands in `_quarantine/<place>/`. Write the file somewhere else and move it into the inbox in one step (write, then rename) to avoid this.
+- **No automatic git clean-up and no git hooks in a place.** Every git command the engine runs in a place turns off git's automatic clean-up (`gc.auto=0`, `maintenance.auto=false`) and hooks (`core.hooksPath=/dev/null`). A place's repository is never packed by itself; clean-up has to be scheduled by a later plan. The hub's own `pre-receive` hook still runs.
+- **No alert when an invalid note arrives.** A note that arrives from the shared copy is applied as it is, even if the local engine would consider it invalid; no alert event is written (the design asks for one; not built in this plan).
+- **`REFUSED no-connection` can mean "not confirmed yet".** When the answer to a send is unclear and the shared copy does not show the save, the engine keeps the save and its marker and answers `REFUSED no-connection` (exit 4). The save may still have arrived: the next engine command or daemon pass in that place asks the shared copy and either keeps the save or takes it back. Running the same command again is safe; it answers `SAVED` or `REFUSED note-changed` if the first try did arrive.
+- **In a shared folder `ingest` refuses a file from outside the inbox** (`REFUSED engine-error`, exit 1). `ingest` deletes its source, and only a file under `_inbox/` is kept in the shared history first. Put the file in the inbox, then ingest it from there. In a plain folder `ingest` works on any path as before.
+- **The engine ignores git's repository variables and needs the folder to be its own repository.** In a place, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and the like are not passed on to git, and a shared folder that is not the top level of its own git repository is refused (`REFUSED engine-error`).
 - **After a refused send the daemon backs off.** It skips only the send step for 1, 2, 4 ... up to 100 passes before trying again, and the wait resets after an accepted send. A lost push race does not start the wait. Updating, recovery and handling of stray files continue on every pass.
 - **Measured delay between two places:** median about 1.9 s, worst about 2.9 s over 50 runs with a 3000 ms poll (target: worst under 5 s). The full harness run (`scripts/sync-harness.sh run`) takes about 35-40 minutes.
 
