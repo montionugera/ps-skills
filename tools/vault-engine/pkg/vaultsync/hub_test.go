@@ -3,12 +3,15 @@ package vaultsync
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHubSettingsFileMatchesDefaultLimits(t *testing.T) {
@@ -91,12 +94,20 @@ func TestHub_RefusesRewriteDeleteSideBranchAndTag(t *testing.T) {
 	}
 	tip := mustGit(t, hub, "rev-parse", "refs/heads/main")
 
-	for _, refspec := range []string{":refs/heads/main", "HEAD:refs/heads/side", "HEAD:refs/tags/v1"} {
-		if out, err := pushAs(t, dir, "mac-test", refspec); err == nil {
-			t.Fatalf("push %s should be refused\n%s", refspec, out)
+	// Deleting main is refused by git itself (receive.denyDeletes) before the
+	// hook runs, so only "the push failed" can be asserted. A side branch and a
+	// tag reach the hook, which must print its contract line.
+	if out, err := pushAs(t, dir, "mac-test", ":refs/heads/main"); err == nil {
+		t.Fatalf("deleting main should be refused\n%s", out)
+	}
+	for _, refspec := range []string{"HEAD:refs/heads/side", "HEAD:refs/tags/v1"} {
+		out, err := pushAs(t, dir, "mac-test", refspec)
+		if err == nil || !strings.Contains(out, "vault-hub: REFUSED type-not-allowed: ") {
+			t.Fatalf("push %s should be refused by the hook, got err=%v\n%s", refspec, err, out)
 		}
 	}
-	// History rewrite: drop the last commit, add a different one, force it.
+	// History rewrite: refused by git itself (receive.denyNonFastForwards) before the hook runs.
+	// Drop the last commit, add a different one, force it.
 	mustGit(t, dir, "reset", "--quiet", "--hard", "HEAD~1")
 	commitFiles(t, dir, map[string]int{"01_Ideas/b.md": 10})
 	if out, err := pushAs(t, dir, "mac-test", "HEAD:refs/heads/main", "--force"); err == nil {
@@ -196,4 +207,66 @@ func TestHub_DailyAllowanceIsPerPlace(t *testing.T) {
 	if out, err := gitIn(t, srv, []string{"VAULT_HUB_PLACE="}, "push", "--porcelain", "origin", "HEAD:refs/heads/main"); err == nil {
 		t.Fatalf("push without VAULT_HUB_PLACE should be refused\n%s", out)
 	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+func TestPreReceive_RefusesInputItCannotRead(t *testing.T) {
+	limits := filepath.Join("..", "..", "hub", "vault-limits.json")
+	zero := strings.Repeat("0", 40)
+	cases := map[string]io.Reader{
+		"two fields":      strings.NewReader(zero + " " + zero + "\n"),
+		"four fields":     strings.NewReader(zero + " " + zero + " refs/heads/main extra\n"),
+		"blank line":      strings.NewReader("\n"),
+		"read error":      failingReader{},
+		"oversized token": strings.NewReader(strings.Repeat("x", 128*1024) + "\n"),
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			var stderr strings.Builder
+			code := PreReceive(in, &stderr, limits, "mac-test", time.Now())
+			if code == 0 || !strings.Contains(stderr.String(), "vault-hub: REFUSED type-not-allowed: ") {
+				t.Fatalf("expected refusal, got code=%d stderr=%q", code, stderr.String())
+			}
+		})
+	}
+}
+
+func TestChargeDaily_RefusesAnUnreadableOrCorruptLedger(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	t.Run("ledger path cannot be read", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "2026-10-10.json"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := chargeDaily(dir, "mac-test", now, 10, 1000); err == nil || ok {
+			t.Fatalf("expected an error, got ok=%v err=%v", ok, err)
+		}
+	})
+	t.Run("corrupt ledger is kept", func(t *testing.T) {
+		dir := t.TempDir()
+		file := filepath.Join(dir, "2026-10-10.json")
+		writeFile(t, file, []byte("{not json"))
+		if _, ok, err := chargeDaily(dir, "mac-test", now, 10, 1000); err == nil || ok {
+			t.Fatalf("expected an error, got ok=%v err=%v", ok, err)
+		}
+		if data, _ := os.ReadFile(file); string(data) != "{not json" {
+			t.Fatalf("corrupt ledger was overwritten: %q", data)
+		}
+	})
+	t.Run("other places survive a charge", func(t *testing.T) {
+		dir := t.TempDir()
+		file := filepath.Join(dir, "2026-10-10.json")
+		writeFile(t, file, []byte(`{"srv-test":500}`))
+		if _, ok, err := chargeDaily(dir, "mac-test", now, 10, 1000); err != nil || !ok {
+			t.Fatalf("charge: ok=%v err=%v", ok, err)
+		}
+		data, _ := os.ReadFile(file)
+		var got map[string]int64
+		if err := json.Unmarshal(data, &got); err != nil || got["srv-test"] != 500 || got["mac-test"] != 10 {
+			t.Fatalf("ledger = %s (%v)", data, err)
+		}
+	})
 }

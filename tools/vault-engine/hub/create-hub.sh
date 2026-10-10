@@ -17,6 +17,7 @@ git init --quiet --bare --initial-branch=main "$HUB"
 git -C "$HUB" config receive.denyNonFastForwards true
 git -C "$HUB" config receive.denyDeletes true
 git -C "$HUB" config receive.maxInputSize "$MAX_INPUT"
+git -C "$HUB" config receive.fsckObjects true
 cp "$ENGINE" "$HUB/hooks/vault-engine"
 cp "$LIMITS" "$HUB/hooks/vault-limits.json"
 cp "$HERE/pre-receive" "$HUB/hooks/pre-receive"

@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,7 +58,7 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 	for sc.Scan() {
 		f := strings.Fields(sc.Text())
 		if len(f) != 3 {
-			continue
+			return refuse("type-not-allowed", "cannot read the update line %q; expected <old> <new> <ref>", sc.Text())
 		}
 		oldSHA, newSHA, ref := f[0], f[1], f[2]
 		if ref != l.Ref {
@@ -83,7 +85,10 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 			rec := strings.Split(raw, "\x00")
 			for i := 0; i+1 < len(rec); i += 2 {
 				meta := strings.Fields(rec[i]) // :oldmode newmode oldsha newsha status
-				if len(meta) < 5 || meta[4] == "D" {
+				if len(meta) < 5 {
+					return refuse("type-not-allowed", "cannot read a file record of commit %s: %q", c, rec[i])
+				}
+				if meta[4] == "D" {
 					continue
 				}
 				if meta[1] != "100644" && meta[1] != "100755" {
@@ -96,6 +101,9 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 		}
 	}
 
+	if err := sc.Err(); err != nil {
+		return refuse("type-not-allowed", "cannot read the list of updated refs: %v", err)
+	}
 	if len(paths) > l.MaxFilesPerPush {
 		return refuse("too-large", "the send changes %d files; limit max_files_per_push=%d", len(paths), l.MaxFilesPerPush)
 	}
@@ -188,22 +196,37 @@ func chargeDaily(dir, place string, now time.Time, add, limit int64) (int64, boo
 	}
 	file := filepath.Join(dir, now.UTC().Format("2006-01-02")+".json")
 	usage := map[string]int64{}
-	if data, err := os.ReadFile(file); err == nil {
+	data, err := os.ReadFile(file)
+	switch {
+	case err == nil:
 		if err := json.Unmarshal(data, &usage); err != nil {
 			return 0, false, fmt.Errorf("usage file %s unreadable: %w", file, err)
 		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return 0, false, fmt.Errorf("reading usage file %s: %w", file, err)
 	}
 	if usage[place]+add > limit {
 		return usage[place], false, nil
 	}
 	usage[place] += add
-	data, err := json.Marshal(usage)
+	data, err = json.Marshal(usage)
 	if err != nil {
 		return 0, false, err
 	}
 	tmp := file + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
 		return 0, false, err
+	}
+	_, werr := f.Write(data)
+	if serr := f.Sync(); werr == nil {
+		werr = serr
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return 0, false, fmt.Errorf("writing usage file %s: %w", tmp, werr)
 	}
 	return usage[place], true, os.Rename(tmp, file)
 }
