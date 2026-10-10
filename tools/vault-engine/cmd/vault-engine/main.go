@@ -214,10 +214,6 @@ func main() {
 			reason = os.Args[7]
 		}
 
-		if syncCfg != nil && expectedSHA == "" {
-			finish("Commit FAILED", "", vaultsync.Outcome{Line: "REFUSED note-changed", Exit: vaultsync.ExitNoteChanged,
-				Detail: "a save in a shared folder needs the fingerprint (sha256) from read-record; read the note and save again"})
-		}
 		runMutating(engine, syncCfg, vaultsync.CommitOp(engine, vault.CommitRequest{
 			RecordID:       recordID,
 			ExpectedSHA256: expectedSHA,
