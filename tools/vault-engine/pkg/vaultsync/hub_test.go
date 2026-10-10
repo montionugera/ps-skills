@@ -214,7 +214,13 @@ type failingReader struct{}
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
 
 func TestPreReceive_RefusesInputItCannotRead(t *testing.T) {
-	limits := filepath.Join("..", "..", "hub", "vault-limits.json")
+	// Copy the settings into a temp "hooks" folder: the ledger goes to <hooks>/../vault-usage.
+	data, err := os.ReadFile(filepath.Join("..", "..", "hub", "vault-limits.json"))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	limits := filepath.Join(t.TempDir(), "hooks", "vault-limits.json")
+	writeFile(t, limits, data)
 	zero := strings.Repeat("0", 40)
 	cases := map[string]io.Reader{
 		"two fields":      strings.NewReader(zero + " " + zero + "\n"),
