@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -72,6 +73,52 @@ var exitOnSignal = os.Exit
 var gitSafetyFlags = []string{"--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "gc.auto=0",
 	"-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null"}
 
+// gitLocationVars are the variables with which a caller (a git hook of another
+// repository, `git rebase --exec`, a tool that exports GIT_DIR) tells git which
+// repository, index or object store to use. A place never passes them on: its
+// git commands must find the notes folder's own repository from the folder.
+// Only the place drops them; the hub's hook (hubGit) keeps git's environment.
+var gitLocationVars = map[string]bool{
+	"GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_INDEX_FILE": true, "GIT_COMMON_DIR": true,
+	"GIT_OBJECT_DIRECTORY": true, "GIT_ALTERNATE_OBJECT_DIRECTORIES": true, "GIT_QUARANTINE_PATH": true,
+	"GIT_NAMESPACE": true, "GIT_PREFIX": true, "GIT_IMPLICIT_WORK_TREE": true, "GIT_SHALLOW_FILE": true,
+	"GIT_GRAFT_FILE": true, "GIT_REPLACE_REF_BASE": true, "GIT_CEILING_DIRECTORIES": true,
+}
+
+// placeEnv is this process's environment without gitLocationVars, and with
+// git forbidden to look for a repository above the notes folder.
+func placeEnv(root string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); !gitLocationVars[name] {
+			env = append(env, kv)
+		}
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		env = append(env, "GIT_CEILING_DIRECTORIES="+filepath.Dir(abs))
+	}
+	return env
+}
+
+// ownRepository checks that the notes folder is the top level of its own git
+// repository. Without that, reset, checkout and the moving of stray files
+// would act on whatever repository git found instead.
+func (r *Repo) ownRepository() error {
+	top, err := r.local("rev-parse", "--show-toplevel")
+	if err == nil {
+		rootInfo, rootErr := os.Stat(r.Root)
+		topInfo, topErr := os.Stat(top)
+		if rootErr == nil && topErr == nil && os.SameFile(rootInfo, topInfo) {
+			return nil
+		}
+		err = fmt.Errorf("git uses %s", top)
+	}
+	if errors.Is(err, ErrStopped) {
+		return err
+	}
+	return fmt.Errorf("the notes folder %s is not the top level of its own git repository: %w", r.Root, err)
+}
+
 // run executes git with a time limit. While the folder lock is held, the child
 // inherits the lock's descriptor: if this process is killed, a still-running
 // git keeps the folder locked until it has finished. git runs in its own
@@ -87,7 +134,7 @@ func (r *Repo) run(timeout time.Duration, args ...string) gitResult {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append(append([]string{}, gitSafetyFlags...), args...)...)
 	cmd.Dir = r.Root
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_LITERAL_PATHSPECS=1", "LC_ALL=C", "VAULT_HUB_PLACE="+r.Place)
+	cmd.Env = append(placeEnv(r.Root), "GIT_TERMINAL_PROMPT=0", "GIT_LITERAL_PATHSPECS=1", "LC_ALL=C", "VAULT_HUB_PLACE="+r.Place)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }

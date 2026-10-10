@@ -122,8 +122,13 @@ func (s *Syncer) Save(op Op) (string, Outcome) {
 }
 
 // lockFolder takes the folder lock and hands it to the Repo so that git
-// children inherit it. The returned function undoes both.
+// children inherit it. The returned function undoes both. Everything that
+// changes the folder comes through here, so this is also where a folder that
+// is not its own repository is refused, before the lock and before any change.
 func (s *Syncer) lockFolder() (release func(), err error) {
+	if err := s.Repo.ownRepository(); err != nil {
+		return nil, err
+	}
 	lock, err := AcquireFolderLock(s.Repo.Root, time.Duration(s.Cfg.LockTimeoutMS)*time.Millisecond)
 	if err != nil {
 		return nil, err

@@ -3,6 +3,7 @@ package vaultsync
 import (
 	"bufio"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"obsidian-vault-engine/pkg/vault"
 )
 
 func TestRepo_StatusKeepsLeadingSpaceCodes(t *testing.T) {
@@ -252,5 +255,125 @@ func TestRepo_CommitDoesNotRunHooks(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatalf("a git hook ran; it would inherit the folder-lock descriptor")
+	}
+}
+
+// otherRepo builds a repository that has nothing to do with any place: one
+// committed file with an edit that is not committed, and one untracked file.
+// The returned function describes its whole state (commit, index, work tree).
+func otherRepo(t *testing.T, dir string) (state func() string) {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, "kept.md"), []byte("committed\n"))
+	mustGit(t, dir, "init", "--quiet", "--initial-branch=main")
+	mustGit(t, dir, "add", "-A")
+	mustGit(t, dir, "commit", "--quiet", "-m", "other")
+	writeFile(t, filepath.Join(dir, "kept.md"), []byte("edited, not committed\n"))
+	writeFile(t, filepath.Join(dir, "loose.md"), []byte("untracked\n"))
+	return func() string {
+		t.Helper()
+		kept, _ := os.ReadFile(filepath.Join(dir, "kept.md"))
+		loose, _ := os.ReadFile(filepath.Join(dir, "loose.md"))
+		return strings.Join([]string{
+			mustGit(t, dir, "rev-parse", "HEAD"),
+			mustGit(t, dir, "ls-files", "--stage"),
+			mustGit(t, dir, "status", "--porcelain", "--untracked-files=all"),
+			mustGit(t, dir, "stash", "list"),
+			string(kept), string(loose),
+		}, "\n--\n")
+	}
+}
+
+// A caller that exports git's own repository variables (a git hook of another
+// repository, `git rebase --exec`) must not turn the place's git commands onto
+// that repository: recovery, the daemon and a save all work on the place.
+func TestRepo_HostileGitEnvironmentLeavesTheOtherRepositoryUntouched(t *testing.T) {
+	for name, vars := range map[string][]string{
+		"GIT_DIR only":                 {"GIT_DIR"},
+		"GIT_DIR, work tree and index": {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_PREFIX"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			other := filepath.Join(t.TempDir(), "other")
+			state := otherRepo(t, other)
+			before := state()
+			values := map[string]string{
+				"GIT_DIR":              filepath.Join(other, ".git"),
+				"GIT_WORK_TREE":        other,
+				"GIT_INDEX_FILE":       filepath.Join(other, ".git", "index"),
+				"GIT_OBJECT_DIRECTORY": filepath.Join(other, ".git", "objects"),
+				"GIT_COMMON_DIR":       filepath.Join(other, ".git"),
+				"GIT_PREFIX":           "",
+			}
+			note := fixtureNote(t, w.Mac, note1)
+			original, _ := os.ReadFile(note)
+			writeFile(t, note, []byte("typed straight into the file\n"))
+			quietDrop(t, w.Mac, "01_Ideas/made-by-hand.md", []byte("a stray\n"))
+			hubBefore := mustGit(t, w.Hub, "rev-list", "--count", "refs/heads/main")
+			mac, daemon := newSyncer(t, w.Mac), newDaemon(t, w.Mac)
+
+			for _, k := range vars {
+				t.Setenv(k, values[k])
+			}
+			tickErr := daemon.Tick() // recovery, hand edit and stray handling
+			_, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5))
+			for _, k := range vars { // the checks below use plain git
+				_ = os.Unsetenv(k)
+			}
+
+			if after := state(); after != before {
+				t.Fatalf("the other repository was touched:\n--- before\n%s\n--- after\n%s", before, after)
+			}
+			if tickErr != nil {
+				t.Fatalf("tick: %v", tickErr)
+			}
+			if out.Line != "SAVED" {
+				t.Fatalf("save = %+v, want SAVED", out)
+			}
+			if got := quarantined(t, w.Mac, "mac-test", "01_Ideas/made-by-hand.md"); string(got) != "a stray\n" {
+				t.Fatalf("stray not set aside in the place: %q", got)
+			}
+			if hub := mustGit(t, w.Hub, "rev-list", "--count", "refs/heads/main"); hub == hubBefore {
+				t.Fatalf("the save did not reach the place's own hub")
+			}
+			if now, _ := os.ReadFile(note); string(now) == "typed straight into the file\n" || string(now) == string(original) {
+				t.Fatalf("the note should hold the save, not the hand edit or the old text")
+			}
+			cleanExceptIgnored(t, w.Mac)
+			if _, err := os.Stat(filepath.Join(w.Mac, "kept.md")); !os.IsNotExist(err) {
+				t.Fatalf("a file of the other repository appeared in the place")
+			}
+		})
+	}
+}
+
+// A folder with a sync config but no repository of its own, sitting inside
+// some other repository: git would walk up and use that one. Nothing may run.
+func TestRepo_FolderInsideAnotherRepositoryIsRefusedAndThatRepositoryIsUntouched(t *testing.T) {
+	outer := filepath.Join(t.TempDir(), "outer")
+	state := otherRepo(t, outer)
+	root := filepath.Join(outer, "vault")
+	writeFile(t, filepath.Join(root, "01_Ideas", "note.md"), []byte("a note\n"))
+	before := state()
+	cfg := &Config{Place: "mac-test", Remote: "origin", Branch: "main", PollIntervalMS: 200, InboxQuietMS: 300,
+		NetTimeoutMS: 5000, LockTimeoutMS: 1000, MaxRetries: 2}
+	s := NewSyncer(vault.NewVaultEngine(root), cfg)
+	ran := false
+	_, out := s.Save(Op{Name: "commit", Actor: "agent-olivier", Run: func() (string, error) { ran = true; return "", nil }})
+	if out.Line != "REFUSED engine-error" || out.Exit != ExitEngineError || !strings.Contains(out.Detail, "not the top level of its own git repository") {
+		t.Fatalf("save = %+v, want REFUSED engine-error naming the cause", out)
+	}
+	if ran {
+		t.Fatalf("the operation must not run")
+	}
+	d := NewDaemon(vault.NewVaultEngine(root), cfg)
+	d.Log = io.Discard
+	if err := d.Tick(); err == nil {
+		t.Fatalf("a daemon pass must fail in a folder that is not its own repository")
+	}
+	if _, err := s.Repo.Status(); err == nil {
+		t.Fatalf("no git command of the place may answer from the outer repository")
+	}
+	if after := state(); after != before {
+		t.Fatalf("the outer repository was touched:\n--- before\n%s\n--- after\n%s", before, after)
 	}
 }
