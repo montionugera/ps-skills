@@ -162,3 +162,10 @@ func TestSave_CommitWithoutFingerprintIsRefusedBeforeAnythingOpens(t *testing.T)
 	}
 	cleanExceptIgnored(t, w.Mac)
 }
+
+func TestCLI_VersionNeedsNoVault(t *testing.T) {
+	out, _, code := engineCLI(t.TempDir(), "version")
+	if code != 0 || out != "vault-engine dev\n" {
+		t.Fatalf("version: exit %d, %q (a plain `go build` must say dev)", code, out)
+	}
+}

@@ -17,6 +17,9 @@ import (
 	"obsidian-vault-engine/pkg/workflow"
 )
 
+// version is set at build time: -ldflags "-X main.version=<value>".
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -24,6 +27,11 @@ func main() {
 	}
 
 	command := os.Args[1]
+
+	if command == "version" {
+		fmt.Printf("vault-engine %s\n", version)
+		return
+	}
 
 	// The hub's hook calls this inside a bare repository; it needs no vault root.
 	if command == "hub-pre-receive" {
@@ -477,6 +485,7 @@ func printUsage() {
 	fmt.Println("  validate-agent <manifest_file>      Validate agent recruitment manifest")
 	fmt.Println("  whoami                              Print this place's name (shared folders)")
 	fmt.Println("  sync-daemon [--once]                Keep this place in step with the shared copy")
+	fmt.Println("  version                             Print the build version")
 }
 
 
