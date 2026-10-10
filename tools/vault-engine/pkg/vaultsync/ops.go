@@ -61,7 +61,17 @@ const ingestOutsideInbox = "ingest deletes its source file, and only a file in t
 // must be a file under _inbox/ (checked again against git in the save step).
 // Anything else is refused before any marker opens (Op.Refuse).
 func IngestOp(e *vault.VaultEngine, filePath, actor string) Op {
-	op := Op{Name: "ingest", Actor: actor, FailPrefix: "Ingest failed", Refuse: ingestOutsideInbox}
+	// Run is always set and always gets the caller's own path, exactly as the
+	// plain (no sync config) path has always done. Refuse, Drop and Key are
+	// worked out from the symlink-resolved path.
+	op := Op{Name: "ingest", Actor: actor, FailPrefix: "Ingest failed", Refuse: ingestOutsideInbox,
+		Run: func() (string, error) {
+			assignedID, err := e.IngestFile(filePath)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("Ingested note as %s\n", assignedID), nil
+		}}
 	abs, err := resolvePath(filePath)
 	if err != nil {
 		return op
@@ -79,13 +89,6 @@ func IngestOp(e *vault.VaultEngine, filePath, actor string) Op {
 		return op
 	}
 	op.Refuse, op.Drop = "", rel
-	op.Run = func() (string, error) {
-		assignedID, err := e.IngestFile(abs)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("Ingested note as %s\n", assignedID), nil
-	}
 	// Path plus content while the file exists; path only once it is gone (a
 	// retry after the first try arrived), which matches the earlier key as a prefix.
 	op.Key = "ingest:" + rel + ":"
