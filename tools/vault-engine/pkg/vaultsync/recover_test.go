@@ -761,12 +761,20 @@ func TestUndo_AFailedBlobLookupRemovesNothingAndKeepsTheMarker(t *testing.T) {
 	if !r.hasMarker() {
 		t.Fatalf("marker must stay")
 	}
+	// As in production, the next lock-taker settles it with Recover (never a
+	// second direct Undo): the person's text goes to quarantine intact.
 	r.gate = nil
-	if err := r.Undo(m, []string{"01_Ideas/new.md"}, noRebuild); err != nil {
-		t.Fatalf("undo after the lookup works: %v", err)
+	if err := r.Recover(noRebuild); err != nil {
+		t.Fatalf("recover after the lookup works: %v", err)
 	}
 	if _, err := os.Stat(p); !os.IsNotExist(err) {
-		t.Fatalf("file should have been moved aside by the working undo")
+		t.Fatalf("file should have been moved aside by recovery")
+	}
+	if got := quarantined(t, w.Mac, "mac-test", "01_Ideas/new.md"); string(got) != "a person rewrote this\n" {
+		t.Fatalf("rewritten text not kept byte for byte in quarantine: %q", got)
+	}
+	if r.hasMarker() {
+		t.Fatalf("marker should be cleared after recovery")
 	}
 }
 
