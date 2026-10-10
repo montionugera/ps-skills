@@ -1,0 +1,366 @@
+package vaultsync
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"obsidian-vault-engine/pkg/vault"
+)
+
+const note1, note2 = "IDEA-2026-000001", "IDEA-2026-000002"
+
+func commitOp(s *Syncer, id, sha string, impact int) Op {
+	return CommitOp(s.Engine, vault.CommitRequest{RecordID: id, ExpectedSHA256: sha, Actor: "agent-olivier",
+		Updates: map[string]interface{}{"impact": impact}, Reason: "test"})
+}
+
+func cleanExceptIgnored(t *testing.T, root string) {
+	t.Helper()
+	if st := mustGit(t, root, "status", "--porcelain"); st != "" {
+		t.Fatalf("%s is not clean:\n%s", root, st)
+	}
+}
+
+func TestSave_SendsExactlyWhatTheOperationWrote(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	writeFile(t, filepath.Join(w.Mac, "_inbox", "agent", "agent-olivier", "mac-test-1.md"), []byte("a waiting drop\n"))
+
+	msg, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5))
+	if out.Line != "SAVED" || out.Exit != 0 {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if msg != "Commit SUCCESS for IDEA-2026-000001 by agent-olivier (OCC validated)\n" {
+		t.Errorf("engine message changed: %q", msg)
+	}
+	if author := mustGit(t, w.Hub, "log", "-1", "--format=%an", "refs/heads/main"); author != "agent-olivier@mac-test" {
+		t.Errorf("author on hub = %q", author)
+	}
+	files := strings.Split(mustGit(t, w.Hub, "show", "--name-only", "--format=", "refs/heads/main"), "\n")
+	if len(files) != 2 || !strings.HasPrefix(files[0], "01_Ideas/IDEA-2026-000001--") || !strings.HasPrefix(files[1], "_meta/events/") {
+		t.Errorf("the save should hold the note and its event file, got %v", files)
+	}
+	if st := mustGit(t, w.Mac, "status", "--porcelain"); st != "?? _inbox/agent/agent-olivier/mac-test-1.md" {
+		t.Errorf("the drop must stay untouched and unsent by a save:\n%s", st)
+	}
+	if mac.Repo.hasMarker() {
+		t.Errorf("marker left behind")
+	}
+}
+
+func TestSave_StaleFingerprintFromAnotherPlaceIsRefused(t *testing.T) {
+	w := newWorld(t)
+	mac, srv := newSyncer(t, w.Mac), newSyncer(t, w.Srv)
+	stale := readSHA(t, w.Srv, note1) // srv reads, then mac changes the note
+	if _, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5)); out.Exit != 0 {
+		t.Fatalf("mac save: %+v", out)
+	}
+	_, out := srv.Save(commitOp(srv, note1, stale, 1))
+	if out.Line != "REFUSED note-changed" || out.Exit != ExitNoteChanged {
+		t.Fatalf("outcome = %+v", out)
+	}
+	cleanExceptIgnored(t, w.Srv)
+	if a, b := readSHA(t, w.Srv, note1), readSHA(t, w.Mac, note1); a != b {
+		t.Fatalf("srv should now hold mac's version")
+	}
+}
+
+// Spec test 15: the send loses the race 3 times in a row.
+func TestSave_LosesTheRaceThreeTimesThenSaves(t *testing.T) {
+	w := newWorld(t)
+	mac, srv := newSyncer(t, w.Mac), newSyncer(t, w.Srv)
+	drop := filepath.Join(w.Mac, "_inbox", "agent", "agent-olivier", "mac-test-race.md")
+	writeFile(t, drop, []byte("---\ntitle: Race idea\n---\nBody\n"))
+	if state, out := mac.sendDrops([]string{"_inbox/agent/agent-olivier/mac-test-race.md"}, 1); state != pushOK {
+		t.Fatalf("sending the drop first: %+v", out)
+	}
+	races := 0
+	mac.Hooks.BeforePush = func(attempt int) {
+		if attempt <= 3 { // another place gets in first
+			races++
+			if _, out := srv.Save(commitOp(srv, note2, readSHA(t, w.Srv, note2), attempt)); out.Exit != 0 {
+				t.Errorf("srv save during race: %+v", out)
+			}
+		}
+	}
+	msg, out := mac.Save(IngestOp(mac.Engine, drop, "agent-olivier"))
+	if out.Line != "SAVED" || races != 3 {
+		t.Fatalf("outcome = %+v after %d races (%s)", out, races, msg)
+	}
+	ideas, _ := filepath.Glob(filepath.Join(w.Mac, "01_Ideas", "IDEA-*--race-idea.md"))
+	if len(ideas) != 1 {
+		t.Fatalf("expected exactly one ingested note, got %v", ideas)
+	}
+	cleanExceptIgnored(t, w.Mac)
+	if mac.Repo.hasMarker() {
+		t.Errorf("marker left behind")
+	}
+	index, _ := os.ReadFile(filepath.Join(w.Mac, "_meta", "indexes", "ideas.jsonl"))
+	if strings.Count(string(index), "Race idea") != 1 {
+		t.Errorf("index should list the note once:\n%s", index)
+	}
+	if n := mustGit(t, w.Hub, "log", "--format=%s", "--grep=vault: ingest", "refs/heads/main"); strings.Count(n, "\n") != 0 {
+		t.Errorf("hub should hold one ingest commit, got:\n%s", n)
+	}
+}
+
+// A file made by hand while a save loses the race is not deleted by the undo
+// and is not sent by the retry.
+func TestSave_LostRaceUndoLeavesAHandMadeFileAlone(t *testing.T) {
+	w := newWorld(t)
+	mac, srv := newSyncer(t, w.Mac), newSyncer(t, w.Srv)
+	byHand := filepath.Join(w.Mac, "01_Ideas", "made-by-hand.md")
+	mac.Hooks.BeforePush = func(attempt int) {
+		if attempt == 1 {
+			writeFile(t, byHand, []byte("typed by a person while the save ran\n"))
+			if _, out := srv.Save(commitOp(srv, note2, readSHA(t, w.Srv, note2), 4)); out.Exit != 0 {
+				t.Errorf("srv save during race: %+v", out)
+			}
+		}
+	}
+	if _, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5)); out.Line != "SAVED" {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if text, err := os.ReadFile(byHand); err != nil || string(text) != "typed by a person while the save ran\n" {
+		t.Fatalf("the hand-made file must survive the undo untouched: %q, %v", text, err)
+	}
+	if _, err := gitIn(t, w.Hub, nil, "cat-file", "-e", "refs/heads/main:01_Ideas/made-by-hand.md"); err == nil {
+		t.Fatalf("a hand-made file must never be sent")
+	}
+	if st := mustGit(t, w.Mac, "status", "--porcelain"); st != "?? 01_Ideas/made-by-hand.md" {
+		t.Fatalf("only the hand-made file may remain, waiting for the sync-daemon:\n%s", st)
+	}
+	if _, err := os.Stat(filepath.Join(w.Mac, "_quarantine")); !os.IsNotExist(err) {
+		t.Errorf("a lost race must not fill _quarantine/ with the save's own files")
+	}
+}
+
+// Spec test 8.
+func TestSave_NoConnectionChangesNothing(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	before := readSHA(t, w.Mac, note1)
+	if err := os.Rename(w.Hub, w.Hub+".off"); err != nil {
+		t.Fatalf("rename hub: %v", err)
+	}
+	_, out := mac.Save(commitOp(mac, note1, before, 5))
+	if out.Line != "REFUSED no-connection" || out.Exit != ExitNoConnection {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if readSHA(t, w.Mac, note1) != before {
+		t.Fatalf("the note changed although the save was refused")
+	}
+	cleanExceptIgnored(t, w.Mac)
+}
+
+// Spec test 16: the connection is cut exactly after the hub accepted.
+func TestSave_LostAnswerIsConfirmedWithTheHubAndACreateIsNotRepeated(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	drop := filepath.Join(w.Mac, "_inbox", "agent", "agent-olivier", "mac-test-once.md")
+	writeFile(t, drop, []byte("---\ntitle: Only once\n---\nBody\n"))
+	mac.Hooks.PushResult = func(_ int, res gitResult) gitResult {
+		if res.Err == nil { // the hub accepted; the answer never arrives
+			return gitResult{Err: errors.New("simulated: connection reset")}
+		}
+		return res
+	}
+	op := IngestOp(mac.Engine, drop, "agent-olivier")
+	if _, out := mac.Save(op); out.Line != "SAVED" {
+		t.Fatalf("a save the hub has must be reported as SAVED, got %+v", out)
+	}
+	mac.Hooks = Hooks{}
+	// The agent tries the same create again.
+	msg, out := mac.Save(IngestOp(mac.Engine, drop, "agent-olivier"))
+	if out.Line != "SAVED" || !strings.Contains(msg, "Already saved") {
+		t.Fatalf("second try = %+v (%q)", out, msg)
+	}
+	ideas, _ := filepath.Glob(filepath.Join(w.Mac, "01_Ideas", "IDEA-*--only-once.md"))
+	if len(ideas) != 1 {
+		t.Fatalf("expected one note, got %v", ideas)
+	}
+}
+
+func TestSave_UnreachableHubAfterPushLeavesTheDecisionToTheNextCommand(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	sha := readSHA(t, w.Mac, note1)
+	mac.Hooks.PushResult = func(_ int, res gitResult) gitResult {
+		_ = os.Rename(w.Hub, w.Hub+".off") // accepted, then everything is gone
+		return gitResult{Err: errors.New("simulated: connection reset")}
+	}
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "REFUSED no-connection" {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if !mac.Repo.hasMarker() {
+		t.Fatalf("the marker must stay until the hub can be asked")
+	}
+	mac.Hooks = Hooks{}
+	if err := os.Rename(w.Hub+".off", w.Hub); err != nil {
+		t.Fatalf("rename back: %v", err)
+	}
+	// Rule 3: the agent runs the same command again. The first try did arrive.
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "REFUSED note-changed" {
+		t.Fatalf("retry = %+v, want REFUSED note-changed because the first try arrived", out)
+	}
+	if mac.Repo.hasMarker() {
+		t.Fatalf("marker should be settled")
+	}
+	cleanExceptIgnored(t, w.Mac)
+}
+
+// A send that hits its time limit is "not confirmed", never "refused".
+func TestSave_TimedOutSendIsSettledByTheNextCommand(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	sha := readSHA(t, w.Mac, note1)
+	// The hub does not take the send (allowance used up); the place only sees its own time limit.
+	settings := filepath.Join(w.Hub, "hooks", "vault-limits.json")
+	original, _ := os.ReadFile(settings)
+	tight := strings.Replace(string(original), `"daily_bytes_per_place": 52428800`, `"daily_bytes_per_place": 1`, 1)
+	if tight == string(original) {
+		t.Fatalf("could not tighten the allowance in %s", settings)
+	}
+	if err := os.WriteFile(settings, []byte(tight), 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	mac.Hooks.PushResult = func(_ int, res gitResult) gitResult {
+		if res.Err == nil {
+			t.Errorf("the hub should not have taken this send")
+		}
+		return gitResult{Err: errors.New("timed out after 10s")}
+	}
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "REFUSED no-connection" || out.Exit != ExitNoConnection {
+		t.Fatalf("outcome = %+v, want REFUSED no-connection", out)
+	}
+	if !mac.Repo.hasMarker() {
+		t.Fatalf("the marker must stay until the hub can be asked again")
+	}
+	mac.Hooks = Hooks{}
+	if err := os.WriteFile(settings, original, 0644); err != nil {
+		t.Fatalf("restore settings: %v", err)
+	}
+	// It had not arrived: the next command takes the unsent save back, and the same save goes through.
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "SAVED" {
+		t.Fatalf("retry = %+v, want SAVED", out)
+	}
+	if mac.Repo.hasMarker() {
+		t.Fatalf("marker should be settled")
+	}
+	cleanExceptIgnored(t, w.Mac)
+	if hub := mustGit(t, w.Hub, "rev-list", "--count", "refs/heads/main"); hub != "2" {
+		t.Fatalf("hub should hold the seed and one save, has %s commits", hub)
+	}
+}
+
+// Spec test 9, first half.
+func TestSave_OversizedOrWrongTypeIsRefusedAndNothingIsLeftBehind(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	src := filepath.Join(t.TempDir(), "big-note.md")
+	writeFile(t, src, append([]byte("---\ntitle: Big\nkind: concept\n---\n"), make([]byte, 5<<20)...))
+	_, out := mac.Save(PublishOp(mac.Engine, src, "process", "agent-olivier"))
+	if out.Line != "REFUSED too-large" || out.Exit != ExitTooLarge || !strings.Contains(out.Detail, "max_file_bytes=1048576") {
+		t.Fatalf("outcome = %+v", out)
+	}
+	cleanExceptIgnored(t, w.Mac)
+	if left, _ := filepath.Glob(filepath.Join(w.Mac, "04_Knowledge", "*", "big-note.md")); len(left) != 0 {
+		t.Fatalf("refused note left behind: %v", left)
+	}
+	if hub := mustGit(t, w.Hub, "rev-list", "--count", "refs/heads/main"); hub != "1" {
+		t.Fatalf("hub should still hold only the seed, has %s commits", hub)
+	}
+}
+
+func TestSave_UnsentDropIsSentBeforeIngestDeletesIt(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	drop := filepath.Join(w.Mac, "_inbox", "human", "from-a-person.md")
+	writeFile(t, drop, []byte("---\ntitle: From a person\n---\nOriginal words\n"))
+	if _, out := mac.Save(IngestOp(mac.Engine, drop, "agent-olivier")); out.Line != "SAVED" {
+		t.Fatalf("outcome = %+v", out)
+	}
+	subjects := mustGit(t, w.Hub, "log", "--format=%s", "refs/heads/main")
+	if !strings.Contains(subjects, "vault: inbox drop by inbox@mac-test") || !strings.Contains(subjects, "vault: ingest by agent-olivier@mac-test") {
+		t.Fatalf("expected a drop commit and an ingest commit on the hub:\n%s", subjects)
+	}
+	// The original can always be recovered from the shared history.
+	if text := mustGit(t, w.Hub, "show", "refs/heads/main~1:_inbox/human/from-a-person.md"); !strings.Contains(text, "Original words") {
+		t.Fatalf("original drop not recoverable: %q", text)
+	}
+}
+
+func TestSave_LockTimeoutIsBusy(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	mac.Cfg.LockTimeoutMS = 100
+	held, err := AcquireFolderLock(w.Mac, 0)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	defer held.Release()
+	if _, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5)); out.Line != "REFUSED busy" || out.Exit != ExitBusy {
+		t.Fatalf("outcome = %+v", out)
+	}
+}
+
+func TestViolationOutcome_EveryHubLabelHasAnExitCode(t *testing.T) {
+	for _, c := range []struct {
+		code string
+		line string
+		exit int
+	}{
+		{"too-large", "REFUSED too-large", ExitTooLarge},
+		{"type-not-allowed", "REFUSED type-not-allowed", ExitTypeNotAllowed},
+		{"engine-error", "REFUSED engine-error", ExitEngineError},
+		{"something-new", "REFUSED engine-error", ExitEngineError},
+	} {
+		if out := violationOutcome(&Violation{Code: c.code, Message: "m"}); out.Line != c.line || out.Exit != c.exit {
+			t.Errorf("%s -> %+v", c.code, out)
+		}
+	}
+	if out := errorOutcome(errors.New("plain")); out.Exit != ExitEngineError {
+		t.Errorf("plain error -> %+v", out)
+	}
+}
+
+// The push answers that are read from the text git prints.
+func TestSave_PushAnswersAreReadFromTheirText(t *testing.T) {
+	for _, c := range []struct {
+		stderr string
+		line   string
+		exit   int
+	}{
+		{"remote: vault-hub: REFUSED engine-error: settings unreadable\n", "REFUSED engine-error", ExitEngineError},
+		{"remote: vault-hub: REFUSED type-not-allowed: x.exe\n", "REFUSED type-not-allowed", ExitTypeNotAllowed},
+		{"fatal: pack exceeds maximum allowed size (20.00 MiB)\n", "REFUSED too-large", ExitTooLarge},
+	} {
+		w := newWorld(t)
+		mac := newSyncer(t, w.Mac)
+		mac.Hooks.PushResult = func(_ int, res gitResult) gitResult {
+			return gitResult{Stderr: c.stderr, Err: errors.New("exit status 1")}
+		}
+		before := readSHA(t, w.Mac, note1)
+		if _, out := mac.Save(commitOp(mac, note1, before, 5)); out.Line != c.line || out.Exit != c.exit {
+			t.Fatalf("%q -> %+v", c.stderr, out)
+		}
+		if mac.Repo.hasMarker() || readSHA(t, w.Mac, note1) != before {
+			t.Fatalf("a refused save must be taken back completely")
+		}
+		cleanExceptIgnored(t, w.Mac)
+	}
+}
+
+func TestSave_BeginRefusesToOverwriteAnOpenMarker(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	if _, err := mac.Repo.Begin("commit", "someone"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := mac.begin("commit", "agent"); err == nil {
+		t.Fatalf("a second marker must not be opened over an unsettled one")
+	}
+}

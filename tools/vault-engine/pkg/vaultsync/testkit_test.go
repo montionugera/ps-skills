@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"obsidian-vault-engine/pkg/vault"
 )
 
 // engineBin is the engine built once per test run. Every CLI call through the
@@ -171,4 +173,23 @@ func newRepo(t *testing.T, root string) *Repo {
 		t.Fatalf("sync config of %s: (%v, %v)", root, cfg, err)
 	}
 	return NewRepo(root, cfg)
+}
+
+func newSyncer(t *testing.T, root string) *Syncer {
+	t.Helper()
+	cfg, err := LoadConfig(root)
+	if err != nil || cfg == nil {
+		t.Fatalf("sync config of %s: (%v, %v)", root, cfg, err)
+	}
+	return NewSyncer(vault.NewVaultEngine(root), cfg)
+}
+
+// readSHA returns the fingerprint of a note as an agent would read it.
+func readSHA(t *testing.T, root, id string) string {
+	t.Helper()
+	env, err := vault.NewVaultEngine(root).ReadRecord(id)
+	if err != nil {
+		t.Fatalf("read %s in %s: %v", id, root, err)
+	}
+	return env.SHA256
 }
