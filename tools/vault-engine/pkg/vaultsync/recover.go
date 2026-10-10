@@ -61,7 +61,7 @@ func (r *Repo) Begin(op, actor string) (*Marker, error) {
 	m := &Marker{Op: op, Actor: actor, Place: r.Place, PID: os.Getpid(),
 		StartedAt: time.Now().UTC().Format(time.RFC3339), Base: base}
 	for p, code := range st {
-		if code == "??" {
+		if code == "??" && !localOnly(p) {
 			m.UntrackedBefore = append(m.UntrackedBefore, p)
 		}
 	}
@@ -139,7 +139,76 @@ func (r *Repo) undoUnproven(m *Marker, proven []string, rebuild func() error) er
 	return r.undo(m, proven, true, rebuild)
 }
 
+// localOnly reports whether rel lies under a prefix that belongs to this place
+// alone (the hub never accepts it). Recovery must never move such a file,
+// whatever the vault's .gitignore says.
+func localOnly(rel string) bool {
+	for _, d := range DefaultLimits().DeniedPrefixes {
+		if strings.HasPrefix(rel, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// names runs a git command that prints NUL-separated paths and returns them
+// exactly (Repo.local trims white space, which would damage a first name that
+// starts with a space).
+func (r *Repo) names(args ...string) ([]string, error) {
+	res := r.run(localTimeout, args...)
+	if res.Err != nil {
+		return nil, fmt.Errorf("git %s: %w: %s", args[0], res.Err, strings.TrimSpace(res.Stderr))
+	}
+	var out []string
+	for _, n := range strings.Split(res.Stdout, "\x00") {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
+// blobAt returns the id of p in rev, and whether rev has p.
+func (r *Repo) blobAt(rev, p string) (string, bool) {
+	id, err := r.local("rev-parse", "--verify", "--quiet", rev+":"+p)
+	return id, err == nil
+}
+
+// sameAs reports whether the file on disk holds exactly what rev holds for p
+// (both absent counts as the same). Any doubt answers false.
+func (r *Repo) sameAs(p, rev string) bool {
+	want, inRev := r.blobAt(rev, p)
+	have, err := r.local("hash-object", "--", p)
+	if err != nil {
+		return !inRev
+	}
+	return inRev && have == want
+}
+
+// restoreHandEdit copies a note changed outside the engine to quarantine and
+// puts it back to the version in HEAD.
+func (r *Repo) restoreHandEdit(p, code, why string) error {
+	if err := r.setAside(p, why+" (git status "+strings.TrimSpace(code)+")", false); err != nil {
+		return err
+	}
+	if strings.Contains(code, "A") { // staged by hand, not in the shared version
+		_, err := r.local("rm", "--quiet", "--cached", "--", p)
+		return err
+	}
+	_, err := r.local("checkout", "--quiet", "HEAD", "--", p)
+	return err
+}
+
+// undo puts the folder back to the marker's starting point. A tracked note is
+// put back without a copy only when its content is proven to be the save's
+// own: it is on the caller's list and (if the save committed) equals the
+// commit's version, or the operation is an update and it equals the incoming
+// version. Anything else may be a hand edit and is copied to quarantine first.
 func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) error {
+	preHead, err := r.Head()
+	if err != nil {
+		return err
+	}
 	if _, err := r.local("reset", "--quiet", "--mixed", m.Base); err != nil {
 		return err
 	}
@@ -155,14 +224,29 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 	for _, p := range mine {
 		wrote[p] = true
 	}
+	committed := preHead != m.Base
 	paths := make([]string, 0, len(st))
 	for p := range st {
-		paths = append(paths, p)
+		if !localOnly(p) {
+			paths = append(paths, p)
+		}
 	}
 	sort.Strings(paths)
 	for _, p := range paths {
 		switch {
 		case st[p] != "??": // a note the save changed or deleted: back to the start
+			proven := false
+			switch {
+			case m.Op == "update":
+				proven = r.sameAs(p, r.remoteRef())
+			case !sweep && wrote[p]:
+				proven = !committed || r.sameAs(p, preHead)
+			}
+			if !proven {
+				if err := r.setAside(p, "changed during an interrupted "+m.Op+"; not proven to be written by it (git status "+strings.TrimSpace(st[p])+")", false); err != nil {
+					return err
+				}
+			}
 			if _, err := r.local("checkout", "--quiet", m.Base, "--", p); err != nil {
 				return err
 			}
@@ -174,6 +258,14 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 				return err
 			}
 		case wrote[p]:
+			if committed {
+				if _, inCommit := r.blobAt(preHead, p); inCommit && !r.sameAs(p, preHead) {
+					if err := r.setAside(p, "no longer holds what the "+m.Op+" wrote; kept, not deleted", true); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			if err := os.Remove(filepath.Join(r.Root, filepath.FromSlash(p))); err != nil && !os.IsNotExist(err) {
 				return err
 			}
@@ -210,7 +302,11 @@ func (r *Repo) Recover(rebuild func() error) error {
 		if err := r.Fetch(); err != nil {
 			return err // cannot know yet whether it arrived; decide nothing
 		}
-		if r.isAncestor(head, r.remoteRef()) {
+		onHub, err := r.isAncestor(head, r.remoteRef())
+		if err != nil {
+			return err // a git failure is not an answer; decide nothing, keep the marker
+		}
+		if onHub {
 			// The hub has it and the files are whole. The indexes may not be:
 			// an update can stop after its fast-forward and before its rebuild.
 			if err := rebuild(); err != nil {
@@ -219,11 +315,10 @@ func (r *Repo) Recover(rebuild func() error) error {
 			return r.End()
 		}
 		// The local commit is the proof of what the save wrote.
-		names, err := r.local("diff", "-z", "--name-only", "--no-renames", m.Base, head)
+		proven, err = r.names("diff", "-z", "--name-only", "--no-renames", m.Base, head)
 		if err != nil {
 			return err
 		}
-		proven = strings.Split(names, "\x00")
 	}
 	if err := r.undoUnproven(m, proven, rebuild); err != nil {
 		return err
@@ -240,22 +335,13 @@ func (r *Repo) quarantineHandEdits() error {
 	}
 	var paths []string
 	for p, code := range st {
-		if code != "??" {
+		if code != "??" && !localOnly(p) {
 			paths = append(paths, p)
 		}
 	}
 	sort.Strings(paths)
 	for _, p := range paths {
-		if err := r.setAside(p, "changed outside the engine (git status "+strings.TrimSpace(st[p])+")", false); err != nil {
-			return err
-		}
-		if strings.Contains(st[p], "A") { // staged by hand, not in the shared version
-			if _, err := r.local("rm", "--quiet", "--cached", "--", p); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := r.local("checkout", "--quiet", "HEAD", "--", p); err != nil {
+		if err := r.restoreHandEdit(p, st[p], "changed outside the engine"); err != nil {
 			return err
 		}
 	}
@@ -316,10 +402,9 @@ func (r *Repo) Update(rebuild func() error) (bool, error) {
 	if _, err := r.Begin("update", "sync"); err != nil {
 		return false, err
 	}
-	// An untracked local file with the name of an incoming file would block the
-	// fast-forward. Identical content is a leftover of an interrupted update and
-	// is dropped; different content is someone's unsent file and is set aside.
-	added, err := r.local("diff", "-z", "--name-only", "--no-renames", "--diff-filter=A", head, hub)
+	// A note edited by hand that the incoming version also touches would block
+	// the fast-forward: keep the edit in quarantine and put the note back.
+	touched, err := r.names("diff", "-z", "--name-only", "--no-renames", head, hub)
 	if err != nil {
 		return false, err
 	}
@@ -327,7 +412,24 @@ func (r *Repo) Update(rebuild func() error) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for _, p := range strings.Split(added, "\x00") {
+	for _, p := range touched {
+		if code := st[p]; code != "" && code != "??" && !localOnly(p) {
+			if err := r.restoreHandEdit(p, code, "changed outside the engine; an incoming version replaces it"); err != nil {
+				return false, err
+			}
+		}
+	}
+	// An untracked local file with the name of an incoming file would block the
+	// fast-forward. Identical content is a leftover of an interrupted update and
+	// is dropped; different content is someone's unsent file and is set aside.
+	added, err := r.names("diff", "-z", "--name-only", "--no-renames", "--diff-filter=A", head, hub)
+	if err != nil {
+		return false, err
+	}
+	if st, err = r.Status(); err != nil {
+		return false, err
+	}
+	for _, p := range added {
 		if p == "" || st[p] != "??" {
 			continue
 		}

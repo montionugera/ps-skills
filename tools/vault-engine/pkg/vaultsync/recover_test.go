@@ -82,9 +82,14 @@ func TestRecover_InterruptedSaveMovesUnprovenFilesToQuarantineAndNeverTouchesAnI
 			t.Errorf("%s in quarantine = %q, want %q", rel, got, want)
 		}
 	}
+	// A tracked note changed before any commit cannot be told from a hand edit: it is copied too.
+	noteRel := "01_Ideas/" + filepath.Base(note)
+	if got := quarantined(t, w.Mac, "mac-test", noteRel); string(got) != "half-written\n" {
+		t.Errorf("changed note not copied to quarantine: %q", got)
+	}
 	report, _ := os.ReadFile(filepath.Join(w.Mac, "_quarantine", "mac-test", "REPORT.log"))
-	if strings.Count(string(report), "QUARANTINED") != 2 {
-		t.Errorf("expected two report lines, got:\n%s", report)
+	if strings.Count(string(report), "QUARANTINED") != 3 {
+		t.Errorf("expected three report lines, got:\n%s", report)
 	}
 	if text, err := os.ReadFile(drop); err != nil || string(text) != "arrived while the save ran\n" {
 		t.Errorf("the inbox drop must stay where it is, untouched: %q, %v", text, err)
@@ -134,8 +139,12 @@ func TestRecover_UnsentCommitIsUndoneAndSentCommitIsKept(t *testing.T) {
 		t.Fatalf("push: %v\n%s", err, out)
 	}
 	sent, _ := r.Head()
-	if err := r.Recover(noRebuild); err != nil {
+	rebuilt, markerAtRebuild := 0, false
+	if err := r.Recover(func() error { rebuilt++; markerAtRebuild = r.hasMarker(); return nil }); err != nil {
 		t.Fatalf("recover: %v", err)
+	}
+	if rebuilt != 1 || !markerAtRebuild {
+		t.Fatalf("indexes must be rebuilt once, before the marker is cleared (rebuilt %d, marker present %v)", rebuilt, markerAtRebuild)
 	}
 	if head, _ := r.Head(); head != sent || r.hasMarker() {
 		t.Fatalf("a commit the hub has must be kept (head %s, want %s; marker %v)", head, sent, r.hasMarker())
@@ -268,9 +277,13 @@ func TestUpdate_FastForwardsAndSurvivesAnInterruptedEarlierUpdate(t *testing.T) 
 	if err := srv.Recover(noRebuild); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	moved, err := srv.Update(noRebuild)
+	rebuilt, markerAtRebuild := 0, false
+	moved, err := srv.Update(func() error { rebuilt++; markerAtRebuild = srv.hasMarker(); return nil })
 	if err != nil || !moved {
 		t.Fatalf("update = (%v, %v), want (true, nil)", moved, err)
+	}
+	if rebuilt != 1 || !markerAtRebuild || srv.hasMarker() {
+		t.Fatalf("rebuild must run once while the marker is present, then the marker goes (rebuilt %d, marker at rebuild %v, marker now %v)", rebuilt, markerAtRebuild, srv.hasMarker())
 	}
 	if a, b := mustGit(t, w.Srv, "rev-parse", "HEAD"), mustGit(t, w.Mac, "rev-parse", "HEAD"); a != b {
 		t.Fatalf("srv at %s, mac at %s", a, b)
@@ -323,5 +336,167 @@ func TestUndo_AListedFileThatWasAlreadyUntrackedBeforeTheSaveIsKeptNotDeleted(t 
 	}
 	if got := quarantined(t, w.Mac, "mac-test", "01_Ideas/pre-existing.md"); string(got) != "mine, from before\n" {
 		t.Errorf("pre-existing file lost: %q", got)
+	}
+}
+
+func reportLines(t *testing.T, root, place string) int {
+	t.Helper()
+	b, _ := os.ReadFile(filepath.Join(root, "_quarantine", place, "REPORT.log"))
+	return strings.Count(string(b), "QUARANTINED")
+}
+
+func TestUndo_AHandEditToANoteNotOnTheListIsKeptInQuarantine(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	mine := fixtureNote(t, w.Mac, "IDEA-2026-000001")
+	other := fixtureNote(t, w.Mac, "IDEA-2026-000002")
+	origMine, _ := os.ReadFile(mine)
+	origOther, _ := os.ReadFile(other)
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	writeFile(t, mine, []byte("changed by the save\n"))
+	writeFile(t, other, []byte("typed by a person during the save\n"))
+	if err := r.Undo(m, []string{"01_Ideas/" + filepath.Base(mine)}, noRebuild); err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+	if now, _ := os.ReadFile(mine); string(now) != string(origMine) {
+		t.Errorf("listed note not put back")
+	}
+	if now, _ := os.ReadFile(other); string(now) != string(origOther) {
+		t.Errorf("unlisted note not put back")
+	}
+	if got := quarantined(t, w.Mac, "mac-test", "01_Ideas/"+filepath.Base(other)); string(got) != "typed by a person during the save\n" {
+		t.Errorf("hand edit lost: %q", got)
+	}
+	if n := reportLines(t, w.Mac, "mac-test"); n != 1 {
+		t.Errorf("expected exactly one report line, got %d", n)
+	}
+}
+
+func TestUndo_AListedFileReplacedAfterTheCommitIsMovedNotDeleted(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	p := filepath.Join(w.Mac, "01_Ideas", "new.md")
+	writeFile(t, p, []byte("what the save wrote\n"))
+	if err := r.Commit([]string{"01_Ideas/new.md"}, "agent-olivier", "vault: commit", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	writeFile(t, p, []byte("a person rewrote this\n"))
+	if err := r.Undo(m, []string{"01_Ideas/new.md"}, noRebuild); err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("file should have been moved out of the folder")
+	}
+	if got := quarantined(t, w.Mac, "mac-test", "01_Ideas/new.md"); string(got) != "a person rewrote this\n" {
+		t.Errorf("rewritten text lost: %q", got)
+	}
+}
+
+func TestUpdate_HandEditToANoteTheIncomingVersionAlsoChangesIsSetAside(t *testing.T) {
+	w := newWorld(t)
+	mac, srv := newRepo(t, w.Mac), newRepo(t, w.Srv)
+	macNote := fixtureNote(t, w.Mac, "IDEA-2026-000001")
+	rel := "01_Ideas/" + filepath.Base(macNote)
+	writeFile(t, macNote, []byte("shared change\n"))
+	if err := mac.Commit([]string{rel}, "agent-olivier", "vault: commit", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if out, err := pushAs(t, w.Mac, "mac-test", "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	srvNote := filepath.Join(w.Srv, filepath.FromSlash(rel))
+	writeFile(t, srvNote, []byte("hand edit on the server\n"))
+	lockFor(t, srv)
+	if moved, err := srv.Update(noRebuild); err != nil || !moved {
+		t.Fatalf("update = (%v, %v), want (true, nil)", moved, err)
+	}
+	if now, _ := os.ReadFile(srvNote); string(now) != "shared change\n" {
+		t.Errorf("folder should be at the hub's version, got %q", now)
+	}
+	if got := quarantined(t, w.Srv, "srv-test", rel); string(got) != "hand edit on the server\n" {
+		t.Errorf("hand edit lost: %q", got)
+	}
+	if a, b := mustGit(t, w.Srv, "rev-parse", "HEAD"), mustGit(t, w.Mac, "rev-parse", "HEAD"); a != b {
+		t.Errorf("srv at %s, mac at %s", a, b)
+	}
+}
+
+func TestRecover_EngineFilesStayPutEvenWhenGitignoreLacksTheirLines(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	writeFile(t, filepath.Join(w.Mac, ".gitignore"), []byte(".DS_Store\n"))
+	if err := r.Commit([]string{".gitignore"}, "agent-olivier", "vault: gitignore", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := r.Begin("commit", "agent-olivier"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	writeFile(t, filepath.Join(w.Mac, "01_Ideas", "stray.md"), []byte("stray\n"))
+	if err := r.Recover(noRebuild); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	for _, rel := range []string{"_meta/guards/folder.guard", "_meta/bin/sync.json"} {
+		if _, err := os.Stat(filepath.Join(w.Mac, filepath.FromSlash(rel))); err != nil {
+			t.Errorf("%s must stay in place: %v", rel, err)
+		}
+	}
+	if n := reportLines(t, w.Mac, "mac-test"); n != 1 {
+		t.Errorf("only the stray note may be quarantined, got %d report lines", n)
+	}
+	if m, _ := filepath.Glob(filepath.Join(w.Mac, "_quarantine", "mac-test", "*", "_quarantine", "*")); len(m) != 0 {
+		t.Errorf("_quarantine/ was quarantined into itself: %v", m)
+	}
+}
+
+func TestRecover_AFileNameStartingWithASpaceIsReadWhole(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	if _, err := r.Begin("commit", "agent-olivier"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	writeFile(t, filepath.Join(w.Mac, " lead.md"), []byte("the save's file\n"))
+	if err := r.Commit([]string{" lead.md"}, "agent-olivier", "vault: commit", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	writeFile(t, filepath.Join(w.Mac, "lead.md"), []byte("someone else's file\n"))
+	if err := r.Recover(noRebuild); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(w.Mac, " lead.md")); !os.IsNotExist(err) {
+		t.Errorf("the save's own file should be removed")
+	}
+	if got := quarantined(t, w.Mac, "mac-test", "lead.md"); string(got) != "someone else's file\n" {
+		t.Errorf("the other file must be set aside, not deleted: %q", got)
+	}
+}
+
+func TestIsAncestor_TellsNotAnAncestorFromAGitError(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	base, _ := r.Head()
+	writeFile(t, filepath.Join(w.Mac, "01_Ideas", "x.md"), []byte("x\n"))
+	if err := r.Commit([]string{"01_Ideas/x.md"}, "a", "s", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	head, _ := r.Head()
+	if ok, err := r.isAncestor(base, head); !ok || err != nil {
+		t.Errorf("base is an ancestor of head: (%v, %v)", ok, err)
+	}
+	if ok, err := r.isAncestor(head, base); ok || err != nil {
+		t.Errorf("head is not an ancestor of base, and that is not an error: (%v, %v)", ok, err)
+	}
+	if _, err := r.isAncestor(head, "refs/remotes/origin/no-such-branch"); err == nil {
+		t.Errorf("an unknown ref is a git error, not 'not an ancestor'")
 	}
 }

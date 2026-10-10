@@ -152,8 +152,19 @@ func (r *Repo) RemoteHead() (string, error) {
 	return fields[0], nil
 }
 
-func (r *Repo) isAncestor(a, b string) bool {
-	return r.run(localTimeout, "merge-base", "--is-ancestor", a, b).Err == nil
+// isAncestor tells "a is not an ancestor of b" (false, nil) from a git failure
+// such as a time-out or an unknown ref (false, error): only the first means
+// the answer is no.
+func (r *Repo) isAncestor(a, b string) (bool, error) {
+	res := r.run(localTimeout, "merge-base", "--is-ancestor", a, b)
+	if res.Err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(res.Err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base: %w: %s", res.Err, strings.TrimSpace(res.Stderr))
 }
 
 // Commit records exactly the given paths (additions, changes and deletions)
