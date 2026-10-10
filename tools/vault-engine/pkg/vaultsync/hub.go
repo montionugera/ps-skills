@@ -33,6 +33,31 @@ func hubGit(stdin string, args ...string) (string, error) {
 	return out.String(), nil
 }
 
+// batchCheck feeds input to `git cat-file --batch-check=<format>` (format is
+// "<word> <size>") and calls visit for each output line. A git failure or an
+// unparseable line is a "type-not-allowed" refusal; a non-empty code returned
+// by visit stops the scan and is returned as the refusal.
+func batchCheck(input, format, gitFail string, visit func(word string, size int64) (code, msg string)) (string, string) {
+	out, err := hubGit(input, "cat-file", "--batch-check="+format)
+	if err != nil {
+		return "type-not-allowed", fmt.Sprintf("%s: %v", gitFail, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			return "type-not-allowed", "incoming object cannot be measured: " + line
+		}
+		n, err := strconv.ParseInt(f[1], 10, 64)
+		if err != nil { // git prints "<name> missing" for an object it does not have
+			return "type-not-allowed", "incoming object cannot be measured: " + line
+		}
+		if code, msg := visit(f[0], n); code != "" {
+			return code, msg
+		}
+	}
+	return "", ""
+}
+
 // PreReceive is the hub's door check. It returns the hook's exit code. Every
 // refusal is one line: "vault-hub: REFUSED <code>: <message naming the limit>".
 func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now time.Time) int {
@@ -112,20 +137,9 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 		for sha := range sizes {
 			in.WriteString(sha + "\n")
 		}
-		out, err := hubGit(in.String(), "cat-file", "--batch-check=%(objectname) %(objectsize)")
-		if err != nil {
-			return refuse("type-not-allowed", "cannot measure incoming files: %v", err)
-		}
-		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-			f := strings.Fields(line)
-			if len(f) != 2 {
-				return refuse("type-not-allowed", "incoming object cannot be measured: %s", line)
-			}
-			n, err := strconv.ParseInt(f[1], 10, 64)
-			if err != nil { // git prints "<name> missing" for an object it does not have
-				return refuse("type-not-allowed", "incoming object cannot be measured: %s", line)
-			}
-			sizes[f[0]] = n
+		if code, msg := batchCheck(in.String(), "%(objectname) %(objectsize)", "cannot measure incoming files",
+			func(name string, n int64) (string, string) { sizes[name] = n; return "", "" }); code != "" {
+			return refuse(code, "%s", msg)
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
@@ -149,23 +163,15 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 				in.WriteString(f[0] + "\n")
 			}
 		}
-		out, err := hubGit(in.String(), "cat-file", "--batch-check=%(objecttype) %(objectsize)")
-		if err != nil {
-			return refuse("type-not-allowed", "cannot measure the send: %v", err)
-		}
-		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-			f := strings.Fields(line)
-			if len(f) != 2 {
-				return refuse("type-not-allowed", "incoming object cannot be measured: %s", line)
-			}
-			n, err := strconv.ParseInt(f[1], 10, 64)
-			if err != nil {
-				return refuse("type-not-allowed", "incoming object cannot be measured: %s", line)
-			}
-			if f[0] != "blob" && n > l.MaxFileBytes {
-				return refuse("too-large", "a %s record in this send is %d bytes (commit message or folder listing); limit max_file_bytes=%d", f[0], n, l.MaxFileBytes)
-			}
-			total += n
+		if code, msg := batchCheck(in.String(), "%(objecttype) %(objectsize)", "cannot measure the send",
+			func(typ string, n int64) (string, string) {
+				if typ != "blob" && n > l.MaxFileBytes {
+					return "too-large", fmt.Sprintf("a %s record in this send is %d bytes (commit message or folder listing); limit max_file_bytes=%d", typ, n, l.MaxFileBytes)
+				}
+				total += n
+				return "", ""
+			}); code != "" {
+			return refuse(code, "%s", msg)
 		}
 	}
 	usageDir := filepath.Join(filepath.Dir(limitsFile), "..", "vault-usage")
