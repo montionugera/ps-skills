@@ -65,6 +65,11 @@ func main() {
 
 	syncCfg, err := vaultsync.LoadConfig(engine.Root)
 	if err != nil {
+		// A config file exists but cannot be used: the commands that save still end with the fixed line.
+		switch command {
+		case "ingest", "commit", "capture", "publish-knowledge":
+			finish("Sync config error", "", vaultsync.Outcome{Line: "REFUSED engine-error", Exit: vaultsync.ExitEngineError, Detail: err.Error()})
+		}
 		fmt.Fprintf(os.Stderr, "Sync config error: %v\n", err)
 		os.Exit(1)
 	}
@@ -81,8 +86,7 @@ func main() {
 
 	case "ingest":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: vault-engine ingest <file_path>")
-			os.Exit(1)
+			earlyExit(syncCfg, "Usage: vault-engine ingest <file_path>")
 		}
 		runMutating(engine, syncCfg, vaultsync.IngestOp(engine, os.Args[2], actorFromEnv()))
 
@@ -191,8 +195,7 @@ func main() {
 
 	case "commit":
 		if len(os.Args) < 6 {
-			fmt.Fprintln(os.Stderr, "Usage: vault-engine commit <record_id> <expected_sha> <actor> <updates_json> [idempotency_key] [reason]")
-			os.Exit(1)
+			earlyExit(syncCfg, "Usage: vault-engine commit <record_id> <expected_sha> <actor> <updates_json> [idempotency_key] [reason]")
 		}
 		recordID := os.Args[2]
 		expectedSHA := os.Args[3]
@@ -200,8 +203,7 @@ func main() {
 		rawUpdates := os.Args[5]
 		var updates map[string]interface{}
 		if err := json.Unmarshal([]byte(rawUpdates), &updates); err != nil {
-			fmt.Fprintf(os.Stderr, "Invalid updates JSON: %v\n", err)
-			os.Exit(1)
+			earlyExit(syncCfg, fmt.Sprintf("Invalid updates JSON: %v", err))
 		}
 		idempotencyKey := ""
 		if len(os.Args) > 6 {
@@ -353,8 +355,7 @@ func main() {
 
 	case "capture":
 		if len(os.Args) < 6 {
-			fmt.Fprintln(os.Stderr, "Usage: vault-engine capture <idempotency_key> <category> <origin> <payload>")
-			os.Exit(1)
+			earlyExit(syncCfg, "Usage: vault-engine capture <idempotency_key> <category> <origin> <payload>")
 		}
 		runMutating(engine, syncCfg, vaultsync.CaptureOp(engine, os.Args[2], os.Args[3], os.Args[4], os.Args[5]))
 
@@ -382,8 +383,7 @@ func main() {
 
 	case "publish-knowledge":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: vault-engine publish-knowledge <file_path> [category] [author]")
-			os.Exit(1)
+			earlyExit(syncCfg, "Usage: vault-engine publish-knowledge <file_path> [category] [author]")
 		}
 		filePath := os.Args[2]
 		category := "process"

@@ -101,6 +101,9 @@ func (s *Syncer) Save(op Op) (string, Outcome) {
 	if op.Refuse != "" {
 		return "", refused("engine-error", ExitEngineError, op.Refuse)
 	}
+	if op.NoFingerprint {
+		return "", refused("note-changed", ExitNoteChanged, "a save in a shared folder needs the fingerprint (sha256) from read-record; read the note and save again")
+	}
 	release, err := s.lockFolder()
 	if err != nil {
 		return "", errorOutcome(err)

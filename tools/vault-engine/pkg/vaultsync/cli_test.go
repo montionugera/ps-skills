@@ -111,3 +111,54 @@ func TestCLI_SyncedVaultEndsEverySaveWithAFixedLine(t *testing.T) {
 		t.Fatalf("mac is not clean:\n%s", st)
 	}
 }
+
+// A synced folder: every early exit of a changing command still ends with the
+// fixed last line. A plain folder: the same bad input prints exactly what it did before.
+func TestCLI_EarlyExitsInASyncedFolderEndWithAFixedLine(t *testing.T) {
+	w := newWorld(t)
+	plain := plainVault(t)
+	cases := []struct {
+		name    string
+		args    []string
+		usage   string // text expected on stderr
+		plainEr string // exact stderr without a sync config
+	}{
+		{"bad updates json", []string{"commit", note1, "abc", "agent", "{bad"}, "Invalid updates JSON: ", ""},
+		{"bad json, empty fingerprint", []string{"commit", note1, "", "agent", "{bad"}, "Invalid updates JSON: ", ""},
+		{"commit usage", []string{"commit", note1}, "Usage: vault-engine commit", "Usage: vault-engine commit <record_id> <expected_sha> <actor> <updates_json> [idempotency_key] [reason]\n"},
+		{"ingest usage", []string{"ingest"}, "Usage: vault-engine ingest", "Usage: vault-engine ingest <file_path>\n"},
+		{"capture usage", []string{"capture", "k"}, "Usage: vault-engine capture", "Usage: vault-engine capture <idempotency_key> <category> <origin> <payload>\n"},
+		{"publish usage", []string{"publish-knowledge"}, "Usage: vault-engine publish-knowledge", "Usage: vault-engine publish-knowledge <file_path> [category] [author]\n"},
+	}
+	for _, c := range cases {
+		out, errOut, code := engineCLI(w.Mac, c.args...)
+		if code != 1 || lastLine(out) != "REFUSED engine-error" || !strings.Contains(errOut, c.usage) {
+			t.Errorf("%s (synced): exit %d, stdout %q, stderr %q", c.name, code, out, errOut)
+		}
+		out, errOut, code = engineCLI(plain, c.args...)
+		if code != 1 || out != "" || !strings.HasPrefix(errOut, c.usage) || (c.plainEr != "" && errOut != c.plainEr) {
+			t.Errorf("%s (plain): exit %d, stdout %q, stderr %q", c.name, code, out, errOut)
+		}
+	}
+
+	// A sync config that cannot be read: changing commands still end with the fixed line.
+	broken := plainVault(t)
+	writeFile(t, filepath.Join(broken, "_meta", "bin", "sync.json"), []byte("{not json"))
+	out, errOut, code := engineCLI(broken, "capture", "k", "product_feature", "cli", "x")
+	if code != 1 || lastLine(out) != "REFUSED engine-error" || !strings.Contains(errOut, "Sync config error") {
+		t.Errorf("malformed config: exit %d, stdout %q, stderr %q", code, out, errOut)
+	}
+}
+
+func TestSave_CommitWithoutFingerprintIsRefusedBeforeAnythingOpens(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	msg, out := mac.Save(commitOp(mac, note1, "", 5))
+	if out.Line != "REFUSED note-changed" || out.Exit != ExitNoteChanged || msg != "" || !strings.Contains(out.Detail, "fingerprint") {
+		t.Fatalf("msg %q, outcome %+v", msg, out)
+	}
+	if _, err := os.Stat(filepath.Join(w.Mac, "_meta", "guards", "folder.guard")); !os.IsNotExist(err) {
+		t.Errorf("no lock may be taken for a refused commit")
+	}
+	cleanExceptIgnored(t, w.Mac)
+}

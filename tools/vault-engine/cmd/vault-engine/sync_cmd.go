@@ -65,3 +65,13 @@ func actorFromEnv() string {
 	}
 	return "agent"
 }
+
+// earlyExit ends a changing command that rejected its own input. Without a sync
+// config it prints today's line and exits 1; with one it also ends with the fixed line.
+func earlyExit(cfg *vaultsync.Config, text string) {
+	fmt.Fprintln(os.Stderr, text)
+	if cfg != nil {
+		fmt.Println("REFUSED engine-error")
+	}
+	os.Exit(vaultsync.ExitEngineError)
+}

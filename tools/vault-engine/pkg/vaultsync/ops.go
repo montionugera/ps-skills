@@ -15,14 +15,15 @@ import (
 // Op is one existing engine operation, wrapped so that the same closure serves
 // the plain path (no sync config) and the save step.
 type Op struct {
-	Name       string                        // "commit", "ingest", "capture", "publish-knowledge"
-	Actor      string                        // recorded as <actor>@<place>
-	FailPrefix string                        // today's stderr prefix, e.g. "Commit FAILED"
-	Key        string                        // fixed one-time key; "" = no duplicate check
-	KeyFn      func(r *Repo) (string, error) // if set, replaces Key: asked by the save step after recovery and update, so it sees the folder as it is then
-	Drop       string                        // vault-relative inbox file that must be sent first, or ""
-	Refuse     string                        // non-empty: the save step refuses this op before anything is touched
-	Run        func() (string, error)        // returns exactly what main.go prints on success
+	Name          string                        // "commit", "ingest", "capture", "publish-knowledge"
+	Actor         string                        // recorded as <actor>@<place>
+	FailPrefix    string                        // today's stderr prefix, e.g. "Commit FAILED"
+	Key           string                        // fixed one-time key; "" = no duplicate check
+	KeyFn         func(r *Repo) (string, error) // if set, replaces Key: asked by the save step after recovery and update, so it sees the folder as it is then
+	Drop          string                        // vault-relative inbox file that must be sent first, or ""
+	Refuse        string                        // non-empty: the save step refuses this op before anything is touched
+	Run           func() (string, error)        // returns exactly what main.go prints on success
+	NoFingerprint bool                          // commit sent without the note's fingerprint: the save step refuses it
 }
 
 func shortHash(parts ...string) string {
@@ -31,7 +32,7 @@ func shortHash(parts ...string) string {
 }
 
 func CommitOp(e *vault.VaultEngine, req vault.CommitRequest) Op {
-	return Op{Name: "commit", Actor: req.Actor, FailPrefix: "Commit FAILED", Run: func() (string, error) {
+	return Op{Name: "commit", Actor: req.Actor, FailPrefix: "Commit FAILED", NoFingerprint: req.ExpectedSHA256 == "", Run: func() (string, error) {
 		if err := e.CommitRecord(req); err != nil {
 			return "", err
 		}
