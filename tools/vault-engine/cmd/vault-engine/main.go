@@ -70,7 +70,6 @@ func main() {
 		}
 	}
 
-
 	engine := vault.NewVaultEngine(vaultRoot)
 
 	syncCfg, err := vaultsync.LoadConfig(engine.Root)
@@ -487,5 +486,3 @@ func printUsage() {
 	fmt.Println("  sync-daemon [--once]                Keep this place in step with the shared copy")
 	fmt.Println("  version                             Print the build version")
 }
-
-
