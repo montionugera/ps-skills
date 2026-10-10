@@ -19,6 +19,9 @@ var ErrNoConnection = errors.New("no connection to the shared copy")
 // ErrNothingToCommit is returned by Commit when it is given no paths.
 var ErrNothingToCommit = errors.New("nothing to commit: no paths given")
 
+// ErrTimedOut marks a git command that was stopped by its own time limit.
+var ErrTimedOut = errors.New("timed out")
+
 const localTimeout = 30 * time.Second
 
 var unsafeActorChars = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
@@ -100,7 +103,7 @@ func (r *Repo) run(timeout time.Duration, args ...string) gitResult {
 		}
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		err = fmt.Errorf("timed out after %v", timeout)
+		err = fmt.Errorf("%w after %v", ErrTimedOut, timeout)
 	}
 	return gitResult{Stdout: out.String(), Stderr: errb.String(), Err: err}
 }

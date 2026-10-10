@@ -20,6 +20,7 @@ type Op struct {
 	FailPrefix string                 // today's stderr prefix, e.g. "Commit FAILED"
 	Key        string                 // one-time key; "" = no duplicate check
 	Drop       string                 // vault-relative inbox file that must be sent first, or ""
+	Refuse     string                 // non-empty: the save step refuses this op before anything is touched
 	Run        func() (string, error) // returns exactly what main.go prints on success
 }
 
@@ -37,25 +38,53 @@ func CommitOp(e *vault.VaultEngine, req vault.CommitRequest) Op {
 	}}
 }
 
+// resolvePath makes p absolute and follows symlinks. A file that is already
+// gone is resolved through its folder, so a retry sees the same path.
+func resolvePath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		return r, nil
+	}
+	dir, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, filepath.Base(abs)), nil
+}
+
+const ingestOutsideInbox = "ingest deletes its source file, and only a file in the inbox (_inbox/) is kept in the shared history first: put the file in the inbox, then ingest it from there"
+
+// IngestOp: IngestFile deletes its source, so with sync configured the source
+// must be a file under _inbox/ (checked again against git in the save step).
+// Anything else is refused before any marker opens (Op.Refuse).
 func IngestOp(e *vault.VaultEngine, filePath, actor string) Op {
-	op := Op{Name: "ingest", Actor: actor, FailPrefix: "Ingest failed", Run: func() (string, error) {
-		assignedID, err := e.IngestFile(filePath)
+	op := Op{Name: "ingest", Actor: actor, FailPrefix: "Ingest failed", Refuse: ingestOutsideInbox}
+	abs, err := resolvePath(filePath)
+	if err != nil {
+		return op
+	}
+	root, err := resolvePath(e.Root)
+	if err != nil {
+		return op
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return op // a file outside the vault
+	}
+	rel = filepath.ToSlash(rel)
+	if !strings.HasPrefix(rel, "_inbox/") {
+		return op
+	}
+	op.Refuse, op.Drop = "", rel
+	op.Run = func() (string, error) {
+		assignedID, err := e.IngestFile(abs)
 		if err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("Ingested note as %s\n", assignedID), nil
-	}}
-	abs, err := filepath.Abs(filePath)
-	if err != nil {
-		return op
-	}
-	rel, err := filepath.Rel(e.Root, abs)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return op // a file outside the vault: no drop to send, no key
-	}
-	rel = filepath.ToSlash(rel)
-	if strings.HasPrefix(rel, "_inbox/") {
-		op.Drop = rel
 	}
 	// Path plus content while the file exists; path only once it is gone (a
 	// retry after the first try arrived), which matches the earlier key as a prefix.

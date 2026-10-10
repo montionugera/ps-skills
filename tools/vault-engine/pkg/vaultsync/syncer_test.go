@@ -2,6 +2,7 @@ package vaultsync
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,10 +232,11 @@ func TestSave_TimedOutSendIsSettledByTheNextCommand(t *testing.T) {
 		if res.Err == nil {
 			t.Errorf("the hub should not have taken this send")
 		}
-		return gitResult{Err: errors.New("timed out after 10s")}
+		return gitResult{Err: fmt.Errorf("send stalled: %w", ErrTimedOut)} // the sentinel, not the wording, counts
 	}
-	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "REFUSED no-connection" || out.Exit != ExitNoConnection {
-		t.Fatalf("outcome = %+v, want REFUSED no-connection", out)
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "REFUSED no-connection" || out.Exit != ExitNoConnection ||
+		!strings.Contains(out.Detail, "time limit") {
+		t.Fatalf("outcome = %+v, want REFUSED no-connection naming the time limit", out)
 	}
 	if !mac.Repo.hasMarker() {
 		t.Fatalf("the marker must stay until the hub can be asked again")
@@ -363,4 +365,159 @@ func TestSave_BeginRefusesToOverwriteAnOpenMarker(t *testing.T) {
 	if _, err := mac.begin("commit", "agent"); err == nil {
 		t.Fatalf("a second marker must not be opened over an unsettled one")
 	}
+}
+
+func countIdeas(t *testing.T, root string) int {
+	t.Helper()
+	m, _ := filepath.Glob(filepath.Join(root, "01_Ideas", "IDEA-*.md"))
+	return len(m)
+}
+
+// C1: ingest deletes its source, so a source that git cannot protect is refused up front.
+func TestSave_IngestOfAFileOutsideTheInboxIsRefusedAndTheFileStays(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	src := filepath.Join(t.TempDir(), "elsewhere.md")
+	writeFile(t, src, []byte("---\ntitle: Elsewhere\n---\nOnly copy\n"))
+	link := filepath.Join(w.Mac, "_inbox", "human", "link.md") // a link in the inbox to a file outside
+	if err := os.MkdirAll(filepath.Dir(link), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(src, link); err != nil {
+		t.Fatal(err)
+	}
+	before := countIdeas(t, w.Mac)
+	for _, p := range []string{src, link, filepath.Join(w.Mac, "01_Ideas", "..", "README-not-inbox.md")} {
+		_, out := mac.Save(IngestOp(mac.Engine, p, "agent-olivier"))
+		if out.Line != "REFUSED engine-error" || out.Exit != ExitEngineError || !strings.Contains(out.Detail, "inbox") {
+			t.Fatalf("%s -> %+v", p, out)
+		}
+	}
+	if text, err := os.ReadFile(src); err != nil || !strings.Contains(string(text), "Only copy") {
+		t.Fatalf("the source must still be there: %v", err)
+	}
+	if mac.Repo.hasMarker() || countIdeas(t, w.Mac) != before {
+		t.Fatalf("nothing may be started or created")
+	}
+}
+
+func TestIngestOp_FollowsSymlinksToTheRealInboxPath(t *testing.T) {
+	w := newWorld(t)
+	e := vault.NewVaultEngine(w.Mac)
+	drop := filepath.Join(w.Mac, "_inbox", "human", "real.md")
+	writeFile(t, drop, []byte("x\n"))
+	link := filepath.Join(t.TempDir(), "via-link.md")
+	if err := os.Symlink(drop, link); err != nil {
+		t.Fatal(err)
+	}
+	if op := IngestOp(e, link, "a"); op.Refuse != "" || op.Drop != "_inbox/human/real.md" {
+		t.Fatalf("a link to an inbox drop must be recognised: %+v", op)
+	}
+}
+
+// C1(b) and spec: a lost race on a real inbox ingest leaves the original recoverable, and the retry saves.
+func TestSave_InboxIngestLosingTheRaceKeepsTheOriginalRecoverable(t *testing.T) {
+	w := newWorld(t)
+	mac, srv := newSyncer(t, w.Mac), newSyncer(t, w.Srv)
+	drop := filepath.Join(w.Mac, "_inbox", "human", "c1b.md")
+	writeFile(t, drop, []byte("---\ntitle: C one b\n---\nOriginal words\n"))
+	if state, out := mac.sendDrops([]string{"_inbox/human/c1b.md"}, 1); state != pushOK { // the race must hit the ingest, not the drop
+		t.Fatalf("sending the drop first: %+v", out)
+	}
+	mac.Hooks.BeforePush = func(attempt int) {
+		if attempt == 1 {
+			if _, out := srv.Save(commitOp(srv, note2, readSHA(t, w.Srv, note2), 4)); out.Exit != 0 {
+				t.Errorf("srv save: %+v", out)
+			}
+		}
+	}
+	if _, out := mac.Save(IngestOp(mac.Engine, drop, "agent-olivier")); out.Line != "SAVED" {
+		t.Fatalf("outcome = %+v", out)
+	}
+	added := mustGit(t, w.Hub, "log", "--all", "--diff-filter=A", "--format=%H", "--", "_inbox/human/c1b.md")
+	if added == "" {
+		t.Fatalf("the original never reached the shared history")
+	}
+	if text := mustGit(t, w.Hub, "show", strings.Fields(added)[0]+":_inbox/human/c1b.md"); !strings.Contains(text, "Original words") {
+		t.Fatalf("original not recoverable: %q", text)
+	}
+	if ideas, _ := filepath.Glob(filepath.Join(w.Mac, "01_Ideas", "IDEA-*--c-one-b.md")); len(ideas) != 1 {
+		t.Fatalf("expected exactly one note, got %v", ideas)
+	}
+	cleanExceptIgnored(t, w.Mac)
+}
+
+// I2: an unclear answer with an unmoved hub is never a verdict.
+func TestSave_UnclearAnswerWithUnmovedHubKeepsMarkerAndCommitThenRecovers(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	sha := readSHA(t, w.Mac, note1)
+	settings := filepath.Join(w.Hub, "hooks", "vault-limits.json")
+	original, _ := os.ReadFile(settings)
+	tight := strings.Replace(string(original), `"daily_bytes_per_place": 52428800`, `"daily_bytes_per_place": 1`, 1)
+	if tight == string(original) {
+		t.Fatalf("could not tighten the allowance")
+	}
+	if err := os.WriteFile(settings, []byte(tight), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mac.Hooks.PushResult = func(_ int, res gitResult) gitResult {
+		return gitResult{Stderr: "something git never says", Err: errors.New("exit status 128")}
+	}
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "REFUSED no-connection" || out.Exit != ExitNoConnection {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if !mac.Repo.hasMarker() {
+		t.Fatalf("marker must stay")
+	}
+	if n := mustGit(t, w.Mac, "rev-list", "--count", mac.Repo.remoteRef()+"..HEAD"); n != "1" {
+		t.Fatalf("the local commit must stay, ahead by %s", n)
+	}
+	mac.Hooks = Hooks{}
+	if err := os.WriteFile(settings, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "SAVED" {
+		t.Fatalf("the next command must settle it and save: %+v", out)
+	}
+	if mac.Repo.hasMarker() {
+		t.Fatalf("marker should be settled")
+	}
+	cleanExceptIgnored(t, w.Mac)
+	if hub := mustGit(t, w.Hub, "rev-list", "--count", "refs/heads/main"); hub != "2" {
+		t.Fatalf("hub should hold the seed and one save, has %s", hub)
+	}
+}
+
+// G1: the shared copy keeps moving for every try.
+func TestSave_FiveLostRacesEndAsBusyAndLeaveNothingBehind(t *testing.T) {
+	w := newWorld(t)
+	mac, srv := newSyncer(t, w.Mac), newSyncer(t, w.Srv)
+	drop := filepath.Join(w.Mac, "_inbox", "human", "g1.md")
+	writeFile(t, drop, []byte("---\ntitle: Gee one\n---\nOriginal g1\n"))
+	if state, out := mac.sendDrops([]string{"_inbox/human/g1.md"}, 1); state != pushOK { // the race must hit the ingest, not the drop
+		t.Fatalf("sending the drop first: %+v", out)
+	}
+	mac.Hooks.BeforePush = func(attempt int) {
+		if _, out := srv.Save(commitOp(srv, note2, readSHA(t, w.Srv, note2), attempt)); out.Exit != 0 {
+			t.Errorf("srv save: %+v", out)
+		}
+	}
+	_, out := mac.Save(IngestOp(mac.Engine, drop, "agent-olivier"))
+	if out.Line != "REFUSED busy" || out.Exit != ExitBusy {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if mac.Repo.hasMarker() {
+		t.Errorf("marker left behind")
+	}
+	if n := mustGit(t, w.Mac, "rev-list", "--count", mac.Repo.remoteRef()+"..HEAD"); n != "0" {
+		t.Errorf("local commit left behind: ahead by %s", n)
+	}
+	if ideas, _ := filepath.Glob(filepath.Join(w.Mac, "01_Ideas", "IDEA-*--gee-one.md")); len(ideas) != 0 {
+		t.Errorf("the note must be undone: %v", ideas)
+	}
+	if text, err := os.ReadFile(drop); err != nil || !strings.Contains(string(text), "Original g1") {
+		t.Errorf("the inbox original must survive: %v", err)
+	}
+	cleanExceptIgnored(t, w.Mac)
 }

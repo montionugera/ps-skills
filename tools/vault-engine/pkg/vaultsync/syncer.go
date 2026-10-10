@@ -98,6 +98,9 @@ func NewSyncer(engine *vault.VaultEngine, cfg *Config) *Syncer {
 // Save runs one operation as a save step and returns the operation's own
 // success message together with the fixed outcome.
 func (s *Syncer) Save(op Op) (string, Outcome) {
+	if op.Refuse != "" {
+		return "", refused("engine-error", ExitEngineError, op.Refuse)
+	}
 	release, err := s.lockFolder()
 	if err != nil {
 		return "", errorOutcome(err)
@@ -143,8 +146,19 @@ func (s *Syncer) attempt(op Op, attempt int) (string, Outcome, bool) {
 	if _, err := r.Update(s.Engine.RebuildIndexes); err != nil {
 		return "", errorOutcome(err), false
 	}
-	if op.Key != "" && s.alreadySaved(op.Key) {
-		return "Already saved by an earlier try\n", saved(), false
+	if op.Key != "" {
+		done, err := s.alreadySaved(op.Key)
+		if err != nil {
+			return "", errorOutcome(err), false // never guess: a second create would duplicate
+		}
+		if done {
+			return "Already saved by an earlier try\n", saved(), false
+		}
+	}
+	if op.Drop != "" {
+		if out, ok := s.checkDropVisible(op.Drop); !ok {
+			return "", out, false
+		}
 	}
 	if op.Drop != "" {
 		switch state, out := s.sendDrops([]string{op.Drop}, attempt); state {
@@ -214,10 +228,39 @@ func (s *Syncer) attempt(op Op, attempt int) (string, Outcome, bool) {
 
 // alreadySaved looks for the one-time key in what the hub accepted during the
 // last 24 hours. The folder is up to date when this is called.
-func (s *Syncer) alreadySaved(key string) bool {
+func (s *Syncer) alreadySaved(key string) (bool, error) {
 	out, err := s.Repo.local("log", "-1", "--format=%H", "--since=24.hours.ago", "--fixed-strings",
 		"--grep=Vault-Op-Key: "+key, s.Repo.remoteRef())
-	return err == nil && out != ""
+	if err != nil {
+		return false, err
+	}
+	return out != "", nil
+}
+
+// checkDropVisible refuses an ingest whose inbox file git cannot see (ignored,
+// or not a regular file): ingest deletes its source, so an unseen file would
+// be lost for good if the save were undone. A file already gone passes (a
+// retry of a save that arrived).
+func (s *Syncer) checkDropVisible(rel string) (Outcome, bool) {
+	r := s.Repo
+	if _, err := os.Lstat(filepath.Join(r.Root, filepath.FromSlash(rel))); err != nil {
+		return Outcome{}, true
+	}
+	st, err := r.Status()
+	if err != nil {
+		return errorOutcome(err), false
+	}
+	if st[rel] != "" {
+		return Outcome{}, true
+	}
+	tracked, err := r.local("ls-files", "--", rel)
+	if err != nil {
+		return errorOutcome(err), false
+	}
+	if tracked == "" {
+		return refused("engine-error", ExitEngineError, ingestOutsideInbox), false
+	}
+	return Outcome{}, true
 }
 
 // precheck is the early version of the hub's door check, on what was written.
@@ -269,10 +312,11 @@ func (s *Syncer) record(paths []string, actor, subject, key string, m *Marker, a
 	if strings.Contains(all, "\t[rejected]") {
 		return pushRace, Outcome{}
 	}
-	// Unclear answer: never guess, ask the shared copy. A send that ran into
-	// its own time limit may still be accepted a moment later, so it is never
-	// answered as refused: the marker stays and the next command settles it.
-	timedOut := strings.Contains(res.Err.Error(), "timed out after")
+	// Unclear answer: never guess, ask the shared copy. If it does not show our
+	// commit the send may still be accepted a moment later (a time limit, a cut
+	// connection), so it is never answered as refused: the marker and the local
+	// commit stay and the next command settles it.
+	timedOut := errors.Is(res.Err, ErrTimedOut)
 	// From here the commit may be on the hub: a git failure while asking is
 	// not an answer, so nothing is undone (pushUnconfirmed keeps the marker).
 	head, err := r.Head()
@@ -298,13 +342,14 @@ func (s *Syncer) record(paths []string, actor, subject, key string, m *Marker, a
 		if hub != m.Base {
 			return pushRace, Outcome{}
 		}
-		if timedOut {
-			break
-		}
-		return pushRefused, refused("engine-error", ExitEngineError, "the shared copy did not accept the save: "+strings.TrimSpace(res.Stderr))
+		break // the shared copy did not move and does not show the commit
+	}
+	why := "the connection broke while sending"
+	if timedOut {
+		why = "the send ran into its time limit"
 	}
 	return pushUnconfirmed, refused("no-connection", ExitNoConnection,
-		"the connection broke while sending; whether it arrived is settled on the next command")
+		why+"; whether it arrived is settled on the next command")
 }
 
 // sendDrops sends inbox files the shared copy does not have yet. A file that
