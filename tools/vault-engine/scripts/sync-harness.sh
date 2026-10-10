@@ -5,9 +5,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# VAULT_HARNESS_TEST_REAL_VAULT exists only so tests can aim the guard at a
-# temp-dir stand-in; never set it to anything else.
-REAL_VAULT="${VAULT_HARNESS_TEST_REAL_VAULT:-$HOME/workspace/agentic-vault}"
+REAL_VAULT="$HOME/workspace/agentic-vault"
+# VAULT_HARNESS_EXTRA_GUARDED_DIR names one additional guarded directory (for
+# tests); it never replaces the real-vault guard.
+EXTRA_GUARDED_DIR="${VAULT_HARNESS_EXTRA_GUARDED_DIR:-}"
 
 usage() {
     echo "usage: sync-harness.sh setup <empty-dir> <engine-binary>" >&2
@@ -89,16 +90,18 @@ make_place() { # <root> <place> <engine-binary>
         "$2" "${POLL_MS:-3000}" "${QUIET_MS:-3000}" > "$1/$2/_meta/bin/sync.json"
 }
 
-# True when <physical-dir> is the real vault or lies under it, by its given
-# name or its symlink-resolved name (only the name is resolved, nothing read).
-in_real_vault() {
-    local real_phys
-    real_phys="$(cd "$REAL_VAULT" 2>/dev/null && pwd -P)" || real_phys=""
-    case "$1/" in
-        "$REAL_VAULT"/*) return 0 ;;
-    esac
-    [ -z "$real_phys" ] || case "$1/" in "$real_phys"/*) return 0 ;; esac
+# True when <physical-dir> equals or lies under <guarded>, by its given name or
+# its symlink-resolved name (only the name is resolved, nothing is read).
+under_guarded() { # <physical-dir> <guarded>
+    local phys
+    phys="$(cd "$2" 2>/dev/null && pwd -P)" || phys=""
+    case "$1/" in "$2"/*) return 0 ;; esac
+    [ -z "$phys" ] || case "$1/" in "$phys"/*) return 0 ;; esac
     return 1
+}
+
+in_real_vault() { # <physical-dir>
+    under_guarded "$1" "$REAL_VAULT" || { [ -n "$EXTRA_GUARDED_DIR" ] && under_guarded "$1" "$EXTRA_GUARDED_DIR"; }
 }
 
 setup() { # <empty-dir> <engine-binary>

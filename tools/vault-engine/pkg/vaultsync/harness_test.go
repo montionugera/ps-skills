@@ -61,7 +61,7 @@ func TestHarness_InstallsTheRulesFiles(t *testing.T) {
 	}
 }
 
-func TestHarness_RefusesTheGuardedVaultThroughASymlink(t *testing.T) {
+func TestHarness_RefusesAnExtraGuardedDirThroughASymlink(t *testing.T) {
 	base := t.TempDir()
 	guarded := filepath.Join(base, "guarded")
 	inside := filepath.Join(guarded, "empty")
@@ -75,7 +75,7 @@ func TestHarness_RefusesTheGuardedVaultThroughASymlink(t *testing.T) {
 	script := filepath.Join("..", "..", "scripts", "sync-harness.sh")
 	for name, guard := range map[string]string{"real-path": guarded, "symlink-path": link} {
 		cmd := exec.Command("bash", script, "setup", inside, engineBin)
-		cmd.Env = append(os.Environ(), "VAULT_HARNESS_TEST_REAL_VAULT="+guard)
+		cmd.Env = append(os.Environ(), "VAULT_HARNESS_EXTRA_GUARDED_DIR="+guard)
 		out, err := cmd.CombinedOutput()
 		if err == nil || !strings.Contains(string(out), "refusing to work inside the real vault") {
 			t.Errorf("%s: want refusal, got err=%v\n%s", name, err, out)
@@ -83,5 +83,22 @@ func TestHarness_RefusesTheGuardedVaultThroughASymlink(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(inside); len(entries) != 0 {
 		t.Errorf("guarded stand-in was written to: %v", entries)
+	}
+}
+
+func TestHarness_RealVaultStaysGuardedWhenExtraDirIsSet(t *testing.T) {
+	home := t.TempDir()
+	standIn := filepath.Join(home, "workspace", "agentic-vault", "empty")
+	if err := os.MkdirAll(standIn, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", filepath.Join("..", "..", "scripts", "sync-harness.sh"), "setup", standIn, engineBin)
+	cmd.Env = append(os.Environ(), "HOME="+home, "VAULT_HARNESS_EXTRA_GUARDED_DIR="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "refusing to work inside the real vault") {
+		t.Errorf("want refusal, got err=%v\n%s", err, out)
+	}
+	if entries, _ := os.ReadDir(standIn); len(entries) != 0 {
+		t.Errorf("stand-in was written to: %v", entries)
 	}
 }
