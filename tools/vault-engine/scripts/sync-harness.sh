@@ -5,7 +5,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REAL_VAULT="$HOME/workspace/agentic-vault"
+# VAULT_HARNESS_TEST_REAL_VAULT exists only so tests can aim the guard at a
+# temp-dir stand-in; never set it to anything else.
+REAL_VAULT="${VAULT_HARNESS_TEST_REAL_VAULT:-$HOME/workspace/agentic-vault}"
 
 usage() {
     echo "usage: sync-harness.sh setup <empty-dir> <engine-binary>" >&2
@@ -87,13 +89,23 @@ make_place() { # <root> <place> <engine-binary>
         "$2" "${POLL_MS:-3000}" "${QUIET_MS:-3000}" > "$1/$2/_meta/bin/sync.json"
 }
 
+# True when <physical-dir> is the real vault or lies under it, by its given
+# name or its symlink-resolved name (only the name is resolved, nothing read).
+in_real_vault() {
+    local real_phys
+    real_phys="$(cd "$REAL_VAULT" 2>/dev/null && pwd -P)" || real_phys=""
+    case "$1/" in
+        "$REAL_VAULT"/*) return 0 ;;
+    esac
+    [ -z "$real_phys" ] || case "$1/" in "$real_phys"/*) return 0 ;; esac
+    return 1
+}
+
 setup() { # <empty-dir> <engine-binary>
     local root engine
     root="$(cd "$1" && pwd -P)"
     engine="$2"
-    case "$root/" in
-        "$REAL_VAULT"/*) echo "sync-harness: refusing to work inside the real vault" >&2; exit 1 ;;
-    esac
+    ! in_real_vault "$root" || { echo "sync-harness: refusing to work inside the real vault" >&2; exit 1; }
     [ -z "$(ls -A "$root")" ] || { echo "sync-harness: $root is not empty" >&2; exit 1; }
     for v in POLL_MS QUIET_MS; do
         case "${!v:-3000}" in

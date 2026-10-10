@@ -2,6 +2,7 @@ package vaultsync
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,5 +58,30 @@ func TestHarness_InstallsTheRulesFiles(t *testing.T) {
 	if out := mustGit(t, w.Hub, "ls-tree", "--name-only", "refs/heads/main"); !strings.Contains(out, "AGENTS.md") ||
 		!strings.Contains(out, "CLAUDE.md") || !strings.Contains(out, "GEMINI.md") {
 		t.Errorf("rules files are not on the hub:\n%s", out)
+	}
+}
+
+func TestHarness_RefusesTheGuardedVaultThroughASymlink(t *testing.T) {
+	base := t.TempDir()
+	guarded := filepath.Join(base, "guarded")
+	inside := filepath.Join(guarded, "empty")
+	if err := os.MkdirAll(inside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(guarded, link); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join("..", "..", "scripts", "sync-harness.sh")
+	for name, guard := range map[string]string{"real-path": guarded, "symlink-path": link} {
+		cmd := exec.Command("bash", script, "setup", inside, engineBin)
+		cmd.Env = append(os.Environ(), "VAULT_HARNESS_TEST_REAL_VAULT="+guard)
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "refusing to work inside the real vault") {
+			t.Errorf("%s: want refusal, got err=%v\n%s", name, err, out)
+		}
+	}
+	if entries, _ := os.ReadDir(inside); len(entries) != 0 {
+		t.Errorf("guarded stand-in was written to: %v", entries)
 	}
 }

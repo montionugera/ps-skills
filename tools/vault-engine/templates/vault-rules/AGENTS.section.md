@@ -37,7 +37,9 @@ Agents in other places change this folder too. Follow these rules.
    summary as a note instead.
 
 5. IF A SAVE ENDS WITH `REFUSED busy`: the folder is in use. Wait 10 seconds
-   and run the same command again, up to 3 times.
+   and run the same command again, up to 3 times. If it is still refused after
+   the third try, leave it, write a short note in your own inbox saying what
+   you could not save, and say so in your final report.
    IF IT ENDS WITH `REFUSED engine-error`: the engine did not accept your
    input. Read the message above the last line, correct the input, and try
    once more. If it fails again, write a short note about it in your inbox.
