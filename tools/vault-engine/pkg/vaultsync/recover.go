@@ -22,6 +22,11 @@ type Marker struct {
 	StartedAt       string   `json:"started_at"`
 	Base            string   `json:"base"`
 	UntrackedBefore []string `json:"untracked_before"`
+	// DirtyBefore maps every tracked path that was already modified or deleted
+	// when the operation began to the hash of its content then ("" for a
+	// deleted file). Markers written before this field existed load with a nil
+	// map and behave as if no note was dirty.
+	DirtyBefore map[string]string `json:"dirty_before,omitempty"`
 }
 
 func (r *Repo) markerPath() string { return filepath.Join(r.Root, filepath.FromSlash(markerRel)) }
@@ -61,9 +66,21 @@ func (r *Repo) Begin(op, actor string) (*Marker, error) {
 	m := &Marker{Op: op, Actor: actor, Place: r.Place, PID: os.Getpid(),
 		StartedAt: time.Now().UTC().Format(time.RFC3339), Base: base}
 	for p, code := range st {
-		if code == "??" && !localOnly(p) {
-			m.UntrackedBefore = append(m.UntrackedBefore, p)
+		if localOnly(p) {
+			continue
 		}
+		if code == "??" {
+			m.UntrackedBefore = append(m.UntrackedBefore, p)
+			continue
+		}
+		h, err := r.workHash(p)
+		if err != nil {
+			return nil, err
+		}
+		if m.DirtyBefore == nil {
+			m.DirtyBefore = map[string]string{}
+		}
+		m.DirtyBefore[p] = h
 	}
 	sort.Strings(m.UntrackedBefore)
 	data, err := json.MarshalIndent(m, "", "  ")
@@ -105,6 +122,26 @@ func (r *Repo) End() error {
 // changed lists what differs from the marker's starting point. It leaves out
 // files that were already untracked then, and untracked files under _inbox/
 // (drops that arrived meanwhile): neither was written by the operation.
+// workHash is the git hash of the file on disk, "" when there is no file.
+func (r *Repo) workHash(p string) (string, error) {
+	if _, err := os.Lstat(filepath.Join(r.Root, filepath.FromSlash(p))); os.IsNotExist(err) {
+		return "", nil
+	}
+	return r.local("hash-object", "--", p)
+}
+
+// unchangedSinceBegin reports whether p was already modified or deleted when
+// the operation began and still holds exactly that content: a hand edit the
+// operation did not touch.
+func (r *Repo) unchangedSinceBegin(m *Marker, p string) (bool, error) {
+	was, dirty := m.DirtyBefore[p]
+	if !dirty {
+		return false, nil
+	}
+	now, err := r.workHash(p)
+	return err == nil && now == was, err
+}
+
 func (r *Repo) changed(m *Marker) (map[string]string, error) {
 	st, err := r.Status()
 	if err != nil {
@@ -117,6 +154,20 @@ func (r *Repo) changed(m *Marker) (map[string]string, error) {
 	}
 	for p, code := range st {
 		if code == "??" && strings.HasPrefix(p, "_inbox/") {
+			delete(st, p)
+		}
+	}
+	// A note that was already hand-edited at Begin and still holds that text
+	// was not written by the operation: it is not part of this save.
+	for p := range m.DirtyBefore {
+		if _, listed := st[p]; !listed {
+			continue
+		}
+		same, err := r.unchangedSinceBegin(m, p)
+		if err != nil {
+			return nil, err
+		}
+		if same {
 			delete(st, p)
 		}
 	}
@@ -235,8 +286,21 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 	for _, p := range paths {
 		switch {
 		case st[p] != "??": // a note the save changed or deleted: back to the start
+			same, err := r.unchangedSinceBegin(m, p)
+			if err != nil {
+				return err
+			}
+			if same {
+				// A hand edit that was already there at Begin and was not written
+				// over: left exactly as it is. The next pass with no marker
+				// (Recover -> quarantineHandEdits) copies it and puts the note back.
+				continue
+			}
 			proven := false
+			_, dirtyBefore := m.DirtyBefore[p]
 			switch {
+			case dirtyBefore:
+				// Hand-edited at Begin, written over since: never proven; copy first.
 			case m.Op == "update":
 				proven = r.sameAs(p, r.remoteRef())
 			case !sweep && wrote[p]:

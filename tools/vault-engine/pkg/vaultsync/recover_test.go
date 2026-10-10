@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -498,5 +499,142 @@ func TestIsAncestor_TellsNotAnAncestorFromAGitError(t *testing.T) {
 	}
 	if _, err := r.isAncestor(head, "refs/remotes/origin/no-such-branch"); err == nil {
 		t.Errorf("an unknown ref is a git error, not 'not an ancestor'")
+	}
+}
+
+func sortedKeys(m map[string]string) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func TestUndo_ANoteEditedByHandBeforeBeginIsNotListedAndSurvivesARefusedSave(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
+	rel := "01_Ideas/" + filepath.Base(note)
+	writeFile(t, note, []byte("typed by a person before the save began\n"))
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	st, err := r.changed(m)
+	if err != nil {
+		t.Fatalf("changed: %v", err)
+	}
+	if len(st) != 0 {
+		t.Fatalf("a note the save did not write must not be listed: %v", sortedKeys(st))
+	}
+	if err := r.Undo(m, sortedKeys(st), noRebuild); err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+	if now, _ := os.ReadFile(note); string(now) != "typed by a person before the save began\n" {
+		t.Errorf("hand edit lost or altered: %q", now)
+	}
+	if n := reportLines(t, w.Mac, "mac-test"); n != 0 {
+		t.Errorf("a left-alone hand edit is not reported by an undo, got %d lines", n)
+	}
+	// The next pass with no marker handles it as before.
+	if err := r.End(); err != nil {
+		t.Fatalf("end: %v", err)
+	}
+	if err := r.Recover(noRebuild); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if got := quarantined(t, w.Mac, "mac-test", rel); string(got) != "typed by a person before the save began\n" {
+		t.Errorf("hand edit not kept by the no-marker pass: %q", got)
+	}
+}
+
+func TestRecover_AHandEditBeforeBeginIsLeftForTheNextPassAfterACrash(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
+	writeFile(t, note, []byte("hand edit\n"))
+	if _, err := r.Begin("commit", "agent-olivier"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := r.Recover(noRebuild); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if now, _ := os.ReadFile(note); string(now) != "hand edit\n" {
+		t.Errorf("hand edit lost: %q", now)
+	}
+}
+
+func TestUndo_ANoteEditedByHandThenWrittenByTheSaveIsCopiedBeforeItIsPutBack(t *testing.T) {
+	for _, withCommit := range []bool{false, true} {
+		name := "no commit"
+		if withCommit {
+			name = "with commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			r := newRepo(t, w.Mac)
+			lockFor(t, r)
+			note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
+			rel := "01_Ideas/" + filepath.Base(note)
+			original, _ := os.ReadFile(note)
+			base, _ := r.Head()
+			writeFile(t, note, []byte("hand edit\n"))
+			m, err := r.Begin("commit", "agent-olivier")
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			writeFile(t, note, []byte("written by the save over the hand edit\n"))
+			st, err := r.changed(m)
+			if err != nil || len(st) != 1 || st[rel] == "" {
+				t.Fatalf("a note the save wrote over must be listed: (%v, %v)", st, err)
+			}
+			if withCommit {
+				if err := r.Commit([]string{rel}, "agent-olivier", "vault: commit", ""); err != nil {
+					t.Fatalf("commit: %v", err)
+				}
+			}
+			if err := r.Undo(m, []string{rel}, noRebuild); err != nil {
+				t.Fatalf("undo: %v", err)
+			}
+			if now, _ := os.ReadFile(note); string(now) != string(original) {
+				t.Errorf("note not put back")
+			}
+			if head, _ := r.Head(); head != base {
+				t.Errorf("head %s, want %s", head, base)
+			}
+			if got := quarantined(t, w.Mac, "mac-test", rel); string(got) != "written by the save over the hand edit\n" {
+				t.Errorf("no copy kept before the note was put back: %q", got)
+			}
+			if n := reportLines(t, w.Mac, "mac-test"); n != 1 {
+				t.Errorf("expected one report line, got %d", n)
+			}
+		})
+	}
+}
+
+func TestRecover_AMarkerWrittenBeforeDirtyBeforeExistedStillLoadsAndBehavesAsBefore(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	base, _ := r.Head()
+	old := `{"op":"commit","actor":"agent-olivier","place":"mac-test","pid":1,"started_at":"2026-10-10T00:00:00Z","base":"` + base + `","untracked_before":[]}`
+	writeFile(t, filepath.Join(w.Mac, "_meta", "guards", "save-in-progress.json"), []byte(old))
+	m, err := r.readMarker()
+	if err != nil || m == nil || m.DirtyBefore != nil {
+		t.Fatalf("old marker should load with a nil DirtyBefore: (%+v, %v)", m, err)
+	}
+	stray := filepath.Join(w.Mac, "01_Ideas", "stray.md")
+	writeFile(t, stray, []byte("stray\n"))
+	if err := r.Recover(noRebuild); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if got := quarantined(t, w.Mac, "mac-test", "01_Ideas/stray.md"); string(got) != "stray\n" {
+		t.Errorf("stray file not set aside: %q", got)
+	}
+	if r.hasMarker() {
+		t.Errorf("marker should be cleared")
 	}
 }
