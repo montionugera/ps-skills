@@ -139,7 +139,7 @@ run() {
     go test ./... -count=1 2>&1 | tail -n 12
     echo "--- sync scenarios, full rounds (100 / 100 / 100 / 1000 / 50) ---"
     VAULT_SYNC_ROUNDS=full go test ./pkg/vaultsync/ -run 'TestScenario' -count=1 -timeout 90m -v 2>&1 \
-        | grep -E '^(--- |ok|FAIL|LATENCY|panic)'
+        | grep -E '^(--- |ok|FAIL|LATENCY|KILLS|panic)'
 }
 
 case "${1:-}" in
