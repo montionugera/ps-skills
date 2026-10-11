@@ -188,17 +188,13 @@ func (r *Repo) changed(m *Marker) (map[string]string, error) {
 //
 // The list is trusted once per marker. An Undo that fails part-way may already
 // have moved the folder back, and then the save's own commit, the proof of
-// what it wrote, is gone. So the marker records that an Undo started, and a
-// second Undo on the same marker proves nothing: like Recover, it copies or
-// moves what it finds to _quarantine/<place>/ and deletes nothing. If the
-// record cannot be written, nothing is changed and the marker stays.
+// what it wrote, is gone. So the marker records that the folder was moved back
+// (by Undo or by Recover, see undo), and an Undo on such a marker proves
+// nothing: like Recover, it copies or moves what it finds to
+// _quarantine/<place>/ and deletes nothing.
 func (r *Repo) Undo(m *Marker, written []string, rebuild func() error) error {
 	if m.UndoStarted {
 		return r.undo(m, nil, true, rebuild)
-	}
-	m.UndoStarted = true
-	if err := r.writeMarker(m); err != nil {
-		return err
 	}
 	return r.undo(m, written, false, rebuild)
 }
@@ -303,6 +299,16 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 	preHead, err := r.Head()
 	if err != nil {
 		return err
+	}
+	// Record on disk, before the reset, that the proof (the save's commit) may
+	// be lost from here on. If the record cannot be written, nothing is changed
+	// and the marker (in memory and on disk) stays as it was.
+	if !m.UndoStarted {
+		m.UndoStarted = true
+		if err := r.writeMarker(m); err != nil {
+			m.UndoStarted = false
+			return err
+		}
 	}
 	if _, err := r.local("reset", "--quiet", "--mixed", m.Base); err != nil {
 		return err
