@@ -268,8 +268,10 @@
     "from_idea": "I-028",
     "created_at": "2026-10-11T05:08:29.859299+00:00",
     "claimed_by": "claude-a6c35399",
-    "status": "claimed",
-    "release_version": null,
-    "claimed_at": "2026-10-11T05:08:36.229019+00:00"
+    "status": "shipped",
+    "release_version": "1.11",
+    "claimed_at": "2026-10-11T05:08:36.229019+00:00",
+    "shipped_at": "2026-10-11T05:15:33.145587+00:00",
+    "shipped_sha": "9fc6522c1dd181324f37325b1e5ba4b38bcfaff1"
   }
 ]
