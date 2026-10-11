@@ -40,9 +40,19 @@ Agents in other places change this folder too. Follow these rules.
    and run the same command again, up to 3 times. If it is still refused after
    the third try, leave it, write a short note in your own inbox saying what
    you could not save, and say so in your final report.
-   IF IT ENDS WITH `REFUSED engine-error`: the engine did not accept your
-   input. Read the message above the last line, correct the input, and try
-   once more. If it fails again, write a short note about it in your inbox.
+   IF IT ENDS WITH `REFUSED engine-error`: treat it as not saved and read the
+   message above the last line. There are two cases.
+   a. The message is about what you gave the command (a missing argument, a
+      file that is not there, text it cannot read): correct it and try once
+      more.
+   b. Anything else: the engine or the shared copy hit a fault of its own
+      (for example `hub settings unreadable`, or a git command that failed).
+      Your input is fine. Change nothing, wait one minute, and run the same
+      command again, up to 3 times. If an earlier try did arrive, the engine
+      answers `SAVED` or `REFUSED note-changed` and nothing is saved twice.
+   If it still fails, keep your result as a file in your own inbox, write the
+   message into a short note there, and say so in your final report. Do not
+   work around it.
 
 6. PREFER new files over changing shared ones. Put raw output in your own
    inbox, `_inbox/agent/<your-agent-id>/`, with the place name and the time in
