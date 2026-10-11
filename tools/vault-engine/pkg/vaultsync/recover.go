@@ -28,6 +28,9 @@ type Marker struct {
 	// deleted file). Markers written before this field existed load with a nil
 	// map and behave as if no note was dirty.
 	DirtyBefore map[string]string `json:"dirty_before,omitempty"`
+	// UndoStarted is written to the marker before Undo changes anything. A
+	// marker that carries it has been through an Undo that did not finish.
+	UndoStarted bool `json:"undo_started,omitempty"`
 }
 
 func (r *Repo) markerPath() string { return filepath.Join(r.Root, filepath.FromSlash(markerRel)) }
@@ -98,17 +101,22 @@ func (r *Repo) Begin(op, actor string) (*Marker, error) {
 			return nil, err
 		}
 	}
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(r.markerPath()), 0755); err != nil {
-		return nil, err
-	}
-	if err := writeFileAtomic(r.markerPath(), data); err != nil {
+	if err := r.writeMarker(m); err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+// writeMarker stores m as the folder's marker, whole or not at all.
+func (r *Repo) writeMarker(m *Marker) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(r.markerPath()), 0755); err != nil {
+		return err
+	}
+	return writeFileAtomic(r.markerPath(), data)
 }
 
 func (r *Repo) End() error {
@@ -177,7 +185,21 @@ func (r *Repo) changed(m *Marker) (map[string]string, error) {
 // Undo takes back one save whose written files are known (a refused send, a
 // lost race): the local commit (if any), changed notes, and exactly the
 // untracked files in written. No other untracked file is touched.
+//
+// The list is trusted once per marker. An Undo that fails part-way may already
+// have moved the folder back, and then the save's own commit, the proof of
+// what it wrote, is gone. So the marker records that an Undo started, and a
+// second Undo on the same marker proves nothing: like Recover, it copies or
+// moves what it finds to _quarantine/<place>/ and deletes nothing. If the
+// record cannot be written, nothing is changed and the marker stays.
 func (r *Repo) Undo(m *Marker, written []string, rebuild func() error) error {
+	if m.UndoStarted {
+		return r.undo(m, nil, true, rebuild)
+	}
+	m.UndoStarted = true
+	if err := r.writeMarker(m); err != nil {
+		return err
+	}
 	return r.undo(m, written, false, rebuild)
 }
 

@@ -60,7 +60,7 @@ The last stdout line is always one of:
 
 Other commands in a shared folder: `whoami` prints the place name. `sync-daemon` keeps the place in step (asks every `poll_interval_ms`, fast-forwards under the lock, rebuilds indexes, sends inbox files after a quiet period of `inbox_quiet_ms`, sets hand edits aside in `_quarantine/<place>/`, and moves a file made by hand outside `_inbox/` there after the same quiet period); `sync-daemon --once` does one pass. A stop signal (SIGINT, SIGTERM, SIGHUP) ends `sync-daemon` with exit 0. `run-workflow` and `daemon` are refused (`REFUSED engine-error`, exit 1), because they change notes outside the save step. `route` is a plain lookup and is unchanged.
 
-Local files, never synced: `_meta/guards/folder.guard` (the folder lock), `_meta/guards/sync-daemon.guard` (stops a second `sync-daemon` from starting in the same place), `_meta/guards/save-in-progress.json` (marker), `_quarantine/<place>/` with `REPORT.log`.
+Local files, never synced: `_meta/guards/folder.guard` (the folder lock), `_meta/guards/sync-daemon.guard` (stops a second `sync-daemon` from starting in the same place), `_meta/guards/save-in-progress.json` (marker; it also records that an undo of that save was started), `_quarantine/<place>/` with `REPORT.log`.
 
 ### The shared copy ("hub")
 
