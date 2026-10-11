@@ -52,7 +52,7 @@ done
 # The binary for this machine, when there is one, must also say the version.
 host="vault-engine-$(go env GOHOSTOS)-$(go env GOHOSTARCH)"
 if [ -x "$STAGE/$host" ]; then
-    said="$("$STAGE/$host" version)"
+    said="$(VAULT_ROOT="$STAGE" "$STAGE/$host" version)"
     [ "$said" = "vault-engine $VERSION" ] \
         || { echo "build-release: $host does not carry version $VERSION (it says: $said)" >&2; exit 1; }
 fi

@@ -43,8 +43,8 @@ Agents in other places change this folder too. Follow these rules.
    IF IT ENDS WITH `REFUSED engine-error`: treat it as not saved and read the
    message above the last line. There are two cases.
    a. The message is about what you gave the command (a missing argument, a
-      file that is not there, text it cannot read): correct it and try once
-      more.
+      file that is not there, text it cannot read, a note or value the engine
+      says is not valid): correct it and try once more.
    b. Anything else: the engine or the shared copy hit a fault of its own
       (for example `hub settings unreadable`, or a git command that failed).
       Your input is fine. Change nothing, wait one minute, and run the same
