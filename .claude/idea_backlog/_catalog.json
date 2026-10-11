@@ -174,5 +174,11 @@
     "title": "Vault sync review tweaks: stale recover comment, VAULT_ROOT prefix, rule 5 example",
     "created_at": "2026-10-11T05:07:29.848419+00:00",
     "promoted_to": "F-022"
+  },
+  {
+    "id": "I-029",
+    "title": "Vault sync save race: show the engine's message in the test and treat a refused push as a lost race",
+    "created_at": "2026-10-11T07:05:13.493128+00:00",
+    "promoted_to": null
   }
 ]
