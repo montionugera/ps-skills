@@ -273,5 +273,14 @@
     "claimed_at": "2026-10-11T05:08:36.229019+00:00",
     "shipped_at": "2026-10-11T05:15:33.145587+00:00",
     "shipped_sha": "9fc6522c1dd181324f37325b1e5ba4b38bcfaff1"
+  },
+  {
+    "id": "F-023",
+    "title": "Vault sync save race: show the engine's message in the test and treat a refused push as a lost race",
+    "from_idea": "I-029",
+    "created_at": "2026-10-11T07:05:48.742028+00:00",
+    "claimed_by": null,
+    "status": "open",
+    "release_version": null
   }
 ]
