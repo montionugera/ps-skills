@@ -739,3 +739,103 @@ func TestSave_HubFaultIsAnEngineErrorAndTheSameSaveWorksAfterRepair(t *testing.T
 		t.Fatalf("after the repair = %+v, want SAVED", out)
 	}
 }
+
+// hubUpdateHook makes the shared copy run body once, while the first send is
+// being taken in. Later sends pass.
+func hubUpdateHook(t *testing.T, hub, body string) {
+	t.Helper()
+	once := filepath.Join(hub, "update-hook-ran")
+	script := "#!/bin/sh\nif [ ! -e '" + once + "' ]; then\n: > '" + once + "'\nunset GIT_QUARANTINE_PATH\n" + body + "\nfi\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(hub, "hooks", "update"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Two sends reach the shared copy at the same instant. Git then answers
+// "[remote rejected]" instead of "[rejected]". The answers here are git's own.
+// The shared copy is put back before the engine looks, so it has not moved.
+func TestSave_RemoteRejectedFromALostRaceIsTriedAgain(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		locked     bool
+		stdoutOnly bool
+		says       string
+	}{
+		{"the shared copy moved under the send", false, false, "cannot lock ref"},
+		{"the shared copy moved under the send, reason line only", false, true, "incorrect old value provided"},
+		{"another send holds the lock", true, false, "cannot lock ref"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			mac := newSyncer(t, w.Mac)
+			base := mustGit(t, w.Hub, "rev-parse", "refs/heads/main")
+			lock := filepath.Join(w.Hub, "refs", "heads", "main.lock")
+			if c.locked {
+				hubUpdateHook(t, w.Hub, ": > '"+lock+"'")
+			} else {
+				other := mustGit(t, w.Hub, "commit-tree", "-p", base, "-m", "other place", base+"^{tree}")
+				hubUpdateHook(t, w.Hub, "git update-ref refs/heads/main "+other)
+			}
+			pushes, first := 0, ""
+			mac.Hooks.PushResult = func(attempt int, res gitResult) gitResult {
+				pushes++
+				if attempt == 1 {
+					_ = os.Remove(lock)
+					mustGit(t, w.Hub, "update-ref", "refs/heads/main", base)
+					if c.stdoutOnly {
+						res.Stderr = ""
+					}
+					first = res.Stdout + res.Stderr
+				}
+				return res
+			}
+			_, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5))
+			t.Logf("git answered the first send with:\n%s", first)
+			if c.stdoutOnly && !strings.Contains(first, c.says) {
+				t.Skipf("this git does not word the reason as %q", c.says)
+			}
+			if !strings.Contains(first, "\t[remote rejected]") || !strings.Contains(first, c.says) {
+				t.Fatalf("the first send should be answered [remote rejected] with %q", c.says)
+			}
+			if out.Line != "SAVED" || out.Exit != 0 || pushes != 2 {
+				t.Fatalf("outcome = %+v after %d sends, want SAVED on the second", out, pushes)
+			}
+			if mac.Repo.hasMarker() {
+				t.Errorf("marker left behind")
+			}
+			cleanExceptIgnored(t, w.Mac)
+			if n := mustGit(t, w.Hub, "rev-list", "--count", base+"..refs/heads/main"); n != "1" {
+				t.Errorf("hub should hold exactly one save, has %s", n)
+			}
+		})
+	}
+}
+
+// A hook on the shared copy that declines is not a lost race: the answer stays
+// unclear and the send is not repeated.
+func TestSave_RemoteRejectedByAHookIsNotTriedAgain(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	hubUpdateHook(t, w.Hub, "exit 1")
+	pushes, first := 0, ""
+	mac.Hooks.PushResult = func(attempt int, res gitResult) gitResult {
+		pushes++
+		if attempt == 1 {
+			first = res.Stdout + res.Stderr
+		}
+		return res
+	}
+	_, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5))
+	if !strings.Contains(first, "\t[remote rejected] (hook declined)") {
+		t.Fatalf("the send should be answered [remote rejected] (hook declined), got:\n%s", first)
+	}
+	if out.Line != "REFUSED no-connection" || out.Exit != ExitNoConnection || pushes != 1 {
+		t.Fatalf("outcome = %+v after %d sends, want no-connection after one", out, pushes)
+	}
+	if !mac.Repo.hasMarker() {
+		t.Errorf("marker must stay")
+	}
+	if n := mustGit(t, w.Mac, "rev-list", "--count", mac.Repo.remoteRef()+"..HEAD"); n != "1" {
+		t.Errorf("the local commit must stay, ahead by %s", n)
+	}
+}
