@@ -474,14 +474,19 @@ func TestScenario07_KilledMidSaveAndMidUpdate(t *testing.T) {
 	}
 	marker := filepath.Join(w.Mac, "_meta", "guards", "save-in-progress.json")
 	var window time.Duration
+	ended := true
 	daemon := startDaemon(t, w.Mac)
 	if waitFor(5*time.Second, func() bool { _, err := os.Stat(marker); return err == nil }) {
 		began := time.Now()
-		waitFor(5*time.Second, func() bool { _, err := os.Stat(marker); return err != nil })
+		ended = waitFor(5*time.Second, func() bool { _, err := os.Stat(marker); return err != nil })
 		window = time.Since(began)
 	}
 	daemon.stop(t)
+	if !ended {
+		t.Fatalf("the update timed before the rounds had not ended after 5 s")
+	}
 	converge(t, w)
+	windowFirst := window
 	t.Logf("measured update window (marker on disk): %v", window)
 	for i := 0; i < n; i++ {
 		// Mid-update: srv saves, so mac is behind the shared copy and has an
@@ -494,16 +499,21 @@ func TestScenario07_KilledMidSaveAndMidUpdate(t *testing.T) {
 		if window > 0 { // a window too short to measure means no delay
 			delay = time.Duration(rand.Int63n(int64(window)))
 		}
+		// waited stays 0 if the round never shows a marker.
+		var waited time.Duration
 		later := func() bool { // a random moment inside the measured update window
+			began := time.Now()
 			time.Sleep(delay)
+			waited = time.Since(began)
 			return true
 		}
 		if killWhen(t, w.Mac, later, "sync-daemon") {
 			midUpdate++
-		} else if delay > 0 {
+		} else if waited > 0 && waited < window {
 			// The update ended before the kill, so the window was measured
-			// too long (a busy machine does that). Bring it down to this delay.
-			window = delay
+			// too long (a busy machine does that). Bring it down to the time
+			// really waited, which a stalled test can make longer than the delay.
+			window = waited
 		}
 		converge(t, w) // after restart: healthy and identical
 
@@ -522,7 +532,8 @@ func TestScenario07_KilledMidSaveAndMidUpdate(t *testing.T) {
 	}
 	// Printed in every run (the harness keeps the line), so the margin above
 	// the floor is known and a slow machine shows up before the test fails.
-	fmt.Printf("KILLS rounds=%d mid_save=%d mid_update=%d floor=%d\n", n, midSave, midUpdate, n/2)
+	fmt.Printf("KILLS rounds=%d mid_save=%d mid_update=%d floor=%d window_first=%.1fms window_last=%.1fms\n", n, midSave, midUpdate, n/2,
+		float64(windowFirst)/float64(time.Millisecond), float64(window)/float64(time.Millisecond))
 	if midSave < n/2 || midUpdate < n/2 {
 		t.Fatalf("kills proven mid-operation: %d saves and %d updates out of %d rounds, want at least %d of each", midSave, midUpdate, n, n/2)
 	}
