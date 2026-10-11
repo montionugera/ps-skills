@@ -746,6 +746,9 @@ func hubUpdateHook(t *testing.T, hub, body string) {
 	t.Helper()
 	once := filepath.Join(hub, "update-hook-ran")
 	script := "#!/bin/sh\nif [ ! -e '" + once + "' ]; then\n: > '" + once + "'\nunset GIT_QUARANTINE_PATH\n" + body + "\nfi\nexit 0\n"
+	if err := os.MkdirAll(filepath.Join(hub, "hooks"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(hub, "hooks", "update"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
