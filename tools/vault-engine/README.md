@@ -79,7 +79,7 @@ creates a bare repository that only moves forward on `refs/heads/main` (`receive
 | Files per send | 500 |
 | Per place per day | 52428800 bytes (50 MB), counted per UTC day in `<hub>/vault-usage/<date>.json` |
 
-Every file in every commit of a send is checked. A refusal reads `vault-hub: REFUSED <too-large|type-not-allowed|engine-error>: <message>`. `too-large` and `type-not-allowed` mean the send broke a rule in the table above. `engine-error` means the hub itself could not read or compute something (its settings file, git's own input, a git command inside the hook, the usage file): the send is still refused, and the place answers `REFUSED engine-error` (exit 1), not a size or type refusal.
+Every file in every commit of a send is checked. A refusal reads `vault-hub: REFUSED <too-large|type-not-allowed|engine-error>: <message>`. `too-large` and `type-not-allowed` mean the send broke a rule in the table above. `engine-error` means the hub itself could not read or compute something (its settings file, git's own input, a git command inside the hook (including the check that a send only moves forward), the usage file): the send is still refused, and the place answers `REFUSED engine-error` (exit 1), not a size or type refusal.
 
 ### Known limits
 

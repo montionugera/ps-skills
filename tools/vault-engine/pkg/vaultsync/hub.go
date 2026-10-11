@@ -102,8 +102,14 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 			return refuse("type-not-allowed", "deleting %s is never accepted", ref)
 		}
 		if oldSHA != zeroSHA {
+			// git exits 1 for a clear "not an ancestor"; any other failure is no
+			// answer at all, so it is the hub's own fault (still refused).
 			if _, err := hubGit("", "merge-base", "--is-ancestor", oldSHA, newSHA); err != nil {
-				return refuse("type-not-allowed", "rewriting the history of %s is never accepted", ref)
+				var ee *exec.ExitError
+				if errors.As(err, &ee) && ee.ExitCode() == 1 {
+					return refuse("type-not-allowed", "rewriting the history of %s is never accepted", ref)
+				}
+				return refuse(hubFault, "cannot check that %s only moves forward: %v", ref, err)
 			}
 		}
 		tips = append(tips, newSHA)
