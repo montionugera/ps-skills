@@ -872,6 +872,12 @@ func TestUndo_CalledAgainAfterAFailedUndoKeepsACopyOfEverything(t *testing.T) {
 // folder back also lost the save's commit. A direct Undo afterwards must not
 // trust the list and delete a file a person rewrote in between.
 func TestUndo_CalledAfterAFailedRecoverKeepsACopyOfEverything(t *testing.T) {
+	for name, reread := range map[string]bool{"same marker": false, "marker read from disk again": true} {
+		t.Run(name, func(t *testing.T) { undoAfterFailedRecover(t, reread) })
+	}
+}
+
+func undoAfterFailedRecover(t *testing.T, reread bool) {
 	w := newWorld(t)
 	r := newRepo(t, w.Mac)
 	lockFor(t, r)
@@ -903,8 +909,10 @@ func TestUndo_CalledAfterAFailedRecoverKeepsACopyOfEverything(t *testing.T) {
 		t.Fatalf("the recovery must report the failed lookup")
 	}
 	r.gate = nil
-	if m, err = r.readMarker(); err != nil || m == nil {
-		t.Fatalf("marker must still be on disk: (%v, %v)", m, err)
+	if reread {
+		if m, err = r.readMarker(); err != nil || m == nil {
+			t.Fatalf("marker must still be on disk: (%v, %v)", m, err)
+		}
 	}
 	if err := r.Undo(m, list, noRebuild); err != nil {
 		t.Fatalf("undo: %v", err)

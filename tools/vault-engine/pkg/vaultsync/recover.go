@@ -193,6 +193,22 @@ func (r *Repo) changed(m *Marker) (map[string]string, error) {
 // nothing: like Recover, it copies or moves what it finds to
 // _quarantine/<place>/ and deletes nothing.
 func (r *Repo) Undo(m *Marker, written []string, rebuild func() error) error {
+	// The marker on disk is the record: a Recover that failed set the flag on
+	// its own copy, not on the one the caller holds. A missing file means no
+	// earlier pass recorded anything, so the caller's marker decides. A file
+	// for another operation is not this save's record: change nothing.
+	disk, err := r.readMarker()
+	if err != nil {
+		return err
+	}
+	if disk != nil {
+		if disk.Op != m.Op || disk.Actor != m.Actor || disk.Base != m.Base ||
+			disk.StartedAt != m.StartedAt || disk.PID != m.PID {
+			return fmt.Errorf("the save marker on disk (%s by %s, started %s) is not the one given to undo (%s by %s, started %s); nothing was changed",
+				disk.Op, disk.Actor, disk.StartedAt, m.Op, m.Actor, m.StartedAt)
+		}
+		m.UndoStarted = m.UndoStarted || disk.UndoStarted
+	}
 	if m.UndoStarted {
 		return r.undo(m, nil, true, rebuild)
 	}
