@@ -141,13 +141,18 @@ func converge(t *testing.T, w world) {
 	}
 }
 
-func saveImpact(root, id string, impact int) int {
-	out, _, code := engineCLI(root, "read-record", id)
+// saveImpact logs what the engine printed when a save does not end with 0.
+func saveImpact(t *testing.T, root, id string, impact int) int {
+	out, errOut, code := engineCLI(root, "read-record", id)
 	var env vault.RecordEnvelope
 	if code != 0 || json.Unmarshal([]byte(out), &env) != nil {
+		t.Logf("read-record %s in %s: exit %d\n%s%s", id, root, code, out, errOut)
 		return -1
 	}
-	_, _, code = engineCLI(root, "commit", id, env.SHA256, "agent-olivier", fmt.Sprintf(`{"impact":%d}`, impact))
+	out, errOut, code = engineCLI(root, "commit", id, env.SHA256, "agent-olivier", fmt.Sprintf(`{"impact":%d}`, impact))
+	if code != 0 {
+		t.Logf("save of %s in %s: exit %d\n%s%s", id, root, code, out, errOut)
+	}
 	return code
 }
 
@@ -171,9 +176,9 @@ func TestScenario01_DifferentNotesAtTheSameMoment(t *testing.T) {
 	for i := 0; i < n; i++ {
 		codes := both(w, func(root string) int {
 			if root == w.Mac {
-				return saveImpact(root, note1, i%5+1)
+				return saveImpact(t, root, note1, i%5+1)
 			}
-			return saveImpact(root, note2, i%5+1)
+			return saveImpact(t, root, note2, i%5+1)
 		})
 		if codes != [2]int{0, 0} {
 			t.Fatalf("round %d: exit codes %v, want both 0", i, codes)
@@ -352,9 +357,9 @@ func TestScenario05_SaveRacesIncomingUpdate(t *testing.T) {
 	for i := 0; i < n; i++ {
 		codes := both(w, func(root string) int {
 			if root == w.Mac {
-				return saveImpact(root, note1, i%5+1)
+				return saveImpact(t, root, note1, i%5+1)
 			}
-			return saveImpact(root, note2, i%5+1)
+			return saveImpact(t, root, note2, i%5+1)
 		})
 		if codes != [2]int{0, 0} {
 			t.Fatalf("round %d: exit codes %v, want both 0", i, codes)
@@ -388,7 +393,7 @@ func TestScenario06_DelayBetweenPlaces(t *testing.T) {
 
 	var delays []time.Duration
 	for i := 0; i < n; i++ {
-		if code := saveImpact(w.Mac, note1, i%5+1); code != 0 {
+		if code := saveImpact(t, w.Mac, note1, i%5+1); code != 0 {
 			t.Fatalf("run %d: save exit %d", i, code)
 		}
 		saved := time.Now() // the agent has just been told SAVED
@@ -465,7 +470,7 @@ func TestScenario07_KilledMidSaveAndMidUpdate(t *testing.T) {
 		// Mid-update: srv saves, so mac is behind the shared copy and has an
 		// update to pull. The daemon on mac is killed a random moment after
 		// its update has begun, and the kill counts only if the update had not ended.
-		if code := saveImpact(w.Srv, note2, i%5+1); code != 0 {
+		if code := saveImpact(t, w.Srv, note2, i%5+1); code != 0 {
 			t.Fatalf("round %d: srv save exit %d", i, code)
 		}
 		later := func() bool { // a random moment shortly after the update has begun
@@ -496,7 +501,7 @@ func TestScenario07_KilledMidSaveAndMidUpdate(t *testing.T) {
 	if midSave < n/2 || midUpdate < n/2 {
 		t.Fatalf("kills proven mid-operation: %d saves and %d updates out of %d rounds, want at least %d of each", midSave, midUpdate, n, n/2)
 	}
-	if code := saveImpact(w.Mac, note1, 3); code != 0 && code != ExitNoteChanged {
+	if code := saveImpact(t, w.Mac, note1, 3); code != 0 && code != ExitNoteChanged {
 		t.Fatalf("a normal save after the kills ended with exit %d", code)
 	}
 	converge(t, w)
@@ -534,7 +539,7 @@ func TestScenario18_OnePlaceOverItsAllowance(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(w.Mac, "_meta", "guards", "save-in-progress.json")); !os.IsNotExist(err) {
 		t.Fatalf("the refused save left its marker behind (%v)", err)
 	}
-	if code := saveImpact(w.Srv, note2, 4); code != 0 {
+	if code := saveImpact(t, w.Srv, note2, 4); code != 0 {
 		t.Fatalf("srv-test must still be able to save, exit %d", code)
 	}
 	converge(t, w)

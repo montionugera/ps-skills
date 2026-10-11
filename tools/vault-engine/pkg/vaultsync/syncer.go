@@ -320,6 +320,15 @@ func (s *Syncer) record(paths []string, actor, subject, key string, m *Marker, a
 	if strings.Contains(all, "\t[rejected]") {
 		return pushRace, Outcome{}
 	}
+	// Two sends at the same instant: git words the lost race differently. The
+	// shared copy took nothing in, so it is tried again like any lost race.
+	// Every other [remote rejected] reason stays an unclear answer. The status
+	// line is read from git's own output only, never from what a hook printed.
+	if strings.Contains(res.Stdout, "\t[remote rejected]") &&
+		(strings.Contains(all, "incorrect old value provided") || strings.Contains(all, "cannot lock ref")) {
+		time.Sleep(500 * time.Millisecond) // the other send may still hold the lock
+		return pushRace, Outcome{}
+	}
 	// Unclear answer: never guess, ask the shared copy. If it does not show our
 	// commit the send may still be accepted a moment later (a time limit, a cut
 	// connection), so it is never answered as refused: the marker and the local
