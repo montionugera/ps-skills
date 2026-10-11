@@ -811,6 +811,25 @@ func TestUndo_AListedFileNotInTheCommitIsStillRemoved(t *testing.T) {
 // without a copy. It makes no difference whether the caller still holds the
 // marker or reads it from disk again.
 func TestUndo_CalledAgainAfterAFailedUndoKeepsACopyOfEverything(t *testing.T) {
+	undoAfterFailedPass(t, func(r *Repo, m *Marker, list []string) error {
+		return r.Undo(m, list, noRebuild)
+	})
+}
+
+// The same hole through Recover: a Recover that failed after it had moved the
+// folder back also lost the save's commit. A direct Undo afterwards must not
+// trust the list and delete a file a person rewrote in between.
+func TestUndo_CalledAfterAFailedRecoverKeepsACopyOfEverything(t *testing.T) {
+	undoAfterFailedPass(t, func(r *Repo, _ *Marker, _ []string) error {
+		return r.Recover(noRebuild)
+	})
+}
+
+// undoAfterFailedPass runs firstPass with the commit lookup (ls-tree) killed
+// after the folder was moved back, then calls Undo again, with the caller's
+// marker and with the marker read from disk, and checks that everything a
+// person rewrote in between was kept in quarantine.
+func undoAfterFailedPass(t *testing.T, firstPass func(r *Repo, m *Marker, list []string) error) {
 	for name, reread := range map[string]bool{"same marker": false, "marker read from disk again": true} {
 		t.Run(name, func(t *testing.T) {
 			w := newWorld(t)
@@ -840,8 +859,8 @@ func TestUndo_CalledAgainAfterAFailedUndoKeepsACopyOfEverything(t *testing.T) {
 				}
 				return nil
 			}
-			if err := r.Undo(m, list, noRebuild); err == nil {
-				t.Fatalf("the first undo must report the failed lookup")
+			if err := firstPass(r, m, list); err == nil {
+				t.Fatalf("the first pass must report the failed lookup")
 			}
 			r.gate = nil
 			if reread {
@@ -865,68 +884,5 @@ func TestUndo_CalledAgainAfterAFailedUndoKeepsACopyOfEverything(t *testing.T) {
 				t.Errorf("rewritten file not kept byte for byte: %q", got)
 			}
 		})
-	}
-}
-
-// The same hole through Recover: a Recover that failed after it had moved the
-// folder back also lost the save's commit. A direct Undo afterwards must not
-// trust the list and delete a file a person rewrote in between.
-func TestUndo_CalledAfterAFailedRecoverKeepsACopyOfEverything(t *testing.T) {
-	for name, reread := range map[string]bool{"same marker": false, "marker read from disk again": true} {
-		t.Run(name, func(t *testing.T) { undoAfterFailedRecover(t, reread) })
-	}
-}
-
-func undoAfterFailedRecover(t *testing.T, reread bool) {
-	w := newWorld(t)
-	r := newRepo(t, w.Mac)
-	lockFor(t, r)
-	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
-	noteRel := "01_Ideas/" + filepath.Base(note)
-	original, _ := os.ReadFile(note)
-	m, err := r.Begin("commit", "agent-olivier")
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	fresh := filepath.Join(w.Mac, "01_Ideas", "new.md")
-	writeFile(t, note, []byte("what the save wrote into the note\n"))
-	writeFile(t, fresh, []byte("what the save wrote\n"))
-	list := []string{noteRel, "01_Ideas/new.md"}
-	if err := r.Commit(list, "agent-olivier", "vault: commit", ""); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	writeFile(t, note, []byte("a person rewrote the note\n"))
-	writeFile(t, fresh, []byte("a person rewrote this\n"))
-	r.gate = func(args []string) error {
-		for _, a := range args {
-			if a == "ls-tree" {
-				return errors.New("git was killed")
-			}
-		}
-		return nil
-	}
-	if err := r.Recover(noRebuild); err == nil {
-		t.Fatalf("the recovery must report the failed lookup")
-	}
-	r.gate = nil
-	if reread {
-		if m, err = r.readMarker(); err != nil || m == nil {
-			t.Fatalf("marker must still be on disk: (%v, %v)", m, err)
-		}
-	}
-	if err := r.Undo(m, list, noRebuild); err != nil {
-		t.Fatalf("undo: %v", err)
-	}
-	if now, _ := os.ReadFile(note); string(now) != string(original) {
-		t.Errorf("the note should be back at the shared version, got %q", now)
-	}
-	if _, err := os.Stat(fresh); !os.IsNotExist(err) {
-		t.Errorf("the new file should have been moved aside")
-	}
-	if got := quarantined(t, w.Mac, "mac-test", noteRel); string(got) != "a person rewrote the note\n" {
-		t.Errorf("rewritten note not kept byte for byte: %q", got)
-	}
-	if got := quarantined(t, w.Mac, "mac-test", "01_Ideas/new.md"); string(got) != "a person rewrote this\n" {
-		t.Errorf("rewritten file not kept byte for byte: %q", got)
 	}
 }
