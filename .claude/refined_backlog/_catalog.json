@@ -267,8 +267,9 @@
     "title": "Vault sync review tweaks: stale recover comment, VAULT_ROOT prefix, rule 5 example",
     "from_idea": "I-028",
     "created_at": "2026-10-11T05:08:29.859299+00:00",
-    "claimed_by": null,
-    "status": "open",
-    "release_version": null
+    "claimed_by": "claude-a6c35399",
+    "status": "claimed",
+    "release_version": null,
+    "claimed_at": "2026-10-11T05:08:36.229019+00:00"
   }
 ]
