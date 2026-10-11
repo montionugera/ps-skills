@@ -33,8 +33,8 @@ func NewDaemon(engine *vault.VaultEngine, cfg *Config) *Daemon {
 // daemon runs per place (same guard technique as the engine's inbox watcher).
 // Passes run on the calling goroutine, so when Run returns nothing of it is
 // left running: no goroutine, no git child, no lock. A cancel is noticed
-// between the steps of a pass; a git command already started ends by its own
-// time limit.
+// between the steps of a pass, kills a git command that is running, and ends
+// a wait for the folder lock.
 func (d *Daemon) Run(ctx context.Context) error {
 	guardsDir := filepath.Join(d.S.Repo.Root, "_meta", "guards")
 	if err := os.MkdirAll(guardsDir, 0755); err != nil {
@@ -67,6 +67,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return nil
 	}
 	defer func() { r.gate = prevGate }()
+	// The same cancel also cuts short a git command that is already running
+	// and a wait for the folder lock.
+	prevStop := r.stop
+	r.stop = ctx
+	defer func() { r.stop = prevStop }()
 	prevExit := exitOnSignal
 	exitOnSignal = func(int) { cancel() }
 	defer func() { exitOnSignal = prevExit }()

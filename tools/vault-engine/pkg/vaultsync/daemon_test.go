@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -518,5 +519,111 @@ func TestDaemon_StopSignalDuringPushStartsNoFurtherGitCommand(t *testing.T) {
 	}
 	if strings.Contains(log.String(), "refused") || strings.Contains(log.String(), "not sent") {
 		t.Fatalf("a stop must not be reported as a refusal:\n%s", log)
+	}
+}
+
+// runAndCancel starts Run, waits for ready, cancels, and returns how long Run
+// took to return after the cancel. Run is always waited for before the test's
+// folders are removed.
+func runAndCancel(t *testing.T, d *Daemon, ready <-chan struct{}) time.Duration {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	returned := false
+	t.Cleanup(func() {
+		cancel()
+		if !returned {
+			<-done
+		}
+	})
+	select {
+	case <-ready:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("the daemon never reached the step under test")
+	}
+	time.Sleep(200 * time.Millisecond) // let it settle into the wait
+	cancel()
+	start := time.Now()
+	select {
+	case err := <-done:
+		returned = true
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Run did not return within 3 s of the cancel")
+	}
+	return time.Since(start)
+}
+
+// A cancel that is not a signal (a test, a program that embeds the daemon)
+// must cut a running git command short, not wait for its time limit.
+func TestDaemon_CancelCutsARunningGitCommandShort(t *testing.T) {
+	w := newWorld(t)
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	script := filepath.Join(t.TempDir(), "slow.sh")
+	writeFile(t, script, []byte("#!/bin/sh\necho $$ > \""+pidFile+"\"\nexec sleep 30\n"))
+	if err := os.Chmod(script, 0755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	mustGit(t, w.Srv, "config", "protocol.ext.allow", "always")
+	mustGit(t, w.Srv, "config", "remote.slow.url", "ext::"+script)
+	srv := newDaemon(t, w.Srv)
+	srv.S.Cfg.PollIntervalMS = 50
+	srv.S.Repo.Remote = "slow"
+	srv.S.Repo.NetTimeout = 20 * time.Second
+	ready := make(chan struct{})
+	go func() { // the helper writes its pid once git has started it
+		for {
+			if _, err := os.Stat(pidFile); err == nil {
+				close(ready)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	took := runAndCancel(t, srv, ready)
+	t.Logf("Run returned %v after the cancel", took)
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("pid file: %v", err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if waitFor(2*time.Second, func() bool { return syscall.Kill(pid, 0) != nil }); syscall.Kill(pid, 0) == nil {
+		t.Fatalf("helper process %d is still running after the cancel", pid)
+	}
+}
+
+// A daemon told to stop while it waits for the folder lock must not sit out
+// the whole lock time limit.
+func TestDaemon_CancelEndsTheWaitForTheFolderLock(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	if _, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5)); out.Exit != 0 {
+		t.Fatalf("mac save: %+v", out) // srv now has an update to pull, so its pass needs the lock
+	}
+	held, err := AcquireFolderLock(w.Srv, 0)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	defer held.Release()
+	srv := newDaemon(t, w.Srv)
+	srv.S.Cfg.PollIntervalMS = 50
+	srv.S.Cfg.LockTimeoutMS = 20000
+	ready := make(chan struct{})
+	var once sync.Once
+	srv.S.Repo.gate = func(args []string) error {
+		for _, a := range args {
+			if a == "--show-toplevel" { // the last git command before the lock is asked for
+				once.Do(func() { close(ready) })
+			}
+		}
+		return nil
+	}
+	took := runAndCancel(t, srv, ready)
+	t.Logf("Run returned %v after the cancel", took)
+	if st := mustGit(t, w.Srv, "status", "--porcelain"); st != "" {
+		t.Fatalf("a stopped wait must leave the folder as it was:\n%s", st)
 	}
 }

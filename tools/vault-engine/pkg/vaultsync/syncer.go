@@ -130,7 +130,7 @@ func (s *Syncer) lockFolder() (release func(), err error) {
 	if err := s.Repo.ownRepository(); err != nil {
 		return nil, err
 	}
-	lock, err := AcquireFolderLock(s.Repo.Root, time.Duration(s.Cfg.LockTimeoutMS)*time.Millisecond)
+	lock, err := AcquireFolderLockContext(s.Repo.stopCtx(), s.Repo.Root, time.Duration(s.Cfg.LockTimeoutMS)*time.Millisecond)
 	if err != nil {
 		return nil, err
 	}

@@ -23,8 +23,9 @@ var ErrNothingToCommit = errors.New("nothing to commit: no paths given")
 // ErrTimedOut marks a git command that was stopped by its own time limit.
 var ErrTimedOut = errors.New("timed out")
 
-// ErrStopped marks a git command that was not started because the program is
-// shutting down (see Repo.gate).
+// ErrStopped marks a git command that was not started, or was killed while it
+// ran, because the program is shutting down (see Repo.gate and Repo.stop). A
+// wait for the folder lock that ends for the same reason returns it too.
 var ErrStopped = errors.New("stopped")
 
 const localTimeout = 30 * time.Second
@@ -50,6 +51,19 @@ type Repo struct {
 	// nothing is started. The daemon uses it to stop at once after a stop signal;
 	// tests use it to count commands or to fail one.
 	gate func(args []string) error
+	// stop, when set, ends this Repo's work early: when it is cancelled, a git
+	// command that is running is killed (whole process group) and reported as
+	// ErrStopped, and a wait for the folder lock ends. Nil means "never": the
+	// one-shot commands leave it nil. The daemon sets it for the length of Run.
+	stop context.Context
+}
+
+// stopCtx is r.stop, or a context that is never cancelled when none was set.
+func (r *Repo) stopCtx() context.Context {
+	if r.stop != nil {
+		return r.stop
+	}
+	return context.Background()
 }
 
 func NewRepo(root string, cfg *Config) *Repo {
@@ -122,15 +136,17 @@ func (r *Repo) ownRepository() error {
 // run executes git with a time limit. While the folder lock is held, the child
 // inherits the lock's descriptor: if this process is killed, a still-running
 // git keeps the folder locked until it has finished. git runs in its own
-// process group; a time-out, SIGINT, SIGTERM or SIGHUP kills the whole group,
-// and a signal then ends the engine with status 128+signal.
+// process group; a time-out, a cancel of r.stop, SIGINT, SIGTERM or SIGHUP
+// kills the whole group, and a signal then ends the engine with status
+// 128+signal.
 func (r *Repo) run(timeout time.Duration, args ...string) gitResult {
 	if r.gate != nil {
 		if err := r.gate(args); err != nil {
 			return gitResult{Err: err}
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	stop := r.stopCtx()
+	ctx, cancel := context.WithTimeout(stop, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append(append([]string{}, gitSafetyFlags...), args...)...)
 	cmd.Dir = r.Root
@@ -163,7 +179,10 @@ func (r *Repo) run(timeout time.Duration, args ...string) gitResult {
 			err = fmt.Errorf("interrupted by %v", sig)
 		}
 	}
-	if ctx.Err() == context.DeadlineExceeded {
+	switch {
+	case err != nil && stop.Err() != nil:
+		err = ErrStopped // killed by the cancel, or never started because of it
+	case ctx.Err() == context.DeadlineExceeded:
 		err = fmt.Errorf("%w after %v", ErrTimedOut, timeout)
 	}
 	return gitResult{Stdout: out.String(), Stderr: errb.String(), Err: err}
