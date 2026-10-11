@@ -15,7 +15,7 @@ bin/vault-engine version                   # prints "vault-engine dev" for a pla
 
 **Keep the `env -u VAULT_ROOT` prefix on `test_e2e.sh`.** The script uses an already-exported `VAULT_ROOT` as its work folder and ends with `rm -rf "$VAULT_ROOT"`, so running it while `VAULT_ROOT` points at a real notes folder deletes that folder. With the prefix it works in a fresh temporary folder of its own.
 
-`build-release.sh` stamps the version `0.2.0-sync+<short commit>` (override with `VERSION=...`) and writes `bin/release/SHA256SUMS`. It installs nothing; the same version must be installed in every place.
+`build-release.sh` stamps the version `0.2.0-sync+<short commit>`, with `.dirty` added when the engine folder holds uncommitted or untracked files (an explicit `VERSION=...` is used as given). It checks that every binary carries that version and then writes `bin/release/SHA256SUMS`. Everything is built and checked in a staging folder first, so a build that fails leaves the earlier set as it was. Moving the new set into place is not one atomic step: if it is interrupted, `SHA256SUMS` is missing, and a missing `SHA256SUMS` means the set is not complete and must be built again. It installs nothing; the same version must be installed in every place.
 
 **Always set `VAULT_ROOT` when running the binary by hand.** Without it the engine looks at the current folder (or two levels up) for a `_meta` folder and then falls back to `~/workspace/agentic-vault` or `~/Documents/Obsidian Vault`, if either exists.
 
