@@ -1,0 +1,5 @@
+#!/bin/sh
+# Door check of the shared copy. The logic lives in the engine binary so that a
+# place's early check and this check are the same code.
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+exec "$HOOK_DIR/vault-engine" hub-pre-receive "$HOOK_DIR/vault-limits.json"

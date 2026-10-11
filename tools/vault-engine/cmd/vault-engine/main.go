@@ -5,14 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"obsidian-vault-engine/pkg/agent"
 	"obsidian-vault-engine/pkg/daemon"
 	"obsidian-vault-engine/pkg/vault"
+	"obsidian-vault-engine/pkg/vaultsync"
 	"obsidian-vault-engine/pkg/workflow"
 )
+
+// version is set at build time: -ldflags "-X main.version=<value>".
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -21,6 +27,20 @@ func main() {
 	}
 
 	command := os.Args[1]
+
+	if command == "version" {
+		fmt.Printf("vault-engine %s\n", version)
+		return
+	}
+
+	// The hub's hook calls this inside a bare repository; it needs no vault root.
+	if command == "hub-pre-receive" {
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: vault-engine hub-pre-receive <limits_file>")
+			os.Exit(1)
+		}
+		os.Exit(vaultsync.PreReceive(os.Stdin, os.Stderr, os.Args[2], os.Getenv("VAULT_HUB_PLACE"), time.Now()))
+	}
 
 	// Determine vault root: if VAULT_ROOT env is set, use it; otherwise search up or use system canonical vault
 	vaultRoot := os.Getenv("VAULT_ROOT")
@@ -50,28 +70,34 @@ func main() {
 		}
 	}
 
-
 	engine := vault.NewVaultEngine(vaultRoot)
+
+	syncCfg, err := vaultsync.LoadConfig(engine.Root)
+	if err != nil {
+		// A config file exists but cannot be used: the commands that save still end with the fixed line.
+		switch command {
+		case "ingest", "commit", "capture", "publish-knowledge":
+			finish("Sync config error", "", vaultsync.Outcome{Line: "REFUSED engine-error", Exit: vaultsync.ExitEngineError, Detail: err.Error()})
+		}
+		fmt.Fprintf(os.Stderr, "Sync config error: %v\n", err)
+		os.Exit(1)
+	}
 
 	switch command {
 	case "rebuild-index":
+		unlock := lockIfSynced(engine, syncCfg)
 		if err := engine.RebuildIndexes(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error rebuilding indexes: %v\n", err)
 			os.Exit(1)
 		}
+		unlock()
 		fmt.Printf("Successfully rebuilt indexes in %s\n", filepath.Join(engine.Root, "_meta", "indexes"))
 
 	case "ingest":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: vault-engine ingest <file_path>")
-			os.Exit(1)
+			earlyExit(syncCfg, "Usage: vault-engine ingest <file_path>")
 		}
-		assignedID, err := engine.IngestFile(os.Args[2])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Ingest failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Ingested note as %s\n", assignedID)
+		runMutating(engine, syncCfg, vaultsync.IngestOp(engine, os.Args[2], actorFromEnv()))
 
 	case "validate":
 		if len(os.Args) < 3 {
@@ -178,8 +204,7 @@ func main() {
 
 	case "commit":
 		if len(os.Args) < 6 {
-			fmt.Fprintln(os.Stderr, "Usage: vault-engine commit <record_id> <expected_sha> <actor> <updates_json> [idempotency_key] [reason]")
-			os.Exit(1)
+			earlyExit(syncCfg, "Usage: vault-engine commit <record_id> <expected_sha> <actor> <updates_json> [idempotency_key] [reason]")
 		}
 		recordID := os.Args[2]
 		expectedSHA := os.Args[3]
@@ -187,8 +212,7 @@ func main() {
 		rawUpdates := os.Args[5]
 		var updates map[string]interface{}
 		if err := json.Unmarshal([]byte(rawUpdates), &updates); err != nil {
-			fmt.Fprintf(os.Stderr, "Invalid updates JSON: %v\n", err)
-			os.Exit(1)
+			earlyExit(syncCfg, fmt.Sprintf("Invalid updates JSON: %v", err))
 		}
 		idempotencyKey := ""
 		if len(os.Args) > 6 {
@@ -199,21 +223,17 @@ func main() {
 			reason = os.Args[7]
 		}
 
-		err := engine.CommitRecord(vault.CommitRequest{
+		runMutating(engine, syncCfg, vaultsync.CommitOp(engine, vault.CommitRequest{
 			RecordID:       recordID,
 			ExpectedSHA256: expectedSHA,
 			Updates:        updates,
 			Actor:          actor,
 			IdempotencyKey: idempotencyKey,
 			Reason:         reason,
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Commit FAILED: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Commit SUCCESS for %s by %s (OCC validated)\n", recordID, actor)
+		}))
 
 	case "run-workflow":
+		refuseIfSynced(syncCfg, "run-workflow")
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: vault-engine run-workflow <workflow_file> [payload_json]")
 			os.Exit(1)
@@ -304,6 +324,7 @@ func main() {
 		fmt.Printf("Workflow %s completed with status: %s (Instance ID: %s)\n", wf.WorkflowID, inst.Status, inst.InstanceID)
 
 	case "daemon":
+		refuseIfSynced(syncCfg, "daemon")
 		interval := 3 * time.Second
 		runOnce := false
 		wfPath := filepath.Join(engine.Root, "_meta", "workflows", "idea-lifecycle.json")
@@ -339,17 +360,9 @@ func main() {
 
 	case "capture":
 		if len(os.Args) < 6 {
-			fmt.Fprintln(os.Stderr, "Usage: vault-engine capture <idempotency_key> <category> <origin> <payload>")
-			os.Exit(1)
+			earlyExit(syncCfg, "Usage: vault-engine capture <idempotency_key> <category> <origin> <payload>")
 		}
-		ledger := vault.NewCaptureLedger(filepath.Join(engine.Root, "_meta", "ledger"))
-		entry, err := ledger.RecordCapture(os.Args[2], vault.CategoryTrack(os.Args[3]), os.Args[4], os.Args[5])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Capture failed: %v\n", err)
-			os.Exit(1)
-		}
-		data, _ := json.Marshal(entry)
-		fmt.Println(string(data))
+		runMutating(engine, syncCfg, vaultsync.CaptureOp(engine, os.Args[2], os.Args[3], os.Args[4], os.Args[5]))
 
 	case "route":
 		if len(os.Args) < 5 {
@@ -375,8 +388,7 @@ func main() {
 
 	case "publish-knowledge":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: vault-engine publish-knowledge <file_path> [category] [author]")
-			os.Exit(1)
+			earlyExit(syncCfg, "Usage: vault-engine publish-knowledge <file_path> [category] [author]")
 		}
 		filePath := os.Args[2]
 		category := "process"
@@ -387,12 +399,14 @@ func main() {
 		if len(os.Args) > 4 {
 			author = os.Args[4]
 		}
-		assignedID, err := engine.PublishKnowledge(filePath, category, author)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Publish knowledge failed: %v\n", err)
+		runMutating(engine, syncCfg, vaultsync.PublishOp(engine, filePath, category, author))
+
+	case "whoami":
+		if syncCfg == nil {
+			fmt.Fprintln(os.Stderr, "no sync config (_meta/bin/sync.json); this folder is not shared")
 			os.Exit(1)
 		}
-		fmt.Printf("Published knowledge note as %s\n", assignedID)
+		fmt.Println(syncCfg.Place)
 
 	case "search":
 		if len(os.Args) < 3 {
@@ -421,6 +435,28 @@ func main() {
 		}
 		fmt.Println("Git privacy check PASSED: all quarantine paths strictly ignored.")
 
+	case "sync-daemon":
+		if syncCfg == nil {
+			fmt.Fprintln(os.Stderr, "sync-daemon needs a sync config (_meta/bin/sync.json)")
+			os.Exit(1)
+		}
+		d := vaultsync.NewDaemon(engine, syncCfg)
+		if len(os.Args) > 2 && os.Args[2] == "--once" {
+			if err := d.Tick(); err != nil {
+				fmt.Fprintf(os.Stderr, "Sync failed: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Sync pass complete")
+			return
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		defer stop()
+		fmt.Printf("Starting vault sync on %s as %s (every %d ms)...\n", engine.Root, syncCfg.Place, syncCfg.PollIntervalMS)
+		if err := d.Run(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Sync daemon error: %v\n", err)
+			os.Exit(1)
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		printUsage()
@@ -446,6 +482,7 @@ func printUsage() {
 	fmt.Println("  unlock <record_id>                  Release lock")
 	fmt.Println("  validate-dag <workflow_file>        Validate workflow DAG acyclicity")
 	fmt.Println("  validate-agent <manifest_file>      Validate agent recruitment manifest")
+	fmt.Println("  whoami                              Print this place's name (shared folders)")
+	fmt.Println("  sync-daemon [--once]                Keep this place in step with the shared copy")
+	fmt.Println("  version                             Print the build version")
 }
-
-

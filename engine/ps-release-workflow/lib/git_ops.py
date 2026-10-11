@@ -1,4 +1,4 @@
-"""Subprocess wrappers around git commands."""
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -36,12 +36,29 @@ def commit_all(cwd: Path, message: str) -> None:
     _run(cwd, "commit", "-m", message)
 
 
+def _seed_graft_if_present(parent_dir: Path, target_dir: Path) -> None:
+    """If the parent repo has a graft context graph, seed it in the new worktree."""
+    if (parent_dir / "graft").is_dir() and shutil.which("graft"):
+        try:
+            subprocess.run(
+                ["graft", "build"],
+                cwd=str(target_dir),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+
 def add_worktree(cwd: Path, path: Path, branch: str) -> None:
     _run(cwd, "worktree", "add", str(path), branch)
+    _seed_graft_if_present(cwd, path)
 
 
 def add_worktree_new_branch(cwd: Path, path: Path, new_branch: str, start_point: str = "HEAD") -> None:
     _run(cwd, "worktree", "add", "-b", new_branch, str(path), start_point)
+    _seed_graft_if_present(cwd, path)
 
 
 def fetch_and_ff_main(cwd: Path, remote: str = "origin", branch: str = "main") -> None:

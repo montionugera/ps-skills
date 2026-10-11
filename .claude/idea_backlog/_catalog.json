@@ -156,5 +156,41 @@
     "title": "Worktree GC and claim reopen for ps-release-workflow",
     "created_at": "2026-10-05T08:11:36.446127+00:00",
     "promoted_to": "F-019"
+  },
+  {
+    "id": "I-026",
+    "title": "Agentic vault multi-place sync - local proof",
+    "created_at": "2026-10-10T12:46:23.735297+00:00",
+    "promoted_to": "F-020"
+  },
+  {
+    "id": "I-027",
+    "title": "Agentic vault sync leftovers",
+    "created_at": "2026-10-11T02:15:55.610356+00:00",
+    "promoted_to": "F-021"
+  },
+  {
+    "id": "I-028",
+    "title": "Vault sync review tweaks: stale recover comment, VAULT_ROOT prefix, rule 5 example",
+    "created_at": "2026-10-11T05:07:29.848419+00:00",
+    "promoted_to": "F-022"
+  },
+  {
+    "id": "I-029",
+    "title": "Vault sync save race: show the engine's message in the test and treat a refused push as a lost race",
+    "created_at": "2026-10-11T07:05:13.493128+00:00",
+    "promoted_to": "F-023"
+  },
+  {
+    "id": "I-030",
+    "title": "Release tool: promote --babysit reads 'no checks reported' as a failure when it looks before GitHub has registered the checks",
+    "created_at": "2026-10-11T07:06:28.737808+00:00",
+    "promoted_to": null
+  },
+  {
+    "id": "I-031",
+    "title": "Vault sync kill test: fit the kill delay to the machine so kills land mid-update on a fast runner",
+    "created_at": "2026-10-11T16:02:19.072079+00:00",
+    "promoted_to": "F-024"
   }
 ]
