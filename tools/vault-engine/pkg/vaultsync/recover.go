@@ -28,8 +28,10 @@ type Marker struct {
 	// deleted file). Markers written before this field existed load with a nil
 	// map and behave as if no note was dirty.
 	DirtyBefore map[string]string `json:"dirty_before,omitempty"`
-	// UndoStarted is written to the marker before Undo changes anything. A
-	// marker that carries it has been through an Undo that did not finish.
+	// UndoStarted records that the folder may have been moved back. It is
+	// written to the marker before the folder is reset, by Undo, by Recover
+	// and by a save that fails early. An Undo on a marker that carries it no
+	// longer trusts its list (see Undo).
 	UndoStarted bool `json:"undo_started,omitempty"`
 }
 
