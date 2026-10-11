@@ -291,8 +291,9 @@
     "title": "Vault sync kill test: fit the kill delay to the machine so kills land mid-update on a fast runner",
     "from_idea": "I-031",
     "created_at": "2026-10-11T16:02:47.706120+00:00",
-    "claimed_by": null,
-    "status": "open",
-    "release_version": null
+    "claimed_by": "claude-a6c35399",
+    "status": "claimed",
+    "release_version": null,
+    "claimed_at": "2026-10-11T16:02:49.393912+00:00"
   }
 ]
