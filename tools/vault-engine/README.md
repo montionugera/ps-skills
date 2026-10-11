@@ -15,9 +15,9 @@ bin/vault-engine version                   # prints "vault-engine dev" for a pla
 
 **Keep the `env -u VAULT_ROOT` prefix on `test_e2e.sh`.** The script uses an already-exported `VAULT_ROOT` as its work folder and ends with `rm -rf "$VAULT_ROOT"`, so running it while `VAULT_ROOT` points at a real notes folder deletes that folder. With the prefix it works in a fresh temporary folder of its own.
 
-`build-release.sh` stamps the version `0.2.0-sync+<short commit>` (override with `VERSION=...`) and writes `bin/release/SHA256SUMS`. It installs nothing; the same version must be installed in every place.
+`build-release.sh` stamps the version `0.2.0-sync+<short commit>`, with `.dirty` added when the engine folder holds uncommitted or untracked files (an explicit `VERSION=...` is used as given). It checks that every binary carries that version and then writes `bin/release/SHA256SUMS`. Everything is built and checked in a staging folder first, so a build that fails leaves the earlier set as it was. Moving the new set into place is not one atomic step: if it is interrupted, `SHA256SUMS` is missing, and a missing `SHA256SUMS` means the set is not complete and must be built again. It installs nothing; the same version must be installed in every place.
 
-**Always set `VAULT_ROOT` when running the binary by hand.** Without it the engine looks at the current folder (or two levels up) for a `_meta` folder and then falls back to `~/workspace/agentic-vault` or `~/Documents/Obsidian Vault`, if either exists.
+**Always set `VAULT_ROOT` when running the binary by hand.** Without it the engine looks at the current folder (or two levels up) for a `_meta` folder and then falls back to `~/workspace/agentic-vault` or `~/Documents/Obsidian Vault`, if either exists, and to the current folder if neither does.
 
 ## Plain folder (no sync config)
 
@@ -44,7 +44,7 @@ Only `place` is required (lower-case letters, digits and `-`, up to 63 character
 
 ### What a save does
 
-`commit`, `ingest`, `capture` and `publish-knowledge` each run as one locked step: take the folder lock, settle anything an interrupted run left, get the newest version, run the operation, check size and type of what it wrote, record exactly those files as `<actor>@<place>`, send, and if the answer is unclear ask the shared copy. If another place got in first, the step undoes its own save, rebuilds the indexes and tries again (up to `max_retries`, 5 by default). With a sync config, `ingest` only accepts a file that is already inside `_inbox/`.
+`commit`, `ingest`, `capture` and `publish-knowledge` each run as one locked step: take the folder lock, settle anything an interrupted run left, get the newest version, run the operation, check size and type of what it wrote, record exactly those files as `<actor>@<place>`, send, and if the answer is unclear ask the shared copy. If another place got in first, the step undoes its own save, rebuilds the indexes and tries again. `max_retries` (5 by default) is the total number of tries, the first one included. With a sync config, `ingest` only accepts a file that is already inside `_inbox/`.
 
 The last stdout line is always one of:
 
@@ -58,9 +58,9 @@ The last stdout line is always one of:
 | `REFUSED type-not-allowed` | 6 | File type or path not accepted |
 | `REFUSED busy` | 7 | The folder is in use, or the retries were all lost to races |
 
-Other commands in a shared folder: `whoami` prints the place name. `sync-daemon` keeps the place in step (asks every `poll_interval_ms`, fast-forwards under the lock, rebuilds indexes, sends inbox files after a quiet period of `inbox_quiet_ms`, sets hand edits aside in `_quarantine/<place>/`, and moves a file made by hand outside `_inbox/` there after the same quiet period); `sync-daemon --once` does one pass. A stop signal (SIGINT, SIGTERM, SIGHUP) ends `sync-daemon` with exit 0. `run-workflow` and `daemon` are refused (`REFUSED engine-error`, exit 1), because they change notes outside the save step. `route` is a plain lookup and is unchanged.
+Other commands in a shared folder: `whoami` prints the place name. `sync-daemon` keeps the place in step (asks every `poll_interval_ms`, fast-forwards under the lock, rebuilds indexes, sends inbox files after a quiet period of `inbox_quiet_ms`, sets hand edits aside in `_quarantine/<place>/`, and moves a file made by hand outside `_inbox/` there after the same quiet period); `sync-daemon --once` does one pass. A stop signal (SIGINT, SIGTERM, SIGHUP) ends `sync-daemon` with exit 0. The stop does not wait for a time limit: a git command that is running is killed, and a wait for the folder lock ends at once. `run-workflow` and `daemon` are refused (`REFUSED engine-error`, exit 1), because they change notes outside the save step. `route` is a plain lookup and is unchanged.
 
-Local files, never synced: `_meta/guards/folder.guard` (the folder lock), `_meta/guards/sync-daemon.guard` (stops a second `sync-daemon` from starting in the same place), `_meta/guards/save-in-progress.json` (marker), `_quarantine/<place>/` with `REPORT.log`.
+Local files, never synced: `_meta/guards/folder.guard` (the folder lock), `_meta/guards/sync-daemon.guard` (stops a second `sync-daemon` from starting in the same place), `_meta/guards/save-in-progress.json` (marker; it also records that an undo of that save was started), `_quarantine/<place>/` with `REPORT.log`.
 
 ### The shared copy ("hub")
 
@@ -79,7 +79,7 @@ creates a bare repository that only moves forward on `refs/heads/main` (`receive
 | Files per send | 500 |
 | Per place per day | 52428800 bytes (50 MB), counted per UTC day in `<hub>/vault-usage/<date>.json` |
 
-Every file in every commit of a send is checked. A refusal reads `vault-hub: REFUSED <too-large|type-not-allowed|engine-error>: <message>`. `too-large` and `type-not-allowed` mean the send broke a rule in the table above. `engine-error` means the hub itself could not read or compute something (its settings file, git's own input, a git command inside the hook, the usage file): the send is still refused, and the place answers `REFUSED engine-error` (exit 1), not a size or type refusal.
+Every file in every commit of a send is checked. A refusal reads `vault-hub: REFUSED <too-large|type-not-allowed|engine-error>: <message>`. `too-large` and `type-not-allowed` mean the send broke a rule in the table above. `engine-error` means the hub itself could not read or compute something (its settings file, git's own input, a git command inside the hook (including the check that a send only moves forward), the usage file): the send is still refused, and the place answers `REFUSED engine-error` (exit 1), not a size or type refusal.
 
 ### Known limits
 
@@ -99,8 +99,10 @@ Every file in every commit of a send is checked. A refusal reads `vault-hub: REF
 - **`REFUSED no-connection` can mean "not confirmed yet".** When the answer to a send is unclear and the shared copy does not show the save, the engine keeps the save and its marker and answers `REFUSED no-connection` (exit 4). The save may still have arrived: the next engine command or daemon pass in that place asks the shared copy and either keeps the save or takes it back. Running the same command again is safe; it answers `SAVED` or `REFUSED note-changed` if the first try did arrive.
 - **In a shared folder `ingest` refuses a file from outside the inbox** (`REFUSED engine-error`, exit 1). `ingest` deletes its source, and only a file under `_inbox/` is kept in the shared history first. Put the file in the inbox, then ingest it from there. In a plain folder `ingest` works on any path as before.
 - **The engine ignores git's repository variables and needs the folder to be its own repository.** In a place, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and the like are not passed on to git, and a shared folder that is not the top level of its own git repository is refused (`REFUSED engine-error`).
+- **The vault's `.gitignore` must carry the lines the test fixture writes** (`scripts/sync-harness.sh`, the list in `write_fixture`). The engine protects by itself only the paths the hub never accepts (`_meta/guards/`, `_meta/bin/`, `_quarantine/` and the others in the limits table). Everything else in that list is kept out of the shared copy only by the ignore file. Without the `_inbox/private/` line, `sync-daemon` treats a file there like any other inbox file and **sends it to the shared copy** after the quiet period. Without the other lines (`_meta/instances/`, `_meta/snapshots/`, `_meta/ledger/raw/`, `.DS_Store`, `*.raw`, `*.tmp`), `sync-daemon` treats such a file outside `_inbox/` as made by hand and moves it to `_quarantine/<place>/`, and a save that wrote one tries to send it. If `_meta/guards/` is missing from the ignore file, every save ends `REFUSED type-not-allowed`. Nothing checks the ignore file at start-up yet.
+- **Lock files left by a killed git command are not all cleared.** When a git command is killed in the middle of its work (by its time limit, a stop signal, or a cancel), git can leave its own lock files behind. At the next recovery the engine removes only `.git/index.lock`. A lock file left on a ref (after a killed fetch, commit or send) is not removed by anything, and git commands that need that ref can fail until it is gone.
 - **After a refused send the daemon backs off.** It skips only the send step for 1, 2, 4 ... up to 100 passes before trying again, and the wait resets after an accepted send. A lost push race does not start the wait. Updating, recovery and handling of stray files continue on every pass.
-- **Measured delay between two places:** median about 1.9 s, worst about 2.9 s over 50 runs with a 3000 ms poll (target: worst under 5 s). The full harness run (`scripts/sync-harness.sh run`) takes about 35-40 minutes.
+- **Measured delay between two places:** median about 1.9 s, worst about 2.8 s over 50 runs with a 3000 ms poll (target: worst under 5 s). In the same run the kill test proved 30 of 30 kills mid-save and 30 of 30 mid-update (it needs 15 of each). The full harness run (`scripts/sync-harness.sh run`) takes about 35-40 minutes.
 
 ### Rules for agents
 

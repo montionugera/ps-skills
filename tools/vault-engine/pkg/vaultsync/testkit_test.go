@@ -50,7 +50,12 @@ func TestMain(m *testing.M) {
 		r := &Repo{Root: root, Place: "helper", lock: lock}
 		alias := "alias.nap=!echo $$ > " + os.Getenv("VAULTSYNC_SIGNAL_PID") + "; exec sleep 30"
 		go r.run(time.Minute, "-c", alias, "nap")
-		time.Sleep(900 * time.Millisecond) // let the child start
+		// The child writes its pid file as its first act: wait for that, not for a fixed time.
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if data, err := os.ReadFile(os.Getenv("VAULTSYNC_SIGNAL_PID")); err == nil && len(bytes.TrimSpace(data)) > 0 {
+				break
+			}
+		}
 		fmt.Println("started")
 		time.Sleep(time.Hour)
 	}

@@ -364,3 +364,40 @@ func TestHub_UnwritableUsageLedgerIsAnEngineError(t *testing.T) {
 		t.Fatalf("the hub must not have taken the send:\n%s", refs)
 	}
 }
+
+// The forward-only check asks git one yes/no question. Only a clear "no" is a
+// history rewrite; a git failure is the hub's own fault. Both are refused.
+func TestPreReceive_AncestorCheckThatCannotRunIsAnEngineError(t *testing.T) {
+	// Two object names the repository does not have: git cannot answer at all.
+	older, newer := strings.Repeat("2", 40), strings.Repeat("1", 40)
+	var stderr strings.Builder
+	code := PreReceive(strings.NewReader(older+" "+newer+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
+	if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: cannot check that refs/heads/main only moves forward") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "rewriting the history") {
+		t.Fatalf("a git failure must not read as a history rewrite: %q", stderr.String())
+	}
+}
+
+// A real rewrite keeps its label. git's own receive.denyNonFastForwards is
+// switched off here so that the send reaches the hook's check.
+func TestHub_HookItselfRefusesAHistoryRewrite(t *testing.T) {
+	hub := newHub(t)
+	dir := seededClone(t, hub)
+	commitFiles(t, dir, map[string]int{"01_Ideas/a.md": 10})
+	if out, err := pushAs(t, dir, "mac-test", "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("setup push: %v\n%s", err, out)
+	}
+	tip := mustGit(t, hub, "rev-parse", "refs/heads/main")
+	mustGit(t, hub, "config", "receive.denyNonFastForwards", "false")
+	mustGit(t, dir, "reset", "--quiet", "--hard", "HEAD~1")
+	commitFiles(t, dir, map[string]int{"01_Ideas/b.md": 10})
+	out, err := pushAs(t, dir, "mac-test", "HEAD:refs/heads/main", "--force")
+	if err == nil || !strings.Contains(out, "vault-hub: REFUSED type-not-allowed: rewriting the history of refs/heads/main is never accepted") {
+		t.Fatalf("the hook should refuse the rewrite by name, got err=%v\n%s", err, out)
+	}
+	if now := mustGit(t, hub, "rev-parse", "refs/heads/main"); now != tip {
+		t.Fatalf("hub tip changed from %s to %s", tip, now)
+	}
+}

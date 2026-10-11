@@ -490,6 +490,9 @@ func TestScenario07_KilledMidSaveAndMidUpdate(t *testing.T) {
 		}
 		converge(t, w)
 	}
+	// Printed in every run (the harness keeps the line), so the margin above
+	// the floor is known and a slow machine shows up before the test fails.
+	fmt.Printf("KILLS rounds=%d mid_save=%d mid_update=%d floor=%d\n", n, midSave, midUpdate, n/2)
 	if midSave < n/2 || midUpdate < n/2 {
 		t.Fatalf("kills proven mid-operation: %d saves and %d updates out of %d rounds, want at least %d of each", midSave, midUpdate, n, n/2)
 	}
@@ -523,7 +526,16 @@ func TestScenario18_OnePlaceOverItsAllowance(t *testing.T) {
 	if st := mustGit(t, w.Mac, "status", "--porcelain"); st != "" {
 		t.Fatalf("the refused save left something behind:\n%s", st)
 	}
+	// A clean status does not show a local commit that was never taken back,
+	// or a marker (it is git-ignored): check both.
+	if head, hub := headOf(w.Mac), mustGit(t, w.Hub, "rev-parse", "refs/heads/main"); head != hub {
+		t.Fatalf("the refused save left its local commit: mac-test at %s, the shared copy at %s", head, hub)
+	}
+	if _, err := os.Stat(filepath.Join(w.Mac, "_meta", "guards", "save-in-progress.json")); !os.IsNotExist(err) {
+		t.Fatalf("the refused save left its marker behind (%v)", err)
+	}
 	if code := saveImpact(w.Srv, note2, 4); code != 0 {
 		t.Fatalf("srv-test must still be able to save, exit %d", code)
 	}
+	converge(t, w)
 }

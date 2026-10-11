@@ -1,6 +1,7 @@
 package vaultsync
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +26,12 @@ var ErrLockTimeout = errors.New("folder lock: timed out waiting for another save
 type FolderLock struct{ f *os.File }
 
 func AcquireFolderLock(vaultRoot string, timeout time.Duration) (*FolderLock, error) {
+	return AcquireFolderLockContext(context.Background(), vaultRoot, timeout)
+}
+
+// AcquireFolderLockContext is AcquireFolderLock with a way to give up early:
+// when ctx is cancelled while waiting, it returns ErrStopped at once.
+func AcquireFolderLockContext(ctx context.Context, vaultRoot string, timeout time.Duration) (*FolderLock, error) {
 	guardsDir := filepath.Join(vaultRoot, "_meta", "guards")
 	if err := os.MkdirAll(guardsDir, 0755); err != nil {
 		return nil, err
@@ -47,7 +54,12 @@ func AcquireFolderLock(vaultRoot string, timeout time.Duration) (*FolderLock, er
 			_ = f.Close()
 			return nil, ErrLockTimeout
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, ErrStopped
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 }
 

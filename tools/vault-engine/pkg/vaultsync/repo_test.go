@@ -377,3 +377,64 @@ func TestRepo_FolderInsideAnotherRepositoryIsRefusedAndThatRepositoryIsUntouched
 		t.Fatalf("the outer repository was touched:\n--- before\n%s\n--- after\n%s", before, after)
 	}
 }
+
+// Every git child of a place gets an environment with none of git's
+// repository-selecting variables, and a ceiling taken from the folder's real
+// path: git compares the ceiling with the real working folder, so the parent
+// of a symbolic link would have no effect.
+func TestPlaceEnv_DropsEveryLocationVariableAndSetsTheCeilingFromTheRealPath(t *testing.T) {
+	for name := range gitLocationVars {
+		t.Setenv(name, "/somewhere/else")
+	}
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realRoot := filepath.Join(base, "real", "place")
+	if err := os.MkdirAll(realRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Fatal(err)
+	}
+	ceilings := 0
+	for _, kv := range placeEnv(link) {
+		name, value, _ := strings.Cut(kv, "=")
+		switch {
+		case name == "GIT_CEILING_DIRECTORIES":
+			ceilings++
+			if want := filepath.Join(base, "real"); value != want {
+				t.Errorf("ceiling = %q, want the real parent %q", value, want)
+			}
+		case gitLocationVars[name]:
+			t.Errorf("%s was passed on to git", name)
+		}
+	}
+	if ceilings != 1 {
+		t.Errorf("GIT_CEILING_DIRECTORIES set %d times, want once", ceilings)
+	}
+}
+
+// The cause of a failed fetch stays readable by the program, not only as text.
+func TestRepo_NoConnectionErrorsKeepTheirCause(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	stopped := errors.New("stopped by the test")
+	r.gate = func([]string) error { return stopped }
+	if err := r.Fetch(); !errors.Is(err, ErrNoConnection) || !errors.Is(err, stopped) {
+		t.Fatalf("Fetch: want ErrNoConnection wrapping the cause, got %v", err)
+	}
+	if _, err := r.RemoteHead(); !errors.Is(err, ErrNoConnection) || !errors.Is(err, stopped) {
+		t.Fatalf("RemoteHead: want ErrNoConnection wrapping the cause, got %v", err)
+	}
+	// A hub that answers but has no main line yet is still "no connection", with a plain reason.
+	r.gate = nil
+	empty := filepath.Join(t.TempDir(), "empty.git")
+	mustGit(t, t.TempDir(), "init", "--quiet", "--bare", empty)
+	mustGit(t, w.Mac, "config", "remote.empty.url", empty)
+	r.Remote = "empty"
+	if _, err := r.RemoteHead(); !errors.Is(err, ErrNoConnection) || strings.Contains(err.Error(), "<nil>") {
+		t.Fatalf("RemoteHead on an empty hub: got %v", err)
+	}
+}

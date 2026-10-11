@@ -102,8 +102,14 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 			return refuse("type-not-allowed", "deleting %s is never accepted", ref)
 		}
 		if oldSHA != zeroSHA {
+			// git exits 1 for a clear "not an ancestor"; any other failure is no
+			// answer at all, so it is the hub's own fault (still refused).
 			if _, err := hubGit("", "merge-base", "--is-ancestor", oldSHA, newSHA); err != nil {
-				return refuse("type-not-allowed", "rewriting the history of %s is never accepted", ref)
+				var ee *exec.ExitError
+				if errors.As(err, &ee) && ee.ExitCode() == 1 {
+					return refuse("type-not-allowed", "rewriting the history of %s is never accepted", ref)
+				}
+				return refuse(hubFault, "cannot check that %s only moves forward: %v", ref, err)
 			}
 		}
 		tips = append(tips, newSHA)
@@ -228,20 +234,8 @@ func chargeDaily(dir, place string, now time.Time, add, limit int64) (int64, boo
 	if err != nil {
 		return 0, false, err
 	}
-	tmp := file + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return 0, false, err
+	if err := writeFileAtomic(file, data); err != nil {
+		return 0, false, fmt.Errorf("writing usage file %s: %w", file, err)
 	}
-	_, werr := f.Write(data)
-	if serr := f.Sync(); werr == nil {
-		werr = serr
-	}
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		return 0, false, fmt.Errorf("writing usage file %s: %w", tmp, werr)
-	}
-	return usage[place], true, os.Rename(tmp, file)
+	return usage[place], true, nil
 }

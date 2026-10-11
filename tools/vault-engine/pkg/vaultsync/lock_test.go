@@ -2,6 +2,7 @@ package vaultsync
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -55,4 +56,29 @@ func TestFolderLock_ReleasedWhenTheHolderIsKilled(t *testing.T) {
 		t.Fatalf("the kernel should have released the lock: %v", err)
 	}
 	lock.Release()
+}
+
+func TestFolderLock_WaitEndsAtOnceWhenTheContextIsCancelled(t *testing.T) {
+	root := t.TempDir()
+	held, err := AcquireFolderLock(root, time.Second)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	defer held.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	start := time.Now()
+	if _, err := AcquireFolderLockContext(ctx, root, 10*time.Second); !errors.Is(err, ErrStopped) {
+		t.Fatalf("expected ErrStopped, got %v", err)
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Fatalf("waited %v after the cancel, expected about 100ms", waited)
+	}
+	// The failed wait must not have left the lock taken or a descriptor open on it.
+	held.Release()
+	again, err := AcquireFolderLock(root, time.Second)
+	if err != nil {
+		t.Fatalf("acquire after the cancelled wait: %v", err)
+	}
+	again.Release()
 }

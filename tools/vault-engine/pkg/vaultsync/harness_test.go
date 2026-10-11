@@ -1,6 +1,7 @@
 package vaultsync
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,6 +44,7 @@ func TestHarness_InstallsTheRulesFiles(t *testing.T) {
 		"_meta/bin/vault-engine whoami", "SAVED", "REFUSED note-changed", "REFUSED no-connection",
 		"REFUSED too-large", "REFUSED type-not-allowed", "REFUSED busy", "REFUSED engine-error",
 		"_inbox/agent/<your-agent-id>/", "Never run git in this folder",
+		"hit a fault of its own", "Your input is fine",
 	} {
 		if !strings.Contains(string(agents), want) {
 			t.Errorf("AGENTS.md does not mention %q", want)
@@ -100,5 +102,21 @@ func TestHarness_RealVaultStaysGuardedWhenExtraDirIsSet(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(standIn); len(entries) != 0 {
 		t.Errorf("stand-in was written to: %v", entries)
+	}
+}
+
+func TestHarness_SetupNamesAMissingTargetFolder(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-there")
+	cmd := exec.Command("bash", filepath.Join("..", "..", "scripts", "sync-harness.sh"), "setup", missing, engineBin)
+	out, err := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+		t.Fatalf("want exit 1, got %v\n%s", err, out)
+	}
+	if want := "sync-harness: target folder " + missing + " does not exist\n"; string(out) != want {
+		t.Fatalf("output = %q, want exactly %q", out, want)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("setup must not create the folder it was asked about: %v", err)
 	}
 }

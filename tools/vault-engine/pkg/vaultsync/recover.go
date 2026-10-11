@@ -28,6 +28,9 @@ type Marker struct {
 	// deleted file). Markers written before this field existed load with a nil
 	// map and behave as if no note was dirty.
 	DirtyBefore map[string]string `json:"dirty_before,omitempty"`
+	// UndoStarted is written to the marker before Undo changes anything. A
+	// marker that carries it has been through an Undo that did not finish.
+	UndoStarted bool `json:"undo_started,omitempty"`
 }
 
 func (r *Repo) markerPath() string { return filepath.Join(r.Root, filepath.FromSlash(markerRel)) }
@@ -98,17 +101,22 @@ func (r *Repo) Begin(op, actor string) (*Marker, error) {
 			return nil, err
 		}
 	}
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(r.markerPath()), 0755); err != nil {
-		return nil, err
-	}
-	if err := writeFileAtomic(r.markerPath(), data); err != nil {
+	if err := r.writeMarker(m); err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+// writeMarker stores m as the folder's marker, whole or not at all.
+func (r *Repo) writeMarker(m *Marker) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(r.markerPath()), 0755); err != nil {
+		return err
+	}
+	return writeFileAtomic(r.markerPath(), data)
 }
 
 func (r *Repo) End() error {
@@ -177,7 +185,33 @@ func (r *Repo) changed(m *Marker) (map[string]string, error) {
 // Undo takes back one save whose written files are known (a refused send, a
 // lost race): the local commit (if any), changed notes, and exactly the
 // untracked files in written. No other untracked file is touched.
+//
+// The list is trusted once per marker. An Undo that fails part-way may already
+// have moved the folder back, and then the save's own commit, the proof of
+// what it wrote, is gone. So the marker records that the folder was moved back
+// (by Undo or by Recover, see undo), and an Undo on such a marker proves
+// nothing: like Recover, it copies or moves what it finds to
+// _quarantine/<place>/ and deletes nothing.
 func (r *Repo) Undo(m *Marker, written []string, rebuild func() error) error {
+	// The marker on disk is the record: a Recover that failed set the flag on
+	// its own copy, not on the one the caller holds. A missing file means no
+	// earlier pass recorded anything, so the caller's marker decides. A file
+	// for another operation is not this save's record: change nothing.
+	disk, err := r.readMarker()
+	if err != nil {
+		return err
+	}
+	if disk != nil {
+		if disk.Op != m.Op || disk.Actor != m.Actor || disk.Base != m.Base ||
+			disk.StartedAt != m.StartedAt || disk.PID != m.PID {
+			return fmt.Errorf("the save marker on disk (%s by %s, started %s) is not the one given to undo (%s by %s, started %s); nothing was changed",
+				disk.Op, disk.Actor, disk.StartedAt, m.Op, m.Actor, m.StartedAt)
+		}
+		m.UndoStarted = m.UndoStarted || disk.UndoStarted
+	}
+	if m.UndoStarted {
+		return r.undo(m, nil, true, rebuild)
+	}
 	return r.undo(m, written, false, rebuild)
 }
 
@@ -281,6 +315,16 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 	preHead, err := r.Head()
 	if err != nil {
 		return err
+	}
+	// Record on disk, before the reset, that the proof (the save's commit) may
+	// be lost from here on. If the record cannot be written, nothing is changed
+	// and the marker (in memory and on disk) stays as it was.
+	if !m.UndoStarted {
+		m.UndoStarted = true
+		if err := r.writeMarker(m); err != nil {
+			m.UndoStarted = false
+			return err
+		}
 	}
 	if _, err := r.local("reset", "--quiet", "--mixed", m.Base); err != nil {
 		return err
@@ -480,11 +524,13 @@ func writeFileAtomic(path string, data []byte) error {
 	if cerr := f.Close(); werr == nil {
 		werr = cerr
 	}
+	if werr == nil {
+		werr = os.Rename(tmp, path)
+	}
 	if werr != nil {
 		_ = os.Remove(tmp)
-		return werr
 	}
-	return os.Rename(tmp, path)
+	return werr
 }
 
 // freshTarget makes the folder for dst and refuses a dst that already exists.
