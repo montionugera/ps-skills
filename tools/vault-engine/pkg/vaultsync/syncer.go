@@ -69,7 +69,6 @@ func errorOutcome(err error) Outcome {
 
 // Hooks are test seams. All are nil in production.
 type Hooks struct {
-	AfterOp    func(attempt int)
 	BeforePush func(attempt int)
 	PushResult func(attempt int, res gitResult) gitResult
 }
@@ -198,9 +197,6 @@ func (s *Syncer) attempt(op Op, attempt int) (string, Outcome, bool) {
 		return "", out, false
 	}
 	msg, opErr := op.Run()
-	if s.Hooks.AfterOp != nil {
-		s.Hooks.AfterOp(attempt)
-	}
 	if opErr != nil {
 		return fail(errorOutcome(opErr))
 	}
@@ -294,7 +290,8 @@ func (s *Syncer) precheck(paths []string) *Violation {
 	return nil
 }
 
-// record commits exactly paths and sends them. On pushRace and pushRefused the
+// record commits exactly paths and sends them. An empty list is refused by
+// Repo.Commit itself (ErrNothingToCommit). On pushRace and pushRefused the
 // caller must undo; on pushUnconfirmed the caller must leave everything as it is.
 func (s *Syncer) record(paths []string, actor, subject, key string, m *Marker, attempt int) (pushState, Outcome) {
 	r := s.Repo

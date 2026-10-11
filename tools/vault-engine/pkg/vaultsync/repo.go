@@ -109,6 +109,11 @@ func placeEnv(root string) []string {
 		}
 	}
 	if abs, err := filepath.Abs(root); err == nil {
+		// git compares the ceiling with the real working folder, so a root
+		// reached through a symbolic link is resolved first.
+		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = resolved
+		}
 		env = append(env, "GIT_CEILING_DIRECTORIES="+filepath.Dir(abs))
 	}
 	return env
@@ -220,7 +225,7 @@ func (r *Repo) Status() (map[string]string, error) {
 func (r *Repo) Fetch() error {
 	res := r.run(r.NetTimeout, "fetch", "--quiet", r.Remote, "+refs/heads/"+r.Branch+":refs/remotes/"+r.Remote+"/"+r.Branch)
 	if res.Err != nil {
-		return fmt.Errorf("%w: fetch: %v: %s", ErrNoConnection, res.Err, strings.TrimSpace(res.Stderr))
+		return fmt.Errorf("%w: fetch: %w: %s", ErrNoConnection, res.Err, strings.TrimSpace(res.Stderr))
 	}
 	return nil
 }
@@ -228,9 +233,12 @@ func (r *Repo) Fetch() error {
 // RemoteHead asks the hub where its main line is, without downloading anything.
 func (r *Repo) RemoteHead() (string, error) {
 	res := r.run(r.NetTimeout, "ls-remote", r.Remote, "refs/heads/"+r.Branch)
+	if res.Err != nil {
+		return "", fmt.Errorf("%w: ls-remote: %w: %s", ErrNoConnection, res.Err, strings.TrimSpace(res.Stderr))
+	}
 	fields := strings.Fields(res.Stdout)
-	if res.Err != nil || len(fields) == 0 {
-		return "", fmt.Errorf("%w: ls-remote: %v: %s", ErrNoConnection, res.Err, strings.TrimSpace(res.Stderr))
+	if len(fields) == 0 {
+		return "", fmt.Errorf("%w: ls-remote: the shared copy has no refs/heads/%s", ErrNoConnection, r.Branch)
 	}
 	return fields[0], nil
 }

@@ -524,11 +524,13 @@ func writeFileAtomic(path string, data []byte) error {
 	if cerr := f.Close(); werr == nil {
 		werr = cerr
 	}
+	if werr == nil {
+		werr = os.Rename(tmp, path)
+	}
 	if werr != nil {
 		_ = os.Remove(tmp)
-		return werr
 	}
-	return os.Rename(tmp, path)
+	return werr
 }
 
 // freshTarget makes the folder for dst and refuses a dst that already exists.

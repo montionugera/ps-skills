@@ -234,20 +234,8 @@ func chargeDaily(dir, place string, now time.Time, add, limit int64) (int64, boo
 	if err != nil {
 		return 0, false, err
 	}
-	tmp := file + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return 0, false, err
+	if err := writeFileAtomic(file, data); err != nil {
+		return 0, false, fmt.Errorf("writing usage file %s: %w", file, err)
 	}
-	_, werr := f.Write(data)
-	if serr := f.Sync(); werr == nil {
-		werr = serr
-	}
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		return 0, false, fmt.Errorf("writing usage file %s: %w", tmp, werr)
-	}
-	return usage[place], true, os.Rename(tmp, file)
+	return usage[place], true, nil
 }

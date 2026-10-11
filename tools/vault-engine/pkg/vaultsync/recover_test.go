@@ -886,3 +886,15 @@ func undoAfterFailedPass(t *testing.T, firstPass func(r *Repo, m *Marker, list [
 		})
 	}
 }
+
+func TestWriteFileAtomic_LeavesNoTempFileWhenTheRenameFails(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "taken")
+	writeFile(t, filepath.Join(target, "inside.txt"), []byte("x")) // a non-empty folder: the rename cannot replace it
+	if err := writeFileAtomic(target, []byte("new")); err == nil {
+		t.Fatalf("writing over a non-empty folder should fail")
+	}
+	if _, err := os.Stat(target + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("the temp file was left behind: %v", err)
+	}
+}
