@@ -1836,7 +1836,7 @@ def main():
     parser.add_argument("--model", type=str, default=None,
                         help="Model override for the chosen agent")
     parser.add_argument("--effort", type=str, default=None,
-                        help="Reasoning effort level (e.g. low, medium, high, max). Thinking mode defaults to 'high'.")
+                        help="Reasoning effort level (e.g. low, medium, high, max). Thinking mode defaults to 'medium'.")
     parser.add_argument("--priority", type=str, default=default_preference,
                         help="Priority chain preference (e.g. 'cursor:gemini-3.8-flash > agy')")
     parser.add_argument("--mode", choices=["subscription_quota_remaining", "on_demand"], default=default_mode_str,
