@@ -67,6 +67,8 @@ VERIFY_FAILED_EXIT_CODE = 13
 NO_CHANGES_UNVERIFIED_STATUS = "NO_CHANGES_UNVERIFIED"
 # `--wait` stopped at its own limit while the job is still running (EX_TEMPFAIL: not a failure, wait again).
 WAIT_STILL_RUNNING_EXIT_CODE = 75
+# A job saved without a runner pid for longer than this never started: --wait reports it dead instead of hanging.
+WAIT_ORPHAN_GRACE_SECONDS = 60
 VERIFY_TAIL_LINES = 40
 STALL_SECONDS = 300  # --status flags a RUNNING job STALLED? after this long without log output
 
@@ -1259,9 +1261,11 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, ou
 
 def derive_status(exit_code, files_changed, verify_info=None):
     if exit_code == 0:
-        # Read-only work stays SUCCESS when it is a thinking-mode task or left a non-empty --output-file.
+        # Read-only work stays SUCCESS when it is a thinking-mode task or wrote a non-empty --output-file.
+        # Outside a git repo changed files cannot be counted, so "0 files" is not evidence either way.
         if (verify_info is not None and files_changed == 0 and verify_info.get("verified", "skipped") == "skipped"
-                and not verify_info.get("is_thinking") and not verify_info.get("has_artifact")):
+                and not verify_info.get("is_thinking") and not verify_info.get("has_artifact")
+                and verify_info.get("in_git_repo", True)):
             return NO_CHANGES_UNVERIFIED_STATUS
         return "SUCCESS"
     if exit_code == VERIFY_FAILED_EXIT_CODE:
@@ -1327,6 +1331,16 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         capture_output=True,
         text=True,
     ).stdout.strip()
+    info["in_git_repo"] = bool(initial_head)
+
+    def _artifact_signature():
+        try:
+            st = os.stat(os.path.join(target_dir, output_file))
+            return (st.st_mtime_ns, st.st_size)
+        except (OSError, TypeError):
+            return None
+
+    artifact_before = _artifact_signature()
 
     def _invoke_worker(prompt_text):
         wrapped_task = wrap_prompt_contract(
@@ -1392,9 +1406,9 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
                        attempts=info["verify_attempts"])
 
     files_changed, diff_summary, commit_count = inspect_git_changes(target_dir, initial_head)
-    if output_file:
-        artifact_path = os.path.join(target_dir, output_file)
-        info["has_artifact"] = os.path.isfile(artifact_path) and os.path.getsize(artifact_path) > 0
+    artifact_after = _artifact_signature()
+    # Only a file this run wrote counts: a non-empty output file that is new or changed since the start.
+    info["has_artifact"] = bool(artifact_after and artifact_after[1] > 0 and artifact_after != artifact_before)
     return exit_code, stdout, stderr, files_changed, diff_summary
 
 
@@ -1937,7 +1951,8 @@ def main():
                 status = st.get("status")
                 pid = st.get("pid")
                 if status in ("RUNNING", "PENDING"):
-                    if pid and not is_pid_running(pid):
+                    orphaned = not pid and (time.time() - (st.get("created_at") or 0)) > WAIT_ORPHAN_GRACE_SECONDS
+                    if orphaned or (pid and not is_pid_running(pid)):
                         st["status"] = "FAILED_DIED"
                         st["exit_code"] = 1
                         save_job_state(jid, st, job_dir=args.job_dir)

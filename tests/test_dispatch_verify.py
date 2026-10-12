@@ -601,7 +601,29 @@ class TestNoChangesUnverifiedStatus(VerifyCLIBase):
         now = 1_000_000.0
         events = [{"ts": now, "event": "finish", "run_id": "a", "agent": "agy", "status": self.STATUS, "duration_s": 5}]
         report = dispatch_mod.format_stats_report(events, now=now)
-        self.assertIn("0%", report)
+        self.assertNotIn("100%", report)
+        self.assertRegex(report, r"\s0%")
+
+    def test_preexisting_output_file_does_not_count_as_evidence(self):
+        out = self.tmp / "old-audit.md"
+        out.write_text("written before this run\n", encoding="utf-8")
+        info = {}
+        with self._fake_worker():
+            exit_code, _out, _err, files_changed, _diff = dispatch_mod.run_single_task(
+                "audit only", str(self.repo_dir), "agy", None, 30, output_file=str(out),
+                verify_opts={"no_verify": True}, verify_info=info)
+        self.assertEqual(dispatch_mod.derive_status(exit_code, files_changed, info), self.STATUS)
+
+    def test_non_git_directory_is_not_downgraded(self):
+        # Without a git repo the dispatcher cannot count changed files, so "0 files" proves nothing.
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        info = {}
+        with self._fake_worker("echo data > made.txt"):
+            exit_code, _out, _err, files_changed, _diff = dispatch_mod.run_single_task(
+                "write a file", str(plain), "agy", None, 30, verify_opts={"no_verify": True}, verify_info=info)
+        self.assertEqual((exit_code, files_changed), (0, 0))
+        self.assertEqual(dispatch_mod.derive_status(exit_code, files_changed, info), "SUCCESS")
 
 
 class TestWaitDoesNotGiveUpAtRunTimeout(unittest.TestCase):
@@ -666,6 +688,27 @@ class TestWaitDoesNotGiveUpAtRunTimeout(unittest.TestCase):
         out, _err = proc.communicate(timeout=20)
         self.assertEqual(proc.returncode, 75, out)
         self.assertIn("STILL_RUNNING: job-d", out)
+
+    def test_orphan_job_without_pid_does_not_block_the_wait(self):
+        # A job saved as PENDING whose runner never started (no pid) must not hang `--wait` forever.
+        dispatch_mod.save_job_state("job-orphan", {
+            "job_id": "job-orphan", "agent": "agy", "task": "t", "cwd": "/tmp",
+            "status": "PENDING", "created_at": time.time() - 3600,
+        }, job_dir=self.job_dir)
+        proc = self._wait("job-orphan")
+        out, _err = proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, 1, out)
+        self.assertIn("Status: FAILED_DIED", out)
+
+    def test_freshly_created_job_without_pid_is_given_time_to_start(self):
+        dispatch_mod.save_job_state("job-new", {
+            "job_id": "job-new", "agent": "agy", "task": "t", "cwd": "/tmp",
+            "status": "PENDING", "created_at": time.time(),
+        }, job_dir=self.job_dir)
+        proc = self._wait("job-new", "--wait-timeout", "1")
+        out, _err = proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, 75, out)
+        self.assertEqual(dispatch_mod.load_job_state("job-new", job_dir=self.job_dir)["status"], "PENDING")
 
     def test_wait_all_reports_finished_and_still_running_jobs(self):
         self._running_job("job-e")
