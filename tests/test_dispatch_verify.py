@@ -389,7 +389,7 @@ class TestResultCarriesVerifiedField(VerifyTestBase):
         self.assertEqual(state["verify_cmd"], "false")
 
 
-class TestVerifyCLI(VerifyTestBase):
+class VerifyCLIBase(VerifyTestBase):
     """End-to-end through the real CLI, with a fake `agy` binary first on PATH."""
 
     def setUp(self):
@@ -411,6 +411,8 @@ class TestVerifyCLI(VerifyTestBase):
             capture_output=True, text=True, env=self.env, timeout=60,
         )
 
+
+class TestVerifyCLI(VerifyCLIBase):
     def test_cli_verify_failure_exit_code_and_report(self):
         res = self._cli("--verify-cmd", "echo GATE-RED-LINE; false", "--acceptance", "it works")
         self.assertEqual(res.returncode, dispatch_mod.VERIFY_FAILED_EXIT_CODE, res.stderr[-500:])
@@ -450,6 +452,67 @@ class TestVerifyCLI(VerifyTestBase):
         res = self._cli("--verify-cmd", "make gate", "--dry-run")
         self.assertEqual(res.returncode, 0)
         self.assertIn("make gate", res.stdout)
+
+
+class TestEventsRecordVerifyAndAcceptance(VerifyCLIBase):
+    """start/finish events say whether a verify command and acceptance criteria were given - flags only."""
+
+    def setUp(self):
+        super().setUp()
+        self.events_file = self.tmp / "events.jsonl"
+        self.env["DISPATCH_EVENTS_FILE"] = str(self.events_file)
+
+    def _events(self, kind):
+        return [e for e in dispatch_mod.load_events(str(self.events_file)) if e.get("event") == kind]
+
+    def test_verified_run_records_flags_without_the_text(self):
+        res = self._cli("--verify-cmd", "true # TOKEN=hunter2", "--acceptance", "ACCEPT-SECRET-TEXT")
+        self.assertEqual(res.returncode, 0, res.stderr[-500:])
+        start, finish = self._events("start")[0], self._events("finish")[0]
+        for event in (start, finish):
+            self.assertIs(event["has_verify_cmd"], True)
+            self.assertEqual(event["verify_source"], "explicit")
+            self.assertIs(event["has_acceptance"], True)
+        self.assertIs(finish["verified"], True)
+        raw = self.events_file.read_text(encoding="utf-8")
+        self.assertNotIn("hunter2", raw)
+        self.assertNotIn("ACCEPT-SECRET-TEXT", raw)
+
+    def test_no_verify_run_records_false_flags(self):
+        res = self._cli("--no-verify")
+        self.assertEqual(res.returncode, 0, res.stderr[-500:])
+        start, finish = self._events("start")[0], self._events("finish")[0]
+        for event in (start, finish):
+            self.assertIs(event["has_verify_cmd"], False)
+            self.assertEqual(event["verify_source"], "disabled")
+            self.assertIs(event["has_acceptance"], False)
+        self.assertEqual(finish["verified"], "skipped")
+
+    def test_batch_and_detached_finish_events_carry_the_flags(self):
+        os.environ["DISPATCH_EVENTS_FILE"], previous = str(self.events_file), os.environ["DISPATCH_EVENTS_FILE"]
+        self.addCleanup(os.environ.__setitem__, "DISPATCH_EVENTS_FILE", previous)
+        with self._fake_worker():
+            dispatch_mod.execute_batch_parallel(
+                [{"task": "t1", "verify_cmd": "true", "acceptance": "works"}],
+                base_repo_dir=str(self.repo_dir), chosen_agent="agy", chosen_model=None, timeout_seconds=30, max_parallel=1,
+            )
+        job_dir = str(self.tmp / "jobs")
+        dispatch_mod.save_job_state("job-ev", {
+            "job_id": "job-ev", "agent": "agy", "task": "t", "cwd": str(self.repo_dir),
+            "isolated": False, "timeout": 30, "no_verify": True,
+        }, job_dir=job_dir)
+        with self._fake_worker(), self.assertRaises(SystemExit):
+            dispatch_mod.run_internal_job("job-ev", job_dir=job_dir)
+        batch_finish, job_finish = self._events("finish")
+        self.assertEqual((batch_finish["has_verify_cmd"], batch_finish["has_acceptance"], batch_finish["verified"]),
+                         (True, True, True))
+        self.assertEqual((job_finish["has_verify_cmd"], job_finish["has_acceptance"], job_finish["verified"]),
+                         (False, False, "skipped"))
+
+    def test_stats_still_reads_the_extended_events(self):
+        self._cli("--verify-cmd", "true", "--acceptance", "it works")
+        report = dispatch_mod.format_stats_report(dispatch_mod.load_events(str(self.events_file)))
+        self.assertIn("100%", report)
 
 
 if __name__ == "__main__":

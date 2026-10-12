@@ -1263,6 +1263,17 @@ def derive_status(exit_code, files_changed):
     return "FAILED_PARTIAL_WORK" if files_changed > 0 else "FAILED"
 
 
+def verify_event_fields(info):
+    """Event-log view of a run's verify plan: flags only - never the command or the acceptance text."""
+    info = info or {}
+    return {
+        "has_verify_cmd": bool(info.get("verify_cmd")),
+        "verify_source": info.get("verify_source"),
+        "has_acceptance": bool(info.get("has_acceptance")),
+        "verified": info.get("verified", "skipped"),
+    }
+
+
 def verify_opts_from(source):
     """Extracts the verify/acceptance options from a dict-like (batch item or job state)."""
     return {
@@ -1293,6 +1304,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
     info.update({
         "verified": "skipped", "verify_cmd": verify_cmd, "verify_source": verify_source,
         "verify_attempts": 0, "verify_output": "", "worktree": target_dir,
+        "has_acceptance": bool((opts.get("acceptance") or "").strip()),
     })
     if verify_source == "none":
         print(
@@ -1329,7 +1341,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         return 1 if code == VERIFY_FAILED_EXIT_CODE else code
 
     emit_event("start", run_id=run_id, agent=chosen_agent, model=chosen_model, cwd=target_dir, isolated=isolated,
-               timeout=timeout_seconds, **task_digest(task_text))
+               timeout=timeout_seconds, **verify_event_fields(info), **task_digest(task_text))
     exit_code, stdout, stderr, is_timeout = _invoke_worker(task_text)
     exit_code = _own_exit(exit_code)
 
@@ -1700,7 +1712,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     state["completed_at"] = time.time()
     save_job_state(job_id, state, job_dir)
     emit_event("finish", run_id=job_id, agent=agent, model=model, status=status, exit_code=exit_code,
-               duration_s=round(time.time() - started, 1), files_changed=files_changed)
+               duration_s=round(time.time() - started, 1), files_changed=files_changed, **verify_event_fields(verify_info))
 
     sys.exit(exit_code)
 
@@ -1756,7 +1768,8 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
         except Exception as e:
             exit_code, stdout, stderr, files_changed, diff_summary = 1, "", str(e), 0, "error"
         emit_event("finish", run_id=t_run_id, agent=t_agent, model=t_model, status=derive_status(exit_code, files_changed),
-                   exit_code=exit_code, duration_s=round(time.time() - t_started, 1), files_changed=files_changed)
+                   exit_code=exit_code, duration_s=round(time.time() - t_started, 1), files_changed=files_changed,
+                   **verify_event_fields(t_verify_info))
 
         results[idx] = {
             "task": t_task,
@@ -2284,7 +2297,7 @@ def main():
 
     status = derive_status(exit_code, files_changed)
     emit_event("finish", run_id=run_id, agent=chosen_agent, model=chosen_model, status=status, exit_code=exit_code,
-               duration_s=round(time.time() - started, 1), files_changed=files_changed)
+               duration_s=round(time.time() - started, 1), files_changed=files_changed, **verify_event_fields(verify_info))
 
     tail_output = stdout if stdout else (stderr or "none")
     if status == "VERIFY_FAILED":
