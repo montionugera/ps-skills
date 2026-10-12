@@ -63,6 +63,8 @@ DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.env
 DEFAULT_VERIFY_TIMEOUT = int(os.environ.get("DISPATCH_VERIFY_TIMEOUT") or "600")
 DEFAULT_VERIFY_SCRIPT = "scripts/precheck.sh"
 VERIFY_FAILED_EXIT_CODE = 13
+# Worker exited 0, changed no files, and nothing verified the result: reported under its own name, still exit 0.
+NO_CHANGES_UNVERIFIED_STATUS = "NO_CHANGES_UNVERIFIED"
 VERIFY_TAIL_LINES = 40
 STALL_SECONDS = 300  # --status flags a RUNNING job STALLED? after this long without log output
 
@@ -1253,8 +1255,12 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, ou
         return cmd
 
 
-def derive_status(exit_code, files_changed):
+def derive_status(exit_code, files_changed, verify_info=None):
     if exit_code == 0:
+        # Read-only work stays SUCCESS when it is a thinking-mode task or left a non-empty --output-file.
+        if (verify_info is not None and files_changed == 0 and verify_info.get("verified", "skipped") == "skipped"
+                and not verify_info.get("is_thinking") and not verify_info.get("has_artifact")):
+            return NO_CHANGES_UNVERIFIED_STATUS
         return "SUCCESS"
     if exit_code == VERIFY_FAILED_EXIT_CODE:
         return "VERIFY_FAILED"
@@ -1305,6 +1311,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         "verified": "skipped", "verify_cmd": verify_cmd, "verify_source": verify_source,
         "verify_attempts": 0, "verify_output": "", "worktree": target_dir,
         "has_acceptance": bool((opts.get("acceptance") or "").strip()),
+        "is_thinking": bool(is_thinking), "has_artifact": False,
     })
     if verify_source == "none":
         print(
@@ -1383,6 +1390,9 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
                        attempts=info["verify_attempts"])
 
     files_changed, diff_summary, commit_count = inspect_git_changes(target_dir, initial_head)
+    if output_file:
+        artifact_path = os.path.join(target_dir, output_file)
+        info["has_artifact"] = os.path.isfile(artifact_path) and os.path.getsize(artifact_path) > 0
     return exit_code, stdout, stderr, files_changed, diff_summary
 
 
@@ -1486,6 +1496,8 @@ def format_batch_report(results):
         task_preview = r.get("task", "")[:28] + "..." if len(r.get("task", "")) > 28 else r.get("task", "")
         status_icon = "SUCCESS" if r.get("exit_code") == 0 else (
             "VERIFY_FAILED" if r.get("exit_code") == VERIFY_FAILED_EXIT_CODE else "FAILED")
+        if r.get("status") == NO_CHANGES_UNVERIFIED_STATUS:
+            status_icon = NO_CHANGES_UNVERIFIED_STATUS
         agent = r.get("agent", "worker").upper()
         fc = r.get("files_changed", 0)
         ds = r.get("diff_summary", "no diff")
@@ -1694,7 +1706,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     except Exception as e:
         exit_code, stdout, stderr, files_changed, diff_summary = 1, "", f"Execution error: {e}", 0, "error"
 
-    status = derive_status(exit_code, files_changed)
+    status = derive_status(exit_code, files_changed, verify_info)
 
     tail_output = stdout if stdout else (stderr or "none")
     if status == "VERIFY_FAILED":
@@ -1767,7 +1779,8 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
             )
         except Exception as e:
             exit_code, stdout, stderr, files_changed, diff_summary = 1, "", str(e), 0, "error"
-        emit_event("finish", run_id=t_run_id, agent=t_agent, model=t_model, status=derive_status(exit_code, files_changed),
+        t_status = derive_status(exit_code, files_changed, t_verify_info)
+        emit_event("finish", run_id=t_run_id, agent=t_agent, model=t_model, status=t_status,
                    exit_code=exit_code, duration_s=round(time.time() - t_started, 1), files_changed=files_changed,
                    **verify_event_fields(t_verify_info))
 
@@ -1775,6 +1788,7 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
             "task": t_task,
             "agent": t_agent,
             "model": t_model,
+            "status": t_status,
             "exit_code": exit_code,
             "files_changed": files_changed,
             "diff_summary": diff_summary,
@@ -2295,7 +2309,7 @@ def main():
         elif is_deep_design:
             exit_code = 12  # Fail closed: THINKER_UNAVAILABLE
 
-    status = derive_status(exit_code, files_changed)
+    status = derive_status(exit_code, files_changed, verify_info)
     emit_event("finish", run_id=run_id, agent=chosen_agent, model=chosen_model, status=status, exit_code=exit_code,
                duration_s=round(time.time() - started, 1), files_changed=files_changed, **verify_event_fields(verify_info))
 

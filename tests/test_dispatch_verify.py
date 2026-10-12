@@ -515,5 +515,93 @@ class TestEventsRecordVerifyAndAcceptance(VerifyCLIBase):
         self.assertIn("100%", report)
 
 
+class TestNoChangesUnverifiedStatus(VerifyCLIBase):
+    """Exit 0 with zero changed files and skipped verification is not plain SUCCESS."""
+
+    STATUS = "NO_CHANGES_UNVERIFIED"
+
+    def test_derive_status_table(self):
+        derive = dispatch_mod.derive_status
+        self.assertEqual(derive(0, 0), "SUCCESS")  # callers that pass no verify outcome keep the old meaning
+        self.assertEqual(derive(0, 0, {"verified": "skipped"}), self.STATUS)
+        self.assertEqual(derive(0, 0, {"verified": True}), "SUCCESS")
+        self.assertEqual(derive(0, 3, {"verified": "skipped"}), "SUCCESS")
+        self.assertEqual(derive(0, 0, {"verified": "skipped", "is_thinking": True}), "SUCCESS")
+        self.assertEqual(derive(0, 0, {"verified": "skipped", "has_artifact": True}), "SUCCESS")
+        self.assertEqual(derive(124, 0, {"verified": "skipped"}), "TIMEOUT_NO_PROGRESS")
+        self.assertEqual(derive(1, 0, {"verified": "skipped"}), "FAILED")
+
+    def test_cli_noop_worker_without_verify(self):
+        res = self._cli("--no-verify")
+        self.assertEqual(res.returncode, 0, res.stderr[-500:])
+        self.assertIn(f"Status: {self.STATUS} (exit 0)", res.stdout)
+        self.assertNotIn("Status: SUCCESS", res.stdout)
+
+    def test_cli_worker_that_changes_a_file_is_still_success(self):
+        _write_executable(self.fake_bin / "agy", "#!/bin/sh\necho changed > new-file.txt\n")
+        res = self._cli("--no-verify")
+        self.assertEqual(res.returncode, 0, res.stderr[-500:])
+        self.assertIn("Status: SUCCESS (exit 0)", res.stdout)
+
+    def test_cli_noop_worker_with_passing_verify_is_success(self):
+        res = self._cli("--verify-cmd", "true")
+        self.assertIn("Status: SUCCESS (exit 0)", res.stdout)
+
+    def test_thinking_task_stays_success(self):
+        info = {}
+        with self._fake_worker():
+            exit_code, _out, _err, files_changed, _diff = dispatch_mod.run_single_task(
+                "analyse the design", str(self.repo_dir), "agy", None, 30, is_thinking=True, verify_info=info)
+        self.assertEqual((exit_code, files_changed), (0, 0))
+        self.assertEqual(dispatch_mod.derive_status(exit_code, files_changed, info), "SUCCESS")
+
+    def test_read_only_task_with_output_file_stays_success(self):
+        out = self.tmp / "audit.md"
+        info = {}
+        with self._fake_worker(f"echo findings > '{out}'"):
+            exit_code, _out, _err, files_changed, _diff = dispatch_mod.run_single_task(
+                "audit only", str(self.repo_dir), "agy", None, 30, output_file=str(out),
+                verify_opts={"no_verify": True}, verify_info=info)
+        self.assertEqual((exit_code, files_changed), (0, 0))
+        self.assertEqual(dispatch_mod.derive_status(exit_code, files_changed, info), "SUCCESS")
+
+    def test_missing_output_file_does_not_count_as_evidence(self):
+        info = {}
+        with self._fake_worker():
+            exit_code, _out, _err, files_changed, _diff = dispatch_mod.run_single_task(
+                "audit only", str(self.repo_dir), "agy", None, 30, output_file=str(self.tmp / "never-written.md"),
+                verify_opts={"no_verify": True}, verify_info=info)
+        self.assertEqual(dispatch_mod.derive_status(exit_code, files_changed, info), self.STATUS)
+
+    def test_batch_report_names_the_status(self):
+        with self._fake_worker():
+            results = dispatch_mod.execute_batch_parallel(
+                [{"task": "t1", "no_verify": True}, {"task": "t2", "verify_cmd": "true"}],
+                base_repo_dir=str(self.repo_dir), chosen_agent="agy", chosen_model=None, timeout_seconds=30, max_parallel=1,
+            )
+        self.assertEqual([r["status"] for r in results], [self.STATUS, "SUCCESS"])
+        report = dispatch_mod.format_batch_report(results).splitlines()
+        self.assertIn(f"{self.STATUS}:", report[1])
+        self.assertIn("SUCCESS:", report[2])
+        self.assertEqual(dispatch_mod.batch_overall_exit(results), 0)
+
+    def test_detached_job_state_and_finish_event(self):
+        job_dir = str(self.tmp / "jobs")
+        dispatch_mod.save_job_state("job-noop", {
+            "job_id": "job-noop", "agent": "agy", "task": "t", "cwd": str(self.repo_dir),
+            "isolated": False, "timeout": 30, "no_verify": True,
+        }, job_dir=job_dir)
+        with self._fake_worker(), self.assertRaises(SystemExit) as ctx:
+            dispatch_mod.run_internal_job("job-noop", job_dir=job_dir)
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(dispatch_mod.load_job_state("job-noop", job_dir=job_dir)["status"], self.STATUS)
+
+    def test_stats_does_not_count_it_as_ok(self):
+        now = 1_000_000.0
+        events = [{"ts": now, "event": "finish", "run_id": "a", "agent": "agy", "status": self.STATUS, "duration_s": 5}]
+        report = dispatch_mod.format_stats_report(events, now=now)
+        self.assertIn("0%", report)
+
+
 if __name__ == "__main__":
     unittest.main()
