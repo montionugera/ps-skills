@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -601,6 +602,82 @@ class TestNoChangesUnverifiedStatus(VerifyCLIBase):
         events = [{"ts": now, "event": "finish", "run_id": "a", "agent": "agy", "status": self.STATUS, "duration_s": 5}]
         report = dispatch_mod.format_stats_report(events, now=now)
         self.assertIn("0%", report)
+
+
+class TestWaitDoesNotGiveUpAtRunTimeout(unittest.TestCase):
+    """--wait blocks until the job ends; only an explicit limit stops it early, with its own exit code."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.job_dir = str(Path(self.temp_dir.name) / "jobs")
+        # A config-file default of 1s stands in for the 900s default: the wait must outlive it.
+        config = Path(self.temp_dir.name) / "config.env"
+        config.write_text('DISPATCH_TIMEOUT="1"\n', encoding="utf-8")
+        self.env = {k: v for k, v in os.environ.items()
+                    if k not in ("AI_AGENT_AUTO_DISPATCH_TIMEOUT", "DISPATCH_TIMEOUT")}
+        self.env["DISPATCH_CONFIG_FILE"] = str(config)
+
+    def _running_job(self, job_id):
+        # This test process is the "live worker": its pid stays alive for the whole wait.
+        dispatch_mod.save_job_state(job_id, {
+            "job_id": job_id, "agent": "agy", "task": f"task {job_id}", "cwd": "/tmp",
+            "status": "RUNNING", "pid": os.getpid(), "timeout": 9000,
+        }, job_dir=self.job_dir)
+
+    def _finish_job(self, job_id):
+        state = dispatch_mod.load_job_state(job_id, job_dir=self.job_dir)
+        state.update({"status": "SUCCESS", "exit_code": 0, "files_changed": 1, "diff_summary": "1 file", "verified": True})
+        dispatch_mod.save_job_state(job_id, state, job_dir=self.job_dir)
+
+    def _wait(self, *args):
+        return subprocess.Popen(
+            [sys.executable, str(SCRIPT_PATH), "--job-dir", self.job_dir, "--wait", *args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env,
+        )
+
+    def test_default_run_timeout_does_not_end_the_wait(self):
+        self.assertEqual(dispatch_mod.get_config_timeout(dispatch_mod.load_dispatch_config(self.env["DISPATCH_CONFIG_FILE"])), 1)
+        self._running_job("job-a")
+        proc = self._wait("job-a")
+        with self.assertRaises(subprocess.TimeoutExpired):
+            proc.communicate(timeout=3)  # still blocking well past the 1s default run timeout
+        self._finish_job("job-a")
+        out, _err = proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertIn("Status: SUCCESS (exit 0)", out)
+        self.assertNotIn("UNKNOWN", out)
+
+    def test_explicit_wait_timeout_reports_still_running(self):
+        self._running_job("job-b")
+        proc = self._wait("job-b", "--wait-timeout", "1")
+        out, _err = proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, dispatch_mod.WAIT_STILL_RUNNING_EXIT_CODE, out)
+        self.assertEqual(dispatch_mod.WAIT_STILL_RUNNING_EXIT_CODE, 75)
+        self.assertIn("STILL_RUNNING: job-b", out)
+        self.assertIn("dispatch-worker --wait job-b", out)
+        self.assertNotIn("UNKNOWN", out)
+        self.assertEqual(dispatch_mod.load_job_state("job-b", job_dir=self.job_dir)["status"], "RUNNING")
+
+    def test_explicit_timeout_flag_still_bounds_the_wait(self):
+        # Existing callers pass `--wait <job> --timeout N`: an explicit --timeout keeps working as the wait limit.
+        self._running_job("job-d")
+        proc = self._wait("job-d", "--timeout", "1")
+        out, _err = proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, 75, out)
+        self.assertIn("STILL_RUNNING: job-d", out)
+
+    def test_wait_all_reports_finished_and_still_running_jobs(self):
+        self._running_job("job-e")
+        self._running_job("job-f")
+        proc = self._wait("all", "--wait-timeout", "2")
+        time.sleep(0.5)
+        self._finish_job("job-e")
+        out, _err = proc.communicate(timeout=20)
+        self.assertEqual(proc.returncode, 75, out)
+        self.assertIn("STILL_RUNNING: job-f", out)
+        self.assertNotIn("STILL_RUNNING: job-e", out)
+        self.assertIn("task job-e", out)
 
 
 if __name__ == "__main__":

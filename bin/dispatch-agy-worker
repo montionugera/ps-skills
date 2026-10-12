@@ -65,6 +65,8 @@ DEFAULT_VERIFY_SCRIPT = "scripts/precheck.sh"
 VERIFY_FAILED_EXIT_CODE = 13
 # Worker exited 0, changed no files, and nothing verified the result: reported under its own name, still exit 0.
 NO_CHANGES_UNVERIFIED_STATUS = "NO_CHANGES_UNVERIFIED"
+# `--wait` stopped at its own limit while the job is still running (EX_TEMPFAIL: not a failure, wait again).
+WAIT_STILL_RUNNING_EXIT_CODE = 75
 VERIFY_TAIL_LINES = 40
 STALL_SECONDS = 300  # --status flags a RUNNING job STALLED? after this long without log output
 
@@ -1835,6 +1837,9 @@ def main():
     parser.add_argument("--detach", "--async", dest="detach", action="store_true", help="Launch task in background and exit immediately")
     parser.add_argument("--status", type=str, nargs="?", const="all", help="Check status of background job(s)")
     parser.add_argument("--wait", type=str, nargs="?", const="all", help="Wait for background job(s) to finish")
+    parser.add_argument("--wait-timeout", type=float, default=None, metavar="SECONDS",
+                        help=f"Stop a --wait after SECONDS and exit {WAIT_STILL_RUNNING_EXIT_CODE} if the job is still running "
+                             f"(default: wait until it finishes; an explicit --timeout is used as this limit)")
     parser.add_argument("--stats", type=float, nargs="?", const=7.0, default=None, metavar="DAYS",
                         help="Per-agent summary of the event log over the last DAYS days (default: 7)")
     parser.add_argument("--tail", type=str, nargs="?", const="latest", help="Show recent log output for a job (default: latest)")
@@ -1845,7 +1850,7 @@ def main():
     parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
     parser.add_argument("--min-5h", type=float, default=DEFAULT_MIN_5H, help="Minimum 5h quota remaining percent")
     parser.add_argument("--min-weekly", type=float, default=DEFAULT_MIN_WEEKLY, help="Minimum weekly quota remaining percent")
-    parser.add_argument("--timeout", type=int, default=default_timeout,
+    parser.add_argument("--timeout", type=int, default=None,
                         help=f"Timeout in seconds for execution (default: {default_timeout}s)")
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
@@ -1870,6 +1875,10 @@ def main():
     parser.add_argument("--internal-run-job", type=str, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+    # The run-timeout default must never end a --wait; only a limit the caller typed does.
+    wait_limit = args.wait_timeout if args.wait_timeout is not None else args.timeout
+    if args.timeout is None:
+        args.timeout = default_timeout
     # Explicit --agent (any spelling: `--agent X`, `--agent=X`) vs the default derived from the program name.
     agent_explicit = args.agent is not None
     if not agent_explicit:
@@ -1938,9 +1947,20 @@ def main():
                 else:
                     completed_results[jid] = st
 
-            if all_done or (time.time() - start_time) > args.timeout:
+            if all_done or (wait_limit is not None and (time.time() - start_time) > wait_limit):
                 break
             time.sleep(0.5)
+
+        still_running = [jid for jid in target_ids if jid not in completed_results]
+        if still_running:
+            finished = [completed_results[jid] for jid in target_ids if jid in completed_results]
+            if finished:
+                print(format_batch_report(finished))
+            waited = int(time.time() - start_time)
+            for jid in still_running:
+                print(f"STILL_RUNNING: {jid} has not finished after {waited}s of waiting; the job was not stopped. "
+                      f"Wait again: dispatch-worker --wait {jid}")
+            sys.exit(WAIT_STILL_RUNNING_EXIT_CODE)
 
         if len(target_ids) == 1:
             res = completed_results.get(target_ids[0], {})
