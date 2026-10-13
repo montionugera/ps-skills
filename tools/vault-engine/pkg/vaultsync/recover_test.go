@@ -1009,3 +1009,92 @@ func TestUndo_WhenTheUndoStartCannotBeRecordedNothingIsChanged(t *testing.T) {
 		t.Fatalf("the marker on disk must be as Begin wrote it: (%+v, %v)", disk, derr)
 	}
 }
+
+// A stop that cuts the comparison of an untracked file with the incoming
+// file of the same name is not an answer: the file stays where it is, no
+// report line is written, the stop is returned, and the next pass decides.
+func TestUpdate_AnInterruptedCompareLeavesTheClashingFileWhereItIs(t *testing.T) {
+	w := newWorld(t)
+	mac, srv := newRepo(t, w.Mac), newRepo(t, w.Srv)
+	writeFile(t, filepath.Join(w.Mac, "_inbox", "human", "same-name.md"), []byte("from mac\n"))
+	if err := mac.Commit([]string{"_inbox/human/same-name.md"}, "inbox", "vault: inbox drop", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if out, err := pushAs(t, w.Mac, "mac-test", "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	local := filepath.Join(w.Srv, "_inbox", "human", "same-name.md")
+	writeFile(t, local, []byte("from srv, different\n"))
+	lockFor(t, srv)
+	srv.gate = func(args []string) error {
+		for _, a := range args {
+			if a == "hash-object" {
+				return ErrStopped
+			}
+		}
+		return nil
+	}
+	moved, err := srv.Update(noRebuild)
+	if moved || !errors.Is(err, ErrStopped) {
+		t.Fatalf("update = (%v, %v), want (false, an error that wraps ErrStopped)", moved, err)
+	}
+	if text, rerr := os.ReadFile(local); rerr != nil || string(text) != "from srv, different\n" {
+		t.Fatalf("the local file must stay where it is: (%q, %v)", text, rerr)
+	}
+	if _, serr := os.Stat(filepath.Join(w.Srv, "_quarantine")); !os.IsNotExist(serr) {
+		t.Fatalf("an interrupted compare must set nothing aside and report nothing (stat _quarantine: %v)", serr)
+	}
+	// The next pass, with git working again, decides: the two differ.
+	srv.gate = nil
+	if err := srv.Recover(noRebuild); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if moved, err := srv.Update(noRebuild); err != nil || !moved {
+		t.Fatalf("second update = (%v, %v), want (true, nil)", moved, err)
+	}
+	if text, rerr := os.ReadFile(local); rerr != nil || string(text) != "from mac\n" {
+		t.Fatalf("incoming version should be in place: (%q, %v)", text, rerr)
+	}
+	if got := quarantined(t, w.Srv, "srv-test", "_inbox/human/same-name.md"); string(got) != "from srv, different\n" {
+		t.Fatalf("the local file was not kept: %q", got)
+	}
+	if n := reportLines(t, w.Srv, "srv-test"); n != 1 {
+		t.Fatalf("expected one report line, from the pass that could compare; got %d", n)
+	}
+}
+
+// A comparison that fails for a reason other than a stop is not "unknown": a
+// file git cannot hash (here a link that points nowhere) with the name of an
+// incoming file is still moved aside, so the update is never blocked by it.
+func TestUpdate_AClashingFileThatCannotBeHashedIsStillSetAside(t *testing.T) {
+	w := newWorld(t)
+	mac, srv := newRepo(t, w.Mac), newRepo(t, w.Srv)
+	writeFile(t, filepath.Join(w.Mac, "_inbox", "human", "same-name.md"), []byte("from mac\n"))
+	if err := mac.Commit([]string{"_inbox/human/same-name.md"}, "inbox", "vault: inbox drop", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if out, err := pushAs(t, w.Mac, "mac-test", "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	local := filepath.Join(w.Srv, "_inbox", "human", "same-name.md")
+	if err := os.Symlink("nowhere", local); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	lockFor(t, srv)
+	if moved, err := srv.Update(noRebuild); err != nil || !moved {
+		t.Fatalf("update = (%v, %v), want (true, nil)", moved, err)
+	}
+	if text, rerr := os.ReadFile(local); rerr != nil || string(text) != "from mac\n" {
+		t.Fatalf("incoming version should be in place: (%q, %v)", text, rerr)
+	}
+	kept, _ := filepath.Glob(filepath.Join(w.Srv, "_quarantine", "srv-test", "*", "_inbox", "human", "same-name.md"))
+	if len(kept) != 1 {
+		t.Fatalf("the local link must be set aside, found %v", kept)
+	}
+	if target, lerr := os.Readlink(kept[0]); lerr != nil || target != "nowhere" {
+		t.Fatalf("the link was not kept as it was: (%q, %v)", target, lerr)
+	}
+	if n := reportLines(t, w.Srv, "srv-test"); n != 1 {
+		t.Fatalf("expected one report line for the link that was set aside, got %d", n)
+	}
+}

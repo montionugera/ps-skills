@@ -3,6 +3,7 @@ package vaultsync
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -645,6 +646,14 @@ func (r *Repo) Update(rebuild func() error) (bool, error) {
 		}
 		mine, err1 := r.local("hash-object", "--", p)
 		theirs, err2 := r.local("rev-parse", hub+":"+p)
+		// A comparison cut by a stop is not an answer: the file stays where it
+		// is and nothing is reported; the next pass decides. Any other failure
+		// (a file git cannot hash) is treated as "differs", as before.
+		for _, err := range []error{err1, err2} {
+			if errors.Is(err, ErrStopped) {
+				return false, fmt.Errorf("compare %s with the incoming file of the same name: %w", p, err)
+			}
+		}
 		if err1 == nil && err2 == nil && mine == theirs {
 			if err := os.Remove(filepath.Join(r.Root, filepath.FromSlash(p))); err != nil {
 				return false, err
