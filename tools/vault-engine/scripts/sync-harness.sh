@@ -15,8 +15,18 @@ usage() {
     exit 2
 }
 
-fixture_git() {
-    git -c user.name=fixture -c user.email=fixture@test.invalid -c commit.gpgsign=false "$@"
+# Runs git in <dir> for the fixture. Like a place (gitLocationVars in
+# pkg/vaultsync/repo.go), it does not pass on the variables with which a
+# caller points git at another repository, and git may not look above <dir>.
+fixture_git() { # <dir> <git arguments...>
+    local dir=$1
+    shift
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
+        -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_QUARANTINE_PATH \
+        -u GIT_NAMESPACE -u GIT_PREFIX -u GIT_IMPLICIT_WORK_TREE -u GIT_SHALLOW_FILE \
+        -u GIT_GRAFT_FILE -u GIT_REPLACE_REF_BASE \
+        GIT_CEILING_DIRECTORIES="$(dirname "$dir")" \
+        git -C "$dir" -c user.name=fixture -c user.email=fixture@test.invalid -c commit.gpgsign=false "$@"
 }
 
 write_idea() { # <dir> <number> <title>
@@ -120,9 +130,9 @@ setup() { # <empty-dir> <engine-binary>
     sh "$ENGINE_DIR/hub/create-hub.sh" "$root/hub.git" "$engine" >/dev/null
     mkdir "$root/seed"
     write_fixture "$root/seed"
-    fixture_git -C "$root/seed" init --quiet --initial-branch=main
-    fixture_git -C "$root/seed" add -A
-    fixture_git -C "$root/seed" commit --quiet -m "fixture: synthetic seed"
+    fixture_git "$root/seed" init --quiet --initial-branch=main
+    fixture_git "$root/seed" add -A
+    fixture_git "$root/seed" commit --quiet -m "fixture: synthetic seed"
     env VAULT_HUB_PLACE=seed git -C "$root/seed" push --quiet "$root/hub.git" HEAD:refs/heads/main
     make_place "$root" mac-test "$engine"
     make_place "$root" srv-test "$engine"

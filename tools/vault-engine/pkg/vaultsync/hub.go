@@ -27,10 +27,13 @@ const zeroSHA = "0000000000000000000000000000000000000000"
 // to retry. Rules the sender broke keep "too-large" / "type-not-allowed".
 const hubFault = "engine-error"
 
-// hubGit runs git inside the hook: cwd is the bare repository and the
-// environment (including git's quarantine variables) is inherited untouched.
-func hubGit(stdin string, args ...string) (string, error) {
+// hubGit runs git for the hook in the folder dir; "" is the working folder of
+// this process, which is the bare repository when git runs the hook. The
+// environment (including git's quarantine variables) is inherited untouched:
+// the hook needs it to see the objects of the send it is checking.
+func hubGit(dir, stdin string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -44,8 +47,8 @@ func hubGit(stdin string, args ...string) (string, error) {
 // "<word> <size>") and calls visit for each output line. A git failure or an
 // unparseable line is the hub's own fault and is refused as hubFault; a
 // non-empty code returned by visit stops the scan and is returned as the refusal.
-func batchCheck(input, format, gitFail string, visit func(word string, size int64) (code, msg string)) (string, string) {
-	out, err := hubGit(input, "cat-file", "--batch-check="+format)
+func batchCheck(dir, input, format, gitFail string, visit func(word string, size int64) (code, msg string)) (string, string) {
+	out, err := hubGit(dir, input, "cat-file", "--batch-check="+format)
 	if err != nil {
 		return hubFault, fmt.Sprintf("%s: %v", gitFail, err)
 	}
@@ -68,8 +71,10 @@ func batchCheck(input, format, gitFail string, visit func(word string, size int6
 // PreReceive is the hub's door check. It returns the hook's exit code. Every
 // refusal is one line: "vault-hub: REFUSED <code>: <message>", where <code> is
 // "too-large" or "type-not-allowed" for a broken rule (the message names the
-// limit) and hubFault for a fault of the hub itself.
-func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now time.Time) int {
+// limit) and hubFault for a fault of the hub itself. dir is the folder its git
+// commands run in; the hook passes "" (its own working folder, the bare
+// repository).
+func PreReceive(dir string, stdin io.Reader, stderr io.Writer, limitsFile, place string, now time.Time) int {
 	refuse := func(code, format string, a ...interface{}) int {
 		fmt.Fprintf(stderr, "vault-hub: REFUSED %s: %s\n", code, fmt.Sprintf(format, a...))
 		return 1
@@ -104,21 +109,26 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 		if oldSHA != zeroSHA {
 			// git exits 1 for a clear "not an ancestor"; any other failure is no
 			// answer at all, so it is the hub's own fault (still refused).
-			if _, err := hubGit("", "merge-base", "--is-ancestor", oldSHA, newSHA); err != nil {
+			if _, err := hubGit(dir, "", "merge-base", "--is-ancestor", oldSHA, newSHA); err != nil {
 				var ee *exec.ExitError
 				if errors.As(err, &ee) && ee.ExitCode() == 1 {
 					return refuse("type-not-allowed", "rewriting the history of %s is never accepted", ref)
+				}
+				// The question cannot be asked about a tree or a blob. Sending one
+				// as the new tip is a rule the sender broke, not a fault of the hub.
+				if typ, terr := hubGit(dir, "", "cat-file", "-t", newSHA); terr == nil && strings.TrimSpace(typ) != "commit" {
+					return refuse("type-not-allowed", "%s may only point at a commit; this send points it at a %s", ref, strings.TrimSpace(typ))
 				}
 				return refuse(hubFault, "cannot check that %s only moves forward: %v", ref, err)
 			}
 		}
 		tips = append(tips, newSHA)
-		commits, err := hubGit("", "rev-list", newSHA, "--not", "--all")
+		commits, err := hubGit(dir, "", "rev-list", newSHA, "--not", "--all")
 		if err != nil {
 			return refuse(hubFault, "cannot list incoming commits: %v", err)
 		}
 		for _, c := range strings.Fields(commits) {
-			raw, err := hubGit("", "diff-tree", "-r", "--root", "-m", "--no-renames", "--no-commit-id", "--raw", "-z", c)
+			raw, err := hubGit(dir, "", "diff-tree", "-r", "--root", "-m", "--no-renames", "--no-commit-id", "--raw", "-z", c)
 			if err != nil {
 				return refuse(hubFault, "cannot read commit %s: %v", c, err)
 			}
@@ -152,7 +162,7 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 		for sha := range sizes {
 			in.WriteString(sha + "\n")
 		}
-		if code, msg := batchCheck(in.String(), "%(objectname) %(objectsize)", "cannot measure incoming files",
+		if code, msg := batchCheck(dir, in.String(), "%(objectname) %(objectsize)", "cannot measure incoming files",
 			func(name string, n int64) (string, string) { sizes[name] = n; return "", "" }); code != "" {
 			return refuse(code, "%s", msg)
 		}
@@ -168,7 +178,7 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 	// contents would let data hide in a commit message.
 	var total int64
 	if len(tips) > 0 {
-		listed, err := hubGit("", append(append([]string{"rev-list", "--objects"}, tips...), "--not", "--all")...)
+		listed, err := hubGit(dir, "", append(append([]string{"rev-list", "--objects"}, tips...), "--not", "--all")...)
 		if err != nil {
 			return refuse(hubFault, "cannot list incoming objects: %v", err)
 		}
@@ -178,7 +188,7 @@ func PreReceive(stdin io.Reader, stderr io.Writer, limitsFile, place string, now
 				in.WriteString(f[0] + "\n")
 			}
 		}
-		if code, msg := batchCheck(in.String(), "%(objecttype) %(objectsize)", "cannot measure the send",
+		if code, msg := batchCheck(dir, in.String(), "%(objecttype) %(objectsize)", "cannot measure the send",
 			func(typ string, n int64) (string, string) {
 				if typ != "blob" && n > l.MaxFileBytes {
 					return "too-large", fmt.Sprintf("a %s record in this send is %d bytes (commit message or folder listing); limit max_file_bytes=%d", typ, n, l.MaxFileBytes)
@@ -235,6 +245,11 @@ func chargeDaily(dir, place string, now time.Time, add, limit int64) (int64, boo
 		return 0, false, err
 	}
 	if err := writeFileAtomic(file, data); err != nil {
+		if errors.Is(err, errFolderSync) {
+			// The usage file is already in place; only the post-rename folder sync
+			// failed. Treat as charged (worst case after a power cut is an under-count).
+			return usage[place], true, nil
+		}
 		return 0, false, fmt.Errorf("writing usage file %s: %w", file, err)
 	}
 	return usage[place], true, nil

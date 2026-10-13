@@ -3,6 +3,7 @@ package vaultsync
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,12 +114,15 @@ func (r *Repo) Begin(op, actor string) (*Marker, error) {
 func (r *Repo) writeMarker(m *Marker) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("write save marker %s: %w", markerRel, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(r.markerPath()), 0755); err != nil {
-		return err
+		return fmt.Errorf("write save marker %s: %w", markerRel, err)
 	}
-	return writeFileAtomic(r.markerPath(), data)
+	if err := writeFileAtomic(r.markerPath(), data); err != nil {
+		return fmt.Errorf("write save marker %s: %w", markerRel, err)
+	}
+	return nil
 }
 
 func (r *Repo) End() error {
@@ -196,21 +200,24 @@ func (r *Repo) changed(m *Marker) (map[string]string, error) {
 // _quarantine/<place>/ and deletes nothing.
 func (r *Repo) Undo(m *Marker, written []string, rebuild func() error) error {
 	// The marker on disk is the record: a Recover that failed set the flag on
-	// its own copy, not on the one the caller holds. A missing file means no
-	// earlier pass recorded anything, so the caller's marker decides. A file
-	// for another operation is not this save's record: change nothing.
+	// its own copy, not on the one the caller holds. Begin always writes the
+	// file, so a missing file means the save was already settled (a Recover
+	// that succeeded removes it): the caller's list is stale, change nothing.
+	// A file for another operation is not this save's record: change nothing.
 	disk, err := r.readMarker()
 	if err != nil {
 		return err
 	}
-	if disk != nil {
-		if disk.Op != m.Op || disk.Actor != m.Actor || disk.Base != m.Base ||
-			disk.StartedAt != m.StartedAt || disk.PID != m.PID {
-			return fmt.Errorf("the save marker on disk (%s by %s, started %s) is not the one given to undo (%s by %s, started %s); nothing was changed",
-				disk.Op, disk.Actor, disk.StartedAt, m.Op, m.Actor, m.StartedAt)
-		}
-		m.UndoStarted = m.UndoStarted || disk.UndoStarted
+	if disk == nil {
+		return fmt.Errorf("there is no save marker on disk for the %s by %s (started %s): that save was already settled; nothing was changed",
+			m.Op, m.Actor, m.StartedAt)
 	}
+	if disk.Op != m.Op || disk.Actor != m.Actor || disk.Base != m.Base ||
+		disk.StartedAt != m.StartedAt || disk.PID != m.PID {
+		return fmt.Errorf("the save marker on disk (%s by %s, started %s) is not the one given to undo (%s by %s, started %s); nothing was changed",
+			disk.Op, disk.Actor, disk.StartedAt, m.Op, m.Actor, m.StartedAt)
+	}
+	m.UndoStarted = m.UndoStarted || disk.UndoStarted
 	if m.UndoStarted {
 		return r.undo(m, nil, true, rebuild)
 	}
@@ -319,13 +326,15 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 		return err
 	}
 	// Record on disk, before the reset, that the proof (the save's commit) may
-	// be lost from here on. If the record cannot be written, nothing is changed
-	// and the marker (in memory and on disk) stays as it was.
+	// be lost from here on. If the write fails before the rename, nothing is
+	// changed and the marker stays as it was; if only the folder sync failed
+	// the record on disk already says the undo started, and that is safe
+	// because the next Undo or Recover reads the disk marker.
 	if !m.UndoStarted {
 		m.UndoStarted = true
 		if err := r.writeMarker(m); err != nil {
 			m.UndoStarted = false
-			return err
+			return fmt.Errorf("record undo start: %w", err)
 		}
 	}
 	if _, err := r.local("reset", "--quiet", "--mixed", m.Base); err != nil {
@@ -511,8 +520,37 @@ func (r *Repo) hasCopy(rel string, data []byte) bool {
 	return false
 }
 
+// syncDir flushes a folder's own record to disk, so that a rename inside it
+// survives a power cut. A variable so a test can watch it or make it fail.
+var syncDir = func(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("sync folder %s: %w", dir, err)
+	}
+	serr := d.Sync()
+	if cerr := d.Close(); serr == nil {
+		serr = cerr
+	}
+	if serr != nil {
+		return fmt.Errorf("sync folder %s: %w", dir, serr)
+	}
+	return nil
+}
+
+// errFolderSync marks an error from the parent-folder sync that happens after
+// a successful rename in writeFileAtomic.
+var errFolderSync = errors.New("folder sync")
+
 // writeFileAtomic writes data to path through a temp file, fsync and rename,
-// so a crash leaves either the old file or the whole new one.
+// then syncs the folder, so a crash leaves either the old file or the whole
+// new one and a power cut cannot lose the rename. A folder sync that fails is
+// returned although the new file is already in place; a caller must treat
+// that like a crash right after the rename.
+//
+// The temp name is fixed (path + ".tmp"), so two writers of the same path
+// would share it: every caller must hold a lock that covers path (the folder
+// lock for the marker and for quarantine copies, usage.guard for the hub's
+// usage file).
 func writeFileAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -531,8 +569,12 @@ func writeFileAtomic(path string, data []byte) error {
 	}
 	if werr != nil {
 		_ = os.Remove(tmp)
+		return werr
 	}
-	return werr
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("%w: %w", errFolderSync, err)
+	}
+	return nil
 }
 
 // freshTarget makes the folder for dst and refuses a dst that already exists.
@@ -639,6 +681,14 @@ func (r *Repo) Update(rebuild func() error) (bool, error) {
 		}
 		mine, err1 := r.local("hash-object", "--", p)
 		theirs, err2 := r.local("rev-parse", hub+":"+p)
+		// A comparison cut by a stop is not an answer: the file stays where it
+		// is and nothing is reported; the next pass decides. Any other failure
+		// (a file git cannot hash) is treated as "differs", as before.
+		for _, err := range []error{err1, err2} {
+			if errors.Is(err, ErrStopped) {
+				return false, fmt.Errorf("compare %s with the incoming file of the same name: %w", p, err)
+			}
+		}
 		if err1 == nil && err2 == nil && mine == theirs {
 			if err := os.Remove(filepath.Join(r.Root, filepath.FromSlash(p))); err != nil {
 				return false, err

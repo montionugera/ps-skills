@@ -74,7 +74,10 @@ func TestFolderLock_WaitEndsAtOnceWhenTheContextIsCancelled(t *testing.T) {
 	if waited := time.Since(start); waited > 2*time.Second {
 		t.Fatalf("waited %v after the cancel, expected about 100ms", waited)
 	}
-	// The failed wait must not have left the lock taken or a descriptor open on it.
+	// The cancelled wait must not have left the lock taken: once the holder lets
+	// go, it can be taken again. This does not prove that the wait closed its
+	// own descriptor (a leaked one that never held the lock would not show
+	// here); the close is in the ctx.Done branch of AcquireFolderLockContext.
 	held.Release()
 	again, err := AcquireFolderLock(root, time.Second)
 	if err != nil {

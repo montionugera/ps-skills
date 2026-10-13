@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -522,9 +523,37 @@ func TestDaemon_StopSignalDuringPushStartsNoFurtherGitCommand(t *testing.T) {
 	}
 }
 
-// runAndCancel starts Run, waits for ready, cancels, and returns how long Run
-// took to return after the cancel. Run is always waited for before the test's
-// folders are removed.
+// closedWhen returns a channel that is closed once cond is true. Its polling
+// goroutine ends then, or when the test ends, whichever comes first.
+func closedWhen(t *testing.T, cond func() bool) <-chan struct{} {
+	t.Helper()
+	ready, stop := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		for !cond() {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		close(ready)
+	}()
+	return ready
+}
+
+// waitingForFolderLock reports whether a goroutine of this test binary is
+// inside AcquireFolderLockContext at this moment. A test that itself holds the
+// lock uses it to know that the daemon has really reached the wait.
+func waitingForFolderLock() bool {
+	buf := make([]byte, 1<<20)
+	return bytes.Contains(buf[:runtime.Stack(buf, true)], []byte("vaultsync.AcquireFolderLockContext("))
+}
+
+// runAndCancel starts Run, waits for ready, cancels at once, and returns how
+// long Run took to return after the cancel. ready must be a real sign that the
+// daemon is in the step under test; no settle time is added. Run is always
+// waited for before the test's folders are removed.
 func runAndCancel(t *testing.T, d *Daemon, ready <-chan struct{}) time.Duration {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -542,7 +571,6 @@ func runAndCancel(t *testing.T, d *Daemon, ready <-chan struct{}) time.Duration 
 	case <-time.After(20 * time.Second):
 		t.Fatalf("the daemon never reached the step under test")
 	}
-	time.Sleep(200 * time.Millisecond) // let it settle into the wait
 	cancel()
 	start := time.Now()
 	select {
@@ -573,23 +601,22 @@ func TestDaemon_CancelCutsARunningGitCommandShort(t *testing.T) {
 	srv.S.Cfg.PollIntervalMS = 50
 	srv.S.Repo.Remote = "slow"
 	srv.S.Repo.NetTimeout = 20 * time.Second
-	ready := make(chan struct{})
-	go func() { // the helper writes its pid once git has started it
-		for {
-			if _, err := os.Stat(pidFile); err == nil {
-				close(ready)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
+	// The helper writes its pid as its first act, once git has started it. The
+	// file is only "there" when it holds the pid: the cancel follows at once.
+	ready := closedWhen(t, func() bool {
+		data, err := os.ReadFile(pidFile)
+		return err == nil && len(bytes.TrimSpace(data)) > 0
+	})
 	took := runAndCancel(t, srv, ready)
 	t.Logf("Run returned %v after the cancel", took)
 	raw, err := os.ReadFile(pidFile)
 	if err != nil {
 		t.Fatalf("pid file: %v", err)
 	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("pid file holds %q: %v", raw, err)
+	}
 	if waitFor(2*time.Second, func() bool { return syscall.Kill(pid, 0) != nil }); syscall.Kill(pid, 0) == nil {
 		t.Fatalf("helper process %d is still running after the cancel", pid)
 	}
@@ -611,19 +638,105 @@ func TestDaemon_CancelEndsTheWaitForTheFolderLock(t *testing.T) {
 	srv := newDaemon(t, w.Srv)
 	srv.S.Cfg.PollIntervalMS = 50
 	srv.S.Cfg.LockTimeoutMS = 20000
-	ready := make(chan struct{})
-	var once sync.Once
-	srv.S.Repo.gate = func(args []string) error {
-		for _, a := range args {
-			if a == "--show-toplevel" { // the last git command before the lock is asked for
-				once.Do(func() { close(ready) })
-			}
-		}
-		return nil
-	}
-	took := runAndCancel(t, srv, ready)
+	// This test holds the lock, so a goroutine inside the lock function is the
+	// daemon waiting for it.
+	took := runAndCancel(t, srv, closedWhen(t, waitingForFolderLock))
 	t.Logf("Run returned %v after the cancel", took)
 	if st := mustGit(t, w.Srv, "status", "--porcelain"); st != "" {
 		t.Fatalf("a stopped wait must leave the folder as it was:\n%s", st)
 	}
+}
+
+// cancelledAt runs the daemon with a context that is cancelled, without any
+// signal, at the moment git is asked for the command named word. Repo.run then
+// reports that command as ErrStopped. The pass ends there, under the folder
+// lock, with the save marker still on disk.
+func cancelledAt(t *testing.T, d *Daemon, word string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hit := false
+	d.S.Repo.gate = func(args []string) error {
+		for _, a := range args {
+			if a == word {
+				hit = true
+				cancel()
+			}
+		}
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("Run did not stop")
+	}
+	d.S.Repo.gate = nil
+	if !hit {
+		t.Fatalf("the pass never reached git %s", word)
+	}
+	if !d.S.Repo.hasMarker() {
+		t.Fatalf("a pass cancelled at git %s should leave its marker for the next pass", word)
+	}
+}
+
+// A cancel that is not a signal can land while a pass is changing the folder
+// under the lock. Whatever it leaves, the next pass settles it.
+func TestDaemon_CancelWithoutASignalAtMergeOrCommitIsSettledByTheNextPass(t *testing.T) {
+	t.Run("merge of an incoming update", func(t *testing.T) {
+		w := newWorld(t)
+		mac := newSyncer(t, w.Mac)
+		if _, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5)); out.Exit != 0 {
+			t.Fatalf("mac save: %+v", out) // srv now has an update to bring in
+		}
+		srv := newDaemon(t, w.Srv)
+		srv.S.Cfg.PollIntervalMS = 50
+		cancelledAt(t, srv, "merge")
+		if readSHA(t, w.Srv, note1) == readSHA(t, w.Mac, note1) {
+			t.Fatalf("the update should not have gone through in the cancelled pass")
+		}
+		if err := srv.Tick(); err != nil {
+			t.Fatalf("next pass: %v", err)
+		}
+		if srv.S.Repo.hasMarker() {
+			t.Fatalf("the next pass must settle the marker")
+		}
+		if readSHA(t, w.Srv, note1) != readSHA(t, w.Mac, note1) {
+			t.Fatalf("the next pass must bring the update in")
+		}
+		cleanExceptIgnored(t, w.Srv)
+		if _, err := os.Stat(filepath.Join(w.Srv, "_quarantine")); !os.IsNotExist(err) {
+			t.Fatalf("nothing was edited by hand, so nothing may be set aside (stat _quarantine: %v)", err)
+		}
+	})
+	t.Run("commit of an inbox drop", func(t *testing.T) {
+		w := newWorld(t)
+		quietDrop(t, w.Mac, "_inbox/human/hi.md", []byte("hi\n"))
+		mac := newDaemon(t, w.Mac)
+		mac.S.Cfg.PollIntervalMS = 50
+		cancelledAt(t, mac, "commit")
+		if st := mustGit(t, w.Mac, "status", "--porcelain"); st != "A  _inbox/human/hi.md" {
+			t.Fatalf("the cancelled pass should have left the drop staged and not committed, got %q", st)
+		}
+		if err := mac.Tick(); err != nil {
+			t.Fatalf("next pass: %v", err)
+		}
+		if mac.S.Repo.hasMarker() {
+			t.Fatalf("the next pass must settle the marker")
+		}
+		if text := mustGit(t, w.Hub, "show", "refs/heads/main:_inbox/human/hi.md"); text != "hi" {
+			t.Fatalf("the drop is not on the hub: %q", text)
+		}
+		if n := mustGit(t, w.Hub, "rev-list", "--count", "refs/heads/main"); n != "2" {
+			t.Fatalf("the hub should hold the seed and one send of the drop, has %s commits", n)
+		}
+		cleanExceptIgnored(t, w.Mac)
+		if _, err := os.Stat(filepath.Join(w.Mac, "_quarantine")); !os.IsNotExist(err) {
+			t.Fatalf("a drop is never set aside by a cancelled pass (stat _quarantine: %v)", err)
+		}
+	})
 }
