@@ -83,7 +83,13 @@ class MidturnTest(unittest.TestCase):
 
     def test_huge_line_in_tail(self):
         self.write(260_000, extra=("x" * (5 << 20),))
-        self.run_hook()  # must not crash or hang
+        self.assertIsNone(self.run_hook())  # newest usage is out of the tail: silent, no crash or hang
+
+    def test_session_id_cannot_escape_state_dir(self):
+        self.write(260_000)
+        self.run_hook(session_id="../../escaped")
+        self.assertFalse((self.dir.parent / "escaped.midturn").exists())
+        self.assertTrue(any(p.name.startswith("claude-auto-handoff-") for p in self.dir.iterdir()))
 
 
 if __name__ == "__main__":

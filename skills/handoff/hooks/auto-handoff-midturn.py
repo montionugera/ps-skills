@@ -78,7 +78,7 @@ def main():
     level = passed[-1]
     dry = os.environ.get("CLAUDE_AUTO_HANDOFF_NOTICES") != "1"
     state = pathlib.Path(os.environ.get("CLAUDE_AUTO_HANDOFF_STATE_DIR") or "/tmp")
-    session_id = data.get("session_id") or "unknown"
+    session_id = "".join(c for c in str(data.get("session_id") or "unknown") if c.isalnum() or c in "-_") or "unknown"
     marker = state / f"claude-auto-handoff-{session_id}.midturn{'.dry' if dry else ''}"
     try:
         if int(marker.read_text()) >= level:
