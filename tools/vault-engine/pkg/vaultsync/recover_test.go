@@ -50,7 +50,10 @@ func TestRecover_InterruptedSaveMovesUnprovenFilesToQuarantineAndNeverTouchesAnI
 	r := newRepo(t, w.Mac)
 	lockFor(t, r)
 	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
-	original, _ := os.ReadFile(note)
+	original, err := os.ReadFile(note)
+	if err != nil {
+		t.Fatalf("read %s: %v", note, err)
+	}
 	stray := filepath.Join(w.Mac, "01_Ideas", "was-here-before.md")
 	writeFile(t, stray, []byte("untracked before the save started\n"))
 
@@ -68,8 +71,8 @@ func TestRecover_InterruptedSaveMovesUnprovenFilesToQuarantineAndNeverTouchesAnI
 	if err := r.Recover(func() error { rebuilt = true; return nil }); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if now, _ := os.ReadFile(note); string(now) != string(original) {
-		t.Errorf("note was not put back")
+	if now, err := os.ReadFile(note); err != nil || string(now) != string(original) {
+		t.Errorf("note was not put back: (%q, %v)", now, err)
 	}
 	// After a crash nothing proves who wrote an untracked file: it is moved, never deleted.
 	for rel, want := range map[string]string{
@@ -158,7 +161,10 @@ func TestUndo_RemovesExactlyTheListedFilesAndLeavesAHandMadeFileAlone(t *testing
 	lockFor(t, r)
 	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
 	noteRel := "01_Ideas/" + filepath.Base(note)
-	original, _ := os.ReadFile(note)
+	original, err := os.ReadFile(note)
+	if err != nil {
+		t.Fatalf("read %s: %v", note, err)
+	}
 	m, err := r.Begin("commit", "agent-olivier")
 	if err != nil {
 		t.Fatalf("begin: %v", err)
@@ -176,8 +182,8 @@ func TestUndo_RemovesExactlyTheListedFilesAndLeavesAHandMadeFileAlone(t *testing
 	if err := r.Undo(m, list, noRebuild); err != nil {
 		t.Fatalf("undo: %v", err)
 	}
-	if now, _ := os.ReadFile(note); string(now) != string(original) {
-		t.Errorf("note was not put back")
+	if now, err := os.ReadFile(note); err != nil || string(now) != string(original) {
+		t.Errorf("note was not put back: (%q, %v)", now, err)
 	}
 	if _, err := os.Stat(written); !os.IsNotExist(err) {
 		t.Errorf("the listed file should be gone")
@@ -837,7 +843,10 @@ func undoAfterFailedPass(t *testing.T, firstPass func(r *Repo, m *Marker, list [
 			lockFor(t, r)
 			note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
 			noteRel := "01_Ideas/" + filepath.Base(note)
-			original, _ := os.ReadFile(note)
+			original, err := os.ReadFile(note)
+			if err != nil {
+				t.Fatalf("read %s: %v", note, err)
+			}
 			m, err := r.Begin("commit", "agent-olivier")
 			if err != nil {
 				t.Fatalf("begin: %v", err)
@@ -863,6 +872,11 @@ func undoAfterFailedPass(t *testing.T, firstPass func(r *Repo, m *Marker, list [
 				t.Fatalf("the first pass must report the failed lookup")
 			}
 			r.gate = nil
+			// The premise of this test: the first pass failed after it had moved
+			// the folder back, so the save's commit is gone.
+			if head, err := r.Head(); err != nil || head != m.Base {
+				t.Fatalf("the first pass must have failed after the folder was moved back: head (%s, %v), base %s", head, err, m.Base)
+			}
 			if reread {
 				if m, err = r.readMarker(); err != nil || m == nil {
 					t.Fatalf("marker must still be on disk: (%v, %v)", m, err)
@@ -871,8 +885,8 @@ func undoAfterFailedPass(t *testing.T, firstPass func(r *Repo, m *Marker, list [
 			if err := r.Undo(m, list, noRebuild); err != nil {
 				t.Fatalf("second undo: %v", err)
 			}
-			if now, _ := os.ReadFile(note); string(now) != string(original) {
-				t.Errorf("the note should be back at the shared version, got %q", now)
+			if now, err := os.ReadFile(note); err != nil || string(now) != string(original) {
+				t.Errorf("the note should be back at the shared version, got (%q, %v)", now, err)
 			}
 			if _, err := os.Stat(fresh); !os.IsNotExist(err) {
 				t.Errorf("the new file should have been moved aside")
