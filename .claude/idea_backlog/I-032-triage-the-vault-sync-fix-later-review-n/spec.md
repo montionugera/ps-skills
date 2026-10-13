@@ -44,7 +44,7 @@ line numbers in the notes stop matching.
 ## Acceptance criteria
 
 - [x] Every finding in `research.md` Parts 1 and 2 carries one of three marks (already fixed, still open, no longer applies), each with the file and line checked on `main`.
-- [ ] Every still-open finding is either linked to a new idea or feature id, or dropped with a written reason.
+- [x] Every still-open finding is either linked to a new idea or feature id, or dropped with a written reason. (All 32 open findings, A1-A32, are fixed by F-025, shipped to release 1.12; leftovers found in review are I-036 and I-037.)
 - [x] No review notes for this build exist only in an uncommitted folder.
 
 ## Progress (2026-10-13)
