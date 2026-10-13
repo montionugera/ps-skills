@@ -63,6 +63,12 @@ DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.env
 DEFAULT_VERIFY_TIMEOUT = int(os.environ.get("DISPATCH_VERIFY_TIMEOUT") or "600")
 DEFAULT_VERIFY_SCRIPT = "scripts/precheck.sh"
 VERIFY_FAILED_EXIT_CODE = 13
+# Worker exited 0, changed no files, and nothing verified the result: reported under its own name, still exit 0.
+NO_CHANGES_UNVERIFIED_STATUS = "NO_CHANGES_UNVERIFIED"
+# `--wait` stopped at its own limit while the job is still running (EX_TEMPFAIL: not a failure, wait again).
+WAIT_STILL_RUNNING_EXIT_CODE = 75
+# A job saved without a runner pid for longer than this never started: --wait reports it dead instead of hanging.
+WAIT_ORPHAN_GRACE_SECONDS = 60
 VERIFY_TAIL_LINES = 40
 STALL_SECONDS = 300  # --status flags a RUNNING job STALLED? after this long without log output
 
@@ -1253,14 +1259,31 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, ou
         return cmd
 
 
-def derive_status(exit_code, files_changed):
+def derive_status(exit_code, files_changed, verify_info=None):
     if exit_code == 0:
+        # Read-only work stays SUCCESS when it is a thinking-mode task or wrote a non-empty --output-file.
+        # Outside a git repo changed files cannot be counted, so "0 files" is not evidence either way.
+        if (verify_info is not None and files_changed == 0 and verify_info.get("verified", "skipped") == "skipped"
+                and not verify_info.get("is_thinking") and not verify_info.get("has_artifact")
+                and verify_info.get("in_git_repo", True)):
+            return NO_CHANGES_UNVERIFIED_STATUS
         return "SUCCESS"
     if exit_code == VERIFY_FAILED_EXIT_CODE:
         return "VERIFY_FAILED"
     if exit_code == 124:
         return "TIMEOUT_PARTIAL_WORK" if files_changed > 0 else "TIMEOUT_NO_PROGRESS"
     return "FAILED_PARTIAL_WORK" if files_changed > 0 else "FAILED"
+
+
+def verify_event_fields(info):
+    """Event-log view of a run's verify plan: flags only - never the command or the acceptance text."""
+    info = info or {}
+    return {
+        "has_verify_cmd": bool(info.get("verify_cmd")),
+        "verify_source": info.get("verify_source"),
+        "has_acceptance": bool(info.get("has_acceptance")),
+        "verified": info.get("verified", "skipped"),
+    }
 
 
 def verify_opts_from(source):
@@ -1293,6 +1316,8 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
     info.update({
         "verified": "skipped", "verify_cmd": verify_cmd, "verify_source": verify_source,
         "verify_attempts": 0, "verify_output": "", "worktree": target_dir,
+        "has_acceptance": bool((opts.get("acceptance") or "").strip()),
+        "is_thinking": bool(is_thinking), "has_artifact": False,
     })
     if verify_source == "none":
         print(
@@ -1306,6 +1331,16 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         capture_output=True,
         text=True,
     ).stdout.strip()
+    info["in_git_repo"] = bool(initial_head)
+
+    def _artifact_signature():
+        try:
+            st = os.stat(os.path.join(target_dir, output_file))
+            return (st.st_mtime_ns, st.st_size)
+        except (OSError, TypeError):
+            return None
+
+    artifact_before = _artifact_signature()
 
     def _invoke_worker(prompt_text):
         wrapped_task = wrap_prompt_contract(
@@ -1329,7 +1364,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         return 1 if code == VERIFY_FAILED_EXIT_CODE else code
 
     emit_event("start", run_id=run_id, agent=chosen_agent, model=chosen_model, cwd=target_dir, isolated=isolated,
-               timeout=timeout_seconds, **task_digest(task_text))
+               timeout=timeout_seconds, **verify_event_fields(info), **task_digest(task_text))
     exit_code, stdout, stderr, is_timeout = _invoke_worker(task_text)
     exit_code = _own_exit(exit_code)
 
@@ -1371,6 +1406,9 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
                        attempts=info["verify_attempts"])
 
     files_changed, diff_summary, commit_count = inspect_git_changes(target_dir, initial_head)
+    artifact_after = _artifact_signature()
+    # Only a file this run wrote counts: a non-empty output file that is new or changed since the start.
+    info["has_artifact"] = bool(artifact_after and artifact_after[1] > 0 and artifact_after != artifact_before)
     return exit_code, stdout, stderr, files_changed, diff_summary
 
 
@@ -1474,6 +1512,8 @@ def format_batch_report(results):
         task_preview = r.get("task", "")[:28] + "..." if len(r.get("task", "")) > 28 else r.get("task", "")
         status_icon = "SUCCESS" if r.get("exit_code") == 0 else (
             "VERIFY_FAILED" if r.get("exit_code") == VERIFY_FAILED_EXIT_CODE else "FAILED")
+        if r.get("status") == NO_CHANGES_UNVERIFIED_STATUS:
+            status_icon = NO_CHANGES_UNVERIFIED_STATUS
         agent = r.get("agent", "worker").upper()
         fc = r.get("files_changed", 0)
         ds = r.get("diff_summary", "no diff")
@@ -1682,7 +1722,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     except Exception as e:
         exit_code, stdout, stderr, files_changed, diff_summary = 1, "", f"Execution error: {e}", 0, "error"
 
-    status = derive_status(exit_code, files_changed)
+    status = derive_status(exit_code, files_changed, verify_info)
 
     tail_output = stdout if stdout else (stderr or "none")
     if status == "VERIFY_FAILED":
@@ -1700,7 +1740,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     state["completed_at"] = time.time()
     save_job_state(job_id, state, job_dir)
     emit_event("finish", run_id=job_id, agent=agent, model=model, status=status, exit_code=exit_code,
-               duration_s=round(time.time() - started, 1), files_changed=files_changed)
+               duration_s=round(time.time() - started, 1), files_changed=files_changed, **verify_event_fields(verify_info))
 
     sys.exit(exit_code)
 
@@ -1755,13 +1795,16 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
             )
         except Exception as e:
             exit_code, stdout, stderr, files_changed, diff_summary = 1, "", str(e), 0, "error"
-        emit_event("finish", run_id=t_run_id, agent=t_agent, model=t_model, status=derive_status(exit_code, files_changed),
-                   exit_code=exit_code, duration_s=round(time.time() - t_started, 1), files_changed=files_changed)
+        t_status = derive_status(exit_code, files_changed, t_verify_info)
+        emit_event("finish", run_id=t_run_id, agent=t_agent, model=t_model, status=t_status,
+                   exit_code=exit_code, duration_s=round(time.time() - t_started, 1), files_changed=files_changed,
+                   **verify_event_fields(t_verify_info))
 
         results[idx] = {
             "task": t_task,
             "agent": t_agent,
             "model": t_model,
+            "status": t_status,
             "exit_code": exit_code,
             "files_changed": files_changed,
             "diff_summary": diff_summary,
@@ -1793,7 +1836,7 @@ def main():
     parser.add_argument("--model", type=str, default=None,
                         help="Model override for the chosen agent")
     parser.add_argument("--effort", type=str, default=None,
-                        help="Reasoning effort level (e.g. low, medium, high, max). Thinking mode defaults to 'high'.")
+                        help="Reasoning effort level (e.g. low, medium, high, max). Thinking mode defaults to 'medium'.")
     parser.add_argument("--priority", type=str, default=default_preference,
                         help="Priority chain preference (e.g. 'cursor:gemini-3.8-flash > agy')")
     parser.add_argument("--mode", choices=["subscription_quota_remaining", "on_demand"], default=default_mode_str,
@@ -1808,6 +1851,9 @@ def main():
     parser.add_argument("--detach", "--async", dest="detach", action="store_true", help="Launch task in background and exit immediately")
     parser.add_argument("--status", type=str, nargs="?", const="all", help="Check status of background job(s)")
     parser.add_argument("--wait", type=str, nargs="?", const="all", help="Wait for background job(s) to finish")
+    parser.add_argument("--wait-timeout", type=float, default=None, metavar="SECONDS",
+                        help=f"Stop a --wait after SECONDS and exit {WAIT_STILL_RUNNING_EXIT_CODE} if the job is still running "
+                             f"(default: wait until it finishes; an explicit --timeout is used as this limit)")
     parser.add_argument("--stats", type=float, nargs="?", const=7.0, default=None, metavar="DAYS",
                         help="Per-agent summary of the event log over the last DAYS days (default: 7)")
     parser.add_argument("--tail", type=str, nargs="?", const="latest", help="Show recent log output for a job (default: latest)")
@@ -1818,7 +1864,7 @@ def main():
     parser.add_argument("--cwd", type=str, default=os.getcwd(), help="Target working directory / worktree")
     parser.add_argument("--min-5h", type=float, default=DEFAULT_MIN_5H, help="Minimum 5h quota remaining percent")
     parser.add_argument("--min-weekly", type=float, default=DEFAULT_MIN_WEEKLY, help="Minimum weekly quota remaining percent")
-    parser.add_argument("--timeout", type=int, default=default_timeout,
+    parser.add_argument("--timeout", type=int, default=None,
                         help=f"Timeout in seconds for execution (default: {default_timeout}s)")
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
@@ -1843,6 +1889,10 @@ def main():
     parser.add_argument("--internal-run-job", type=str, default=None, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+    # The run-timeout default must never end a --wait; only a limit the caller typed does.
+    wait_limit = args.wait_timeout if args.wait_timeout is not None else args.timeout
+    if args.timeout is None:
+        args.timeout = default_timeout
     # Explicit --agent (any spelling: `--agent X`, `--agent=X`) vs the default derived from the program name.
     agent_explicit = args.agent is not None
     if not agent_explicit:
@@ -1901,7 +1951,8 @@ def main():
                 status = st.get("status")
                 pid = st.get("pid")
                 if status in ("RUNNING", "PENDING"):
-                    if pid and not is_pid_running(pid):
+                    orphaned = not pid and (time.time() - (st.get("created_at") or 0)) > WAIT_ORPHAN_GRACE_SECONDS
+                    if orphaned or (pid and not is_pid_running(pid)):
                         st["status"] = "FAILED_DIED"
                         st["exit_code"] = 1
                         save_job_state(jid, st, job_dir=args.job_dir)
@@ -1911,9 +1962,20 @@ def main():
                 else:
                     completed_results[jid] = st
 
-            if all_done or (time.time() - start_time) > args.timeout:
+            if all_done or (wait_limit is not None and (time.time() - start_time) > wait_limit):
                 break
             time.sleep(0.5)
+
+        still_running = [jid for jid in target_ids if jid not in completed_results]
+        if still_running:
+            finished = [completed_results[jid] for jid in target_ids if jid in completed_results]
+            if finished:
+                print(format_batch_report(finished))
+            waited = int(time.time() - start_time)
+            for jid in still_running:
+                print(f"STILL_RUNNING: {jid} has not finished after {waited}s of waiting; the job was not stopped. "
+                      f"Wait again: dispatch-worker --wait {jid}")
+            sys.exit(WAIT_STILL_RUNNING_EXIT_CODE)
 
         if len(target_ids) == 1:
             res = completed_results.get(target_ids[0], {})
@@ -2282,9 +2344,9 @@ def main():
         elif is_deep_design:
             exit_code = 12  # Fail closed: THINKER_UNAVAILABLE
 
-    status = derive_status(exit_code, files_changed)
+    status = derive_status(exit_code, files_changed, verify_info)
     emit_event("finish", run_id=run_id, agent=chosen_agent, model=chosen_model, status=status, exit_code=exit_code,
-               duration_s=round(time.time() - started, 1), files_changed=files_changed)
+               duration_s=round(time.time() - started, 1), files_changed=files_changed, **verify_event_fields(verify_info))
 
     tail_output = stdout if stdout else (stderr or "none")
     if status == "VERIFY_FAILED":

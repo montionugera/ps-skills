@@ -1588,7 +1588,9 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
         self.assertEqual(len({e["run_id"] for e in events}), 1)
         fb = events[2]
         self.assertEqual((fb["from_agent"], fb["to_agent"], fb["exit_code"]), ("agy", "claude", 1))
-        self.assertEqual((events[-1]["agent"], events[-1]["status"]), ("claude", "SUCCESS"))
+        # The fake claude worker changes nothing and --no-verify skips the check, so the run is not plain SUCCESS.
+        self.assertEqual((events[-1]["agent"], events[-1]["status"]),
+                         ("claude", dispatch_mod.NO_CHANGES_UNVERIFIED_STATUS))
 
     def test_auto_agy_failure_does_not_fall_back_to_codex(self):
         self._quota(self.agy_state, 95.0, 95.0)
