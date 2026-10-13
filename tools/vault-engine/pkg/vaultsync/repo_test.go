@@ -155,6 +155,8 @@ func TestRepo_SignalKillsTheGitGroupAndEndsTheEngine(t *testing.T) {
 		t.Fatalf("start holder: %v", err)
 	}
 	if line, _ := bufio.NewReader(out).ReadString('\n'); line != "started\n" {
+		_ = holder.Process.Kill() // without this the helper would idle for an hour
+		_ = holder.Wait()
 		t.Fatalf("holder did not start its git child, said %q", line)
 	}
 	raw, err := os.ReadFile(pidFile)
@@ -162,7 +164,12 @@ func TestRepo_SignalKillsTheGitGroupAndEndsTheEngine(t *testing.T) {
 		_ = holder.Process.Kill()
 		t.Fatalf("git child never started: %v", err)
 	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		_ = holder.Process.Kill()
+		_ = holder.Wait()
+		t.Fatalf("pid file of the git child holds %q: %v", raw, err)
+	}
 	_ = holder.Process.Signal(syscall.SIGTERM)
 	err = holder.Wait()
 	var ee *exec.ExitError
@@ -435,7 +442,8 @@ func TestRepo_NoConnectionErrorsKeepTheirCause(t *testing.T) {
 	mustGit(t, t.TempDir(), "init", "--quiet", "--bare", empty)
 	mustGit(t, w.Mac, "config", "remote.empty.url", empty)
 	r.Remote = "empty"
-	if _, err := r.RemoteHead(); !errors.Is(err, ErrNoConnection) || strings.Contains(err.Error(), "<nil>") {
+	if _, err := r.RemoteHead(); !errors.Is(err, ErrNoConnection) || strings.Contains(err.Error(), "<nil>") ||
+		!strings.Contains(err.Error(), "has no refs/heads/") {
 		t.Fatalf("RemoteHead on an empty hub: got %v", err)
 	}
 }
