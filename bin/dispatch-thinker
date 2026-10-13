@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dispatch-thinker: Front-end for dispatch-worker with --capability deep-design-v1
 # Routes thinking / architecture tasks to Claude Opus 5.5 only (codex is disabled in dispatch-worker).
-# Defaults reasoning effort to 'high' (--effort overrides, or THINK_EFFORT env var).
+# Defaults reasoning effort to 'medium' (--effort overrides, or THINK_EFFORT env var).
 # Fails closed with exit code 12 if Claude is unavailable.
 
 set -euo pipefail

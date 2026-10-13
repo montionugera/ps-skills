@@ -28,6 +28,7 @@ The **Handoff** skill solves this by:
   ```json
   { "type": "command", "command": "python3 ~/.claude/hooks/auto-handoff-stop.py", "timeout": 10 }
   ```
+- **Mid-turn check (optional).** A Stop hook only runs when a turn ends, and one long turn can add hundreds of thousands of tokens. `hooks/auto-handoff-midturn.py` is a **PreToolUse hook** that reads the newest main-session usage record before each tool call and, once per level (`CLAUDE_AUTO_HANDOFF_MIDTURN_LEVELS`, default `250000,300000,400000,500000`), adds a note asking the agent to finish the unit of work and end the turn so the Stop hook can hand off. It never denies a tool call and ignores subagents. **Notes are off unless `CLAUDE_AUTO_HANDOFF_NOTICES=1`** (log only otherwise). Install like the Stop hook, under `hooks.PreToolUse[].hooks`. Tests: `tests/test_auto_handoff_midturn.py`.
 
 ---
 
