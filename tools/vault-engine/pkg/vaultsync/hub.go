@@ -114,6 +114,11 @@ func PreReceive(dir string, stdin io.Reader, stderr io.Writer, limitsFile, place
 				if errors.As(err, &ee) && ee.ExitCode() == 1 {
 					return refuse("type-not-allowed", "rewriting the history of %s is never accepted", ref)
 				}
+				// The question cannot be asked about a tree or a blob. Sending one
+				// as the new tip is a rule the sender broke, not a fault of the hub.
+				if typ, terr := hubGit(dir, "", "cat-file", "-t", newSHA); terr == nil && strings.TrimSpace(typ) != "commit" {
+					return refuse("type-not-allowed", "%s may only point at a commit; this send points it at a %s", ref, strings.TrimSpace(typ))
+				}
 				return refuse(hubFault, "cannot check that %s only moves forward: %v", ref, err)
 			}
 		}

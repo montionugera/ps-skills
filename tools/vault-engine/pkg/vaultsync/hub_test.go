@@ -469,3 +469,48 @@ func TestHub_HookItselfRefusesAHistoryRewrite(t *testing.T) {
 		t.Fatalf("hub tip changed from %s to %s", tip, now)
 	}
 }
+
+// A send that points the main line at a tree or a blob breaks a rule: the
+// forward-only question cannot even be asked about it. That is the sender's
+// doing, so the label is type-not-allowed, not the hub's own engine-error.
+func TestPreReceive_ATreeOrBlobAsTheNewTipIsTypeNotAllowed(t *testing.T) {
+	hub := newHub(t)
+	seededClone(t, hub)
+	tip := mustGit(t, hub, "rev-parse", "refs/heads/main")
+	for kind, object := range map[string]string{
+		"tree": mustGit(t, hub, "rev-parse", "refs/heads/main^{tree}"),
+		"blob": mustGit(t, hub, "rev-parse", "refs/heads/main:README.md"),
+	} {
+		t.Run(kind, func(t *testing.T) {
+			var stderr strings.Builder
+			code := PreReceive(hub, strings.NewReader(tip+" "+object+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
+			want := "vault-hub: REFUSED type-not-allowed: refs/heads/main may only point at a commit; this send points it at a " + kind
+			if code != 1 || !strings.HasPrefix(stderr.String(), want) {
+				t.Fatalf("code=%d stderr=%q, want code 1 and %q", code, stderr.String(), want)
+			}
+		})
+	}
+}
+
+// The same refusal as the sending place sees it. The place reads the hub's
+// line from what git prints and answers with the exit code of the label: 6
+// for type-not-allowed (it was 1, engine-error, before the label was fixed).
+func TestSave_ATreeOrBlobRefusalFromTheHubEndsWithExitSix(t *testing.T) {
+	hub := newHub(t)
+	seededClone(t, hub)
+	tip := mustGit(t, hub, "rev-parse", "refs/heads/main")
+	tree := mustGit(t, hub, "rev-parse", "refs/heads/main^{tree}")
+	var stderr strings.Builder
+	if code := PreReceive(hub, strings.NewReader(tip+" "+tree+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now()); code != 1 {
+		t.Fatalf("the hub must refuse a tree as the new tip, code=%d stderr=%q", code, stderr.String())
+	}
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	mac.Hooks.PushResult = func(_ int, _ gitResult) gitResult {
+		return gitResult{Stderr: "remote: " + stderr.String(), Err: errors.New("exit status 1")}
+	}
+	_, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5))
+	if out.Line != "REFUSED type-not-allowed" || out.Exit != 6 {
+		t.Fatalf("outcome = %+v, want REFUSED type-not-allowed with exit 6", out)
+	}
+}
