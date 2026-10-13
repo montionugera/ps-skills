@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
 # dispatch-thinker: Front-end for dispatch-worker with --capability deep-design-v1
-# Routes thinking / architecture tasks to Claude Opus 5.5 only (codex is disabled in dispatch-worker).
+# Routes thinking / architecture tasks to Frontier Tier thinkers (Claude Opus 5.5 or Gemini 4 Argon).
+# Supports fallback priority claude:claude-opus-5-5,agy:gemini-4-argon (or --agent agy / --agent claude).
 # Defaults reasoning effort to 'medium' (--effort overrides, or THINK_EFFORT env var).
-# Fails closed with exit code 12 if Claude is unavailable.
+# Fails closed with exit code 12 if neither frontier thinker is available.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER="$SCRIPT_DIR/dispatch-worker"
 
-exec "$WORKER" --capability deep-design-v1 "$@"
+HAS_ROUTING=0
+for arg in "$@"; do
+    if [[ "$arg" == "--priority" || "$arg" == --priority=* || "$arg" == "--agent" || "$arg" == --agent=* ]]; then
+        HAS_ROUTING=1
+        break
+    fi
+done
+
+if [[ $HAS_ROUTING -eq 0 ]]; then
+    exec "$WORKER" --capability deep-design-v1 --priority "claude:claude-opus-5-5,agy:gemini-4-argon" "$@"
+else
+    exec "$WORKER" --capability deep-design-v1 "$@"
+fi

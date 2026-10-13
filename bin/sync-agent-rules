@@ -78,12 +78,23 @@ def resolve_imports(path: Path, seen: tuple[Path, ...] = ()) -> str:
     return "\n".join(out) + "\n"
 
 
+AGY_TOOL_MAPPING_BANNER = """<!-- AGY Harness Tool-Mapping Banner:
+- Agent / dispatch-worker (in-session) <-> invoke_subagent + define_subagent
+- SendMessage <-> send_message(Recipient: "<conversation-id>")
+- ListAgents / TaskStop <-> manage_subagents(Action: "list" | "kill" | "kill_all")
+- EnterWorktree <-> invoke_subagent(..., Workspace: "branch" | "share")
+- Model tiers: 80% Fast Worker = Model: "flash" (gemini-3.8-flash-high); 20% Frontier Thinker/Reviewer = Model: "inherit" (gemini-4-argon)
+-->
+"""
+
+
 def generate(source: Path, local: Path) -> str:
     if not source.is_file():
         raise SyncError(f"source not found: {source}")
     parts = [
         f"<!-- GENERATED from {_display(source)} by sync-agent-rules — do not edit by hand. "
         f"Agy-only rules belong in {_display(local)}. -->\n",
+        AGY_TOOL_MAPPING_BANNER,
         resolve_imports(source),
     ]
     if local.is_file():

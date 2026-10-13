@@ -8,15 +8,15 @@ Agents listed in DISABLED_AGENTS are never routed to, in any mode: naming one wi
 refused, and a --priority chain entry naming one is dropped with a one-line notice.
 
 Thinking mode (--think / --capability deep-design-v1, the `dispatch-thinker` shim) routes to
-Claude Opus 5.5 only (`claude -p`, model via CLAUDE_THINK_MODEL). deep-design-v1 fails closed
-with exit 12 when it is unavailable.
+Frontier thinkers: Claude Opus 5.5 (`claude -p`) or Gemini 4 Argon (`agy`). deep-design-v1 fails closed
+with exit 12 when unavailable.
 
 Exit Codes:
   0: Task executed successfully by external agent
   1: Task execution failed (or error in execution)
   10: Insufficient quota (signals orchestrator to fall back to internal Claude subagent)
   2: Invalid arguments / missing required task prompt / a disabled agent was named
-  12: deep-design-v1 thinker unavailable (Claude Opus 5.5) or forbidden model
+  12: deep-design-v1 thinker unavailable (Claude Opus 5.5 / Gemini 4 Argon) or forbidden model
   13: Worker exited 0 but the verify command failed (twice); nothing was merged
 """
 
@@ -52,6 +52,9 @@ DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKL
 STALE_OBSERVATION_MINUTES = 60
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
+DEFAULT_AGY_WORKER_MODEL = os.environ.get("AGY_WORKER_MODEL", "gemini-3.8-flash-high")
+DEFAULT_AGY_THINK_MODEL = os.environ.get("AGY_THINK_MODEL", "gemini-4-argon")
+AGY_THINK_MODEL_NAMES = ("gemini-4-argon", "argon", "gemini-4-argon-thinking")
 
 # Agents the dispatcher refuses to route to, in every mode (auto, priority chain, thinker, batch,
 # runtime fallback). The single switch: remove a name here to route to that agent again.
@@ -322,6 +325,11 @@ def normalize_model_name(agent, model):
             return DEFAULT_CODEX_THINK_MODEL
     if agent == "claude" and clean.lower() == "opus":
         return DEFAULT_CLAUDE_THINK_MODEL
+    if agent == "agy":
+        if clean.lower() in ("argon", "gemini-4-argon", "gemini-4-argon-thinking"):
+            return DEFAULT_AGY_THINK_MODEL
+        if clean.lower() in ("flash", "3.8-flash", "gemini-3.8-flash", "gemini-3.8-flash-high"):
+            return DEFAULT_AGY_WORKER_MODEL
     return clean
 
 
@@ -351,6 +359,8 @@ def resolve_agent_effort(agent, effort, is_thinking=False):
             effort = os.environ.get("CLAUDE_THINK_EFFORT")
         elif agent == "codex" and os.environ.get("CODEX_THINK_EFFORT"):
             effort = os.environ.get("CODEX_THINK_EFFORT")
+        elif agent == "agy" and os.environ.get("AGY_THINK_EFFORT"):
+            effort = os.environ.get("AGY_THINK_EFFORT")
     if not effort:
         return None
     return normalize_effort(agent, effort)
@@ -358,12 +368,13 @@ def resolve_agent_effort(agent, effort, is_thinking=False):
 
 def parse_priority_chain(chain_str):
     """
-    Parses strings like 'cursor:gemini-3.8-flash > agy > codex'
+    Parses strings like 'cursor:gemini-3.8-flash > agy > codex' or 'claude:claude-opus-5-5,agy:gemini-4-argon'
     Returns list of tuples: [(agent, model), ...]
     """
     if not chain_str or not chain_str.strip():
         return []
-    items = [item.strip() for item in chain_str.split(">") if item.strip()]
+    raw_items = chain_str.split(">") if ">" in chain_str else chain_str.split(",")
+    items = [item.strip() for item in raw_items if item.strip()]
     chain = []
     for item in items:
         if ":" in item:
@@ -446,28 +457,67 @@ CLAUDE_THINK_MODEL_NAMES = ("claude-opus-5-5", "opus")
 
 
 def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H, min_weekly=DEFAULT_THINK_MIN_WEEKLY,
-                  current_time=None):
+                  current_time=None, agy_state_file=None, priority=None):
     """
-    Thinking-mode chain: Claude Opus 5.5, then Codex gpt-5.6-sol under the think quota unless codex is in
-    DISABLED_AGENTS (it is: Claude Opus 5.5 is the only thinker, so there is no runtime fallback).
-    An explicit model pins its provider (Claude-family -> claude only, anything else -> codex only).
+    Thinking-mode chain: Claude Opus 5.5 and Gemini 4 Argon under think quota.
+    When a priority chain is specified (e.g. 'claude:claude-opus-5-5,agy:gemini-4-argon' or
+    'agy:gemini-4-argon > claude:claude-opus-5-5'), candidates are evaluated in that priority order.
+    An explicit model pins its provider (Claude-family -> claude only, AGY-family -> agy only).
     Returns: (agent, model, eligible, rem_5h, rem_weekly, msg, runtime_fallback), where runtime_fallback is the
     next eligible (agent, model) to retry once if the chosen agent's run fails, else None.
     """
-    is_claude_model = model is not None and model.lower() in CLAUDE_THINK_MODEL_NAMES
+    chain_pref = priority or os.environ.get("DISPATCH_THINK_PREFERENCE")
     candidates = []
-    if model is None or is_claude_model:
-        candidates.append(("claude", normalize_model_name("claude", model) or DEFAULT_CLAUDE_THINK_MODEL))
-    if not is_claude_model and "codex" not in DISABLED_AGENTS:
-        candidates.append(("codex", normalize_model_name("codex", model) if model else DEFAULT_CODEX_THINK_MODEL))
+    if chain_pref and model is None:
+        parsed_chain = parse_priority_chain(chain_pref)
+        for cand_agent, cand_model in parsed_chain:
+            if cand_agent in DISABLED_AGENTS:
+                continue
+            if cand_agent == "claude":
+                m = normalize_model_name("claude", cand_model) or DEFAULT_CLAUDE_THINK_MODEL
+                if m.lower() in CLAUDE_THINK_MODEL_NAMES:
+                    candidates.append(("claude", m))
+                elif cand_model:
+                    return "claude", cand_model, False, 0.0, 0.0, f"model '{cand_model}' is not an allowed thinking model for claude", None
+            elif cand_agent == "agy":
+                m = normalize_model_name("agy", cand_model) or DEFAULT_AGY_THINK_MODEL
+                if m.lower() in AGY_THINK_MODEL_NAMES:
+                    candidates.append(("agy", m))
+                elif cand_model:
+                    return "agy", cand_model, False, 0.0, 0.0, f"model '{cand_model}' is not an allowed thinking model for agy", None
+            elif cand_agent == "codex" and "codex" not in DISABLED_AGENTS:
+                m = normalize_model_name("codex", cand_model) or DEFAULT_CODEX_THINK_MODEL
+                if m.lower() in ("gpt-5.6-sol", "sol"):
+                    candidates.append(("codex", m))
+                elif cand_model:
+                    return "codex", cand_model, False, 0.0, 0.0, f"model '{cand_model}' is not an allowed thinking model for codex", None
+    elif model is not None:
+        if model.lower() in CLAUDE_THINK_MODEL_NAMES:
+            candidates.append(("claude", normalize_model_name("claude", model) or DEFAULT_CLAUDE_THINK_MODEL))
+        elif model.lower() in AGY_THINK_MODEL_NAMES:
+            candidates.append(("agy", normalize_model_name("agy", model) or DEFAULT_AGY_THINK_MODEL))
+        elif "codex" not in DISABLED_AGENTS and model.lower() in ("gpt-5.6-sol", "sol"):
+            candidates.append(("codex", normalize_model_name("codex", model) or DEFAULT_CODEX_THINK_MODEL))
+        else:
+            return "claude", model, False, 0.0, 0.0, f"model '{model}' is not an allowed thinking model", None
+    else:
+        # Default thinker candidate when no chain preference is given: Claude Opus 5.5
+        candidates.append(("claude", DEFAULT_CLAUDE_THINK_MODEL))
+        if "codex" not in DISABLED_AGENTS:
+            candidates.append(("codex", DEFAULT_CODEX_THINK_MODEL))
 
     if not candidates:
-        return "claude", model, False, 0.0, 0.0, f"model '{model}' is not a Claude thinking model", None
+        return "claude", model, False, 0.0, 0.0, f"no eligible thinking candidates for model '{model}'", None
 
     eligible_picks = []
     traces = []
     for agent, agent_model in candidates:
-        state_file = codex_state_file if agent == "codex" else None
+        if agent == "codex":
+            state_file = codex_state_file
+        elif agent == "agy":
+            state_file = agy_state_file
+        else:
+            state_file = None
         el, r5, rw, msg = check_quota(agent, state_file, min_5h, min_weekly, current_time=current_time)
         traces.append(msg)
         if el:
@@ -1869,9 +1919,11 @@ def main():
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
-    parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Claude Opus 5.5 only (`claude -p`)")
+    parser.add_argument("--escalate", action="store_true",
+                        help="Escalate implementation task from default 3.8-flash worker tier to frontier gemini-4-argon")
+    parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Frontier models (Claude Opus 5.5 or Gemini 4 Argon)")
     parser.add_argument("--capability", type=str, default=None, choices=["deep-design-v1"],
-                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Claude Opus 5.5 and fails closed with exit code 12)")
+                        help="Enforce capability contract (e.g. 'deep-design-v1' restricts models to Frontier thinkers: Claude Opus 5.5 or Gemini 4 Argon and fails closed with exit code 12)")
     parser.add_argument("--attestation-file", type=str, default=None, help="Explicit path to write Thinker attestation JSON (.thinker.json)")
     parser.add_argument("--context", nargs="+", dest="context_files", help="Paths to context/reference files or directories")
     parser.add_argument("--output-file", type=str, default=None, help="File path where worker must write primary deliverable")
@@ -2014,13 +2066,20 @@ def main():
         print(f"FAILED: model '{chosen_model}' is strictly forbidden. Use 'claude-opus-5-5' (effort medium) instead.", file=sys.stderr)
         sys.exit(12)
 
+    if args.escalate:
+        if chosen_agent in ("auto", "agy"):
+            chosen_agent = "agy"
+            if not chosen_model:
+                chosen_model = DEFAULT_AGY_THINK_MODEL
+        elif not chosen_model:
+            chosen_model = DEFAULT_AGY_THINK_MODEL
+
     # If --capability deep-design-v1 or --think is set, adjust thresholds and models
     is_deep_design = (args.capability == "deep-design-v1")
     if is_deep_design:
         args.think = True
-        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 (plus GPT-5.6-Sol only
-        # while codex is not in DISABLED_AGENTS)
-        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus"]
+        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 and Gemini 4 Argon
+        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "gemini-4-argon", "argon", "gemini-4-argon-thinking"]
         if "codex" not in DISABLED_AGENTS:
             ALLOWED_DEEP_DESIGN_MODELS += ["gpt-5.6-sol", "sol"]
         if chosen_model and chosen_model.lower() not in ALLOWED_DEEP_DESIGN_MODELS:
@@ -2034,18 +2093,57 @@ def main():
             min_5h = DEFAULT_THINK_MIN_5H
         if "--min-weekly" not in sys.argv:
             min_weekly = DEFAULT_THINK_MIN_WEEKLY
-        # Explicit agents are respected; otherwise route_thinker picks Claude Opus 5.5.
+        # Explicit agents are respected; otherwise route_thinker picks Claude Opus 5.5 / Gemini 4 Argon.
         if chosen_agent == "codex":
             chosen_model = normalize_model_name("codex", chosen_model) if chosen_model else DEFAULT_CODEX_THINK_MODEL
     if chosen_agent == "claude":
         chosen_model = normalize_model_name("claude", chosen_model) or DEFAULT_CLAUDE_THINK_MODEL
+    if chosen_agent == "agy" and (args.think or is_deep_design):
+        chosen_model = normalize_model_name("agy", chosen_model) or DEFAULT_AGY_THINK_MODEL
+    # Strict validation: thinking mode allows only frontier thinking models
+    if args.think and chosen_model:
+        allowed_think_models = list(CLAUDE_THINK_MODEL_NAMES) + list(AGY_THINK_MODEL_NAMES)
+        if "codex" not in DISABLED_AGENTS:
+            allowed_think_models += ["gpt-5.6-sol", "sol"]
+        if chosen_model.lower() not in allowed_think_models:
+            print(f"FAILED: thinking mode strictly forbids model '{chosen_model}'. "
+                  f"Allowed models: {allowed_think_models}", file=sys.stderr)
+            sys.exit(12)
+        if chosen_agent == "claude" and chosen_model.lower() not in CLAUDE_THINK_MODEL_NAMES:
+            print(f"FAILED: thinking mode for agent 'claude' strictly forbids model '{chosen_model}'. "
+                  f"Allowed models: {list(CLAUDE_THINK_MODEL_NAMES)}", file=sys.stderr)
+            sys.exit(12)
+        if chosen_agent == "agy" and chosen_model.lower() not in AGY_THINK_MODEL_NAMES:
+            print(f"FAILED: thinking mode for agent 'agy' strictly forbids model '{chosen_model}'. "
+                  f"Allowed models: {list(AGY_THINK_MODEL_NAMES)}", file=sys.stderr)
+            sys.exit(12)
+
+    # Strict priority chain validation under thinking mode
+    think_priority = args.priority if "--priority" in sys.argv else os.environ.get("DISPATCH_THINK_PREFERENCE")
+    if (args.think or is_deep_design) and think_priority:
+        for cand_agent, cand_model in parse_priority_chain(think_priority):
+            if cand_agent in DISABLED_AGENTS:
+                continue
+            if cand_agent == "claude" and cand_model:
+                m = normalize_model_name("claude", cand_model)
+                if not m or m.lower() not in CLAUDE_THINK_MODEL_NAMES:
+                    print(f"FAILED: thinking mode for agent 'claude' strictly forbids model '{cand_model}'. "
+                          f"Allowed models: {list(CLAUDE_THINK_MODEL_NAMES)}", file=sys.stderr)
+                    sys.exit(12)
+            elif cand_agent == "agy" and cand_model:
+                m = normalize_model_name("agy", cand_model)
+                if not m or m.lower() not in AGY_THINK_MODEL_NAMES:
+                    print(f"FAILED: thinking mode for agent 'agy' strictly forbids model '{cand_model}'. "
+                          f"Allowed models: {list(AGY_THINK_MODEL_NAMES)}", file=sys.stderr)
+                    sys.exit(12)
+            elif cand_agent == "codex" and cand_model and "codex" not in DISABLED_AGENTS:
+                m = normalize_model_name("codex", cand_model)
+                if not m or m.lower() not in ("gpt-5.6-sol", "sol"):
+                    print(f"FAILED: thinking mode for agent 'codex' strictly forbids model '{cand_model}'.", file=sys.stderr)
+                    sys.exit(12)
+
     # `--agent auto` spelled out is the same request as no --agent: thinking never routes to an execution agent.
     think_chain = args.think and chosen_agent == "auto"
-    if (think_chain and "codex" in DISABLED_AGENTS and chosen_model
-            and chosen_model.lower() not in CLAUDE_THINK_MODEL_NAMES):
-        print(f"FAILED: thinking mode runs Claude Opus 5.5 only (codex is disabled); model '{chosen_model}' is not allowed. "
-              f"Allowed models: {list(CLAUDE_THINK_MODEL_NAMES)}", file=sys.stderr)
-        sys.exit(12)
 
     chosen_effort = args.effort
     if not chosen_effort:
@@ -2062,8 +2160,10 @@ def main():
     chain = None
 
     if think_chain:
+        priority_arg = args.priority if "--priority" in sys.argv else os.environ.get("DISPATCH_THINK_PREFERENCE")
         chosen_agent, chosen_model, eligible, rem_5h, rem_weekly, msg, runtime_fallback = route_thinker(
-            model=chosen_model, codex_state_file=args.state_file, min_5h=min_5h, min_weekly=min_weekly,
+            model=chosen_model, codex_state_file=args.state_file, agy_state_file=args.state_file,
+            min_5h=min_5h, min_weekly=min_weekly, priority=priority_arg,
         )
     elif args.priority and (chosen_agent == "auto" or "--priority" in sys.argv):
         chain, dropped = drop_disabled_agents(parse_priority_chain(args.priority))

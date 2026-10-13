@@ -1166,6 +1166,14 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertEqual(dispatch_mod.normalize_model_name("codex", "thinking"), "gpt-5.6-sol")
         self.assertEqual(dispatch_mod.normalize_model_name("claude", "opus"), "claude-opus-5-5")
 
+    def test_normalize_model_name_agy_aliases(self):
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "argon"), "gemini-4-argon")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon"), "gemini-4-argon")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon-thinking"), "gemini-4-argon")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "flash"), "gemini-3.8-flash-high")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "3.8-flash"), "gemini-3.8-flash-high")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-3.8-flash-high"), "gemini-3.8-flash-high")
+
     def test_wrap_prompt_contract_with_context_and_output(self):
         cfile = Path(self.temp_dir.name) / "spec.md"
         cfile.write_text("# Feature Spec\nMust implement auth endpoint.", encoding="utf-8")
@@ -1433,6 +1441,113 @@ class TestThinkerRouting(unittest.TestCase):
         attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
         self.assertEqual(attestation["effort"], "medium")
 
+    def test_gemini_4_argon_allowed_under_deep_design(self):
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--model", "gemini-4-argon")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_argon_alias_allowed_under_deep_design(self):
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--model", "argon")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_gemini_4_argon_allowed_under_plain_think(self):
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--model", "gemini-4-argon", capability=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_thinking_rejects_gemini_3_8_flash(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--model", "gemini-3.8-flash-high")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("gemini-3.8-flash-high", proc.stderr)
+
+    def test_thinking_rejects_sonnet(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--model", "sonnet")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("sonnet", proc.stderr)
+
+    def test_thinking_rejects_priority_with_non_think_model(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--priority", "agy:gemini-3.8-flash-high")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("gemini-3.8-flash-high", proc.stderr)
+
+    def test_thinking_rejects_cross_agent_model_mismatch(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--agent", "claude", "--model", "gemini-4-argon")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("gemini-4-argon", proc.stderr)
+
+        proc2 = self._run("--dry-run", "--agent", "agy", "--model", "claude-opus-5-5")
+        self.assertEqual(proc2.returncode, 12)
+        self.assertIn("claude-opus-5-5", proc2.stderr)
+
+    def test_fallback_priority_picks_claude_when_available(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--priority", "claude:claude-opus-5-5,agy:gemini-4-argon")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+
+    def test_fallback_priority_picks_agy_when_claude_skipped(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--priority", "claude:claude-opus-5-5,agy:gemini-4-argon",
+                         env_extra={"DISPATCH_THINKER_SKIP_CLAUDE": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_fallback_priority_both_unavailable_fails_closed_12(self):
+        self._fake("claude")
+        self._codex_quota(5.0, 5.0)
+        proc = self._run("--dry-run", "--priority", "claude:claude-opus-5-5,agy:gemini-4-argon",
+                         env_extra={"DISPATCH_THINKER_SKIP_CLAUDE": "1"})
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("Thinker unavailable", proc.stderr)
+
+    def test_escalate_flag_routes_to_gemini_4_argon(self):
+        self._codex_quota(100.0, 100.0)
+        proc = subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--escalate", "--state-file", str(self.codex_state),
+             "--cwd", str(self.repo), "--task", "x", "--dry-run"],
+            capture_output=True, text=True, env={"PATH": f"{self.fake_bin}:/usr/bin:/bin"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_dispatch_thinker_binary_dry_run_with_fallback(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        thinker_bin = BIN_DIR / "dispatch-thinker"
+        env = {k: v for k, v in os.environ.items() if "DISPATCH_THINKER_SKIP_CLAUDE" not in k}
+        env["PATH"] = f"{self.fake_bin}:/usr/bin:/bin"
+        proc = subprocess.run(
+            [str(thinker_bin), "--state-file", str(self.codex_state), "--cwd", str(self.repo),
+             "--task", "x", "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+
+        # And falls back to AGY when Claude is skipped
+        env["DISPATCH_THINKER_SKIP_CLAUDE"] = "1"
+        proc2 = subprocess.run(
+            [str(thinker_bin), "--state-file", str(self.codex_state), "--cwd", str(self.repo),
+             "--task", "x", "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc2.stdout)
+
 
 class TestEffortHelpers(unittest.TestCase):
     def test_normalize_effort_codex(self):
@@ -1457,11 +1572,13 @@ class TestEffortHelpers(unittest.TestCase):
         self.assertEqual(dispatch_mod.normalize_effort("claude", "max"), "max")
 
     def test_resolve_agent_effort_env_overrides(self):
-        with mock.patch.dict(os.environ, {"CLAUDE_THINK_EFFORT": "max", "CODEX_THINK_EFFORT": "medium"}):
+        with mock.patch.dict(os.environ, {"CLAUDE_THINK_EFFORT": "max", "CODEX_THINK_EFFORT": "medium", "AGY_THINK_EFFORT": "max"}):
             self.assertEqual(dispatch_mod.resolve_agent_effort("claude", "high", is_thinking=True), "max")
             self.assertEqual(dispatch_mod.resolve_agent_effort("codex", "high", is_thinking=True), "medium")
+            self.assertEqual(dispatch_mod.resolve_agent_effort("agy", "medium", is_thinking=True), "max")
             # Not in thinking mode, env overrides do not take effect:
             self.assertEqual(dispatch_mod.resolve_agent_effort("claude", "high", is_thinking=False), "high")
+            self.assertEqual(dispatch_mod.resolve_agent_effort("agy", "medium", is_thinking=False), "medium")
 
     @codex_enabled()
     def test_build_agent_command_effort_flags(self):

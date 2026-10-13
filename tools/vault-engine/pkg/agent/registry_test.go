@@ -33,6 +33,19 @@ func TestAgentRegistry_PrivilegeEscalationRejection(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "privilege escalation rejected") {
 		t.Fatalf("expected privilege escalation error for define_subagent, got %v", err)
 	}
+
+	// Agent requesting invoke_subagent
+	badManifest3 := &AgentManifest{
+		AgentID:       "agent-invoker",
+		Role:          "Subagent Invoker",
+		SystemPrompt:  "Try to invoke subagents directly.",
+		ToolAllowlist: []string{"invoke_subagent"},
+	}
+
+	err = reg.ValidateManifest(badManifest3)
+	if err == nil || !strings.Contains(err.Error(), "privilege escalation rejected") {
+		t.Fatalf("expected privilege escalation error for invoke_subagent, got %v", err)
+	}
 }
 
 func TestAgentRegistry_ValidRecruitment(t *testing.T) {
@@ -104,7 +117,7 @@ func TestAgentRegistry_ValidationEdgeCases(t *testing.T) {
 		AgentID:       "agent-system",
 		Role:          "System Root",
 		SystemPrompt:  "Root supervisor",
-		ToolAllowlist: []string{"run_command"},
+		ToolAllowlist: []string{"run_command", "invoke_subagent"},
 		RecruitedBy:   "system",
 	}
 	if err := reg.ValidateManifest(mSys); err != nil {
