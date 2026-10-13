@@ -11,6 +11,10 @@
 #   CLAUDE_AUTO_HANDOFF_THRESHOLD   token threshold (default 200000)
 #   CLAUDE_AUTO_HANDOFF_HARD_CAP    fire regardless of the safe point (default 1.5 x threshold)
 #   CLAUDE_AUTO_HANDOFF=0           disable entirely
+#   CLAUDE_AUTO_HANDOFF_REFIRE_STEP remind again after this much growth past the last fire (default 25000)
+#   CLAUDE_AUTO_HANDOFF_NOTICES=1   send the two new messages (drain notice, retired reminder); default 0 (log only)
+#   CLAUDE_AUTO_HANDOFF_LOG         decision log (default ~/.claude/logs/auto-handoff.log)
+#   CLAUDE_AUTO_HANDOFF_STATE_DIR   where the per-session marker files live (default /tmp)
 
 import json
 import os
@@ -18,6 +22,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 
 def env_int(name, default):
     """An integer setting; a missing or non-numeric value falls back to the default."""
@@ -29,6 +34,10 @@ def env_int(name, default):
 
 THRESHOLD = env_int("CLAUDE_AUTO_HANDOFF_THRESHOLD", 200000)
 HARD_CAP = env_int("CLAUDE_AUTO_HANDOFF_HARD_CAP", THRESHOLD * 3 // 2)
+REFIRE_STEP = env_int("CLAUDE_AUTO_HANDOFF_REFIRE_STEP", 25000)
+NOTICES = os.environ.get("CLAUDE_AUTO_HANDOFF_NOTICES") == "1"
+LOG = os.environ.get("CLAUDE_AUTO_HANDOFF_LOG") or os.path.expanduser("~/.claude/logs/auto-handoff.log")
+STATE_DIR = pathlib.Path(os.environ.get("CLAUDE_AUTO_HANDOFF_STATE_DIR") or "/tmp")
 HANDOFF_SCRIPT = os.path.expanduser("~/.claude/skills/handoff/scripts/herdr-handoff.sh")
 
 # Background work is found in the raw transcript text: a launch line names the task
@@ -57,12 +66,41 @@ def dirty_tree(cwd):
     return out.returncode == 0 and bool(out.stdout.strip())
 
 
+def log(session_id, context, decision, why):
+    """One line per decision taken at or over the threshold; never raises."""
+    try:
+        d = os.path.dirname(LOG)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "session": session_id,
+                                "context": context, "decision": decision, "why": why,
+                                "notices": NOTICES, "dry_run": not NOTICES}) + "\n")
+    except Exception:
+        pass
+
+
+def mark(path, context):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(context))
+    except Exception:
+        pass
+
+
+def block(reason):
+    print(json.dumps({"decision": "block", "reason": reason}))
+
+
 def main():
     if os.environ.get("CLAUDE_AUTO_HANDOFF") == "0":
         return
     try:
         data = json.load(sys.stdin)
     except Exception:
+        return
+
+    if not isinstance(data, dict):
         return
 
     if data.get("stop_hook_active"):
@@ -100,19 +138,71 @@ def main():
         + int(usage.get("cache_read_input_tokens") or 0)
         + int(usage.get("cache_creation_input_tokens") or 0)
     )
+    flag = STATE_DIR / f"claude-auto-handoff-{session_id}.flag"
+    dry = ".dry" if not NOTICES else ""
+    drain = STATE_DIR / f"claude-auto-handoff-{session_id}.drain{dry}"
+    refire = STATE_DIR / f"claude-auto-handoff-{session_id}.refire{dry}"
     if context < THRESHOLD:
+        # Back under the threshold (compaction): clear notice markers; re-arm the main flag only with notices on
+        # (switch unset keeps the original one-shot behaviour).
+        for p in (
+            *((flag,) if NOTICES else ()),
+            drain,
+            refire,
+            STATE_DIR / f"claude-auto-handoff-{session_id}.drain",
+            STATE_DIR / f"claude-auto-handoff-{session_id}.drain.dry",
+            STATE_DIR / f"claude-auto-handoff-{session_id}.refire",
+            STATE_DIR / f"claude-auto-handoff-{session_id}.refire.dry",
+        ):
+            try:
+                p.unlink()
+            except OSError:
+                pass
         return
 
-    flag = pathlib.Path("/tmp") / f"claude-auto-handoff-{session_id}.flag"
     if flag.exists():
+        # Already handed off. The old session keeps getting woken (task notifications,
+        # peer messages, prompts); remind it each REFIRE_STEP of further growth.
+        try:
+            last = max(int(p.read_text()) for p in (flag, refire) if p.exists())
+        except Exception:
+            last = context
+            mark(refire, context)
+        if context < last + REFIRE_STEP:
+            return
+        mark(refire, context)
+        log(session_id, context, "retired-reminder", f"grew {context - last} since the last fire")
+        if NOTICES:
+            block(
+                f"AUTO-HANDOFF: this session already handed off and has since grown to {context} "
+                "tokens. It is retired: do not start or continue work here. If the handoff tab "
+                "is not running, run the handoff skill again; otherwise reply in one line that "
+                "the work moved to the handoff tab, then stop."
+            )
         return
-    # Not a safe point yet: say nothing, and look again after the next turn.
-    if context < HARD_CAP and (launched - finished or dirty_tree(data.get("cwd"))):
+
+    pending = sorted(launched - finished)
+    dirty = dirty_tree(data.get("cwd"))
+    if context < HARD_CAP and (pending or dirty):
+        # Not a safe point yet. Say so once, so the session drains instead of launching
+        # more work; after that stay silent and look again after each turn.
+        if drain.exists():
+            return
+        mark(drain, context)
+        why = f"background={len(pending)} dirty_tree={dirty}"
+        log(session_id, context, "drain-notice", why)
+        if NOTICES:
+            block(
+                f"AUTO-HANDOFF pending: context is {context} tokens (threshold {THRESHOLD}) but "
+                f"this is not a safe point yet ({why}). Do not start a new task and do not "
+                "launch new background agents or commands. Finish the unit of work in progress, "
+                "let the running background work report back, commit, then end your turn; the "
+                f"handoff runs at the next clean stop, or regardless at {HARD_CAP} tokens. "
+                "If nothing is left to do right now, reply in one line and stop."
+            )
         return
-    try:
-        flag.write_text(str(context))
-    except Exception:
-        pass
+    mark(flag, context)
+    log(session_id, context, "handoff", "hard-cap" if (pending or dirty) else "safe-point")
 
     reason = (
         f"AUTO-HANDOFF: this session's context reached {context} tokens "
