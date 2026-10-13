@@ -1,13 +1,16 @@
 package vaultsync
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // buildFixture is a tiny git repository shaped like the engine folder: the
@@ -30,20 +33,37 @@ func buildFixture(t *testing.T) string {
 	return dir
 }
 
+// buildTimeout bounds one run of the build script (three cross-builds; about
+// ten seconds warm, a few minutes on a cold build cache).
+const buildTimeout = 15 * time.Minute
+
 func commitAll(t *testing.T, dir, msg string) {
 	t.Helper()
 	mustGit(t, dir, "add", "-A")
 	mustGit(t, dir, "commit", "--quiet", "-m", msg)
 }
 
-func runBuild(t *testing.T, dir string) (string, error) {
+// runBuild runs the build script in dir with VERSION, GOOS, GOARCH and GOFLAGS
+// emptied; extra ("NAME=value") is set after that. git's location variables
+// are not passed on (placeEnv). A build that hangs is killed, with every
+// process it started, after buildTimeout.
+func runBuild(t *testing.T, dir string, extra ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command("bash", filepath.Join(dir, "scripts", "build-release.sh"))
-	cmd.Env = os.Environ()
+	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(dir, "scripts", "build-release.sh"))
+	cmd.Env = placeEnv(dir)
 	for _, drop := range []string{"VERSION", "GOOS", "GOARCH", "GOFLAGS"} {
 		cmd.Env = append(cmd.Env, drop+"=")
 	}
+	cmd.Env = append(cmd.Env, extra...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("the build script did not finish within %v:\n%s", buildTimeout, out)
+	}
 	return string(out), err
 }
 
@@ -69,7 +89,10 @@ func releaseSet(t *testing.T, dir string) string {
 	if out, err := check.CombinedOutput(); err != nil {
 		t.Fatalf("the checksum file does not match the binaries: %v\n%s", err, out)
 	}
-	sums, _ := os.ReadFile(filepath.Join(rel, "SHA256SUMS"))
+	sums, err := os.ReadFile(filepath.Join(rel, "SHA256SUMS"))
+	if err != nil {
+		t.Fatalf("read the checksum file: %v", err)
+	}
 	return string(sums)
 }
 
@@ -140,11 +163,51 @@ func TestBuildRelease_StampsChecksAndKeepsTheOldSetOnFailure(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "cmd", "vault-engine", "main.go"),
 		[]byte("package main\n\nimport \"fmt\"\n\nvar buildVersion = \"dev\"\n\nfunc main() { fmt.Printf(\"vault-engine %s\\n\", buildVersion) }\n"))
 	commitAll(t, dir, "rename the stamped variable")
+	// The check that looks inside the file names the first target and stops the
+	// build there. The later check, which runs this machine's binary, adds
+	// "(it says: ...)": seeing that would mean the in-file check did not bite.
 	out, err = runBuild(t, dir)
-	if err == nil || !strings.Contains(out, "does not carry version") {
-		t.Fatalf("a build whose stamp did not take must fail and say so: err=%v\n%s", err, out)
+	if err == nil || !strings.Contains(out, "build-release: vault-engine-darwin-amd64 does not carry version") ||
+		strings.Contains(out, "it says:") {
+		t.Fatalf("a build whose stamp did not take must be stopped by the in-file check on the first target: err=%v\n%s", err, out)
 	}
 	if got := releaseSet(t, dir); got != dirtySums {
 		t.Fatalf("a failed build changed the release set")
+	}
+}
+
+// The fixture has its own main.go, so the test above proves the script, not
+// the script together with the real engine. This pins the one name the script
+// stamps (-X main.version). The fixture's program also ignores its arguments,
+// so the "version" argument the script passes to this machine's binary is not
+// checked by any test.
+func TestBuildRelease_TheRealEngineStillHasTheStampedVariable(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "cmd", "vault-engine", "main.go"))
+	if err != nil {
+		t.Fatalf("read the engine's main.go: %v", err)
+	}
+	if !strings.Contains(string(src), "\nvar version = \"") {
+		t.Fatalf("cmd/vault-engine/main.go no longer declares `var version = \"...\"`; scripts/build-release.sh stamps main.version")
+	}
+}
+
+func TestBuildRelease_AnExplicitVersionIsUsedAsGiven(t *testing.T) {
+	dir := buildFixture(t)
+	// An uncommitted file: a version the script worked out itself would end in ".dirty".
+	writeFile(t, filepath.Join(dir, "cmd", "vault-engine", "extra.go"), []byte("package main\n\nvar extra = 1\n"))
+	out, err := runBuild(t, dir, "VERSION=9.9.9-explicit")
+	if err != nil {
+		t.Fatalf("build with an explicit version: %v\n%s", err, out)
+	}
+	if got := builtVersion(t, out); got != "9.9.9-explicit" {
+		t.Fatalf("version = %q, want the explicit one exactly as given", got)
+	}
+	releaseSet(t, dir)
+	host := filepath.Join(dir, "bin", "release", "vault-engine-"+runtime.GOOS+"-"+runtime.GOARCH)
+	if _, statErr := os.Stat(host); statErr == nil {
+		said, runErr := exec.Command(host).Output()
+		if runErr != nil || string(said) != "vault-engine 9.9.9-explicit\n" {
+			t.Fatalf("the built binary says %q (%v), want version 9.9.9-explicit", said, runErr)
+		}
 	}
 }
