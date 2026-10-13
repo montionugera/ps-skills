@@ -2,6 +2,7 @@ package vaultsync
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -436,5 +437,56 @@ func TestRepo_NoConnectionErrorsKeepTheirCause(t *testing.T) {
 	r.Remote = "empty"
 	if _, err := r.RemoteHead(); !errors.Is(err, ErrNoConnection) || strings.Contains(err.Error(), "<nil>") {
 		t.Fatalf("RemoteHead on an empty hub: got %v", err)
+	}
+}
+
+// A cancel of Repo.stop while a git command runs kills it, and the command is
+// reported as ErrStopped (not as a plain failure, not as a time-out).
+func TestRepoRun_CancelDuringASlowCommandGivesErrStopped(t *testing.T) {
+	root := t.TempDir()
+	mustGit(t, root, "init", "-q")
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := &Repo{Root: root, Place: "test", stop: ctx}
+	go func() { // cancel once the command is really running; ends by itself after 20 s at most
+		waitFor(20*time.Second, func() bool {
+			data, err := os.ReadFile(pidFile)
+			return err == nil && strings.TrimSpace(string(data)) != ""
+		})
+		cancel()
+	}()
+	start := time.Now()
+	res := r.run(time.Minute, "-c", "alias.nap=!echo $$ > '"+pidFile+"'; exec sleep 30", "nap")
+	if !errors.Is(res.Err, ErrStopped) {
+		t.Fatalf("a command killed by the cancel must be ErrStopped, got %v", res.Err)
+	}
+	if took := time.Since(start); took > 15*time.Second {
+		t.Fatalf("run returned %v after it started; the cancel should have cut it short", took)
+	}
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Fatalf("the command was never running, so the cancel was not tested: %v", err)
+	}
+}
+
+// stoppedButSilent reports itself cancelled without ever signalling it: what
+// run sees when the cancel lands just after git has ended well.
+type stoppedButSilent struct{ context.Context }
+
+func (stoppedButSilent) Err() error { return context.Canceled }
+
+// A command that ended well keeps its result even when stop is already
+// cancelled: only a command that failed is turned into ErrStopped.
+func TestRepoRun_ACommandThatEndedWellKeepsItsResultWhenStopIsAlreadyCancelled(t *testing.T) {
+	root := t.TempDir()
+	mustGit(t, root, "init", "-q")
+	r := &Repo{Root: root, Place: "test", stop: stoppedButSilent{context.Background()}}
+	res := r.run(localTimeout, "rev-parse", "--git-dir")
+	if res.Err != nil || strings.TrimSpace(res.Stdout) != ".git" {
+		t.Fatalf("run = (%q, %v), want (.git, nil)", res.Stdout, res.Err)
+	}
+	// The same state with a command that fails is a stop, not a plain failure.
+	if res := r.run(localTimeout, "rev-parse", "--verify", "no-such-ref"); !errors.Is(res.Err, ErrStopped) {
+		t.Fatalf("a failed command with stop cancelled must be ErrStopped, got %v", res.Err)
 	}
 }
