@@ -222,6 +222,7 @@ func TestPreReceive_RefusesInputItCannotRead(t *testing.T) {
 	limits := filepath.Join(t.TempDir(), "hooks", "vault-limits.json")
 	writeFile(t, limits, data)
 	zero := strings.Repeat("0", 40)
+	dir := hubRepo(t)
 	cases := map[string]io.Reader{
 		"two fields":      strings.NewReader(zero + " " + zero + "\n"),
 		"four fields":     strings.NewReader(zero + " " + zero + " refs/heads/main extra\n"),
@@ -232,7 +233,7 @@ func TestPreReceive_RefusesInputItCannotRead(t *testing.T) {
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
 			var stderr strings.Builder
-			code := PreReceive(in, &stderr, limits, "mac-test", time.Now())
+			code := PreReceive(dir, in, &stderr, limits, "mac-test", time.Now())
 			// git itself writes these lines; one the hub cannot read is the hub's
 			// own fault, not a rule the sender broke.
 			if code == 0 || !strings.Contains(stderr.String(), "vault-hub: REFUSED engine-error: ") {
@@ -328,6 +329,23 @@ func TestChargeDaily_AFolderSyncFailureAfterTheRenameStillCountsAsCharged(t *tes
 	}
 }
 
+// hubRepo returns an empty bare repository for PreReceive's git commands, and
+// clears git's own location variables for the length of the test. Without it
+// those commands would run in the source checkout, or in whatever repository
+// the test runner exported (GIT_DIR in a git hook, `git rebase --exec`).
+func hubRepo(t *testing.T) string {
+	t.Helper()
+	for name := range gitLocationVars {
+		if _, set := os.LookupEnv(name); set {
+			t.Setenv(name, "") // registers the restore for the end of the test
+			_ = os.Unsetenv(name)
+		}
+	}
+	dir := filepath.Join(t.TempDir(), "hub.git")
+	mustGit(t, t.TempDir(), "init", "--quiet", "--bare", "--initial-branch=main", dir)
+	return dir
+}
+
 // hubLimitsCopy puts the shipped settings into a temp "hooks" folder; the
 // usage ledger then goes to <hooks>/../vault-usage, also in the temp folder.
 func hubLimitsCopy(t *testing.T) string {
@@ -346,9 +364,10 @@ func hubLimitsCopy(t *testing.T) string {
 // sender its file is too large or of the wrong type.
 func TestPreReceive_OwnFaultsAreEngineErrors(t *testing.T) {
 	zero, unknown := strings.Repeat("0", 40), strings.Repeat("1", 40)
+	dir := hubRepo(t)
 	t.Run("settings unreadable", func(t *testing.T) {
 		var stderr strings.Builder
-		code := PreReceive(strings.NewReader(""), &stderr, filepath.Join(t.TempDir(), "missing.json"), "mac-test", time.Now())
+		code := PreReceive(dir, strings.NewReader(""), &stderr, filepath.Join(t.TempDir(), "missing.json"), "mac-test", time.Now())
 		if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: hub settings unreadable") {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
@@ -357,20 +376,20 @@ func TestPreReceive_OwnFaultsAreEngineErrors(t *testing.T) {
 		limits := filepath.Join(t.TempDir(), "hooks", "vault-limits.json")
 		writeFile(t, limits, []byte("{not json"))
 		var stderr strings.Builder
-		code := PreReceive(strings.NewReader(""), &stderr, limits, "mac-test", time.Now())
+		code := PreReceive(dir, strings.NewReader(""), &stderr, limits, "mac-test", time.Now())
 		if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: hub settings unreadable") {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
 	})
 	t.Run("git cannot list the incoming commits", func(t *testing.T) {
 		var stderr strings.Builder
-		code := PreReceive(strings.NewReader(zero+" "+unknown+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
+		code := PreReceive(dir, strings.NewReader(zero+" "+unknown+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
 		if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: cannot list incoming commits") {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
 	})
 	t.Run("an object cannot be measured", func(t *testing.T) {
-		code, msg := batchCheck(unknown+"\n", "%(objectname) %(objectsize)", "cannot measure incoming files",
+		code, msg := batchCheck(dir, unknown+"\n", "%(objectname) %(objectsize)", "cannot measure incoming files",
 			func(string, int64) (string, string) { return "", "" })
 		if code != "engine-error" || !strings.Contains(msg, "cannot be measured") {
 			t.Fatalf("code=%q msg=%q", code, msg)
@@ -383,7 +402,7 @@ func TestPreReceive_OwnFaultsAreEngineErrors(t *testing.T) {
 			"delete":         {"mac-test", unknown + " " + zero + " refs/heads/main\n", "vault-hub: REFUSED type-not-allowed: deleting"},
 		} {
 			var stderr strings.Builder
-			code := PreReceive(strings.NewReader(c.line), &stderr, hubLimitsCopy(t), c.place, time.Now())
+			code := PreReceive(dir, strings.NewReader(c.line), &stderr, hubLimitsCopy(t), c.place, time.Now())
 			if code == 0 || !strings.HasPrefix(stderr.String(), c.want) {
 				t.Errorf("%s: code=%d stderr=%q", name, code, stderr.String())
 			}
@@ -420,7 +439,7 @@ func TestPreReceive_AncestorCheckThatCannotRunIsAnEngineError(t *testing.T) {
 	// Two object names the repository does not have: git cannot answer at all.
 	older, newer := strings.Repeat("2", 40), strings.Repeat("1", 40)
 	var stderr strings.Builder
-	code := PreReceive(strings.NewReader(older+" "+newer+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
+	code := PreReceive(hubRepo(t), strings.NewReader(older+" "+newer+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
 	if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: cannot check that refs/heads/main only moves forward") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}

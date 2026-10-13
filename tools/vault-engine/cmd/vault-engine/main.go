@@ -39,7 +39,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: vault-engine hub-pre-receive <limits_file>")
 			os.Exit(1)
 		}
-		os.Exit(vaultsync.PreReceive(os.Stdin, os.Stderr, os.Args[2], os.Getenv("VAULT_HUB_PLACE"), time.Now()))
+		os.Exit(vaultsync.PreReceive("", os.Stdin, os.Stderr, os.Args[2], os.Getenv("VAULT_HUB_PLACE"), time.Now()))
 	}
 
 	// Determine vault root: if VAULT_ROOT env is set, use it; otherwise search up or use system canonical vault
