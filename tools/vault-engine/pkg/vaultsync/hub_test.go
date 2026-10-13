@@ -440,7 +440,7 @@ func TestPreReceive_AncestorCheckThatCannotRunIsAnEngineError(t *testing.T) {
 	older, newer := strings.Repeat("2", 40), strings.Repeat("1", 40)
 	var stderr strings.Builder
 	code := PreReceive(hubRepo(t), strings.NewReader(older+" "+newer+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
-	if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: cannot check that refs/heads/main only moves forward") {
+	if code != 1 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: cannot check that refs/heads/main only moves forward") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 	if strings.Contains(stderr.String(), "rewriting the history") {
