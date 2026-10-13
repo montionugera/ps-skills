@@ -292,6 +292,12 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertFires(res_rearm)
         self.assertIn("reached 206000 tokens", res_rearm["reason"])
 
+    def test_no_rearm_after_compaction_with_switch_unset(self):
+        self.assertFires(self.run_hook(206_000))
+        self.assertIsNone(self.run_hook(40_000))
+        self.assertTrue(self.flag.exists())
+        self.assertIsNone(self.run_hook(206_000))
+
     def test_original_fire_behaviour_unchanged_with_switch_on_and_off(self):
         # 1. At threshold on safe point, notices OFF (default)
         res_off = self.run_hook(205_000)

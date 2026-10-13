@@ -143,9 +143,10 @@ def main():
     drain = STATE_DIR / f"claude-auto-handoff-{session_id}.drain{dry}"
     refire = STATE_DIR / f"claude-auto-handoff-{session_id}.refire{dry}"
     if context < THRESHOLD:
-        # Back under the threshold (compaction): re-arm, so the next crossing fires again.
+        # Back under the threshold (compaction): clear notice markers; re-arm the main flag only with notices on
+        # (switch unset keeps the original one-shot behaviour).
         for p in (
-            flag,
+            *((flag,) if NOTICES else ()),
             drain,
             refire,
             STATE_DIR / f"claude-auto-handoff-{session_id}.drain",
