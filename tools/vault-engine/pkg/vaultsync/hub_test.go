@@ -514,3 +514,56 @@ func TestSave_ATreeOrBlobRefusalFromTheHubEndsWithExitSix(t *testing.T) {
 		t.Fatalf("outcome = %+v, want REFUSED type-not-allowed with exit 6", out)
 	}
 }
+
+func TestChargeDaily_AUsageFileThatCannotBeWrittenChargesNothing(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "2026-10-10.json")
+	writeFile(t, file, []byte(`{"mac-test":5}`))
+	// A folder sits where the temp file of the write must go.
+	if err := os.Mkdir(file+".tmp", 0755); err != nil {
+		t.Fatal(err)
+	}
+	used, ok, err := chargeDaily(dir, "mac-test", now, 10, 1000)
+	if err == nil || ok || used != 0 || !strings.Contains(err.Error(), "writing usage file") {
+		t.Fatalf("chargeDaily = (%d, %v, %v), want (0, false, an error about writing the usage file)", used, ok, err)
+	}
+	data, rerr := os.ReadFile(file)
+	if rerr != nil || string(data) != `{"mac-test":5}` {
+		t.Fatalf("nothing may be charged when the write fails: (%s, %v)", data, rerr)
+	}
+}
+
+// The same through a real send: refused as the hub's own fault, nothing taken
+// in, and no usage file written for the day.
+func TestHub_UsageFileThatCannotBeWrittenRefusesTheSendAndChargesNothing(t *testing.T) {
+	hub := newHub(t)
+	usage := filepath.Join(hub, "vault-usage")
+	// The hook reads the clock itself: cover today and, for a run at midnight, tomorrow (UTC).
+	var days []string
+	for _, at := range []time.Time{time.Now().UTC(), time.Now().UTC().Add(time.Hour)} {
+		day := filepath.Join(usage, at.Format("2006-01-02")+".json")
+		days = append(days, day)
+		if err := os.MkdirAll(day+".tmp", 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := filepath.Join(t.TempDir(), "place")
+	writeFile(t, filepath.Join(dir, "README.md"), []byte("seed\n"))
+	mustGit(t, dir, "init", "--quiet", "--initial-branch=main")
+	mustGit(t, dir, "remote", "add", "origin", hub)
+	mustGit(t, dir, "add", "-A")
+	mustGit(t, dir, "commit", "--quiet", "-m", "seed")
+	out, err := pushAs(t, dir, "mac-test", "HEAD:refs/heads/main")
+	if err == nil || !strings.Contains(out, "vault-hub: REFUSED engine-error: daily allowance cannot be recorded: writing usage file") {
+		t.Fatalf("expected an engine-error refusal about the usage file, got err=%v\n%s", err, out)
+	}
+	if refs := mustGit(t, hub, "for-each-ref"); refs != "" {
+		t.Fatalf("the hub must not have taken the send:\n%s", refs)
+	}
+	for _, day := range days {
+		if _, serr := os.Stat(day); !os.IsNotExist(serr) {
+			t.Fatalf("no usage may be recorded for a refused send: %s exists (%v)", day, serr)
+		}
+	}
+}
