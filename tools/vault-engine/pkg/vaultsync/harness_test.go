@@ -44,7 +44,7 @@ func TestHarness_InstallsTheRulesFiles(t *testing.T) {
 		"_meta/bin/vault-engine whoami", "SAVED", "REFUSED note-changed", "REFUSED no-connection",
 		"REFUSED too-large", "REFUSED type-not-allowed", "REFUSED busy", "REFUSED engine-error",
 		"_inbox/agent/<your-agent-id>/", "Never run git in this folder",
-		"hit a fault of its own", "Your input is fine",
+		"hit a fault of its own", "Your input is probably fine",
 	} {
 		if !strings.Contains(string(agents), want) {
 			t.Errorf("AGENTS.md does not mention %q", want)
