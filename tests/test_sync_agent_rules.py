@@ -75,6 +75,13 @@ class TestWrite(SyncAgentRulesCase):
         self.run_tool("--write")
         self.assertIn("Tier 3: target tables have non-zero rows.", self.target.read_text())
 
+    def test_write_includes_agy_tool_mapping_banner(self):
+        self.run_tool("--write")
+        text = self.target.read_text()
+        self.assertIn("AGY Harness Tool-Mapping Banner", text)
+        self.assertIn("invoke_subagent + define_subagent", text)
+        self.assertIn("gemini-4-argon", text)
+
     def test_import_line_is_resolved_inline(self):
         self.run_tool("--write")
         text = self.target.read_text()

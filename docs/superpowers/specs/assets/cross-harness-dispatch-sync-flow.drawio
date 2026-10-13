@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="Cross-Harness CLI Dispatch and Rule Sync Loop" id="cross-harness-flow">
+    <mxGraphModel dx="1440" dy="960" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1480" pageHeight="960" background="#0b0f17" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title Banner -->
+        <mxCell id="title" value="Flow B — Cross-Harness Rule Sync &amp; Quota-Aware Tiered CLI Dispatch (80% 3.8-Flash / 20% Argon+Opus)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#74b0ff;fontColor=#f6f8fb;fontStyle=1;fontSize=15;align=left;spacingLeft=16;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1400" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Swimlane 1: Single Source of Truth Rules & Sync Pipeline -->
+        <mxCell id="lane-sync" value="1. Rule &amp; Skill Synchronization Pipeline (Single Source of Truth → Harness-Aware Build Target)" style="swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#4ee39b;fontColor=#4ee39b;fontStyle=1;fontSize=12;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="1400" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="src-claude" value="~/.claude/CLAUDE.md&#xa;(Canonical Global Rules 1–12)&#xa;80/20 Tiered Model &amp; Tool Tables" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-sync">
+          <mxGeometry x="30" y="55" width="260" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="src-local" value="~/.gemini/GEMINI.local.md&#xa;(Cleaned AGY-Only Overrides)&#xa;Argon Orchestrator + Flash Workers&#xa;(Legacy ClickUp RFC Removed)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-sync">
+          <mxGeometry x="360" y="55" width="280" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="sync-bin" value="bin/sync-agent-rules&#xa;• Inline @file Import Resolution&#xa;• Harness Tool Call Callout Banner&#xa;• --check / --write Atomic Build" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-sync">
+          <mxGeometry x="720" y="55" width="290" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="dst-gemini" value="~/.gemini/GEMINI.md&#xa;(Generated Build Artifact)&#xa;Loaded Automatically by AGY Sessions&#xa;+ Symlinked ~/.gemini/skills/*" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-sync">
+          <mxGeometry x="1090" y="55" width="280" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Swimlane 2: Cross-Harness Dispatch & Two-Tier Routing -->
+        <mxCell id="lane-dispatch" value="2. Quota-Aware Tiered CLI Dispatch (80% Default: agy:gemini-3.8-flash-high | 20% Escalate/Think: agy:gemini-4-argon)" style="swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#74b0ff;fontColor=#74b0ff;fontStyle=1;fontSize=12;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="340" width="1400" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="caller-session" value="Caller Orchestrator Session&#xa;• Claude Code (Opus 5.5)&#xa;• Antigravity IDE/CLI (Gemini 4 Argon)&#xa;Thinks Inline; Offloads 80% to Flash" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-dispatch">
+          <mxGeometry x="30" y="60" width="280" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="disp-thinker" value="Frontier / Escalation Tier (--think | --escalate)&#xa;Allowed: claude-opus-5-5 | gemini-4-argon&#xa;Used for: Deep Design, R3+ Escalation,&#xa;Adversarial Review &amp; [complex] Tasks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-dispatch">
+          <mxGeometry x="380" y="60" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="disp-worker" value="Fast Mechanical Tier (80% Default)&#xa;Default: agy:gemini-3.8-flash-high&#xa;Used for: R1–R2 Implementation, Draw.io,&#xa;Render-Spec, Simplify, README &amp; Graft" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-dispatch">
+          <mxGeometry x="750" y="60" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="disp-result" value="Headless AGY Execution &amp; Gate&#xa;Runs --verify-cmd Before Merge&#xa;Salvages Partial Patch on Timeout&#xa;Emits ≤15-Line Report + JSONL Event" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-dispatch">
+          <mxGeometry x="1120" y="60" width="250" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- Swimlane 3: Governance, Mesh Coordination & Vault Registry -->
+        <mxCell id="lane-gov" value="3. Persistence, Mesh Coordination &amp; Vault Agent Governance Boundary" style="swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#b288ff;fontColor=#b288ff;fontStyle=1;fontSize=12;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="610" width="1400" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="gov-mesh" value="Agent Mesh &amp; Handoff Claims&#xa;• In-Session: invoke_subagent + send_message&#xa;• Cross-Session: mesh claim / send / inbox&#xa;• Atomic mkdir &lt;handoff&gt;.claim Lock" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#161b24;strokeColor=#4ed2c8;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-gov">
+          <mxGeometry x="380" y="55" width="320" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="gov-vault" value="tools/vault-engine/pkg/agent/registry.go&#xa;• System Orchestrators: Full Subagent &amp; Shell&#xa;• Recruited Leaf Agents: No Recursive Spawn&#xa;  (define_subagent / agent_recruit Forbidden)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-gov">
+          <mxGeometry x="770" y="55" width="320" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="gov-state" value="Persistent State &amp; Telemetry&#xa;• ~/.local/state/dispatch/events.jsonl&#xa;• ~/.agentmesh/mesh.db (SQLite)&#xa;• .superpowers/sdd/progress.md Ledger" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-gov">
+          <mxGeometry x="1150" y="55" width="220" height="105" as="geometry" />
+        </mxCell>
+
+        <!-- Legend Container -->
+        <mxCell id="legend" value="Legend" style="swimlane;startSize=24;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#2a3340;fontColor=#f6f8fb;fontStyle=1;fontSize=11;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="70" y="630" width="290" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="leg1" value="20% Frontier Tier / State (Green)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="15" y="32" width="260" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="leg2" value="80% Fast 3.8-Flash Tier (Blue)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="15" y="60" width="260" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="leg3" value="Orchestrator / Governance (Purple)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="15" y="88" width="260" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="leg4" value="Build / Verification Pipeline (Amber)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="15" y="114" width="260" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Edges with explicit waypoints & labelBackgroundColor pills -->
+        <mxCell id="e1" value="Base Rules" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="src-claude" target="sync-bin">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="200" y="265" />
+              <mxPoint x="905" y="265" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e2" value="Append Local Overrides" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="src-local" target="sync-bin">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="720" y="195" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e3" value="--write Atomic Output" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="sync-bin" target="dst-gemini">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1090" y="195" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e4" value="Configures AGY Harness" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;dashed=1;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="dst-gemini" target="caller-session">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1270" y="310" />
+              <mxPoint x="210" y="310" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e5" value="20% --think / --escalate (Argon)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="caller-session" target="disp-thinker">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="380" y="455" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e6" value="80% Bulk / R1–R2 Offload (Flash)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="caller-session" target="disp-worker">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="210" y="380" />
+              <mxPoint x="940" y="380" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e7" value="agy --model gemini-3.8-flash-high" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="disp-worker" target="disp-result">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1120" y="455" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e8" value="Cross-Tab / Repo Claims" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ed2c8;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="caller-session" target="gov-mesh">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="210" y="580" />
+              <mxPoint x="580" y="580" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e9" value="Enforces Leaf Allowlist" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="gov-mesh" target="gov-vault">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="770" y="715" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e10" value="Logs JSONL &amp; Ledger" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="disp-result" target="gov-state">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1285" y="580" />
+              <mxPoint x="1300" y="580" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

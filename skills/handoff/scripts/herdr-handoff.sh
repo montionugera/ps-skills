@@ -1,33 +1,57 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# herdr-handoff.sh — Create a new tab in Herdr, start a coding agent, and deliver a handoff prompt.
+# herdr-handoff.sh — Create a new tab in Herdr (or open/launch in T3 Code),
+# start a coding agent, and deliver a handoff prompt.
 #
 # Usage:
 #   herdr-handoff.sh <handoff-markdown-path> [options]
 #
 # Options:
-#   --kind <agent-kind>    Agent kind (opencode, claude, codex, gemini, agy; default: opencode)
-#   --label <tab-label>    Tab label (default: "Handoff: <slug>")
-#   --cwd <dir>            Working directory (default: $PWD)
-#   --prompt <text>        Custom prompt override
-#   --mode <code|plan>     Handoff type. For --kind claude: code -> Sonnet,
-#                          plan -> the default model (unset: default + warning)
-#   --model <name>         Explicit Claude model; overrides --mode
-#   --no-agent            Only open a shell tab without starting an agent
-#   --no-focus             Do not switch focus to the new tab
-#   --use-agent-manager    Try `herdr agent start` first (currently unreliable;
-#                          direct interactive launch is the default)
-#   --close-source         After the new agent is CONFIRMED running, close the
-#                          tab this script was run from ($HERDR_TAB_ID) after a
-#                          short grace period. Pass ONLY when the calling session
-#                          has no background agents/tasks still running — the
-#                          script cannot see those, the caller must check.
+#   --kind <agent-kind>         Agent kind (agy, gemini, claude, codex, opencode, cursor, t3code)
+#   --multiplexer <mux>         Multiplexer/launcher target: herdr, t3 (or t3code), auto (default: auto)
+#   --label <tab-label>         Tab label (default: "Handoff: <slug>")
+#   --cwd <dir>                 Working directory (default: $PWD)
+#   --prompt <text>             Custom prompt override
+#   --mode <code|plan>          Handoff type. For --kind claude: code -> Sonnet,
+#                               plan -> the default model (unset: default + warning)
+#   --model <name>              Explicit Claude model; overrides --mode
+#   --no-agent                  Only open a shell tab without starting an agent
+#   --no-focus                  Do not switch focus to the new tab
+#   --use-agent-manager         Try `herdr agent start` first (direct interactive launch is default)
+#   --close-source              After the new agent is CONFIRMED running, close the
+#                               tab this script was run from ($HERDR_TAB_ID) after a grace period.
+#   --dry-run                   Validate arguments, formulate prompt, and print target plan without launching
+#   --help, -h                  Show usage information
+
+usage() {
+  cat <<'EOF'
+Usage: herdr-handoff.sh <handoff-markdown-path> [options]
+
+Options:
+  --kind <agent-kind>         Agent kind: agy, gemini, claude, codex, opencode, cursor, t3code
+  --multiplexer <mux>         Multiplexer target: herdr, t3 (or t3code), auto (default: auto)
+  --label <tab-label>         Tab label (default: "Handoff: <slug>")
+  --cwd <dir>                 Working directory (default: $PWD)
+  --prompt <text>             Custom prompt override
+  --mode <code|plan>          Handoff type for --kind claude (code -> sonnet, plan -> default)
+  --model <name>              Explicit Claude model; overrides --mode
+  --no-agent                  Only open a shell tab without starting an agent
+  --no-focus                  Do not switch focus to the new tab
+  --use-agent-manager         Try `herdr agent start` first
+  --close-source              Close source Herdr tab ($HERDR_TAB_ID) after confirming agent alive
+  --yolo / --no-yolo          Enable/disable permission-skipping flag (default: --yolo)
+  --dry-run                   Print resolved multiplexer, agent kind, and prompt file without launching
+  --help, -h                  Show this help message
+EOF
+}
 
 HANDOFF_PATH=""
 # Auto-detect current calling agent by environment, or fall back to sensible default:
 DETECTED_KIND="opencode"
-if [[ -n "${ANTIGRAVITY_AGENT:-}" || -n "${ANTIGRAVITY_APP_DATA_DIR:-}" || -n "${ANTIGRAVITY_AGENTAPI_EXE:-}" || -n "${GEMINI_AI_STUDIO_API_KEY:-}" ]]; then
+if [[ -n "${T3CODE_PROJECT_ID:-}" || "${TERM_PROGRAM:-}" == "t3code" ]]; then
+  DETECTED_KIND="t3code"
+elif [[ -n "${ANTIGRAVITY_AGENT:-}" || -n "${ANTIGRAVITY_APP_DATA_DIR:-}" || -n "${ANTIGRAVITY_AGENTAPI_EXE:-}" || -n "${GEMINI_AI_STUDIO_API_KEY:-}" ]]; then
   DETECTED_KIND="agy"
 elif [[ -n "${CODEX_HOME:-}" || -n "${CODEX_CLI_PATH:-}" || -n "${CODEX_SANDBOX:-}" ]]; then
   DETECTED_KIND="codex"
@@ -40,6 +64,7 @@ elif [[ -n "${CURSOR_AGENT:-}" ]]; then
 fi
 
 AGENT_KIND="${HERDR_HANDOFF_AGENT_KIND:-$DETECTED_KIND}"
+MULTIPLEXER="${HERDR_HANDOFF_MULTIPLEXER:-auto}"
 TAB_LABEL=""
 TARGET_CWD="$PWD"
 CUSTOM_PROMPT=""
@@ -51,13 +76,21 @@ USE_AGENT_MANAGER=false
 CLOSE_SOURCE=false
 CLOSE_GRACE_SECONDS=20
 YOLO=true
+DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
     --kind)
       AGENT_KIND="$2"
       shift 2
-
+      ;;
+    --multiplexer|--mux)
+      MULTIPLEXER="$2"
+      shift 2
       ;;
     --label)
       TAB_LABEL="$2"
@@ -103,6 +136,10 @@ while [[ $# -gt 0 ]]; do
       YOLO=false
       shift
       ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
     -*)
       echo "Unknown option: $1" >&2
       exit 1
@@ -120,13 +157,28 @@ done
 
 if [[ -z "$HANDOFF_PATH" ]]; then
   echo "Error: Handoff file path is required." >&2
-  echo "Usage: herdr-handoff.sh <handoff-markdown-path> [--kind <agent>] [--prompt <text>]" >&2
+  echo "Usage: herdr-handoff.sh <handoff-markdown-path> [--kind <agent>] [--multiplexer <herdr|t3|auto>] [--prompt <text>]" >&2
   exit 1
 fi
 
 if [[ ! -f "$HANDOFF_PATH" ]]; then
   echo "Error: Handoff file '$HANDOFF_PATH' does not exist." >&2
   exit 1
+fi
+
+case "$MULTIPLEXER" in
+  herdr|t3|t3code|auto) ;;
+  *)
+    echo "Error: --multiplexer must be 'herdr', 't3', 't3code', or 'auto' (got '$MULTIPLEXER')." >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$MULTIPLEXER" == "t3code" ]]; then
+  MULTIPLEXER="t3"
+fi
+if [[ "$AGENT_KIND" == "t3code" && "$MULTIPLEXER" == "auto" ]]; then
+  MULTIPLEXER="t3"
 fi
 
 # Model routing for claude handoffs: coding work goes to Sonnet, planning
@@ -151,21 +203,6 @@ if [[ -n "$CLAUDE_MODEL" ]]; then
   CLAUDE_MODEL_FLAG="--model $CLAUDE_MODEL "
 fi
 
-# Check if herdr CLI exists
-if ! command -v herdr >/dev/null 2>&1; then
-  echo "⚠️  herdr CLI not found. Handoff file created at: $HANDOFF_PATH"
-  exit 0
-fi
-
-# Check if herdr server is running
-HERDR_STATUS=$(herdr status server 2>&1 || true)
-if [[ "$HERDR_STATUS" != *"status: running"* && "$HERDR_STATUS" != *"running"* ]]; then
-  echo "⚠️  Herdr server is not currently running."
-  echo "📁 Handoff file is ready at: $HANDOFF_PATH"
-  echo "💡 Start Herdr or launch manually: $AGENT_KIND"
-  exit 0
-fi
-
 # Determine default label
 if [[ -z "$TAB_LABEL" ]]; then
   BASENAME=$(basename "$HANDOFF_PATH" .md)
@@ -177,8 +214,16 @@ if [[ -z "$TAB_LABEL" ]]; then
   fi
 fi
 
+# Formulate prompt for incoming agent and write sidecar file before mux dispatch
+FINAL_PROMPT="Please read the handoff document at $HANDOFF_PATH and execute the 'Immediate Next Action' directly. Do NOT conduct historical audits, search other worktrees, or read past review logs inline — stay a thin orchestrator and begin the immediate action."
+if [[ -n "$CUSTOM_PROMPT" ]]; then
+  FINAL_PROMPT="Please read the handoff document at $HANDOFF_PATH and execute: $CUSTOM_PROMPT. Do NOT conduct historical audits or read past review logs inline — begin the immediate action."
+fi
+PROMPT_FILE="${HANDOFF_PATH%.md}.prompt.txt"
+printf '%s\n' "$FINAL_PROMPT" > "$PROMPT_FILE"
+
 # Ensure Graft context graph is seeded if TARGET_CWD is a worktree or repo
-if command -v graft >/dev/null 2>&1; then
+if [[ "$DRY_RUN" != "true" ]] && command -v graft >/dev/null 2>&1; then
   if git -C "$TARGET_CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     _git_common="$(git -C "$TARGET_CWD" rev-parse --git-common-dir 2>/dev/null || true)"
     if [[ -n "$_git_common" && ! -d "$TARGET_CWD/graft" ]]; then
@@ -189,6 +234,83 @@ if command -v graft >/dev/null 2>&1; then
       fi
     fi
   fi
+fi
+
+# Detect Herdr & T3Code availability
+HERDR_AVAILABLE=false
+if command -v herdr >/dev/null 2>&1; then
+  HERDR_STATUS=$(herdr status server 2>&1 || true)
+  if [[ "$HERDR_STATUS" == *"status: running"* || "$HERDR_STATUS" == *"running"* ]]; then
+    HERDR_AVAILABLE=true
+  fi
+fi
+
+T3_AVAILABLE=false
+T3_RUNTIME_FILE="${T3CODE_HOME:-$HOME/.t3}/userdata/server-runtime.json"
+if command -v t3 >/dev/null 2>&1 || [[ -f "$T3_RUNTIME_FILE" ]]; then
+  T3_AVAILABLE=true
+fi
+
+RESOLVED_MUX="$MULTIPLEXER"
+if [[ "$RESOLVED_MUX" == "auto" ]]; then
+  if [[ -n "${T3CODE_PROJECT_ID:-}" || "${TERM_PROGRAM:-}" == "t3code" ]]; then
+    RESOLVED_MUX="t3"
+  elif [[ "$HERDR_AVAILABLE" == "true" ]]; then
+    RESOLVED_MUX="herdr"
+  elif [[ "$T3_AVAILABLE" == "true" ]]; then
+    RESOLVED_MUX="t3"
+  else
+    RESOLVED_MUX="none"
+  fi
+fi
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "DRY_RUN=true"
+  echo "RESOLVED_MUX=$RESOLVED_MUX"
+  echo "AGENT_KIND=$AGENT_KIND"
+  echo "TARGET_CWD=$TARGET_CWD"
+  echo "HANDOFF_PATH=$HANDOFF_PATH"
+  echo "PROMPT_FILE=$PROMPT_FILE"
+  exit 0
+fi
+
+# --------------------------------------------------------------------------
+# T3 Code (t3) Multiplexer / Launcher Path
+# --------------------------------------------------------------------------
+launch_t3_handoff() {
+  echo "🚀 Routing handoff to T3 Code (t3) for workspace '$TARGET_CWD'..."
+  if command -v pbcopy >/dev/null 2>&1; then
+    printf '%s' "$FINAL_PROMPT" | pbcopy || true
+    echo "📋 Copied handoff bootstrap prompt to macOS clipboard (pbcopy)."
+  fi
+  if command -v t3 >/dev/null 2>&1; then
+    t3 project add "$TARGET_CWD" >/dev/null 2>&1 || true
+    if [[ "$FOCUS_FLAG" != "--no-focus" ]]; then
+      t3 app "$TARGET_CWD" >/dev/null 2>&1 || true
+    fi
+    echo "✅ Opened project '$TARGET_CWD' in T3 Code."
+  else
+    echo "ℹ️  T3 Code runtime detected ($T3_RUNTIME_FILE), CLI binary not in PATH."
+  fi
+  echo "📁 Handoff file:   $HANDOFF_PATH"
+  echo "📝 Prompt sidecar: $PROMPT_FILE"
+  echo "💡 Paste (⌘V) in your new T3 Code thread (or AGY provider tab) to resume immediately."
+  exit 0
+}
+
+if [[ "$RESOLVED_MUX" == "t3" ]]; then
+  launch_t3_handoff
+fi
+
+if [[ "$RESOLVED_MUX" == "none" || "$HERDR_AVAILABLE" != "true" ]]; then
+  if [[ "$T3_AVAILABLE" == "true" ]]; then
+    launch_t3_handoff
+  fi
+  echo "⚠️  Neither Herdr server nor T3 Code is currently running."
+  echo "📁 Handoff file is ready at: $HANDOFF_PATH"
+  echo "📝 Prompt sidecar is ready at: $PROMPT_FILE"
+  echo "💡 Start Herdr / T3 Code or launch manually: $AGENT_KIND"
+  exit 0
 fi
 
 echo "🚀 Creating Herdr tab in '$TARGET_CWD'..."
@@ -211,8 +333,7 @@ fi
 # --------------------------------------------------------------------------
 # finish_handoff: confirm the new agent is really alive, print the big
 # close / don't-close banner, and (only if --close-source and confirmed)
-# close the source tab after a grace period. "Launched" is not "running":
-# a pane can accept `pane run` and the agent can still die at startup.
+# close the source tab after a grace period.
 # --------------------------------------------------------------------------
 finish_handoff() {
   local alive=false pane_json agent status
@@ -241,7 +362,7 @@ finish_handoff() {
   if [[ "$CLOSE_SOURCE" == "true" && -n "$source_tab" && "$source_tab" != "$TAB_ID" ]]; then
     echo "🚪  Closing THIS tab ($source_tab) in ${CLOSE_GRACE_SECONDS}s."
     echo "════════════════════════════════════════════════════════════"
-    nohup sh -c "sleep $CLOSE_GRACE_SECONDS; herdr tab close '$source_tab'" >/dev/null 2>&1 &
+    nohup sh -c 'sleep "$1"; herdr tab close "$2"' _ "$CLOSE_GRACE_SECONDS" "$source_tab" >/dev/null 2>&1 &
   else
     echo "🟢  SAFE TO CLOSE THIS TAB${source_tab:+ ($source_tab)} — unless the"
     echo "    session says background agents are still running."
@@ -250,17 +371,6 @@ finish_handoff() {
   return 0
 }
 
-# Formulate prompt for incoming agent
-FINAL_PROMPT="Please read the handoff document at $HANDOFF_PATH and execute the 'Immediate Next Action' directly. Do NOT conduct historical audits, search other worktrees, or read past review logs inline — stay a thin orchestrator and begin the immediate action."
-if [[ -n "$CUSTOM_PROMPT" ]]; then
-  FINAL_PROMPT="Please read the handoff document at $HANDOFF_PATH and execute: $CUSTOM_PROMPT. Do NOT conduct historical audits or read past review logs inline — begin the immediate action."
-fi
-
-# Wait for the new pane's shell to actually come up before starting an agent
-# in it. A flat `sleep 0.5` was a race: `herdr agent start` then failed with
-# "agent target pane ... is not an available shell", the script fell through
-# to the fallback, and the fallback's `claude -p` printed one reply and
-# exited — a dead tab. Poll instead of guessing.
 for _ in $(seq 1 20); do
   if herdr pane list 2>/dev/null \
       | jq -e --arg p "$ROOT_PANE" '[.result.panes[]? | select(.pane_id == $p)] | length > 0' \
@@ -271,49 +381,12 @@ for _ in $(seq 1 20); do
 done
 sleep 1
 
-# Generate unique valid agent name [a-z][a-z0-9_-]{0,31}
 TIMESTAMP=$(date +%s)
-# MUST be lowercased. herdr rejects the name otherwise with
-# invalid_agent_name ("must start with a lowercase letter and contain only
-# lowercase letters, digits, '-' or '_'"). Pane ids are mixed case (w6:pZ),
-# so the old 'a-zA-Z0-9_' class preserved an uppercase letter and EVERY
-# `herdr agent start` failed — silently, because stderr was discarded — which
-# is what pushed this script into its broken `claude -p` fallback every time.
 SHORT_ID=$(echo "$ROOT_PANE" | tr ':' '_' | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_')
 AGENT_NAME="next_${SHORT_ID}_${TIMESTAMP: -4}"
 
-# Keep the prompt OFF the command line entirely: write it to a sidecar file
-# and have the remote shell read it back. Two earlier attempts failed here —
-# \"$FINAL_PROMPT\" broke on embedded quotes, and `printf %q` mangled the
-# em dash into escapes herdr rejected ("argument 4 is not valid UTF-8").
-# Only the sidecar PATH (ASCII, no spaces) crosses the boundary, so prompt
-# text can contain quotes, $, backticks, dashes or any UTF-8 safely.
-PROMPT_FILE="${HANDOFF_PATH%.md}.prompt.txt"
-printf '%s\n' "$FINAL_PROMPT" > "$PROMPT_FILE"
-
-# --------------------------------------------------------------------------
-# Launch strategy: DIRECT INTERACTIVE LAUNCH IS THE DEFAULT.
-#
-# `herdr agent start` was the old primary path. Measured 2026-09-13, it failed
-# 4 out of 4 attempts, three different ways:
-#   - invalid_agent_name  (name built from a mixed-case pane id; fixed above)
-#   - agent_pane_busy     ("target pane is not an available shell")
-#   - agent_not_running   started, then died instantly — AND TOOK THE WHOLE TAB
-#                         WITH IT, so nothing was delivered and there was no
-#                         pane left to fall back into.
-# That last mode is the dangerous one: it reports success at start, fails at
-# prompt delivery, and destroys the tab. A fallback placed after it cannot
-# recover, because the pane is already gone.
-#
-# The direct launch has worked every time it was tried (verified: live
-# interactive session with a real input prompt). So it goes FIRST. The managed
-# path is available behind --use-agent-manager for when herdr fixes it.
-# --------------------------------------------------------------------------
 if [[ "$USE_AGENT_MANAGER" == "true" ]]; then
   echo "🤖 Starting managed agent '$AGENT_NAME' (kind: $AGENT_KIND) in pane $ROOT_PANE..."
-  # `herdr agent start` can report failure in TWO ways — a non-zero exit, OR
-  # exit 0 with a JSON {"error":...} payload on stdout. Check both; never
-  # discard stderr (that is what made the original failure invisible).
   AGENT_START_OUT=""
   AGENT_START_OK=false
   if AGENT_START_OUT=$(herdr agent start "$AGENT_NAME" --kind "$AGENT_KIND" --pane "$ROOT_PANE" 2>&1); then
@@ -327,7 +400,6 @@ if [[ "$USE_AGENT_MANAGER" == "true" ]]; then
     exit $?
   fi
   echo "⚠️  Managed path failed (${AGENT_START_OUT:-prompt delivery failed}); using direct launch." >&2
-  # The pane may have been destroyed along with the dead agent — re-check.
   if ! herdr pane list 2>/dev/null | jq -e --arg p "$ROOT_PANE" \
         '[.result.panes[]? | select(.pane_id == $p)] | length > 0' >/dev/null 2>&1; then
     echo "❌ Pane $ROOT_PANE no longer exists (the managed agent took the tab with it)." >&2
@@ -341,19 +413,15 @@ YOLO_FLAG=""
 if [[ "$YOLO" == "true" ]]; then
   YOLO_FLAG="--dangerously-skip-permissions "
 fi
+QUOTED_PROMPT_FILE=$(printf '%q' "$PROMPT_FILE")
 
 if [[ "$AGENT_KIND" == "opencode" ]]; then
-  herdr pane run "$ROOT_PANE" "opencode --prompt \"\$(cat '$PROMPT_FILE')\""
+  herdr pane run "$ROOT_PANE" "opencode --prompt \"\$(cat $QUOTED_PROMPT_FILE)\""
 elif [[ "$AGENT_KIND" == "claude" ]]; then
-  # INTERACTIVE, not `claude -p`. `-p/--print` is one-shot: it prints a single
-  # reply and EXITS, leaving a dead shell prompt with no session to continue
-  # or resume — which is exactly what "it silently fails" looked like.
-  # Passing the prompt positionally starts a normal interactive session seeded
-  # with it, so the handoff can actually be worked in that tab.
   echo "🧠 Claude model: ${CLAUDE_MODEL:-default}"
-  herdr pane run "$ROOT_PANE" "claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}\"\$(cat '$PROMPT_FILE')\""
+  herdr pane run "$ROOT_PANE" "claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}\"\$(cat $QUOTED_PROMPT_FILE)\""
 elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
-  herdr pane run "$ROOT_PANE" "agy ${YOLO_FLAG}-i \"\$(cat '$PROMPT_FILE')\""
+  herdr pane run "$ROOT_PANE" "agy ${YOLO_FLAG}-i \"\$(cat $QUOTED_PROMPT_FILE)\""
 else
   herdr pane run "$ROOT_PANE" "$AGENT_KIND"
 fi

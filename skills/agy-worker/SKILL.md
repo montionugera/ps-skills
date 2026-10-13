@@ -1,27 +1,61 @@
 ---
 name: agy-worker
-description: "Use when a task is bulk mechanical work a brief fully specifies (bulk edits, sweeps, renames, spec fix-ups, diagram redraws, command-only checks, plan tasks with exact files and tests). Dispatches it to Antigravity CLI via dispatch-worker --agent agy with a verify command and acceptance criteria, falling back to a Sonnet subagent when quota is low."
-argument-hint: "[task prompt] --agent agy [--cwd <dir>] [--verify-cmd <cmd>] [--acceptance-file <file>] [--timeout <seconds>]"
+description: "Use when a task is bulk mechanical work a brief fully specifies. Supports two modes: (1) native in-session AGY multi-agent orchestration (invoke_subagent with 80/20 Flash gemini-3.8-flash-high vs Argon gemini-4-argon tiering), and (2) external CLI dispatch via dispatch-worker --agent agy with quota guarding and verify gates."
+argument-hint: "[task prompt] [--agent agy] [--escalate] [--cwd <dir>] [--verify-cmd <cmd>] [--acceptance-file <file>] [--timeout <seconds>]"
 ---
 
-# External Worker Dispatcher (`agy-worker`, `cursor-worker`)
+# External Worker Dispatcher (`agy-worker`, `cursor-worker`) & Native AGY Multi-Agent
 
 ## Overview
 
-Offloads coding, refactoring, and test execution tasks to **Google Antigravity CLI (`agy`)** or **Cursor CLI (`cursor-agent`)** running in headless mode.
+Offloads coding, refactoring, and test execution tasks using a **Two-Mode Architecture**:
+1. **Mode 1: In-Session Native AGY (`invoke_subagent`)**: When running inside Google Antigravity (`agy`), leverage native multi-agent capabilities directly with the **80/20 Flash-First pipeline**. Never shell out to `dispatch-worker` from within an active AGY session.
+2. **Mode 2: External Cross-Harness CLI (`dispatch-worker --agent agy`)**: When orchestrating from Claude Code, OpenCode, or headless shell scripts, dispatch to Google Antigravity CLI (`agy`) or Cursor CLI (`cursor-agent`) in headless mode with quota guarding and verify gates.
 
 **Codex is disabled (2026-10-03): never dispatch to it.** `--agent codex` and `dispatch-codex-worker` exit 2 with `codex is disabled`; a `--priority` chain entry naming codex is dropped with a one-line stderr notice and routing continues with the rest (a chain naming only codex exits 2).
 
-This workflow:
+---
+
+## Two-Mode & 80/20 Flash-First Architecture
+
+### Mode 1: In-Session Native AGY Orchestration (`invoke_subagent`)
+
+When executing inside Antigravity (`agy`), orchestrators MUST prioritize native in-session multi-agent tools over shelling out to CLI scripts:
+- **`invoke_subagent`**: Dispatch parallel subagents in a single turn. Set workspace isolation explicitly:
+  - `Workspace: "share"`: Zero-copy shared repository worktree for parallel disjoint tasks (optimal speed & disk usage).
+  - `Workspace: "branch"`: Isolated cloned/branched worktree for overlapping files or high-blast-radius edits.
+  - `Workspace: "inherit"`: Shares the exact working directory for read-only research, codebase grep, or diagnostic runs.
+- **`send_message`**: Multi-turn warm fix loops. In Round 2 fixes, send feedback directly to the idle implementer subagent's `conversationID`. Zero cold-start token penalty; preserves context from Round 1.
+- **`define_subagent`**: Declare specialized session-scoped subagents (e.g. `code-reviewer`, `self-grill-auditor`) with tailored system prompts and tool restrictions.
+- **`manage_subagents`**: Inspect running subagents (`Action: "list"`), kill stalled agents (`Action: "kill"`), or clean up.
+
+#### The 80/20 Flash-First Model Tiering in AGY:
+- **80% Fast Worker Tier (`Model: "flash"` / `gemini-3.8-flash-high`)**:
+  - Codebase exploration & `graft` queries (`TypeName: "research"`, `Model: "flash"`, `Workspace: "inherit"`).
+  - Diagram XML math & visual rendering (`drawio-skill` loops, `validate.py --score`, `render-spec`).
+  - Round 1 & Round 2 plan implementation (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"` or `"branch"`).
+  - Step 2 Test verification (`Verify`) and Step 4 simplification (`/simplify`, `README.md` sync, `graft build`).
+- **20% Frontier Tier (`Model: "inherit"` / `gemini-4-argon`)**:
+  - Thin orchestrator thinking, brainstorming, spec writing, and plan drafting on the main thread.
+  - Step 3 Adversarial review (`code-reviewer`, `self-grill-audit`).
+  - Round 3+ Escalation: If Round 2 fails review/verification, terminate the Flash subagent (`manage_subagents(Action: "kill")`) and escalate to a fresh `gemini-4-argon` subagent (`Model: "inherit"`). Also default to Argon for `[complex]` or `[architectural]` tasks.
+
+### Mode 2: External Cross-Harness CLI Dispatch (`dispatch-worker --agent agy`)
+
+When orchestrating from Claude Code, OpenCode, or headless CI:
 1. **Preserves Primary Token Quota**: Coding tasks run on external provider infrastructure instead of depleting Claude limits.
 2. **Proactive Rate Limit Protection**: Reads live provider quota before dispatching. If remaining quota is **< 30% for 5-hour** or **< 10% for weekly**, it returns exit code `10` (`FALLBACK_INTERNAL`), instructing caller orchestrators to seamlessly route to Claude's internal `sonnet` subagents.
 3. **Preference Chain & Dynamic Auto-Routing**:
    - Supports declarative priority chains via `--priority` or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE` (e.g. `cursor:gemini-3.8-flash > agy`).
-   - Evaluates left-to-right, respecting `--mode {subscription_quota_remaining,on_demand}` (or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE`) to guard against unexpected metered billing.
+   - Default worker model is `agy:gemini-3.8-flash-high`.
    - **Always pass `--agent agy`.** The tool's own default is `auto`; never rely on it and never write `--agent auto`.
-4. **Prompt Contract & Scoped Verification**: Wraps prompts with non-negotiable standing rules (TDD cycle, new commits only / never amend, preserving protected configs like `.release.json`, running targeted tests for touched modules, and visual integrity forbidding invented CSS classes).
-5. **Isolated Execution (`--isolated`) & Salvage**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success. If a worker fails or times out (default 900s / 15m, configurable via `AI_AGENT_AUTO_DISPATCH_TIMEOUT`), any partial work is automatically preserved to `/tmp/worker-salvage-<timestamp>.patch` before cleanup.
-6. **Enforces Thin Orchestration**: Returns a standardized **≤ 15-line report** (status, modified files, diff summary, and execution output) so orchestrator context windows remain clean and free from archaeological bloat.
+4. **Escalation Flag (`--escalate`)**:
+   - Pass `--escalate` to route implementation tasks directly to `gemini-4-argon` (for Round 3+ retries or complex tasks).
+5. **Frontier Thinking Mode (`dispatch-thinker` / `--capability deep-design-v1`)**:
+   - Routes to **Claude Opus 5.5** or **Gemini 4 Argon** (`gemini-4-argon`). Fails closed (exit code `12`) if neither frontier model is available or an ineligible model is requested.
+6. **Prompt Contract & Scoped Verification**: Wraps prompts with non-negotiable standing rules (TDD cycle, new commits only / never amend, preserving protected configs like `.release.json`, running targeted tests for touched modules, and visual integrity forbidding invented CSS classes).
+7. **Isolated Execution (`--isolated`) & Salvage**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success. If a worker fails or times out, any partial work is automatically preserved to `/tmp/worker-salvage-<timestamp>.patch` before cleanup.
+8. **Enforces Thin Orchestration**: Returns a standardized **≤ 15-line report** (status, modified files, diff summary, and execution output) so orchestrator context windows remain clean and free from archaeological bloat.
 
 ---
 
@@ -59,12 +93,17 @@ dispatch-worker --agent agy --batch-file tasks.json --max-parallel 4 --cwd "$REP
 dispatch-worker --agent agy --task "Heavy refactor in src/engine" --detach --cwd "$REPO_DIR" \
   --verify-cmd "<cmd>" --acceptance-file "$ACCEPTANCE_FILE" --timeout 9000
 
+# --- Escalation Mode (Frontier Gemini 4 Argon Implementation) ---
+# Escalate from default 3.8-flash worker to frontier Gemini 4 Argon for Round 3 fixes or complex architectural tasks
+dispatch-worker --agent agy --escalate --task "Fix complex concurrency race in src/engine" \
+  --cwd "$WORKTREE_DIR" --verify-cmd "<cmd>"
+
 # --- Heavy Thinking & Architecture Mode (Capability deep-design-v1) ---
-# Offload deep reasoning, RFC generation, or code reviews: Claude Opus 5.5 only (`claude -p`).
-# There is no fallback thinker: a failed Claude run is reported as a failure.
-# Defaults reasoning effort to 'medium' (--effort overrides, or THINK_EFFORT env var).
-# Fails closed (exit code 12) if Claude is unavailable or a non-Claude model is specified.
-dispatch-thinker --task "Synthesize multi-wave portal architecture" \
+# Offload deep reasoning, RFC generation, or code reviews: Claude Opus 5.5 or Gemini 4 Argon (`gemini-4-argon`).
+# There is no fallback thinker: a failed run is reported as a failure.
+# Defaults reasoning effort to 'medium' (--effort overrides, or THINK_EFFORT / AGY_THINK_EFFORT env vars).
+# Fails closed (exit code 12) if neither frontier model is available or an ineligible model is specified.
+dispatch-thinker --agent agy --model gemini-4-argon --task "Synthesize multi-wave portal architecture" \
   --context docs/specs/hub.md \
   --output-file /tmp/portal-synthesis.md
 
@@ -169,9 +208,61 @@ dispatch-worker --isolated --task "..." \
 
 ## Integration with Subagent-Driven Development (SDD)
 
-When using `subagent-driven-development`:
+When using `subagent-driven-development`, select the execution path based on the orchestrator environment:
 
-### 1. Synchronous or Detached Single Batch
+### Path A: In-Session Native AGY Orchestration (Preferred inside AGY)
+
+Inside AGY, never shell out to `dispatch-worker`. Use native tools with the 80/20 Flash-First pattern:
+
+1. **Round 1 Implementation (80% Flash Default)**:
+   ```json
+   invoke_subagent(
+     TypeName: "self",
+     Role: "Task Implementer",
+     Model: "flash",
+     Workspace: "share",  // use "branch" for overlapping or risky surface files
+     Prompt: "Goal: Implement Task N from plan.md...\nFiles in scope: ...\nAcceptance criteria: ...\nVerify command: ..."
+   )
+   ```
+2. **Round 2 Fix Loop (Warm Continuity via `send_message`)**:
+   Instead of respawning a fresh subagent, send reviewer feedback directly to the idle implementer subagent's conversation ID:
+   ```json
+   send_message(
+     Recipient: "<implementer-conversation-id>",
+     Message: "Verification/Review failed with output: ... Please fix and re-verify."
+   )
+   ```
+3. **Round 3+ Escalation (Argon Frontier)**:
+   If Round 2 fails verification or review, terminate the Flash subagent (`manage_subagents(Action: "kill", ConversationIds: ["<implementer-conversation-id>"])`) and escalate to a fresh frontier subagent:
+   ```json
+   invoke_subagent(
+     TypeName: "self",
+     Role: "Escalated Implementer",
+     Model: "inherit",  // runs on gemini-4-argon
+     Workspace: "branch",
+     Prompt: "Escalated: Implement Task N from plan.md...\nReason for escalation: ..."
+   )
+   ```
+4. **Step 3 Adversarial Review Gate**:
+   Always run reviews on the Frontier Tier (`Model: "inherit"` / `gemini-4-argon`):
+   ```json
+   define_subagent(
+     name: "code-reviewer",
+     description: "Adversarial code reviewer",
+     system_prompt: "Adversarial code reviewer evaluating diffs against plan acceptance criteria...",
+     enable_write_tools: false
+   )
+   invoke_subagent(
+     TypeName: "code-reviewer",
+     Role: "Adversarial Reviewer",
+     Model: "inherit",
+     Prompt: "Review git diff for Task N against plan criteria..."
+   )
+   ```
+
+### Path B: External Cross-Harness CLI Dispatch (From Claude Code / Headless)
+
+#### 1. Synchronous or Detached Single Batch
 ```bash
 dispatch-worker --agent agy --detach \
   --task "Read brief: [BRIEF_FILE]. Implement exactly what is specified. Run tests and keep output." \
@@ -182,6 +273,10 @@ dispatch-worker --agent agy --detach \
 dispatch-worker --wait [job-id] --timeout 4200
 ```
 - If exit code is `0`: apply "Accepting a Result", then proceed to Gate 1 / Review Gate with the ≤ 15-line report as the test evidence.
+- If Round 2 fails, escalate to Argon on Round 3 via `--escalate`:
+  ```bash
+  dispatch-worker --agent agy --escalate --detach ...
+  ```
 - If exit code is `10`: Automatically fallback to internal subagent:
   ```
   Agent:
@@ -190,7 +285,7 @@ dispatch-worker --wait [job-id] --timeout 4200
     model: sonnet
   ```
 
-### 2. Multi-Task Parallel Execution (Optimal Tokenomics)
+#### 2. Multi-Task Parallel Execution (Optimal Tokenomics)
 Instead of spawning N separate Claude subagents (which burn ~70K cold-start tokens each), dispatch all tasks in a single batch call:
 ```bash
 dispatch-worker --agent agy \

@@ -25,7 +25,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **ps-release-workflow-status** | Read-only one-screen report of the release, features, claims, and what to do next. |
 | **ps-release-workflow-unclaim** | Abandon a claimed feature: remove its worktree and clear the claim (keeps the branch). |
 | **handoff** | Compact the session into an action-first handoff doc and spawn a fresh agent tab in Herdr; ships an optional Stop hook (`hooks/auto-handoff-stop.py`) that triggers it when context grows large. |
-| **agy-worker** | Offloads coding tasks to Antigravity CLI (`agy`) or Cursor CLI (`cursor-agent`) with proactive quota checking (`>30%` 5h, `>10%` weekly), auto-routing, fallback to Claude Sonnet, and standard ≤15-line reports. Binaries: `dispatch-agy-worker`, `dispatch-cursor-worker`, `dispatch-worker`. |
+| **agy-worker** | Two-mode execution: (1) native in-session AGY multi-agent orchestration (`invoke_subagent`, `define_subagent`, `send_message`, `Workspace: "share"|"branch"`) with 80/20 Flash (`gemini-3.8-flash-high`) vs Frontier Argon (`gemini-4-argon`) tiering; (2) external CLI dispatch via `dispatch-worker --agent agy` with quota guarding and verify gates. Binaries: `dispatch-agy-worker`, `dispatch-cursor-worker`, `dispatch-worker`. |
 | **url-state-resilience** | Enforces URL-as-State, deep-linking, and reload resilience across web dashboards and SPAs; provides `check-url-state.sh` linter and `url-state-guard.py` hook for non-regression. |
 | **macos-audio-hud** | Engineering standards for macOS native floating HUDs and real-time CoreAudio/AVFoundation voice companion clients (`AUVoiceProcessing`, channel 0 extraction, dynamic converters, NSRecursiveLock, floating `NSPanel`, Carbon hotkeys). |
 | **rokid-glasses-companion** | Engineering standards and hardware trap mitigations for Rokid AI Smart Glasses and Android AR wearables (direct Wi-Fi WebSocket architecture, `AudioSource.MIC` + AGC/limiter, walkie-talkie echo suppression, raw key debouncing, priority 999 `KeyReceiver`). |
@@ -77,9 +77,28 @@ Running `./install.sh` in an interactive terminal automatically prompts you to c
 
 Install into a non-default Claude home with `CLAUDE_HOME=/path ./install.sh`.
 
-## Multi-Agent External Fan-out (`dispatch-worker`)
+## Native AGY Multi-Agent & External Worker Fan-out (`dispatch-worker`)
 
-Offload token-heavy code editing and test cycles from Claude to external coding CLIs (**Antigravity CLI** or **Cursor CLI `cursor-agent`**) with quota/on-demand guarding and automated fallback to Claude internal subagents.
+The toolkit provides two complementary multi-agent execution modes:
+
+### Mode 1: In-Session Native AGY Orchestration (Inside Antigravity)
+
+When running inside Google Antigravity (`agy`), orchestrators use native subagent primitives directly without shelling out:
+- **`invoke_subagent`**: Concurrently launch subagents in isolated workspaces:
+  - `Workspace: "share"`: Shared git worktree for parallel disjoint tasks (zero clone overhead).
+  - `Workspace: "branch"`: Isolated branched worktree for overlapping or high-blast-radius edits.
+  - `Workspace: "inherit"`: Shares current working directory for read-only research and inspections.
+- **`send_message`**: Multi-turn warm fix loops to resume idle implementers without cold-start penalties.
+- **`define_subagent`**: Define custom session-scoped roles (e.g. `code-reviewer`, `self-grill-auditor`).
+- **`manage_subagents`**: Supervise, list, and terminate active subagents.
+
+#### 80/20 Flash-First Tiering:
+- **80% Fast Worker Tier (`Model: "flash"` / `gemini-3.8-flash-high`)**: Fast exploration (`graft`), `.drawio` XML authoring, HTML rendering, Round 1–2 plan implementers, test verification (`Verify`), and simplification (`/simplify`).
+- **20% Frontier Tier (`Model: "inherit"` / `gemini-4-argon`)**: Thin orchestrator thinking/planning, Step 3 adversarial review (`code-reviewer`), and Round 3+ escalations.
+
+### Mode 2: External CLI Dispatch (`dispatch-worker`)
+
+Offload token-heavy code editing and test cycles from Claude Code or headless scripts to external coding CLIs (**Antigravity CLI** or **Cursor CLI `cursor-agent`**) with quota/on-demand guarding and automated fallback to Claude internal subagents.
 
 **Codex is disabled (2026-10-03).** The dispatcher never routes to OpenAI Codex, in any mode: `--agent codex` exits 2 with `codex is disabled`, a `--priority` chain entry naming codex is dropped with a one-line notice on stderr (a chain naming only codex exits 2), and `--agent auto` considers agy alone. The single switch is `DISABLED_AGENTS` at the top of `bin/dispatch-agy-worker`.
 
@@ -92,8 +111,11 @@ dispatch-cursor-worker --check-quota
 # Priority chain routing (Cost-efficient Cursor On-Demand -> AGY)
 dispatch-worker --priority "cursor:gemini-3.8-flash > agy" --allow-on-demand --task "Write unit test and implement feature"
 
-# Run in an isolated temporary git worktree
-dispatch-worker --agent auto --isolated --task "Refactor module X"
+# Run in an isolated temporary git worktree (default worker: gemini-3.8-flash-high)
+dispatch-worker --agent agy --isolated --task "Refactor module X"
+
+# Escalate to frontier Gemini 4 Argon for Round 3 fixes or complex tasks
+dispatch-worker --agent agy --escalate --isolated --task "Fix complex concurrency race"
 ```
 
 Configure default preferences in `~/.config/dispatch/config.env` or via environment variables:
@@ -105,14 +127,16 @@ export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3
 
 ### Thinking tasks (`dispatch-thinker`)
 
-`dispatch-thinker` (= `dispatch-worker --capability deep-design-v1`; `--think` uses the same routing) sends deep-reasoning work to **Claude Opus 5.5 only** (`claude -p --model claude-opus-5-5`, available when `claude` is on `PATH`). Reasoning effort defaults to **`high`** (`--effort` on CLI overrides). Claude runs least-privilege (read tools + Write/Edit only; no Bash or web). There is no fallback thinker: a failed Claude run is reported as a failure. `dispatch-thinker` exits `12` (fail closed) when Claude is unavailable or a non-Claude model is requested; plain `--think` exits `12` for a non-Claude model and `10` when Claude is unavailable. `--agent claude` pins the provider.
+`dispatch-thinker` (= `dispatch-worker --capability deep-design-v1`; `--think` uses the same routing) sends deep-reasoning work to **Frontier Tier models: Claude Opus 5.5 or Gemini 4 Argon (`gemini-4-argon`)**. Reasoning effort defaults to **`medium`** (`--effort` on CLI overrides). Claude runs least-privilege (read tools + Write/Edit only; no Bash or web). `dispatch-thinker` exits `12` (fail closed) when neither frontier thinker is available or an unsupported model is requested. `--agent claude` or `--agent agy` pins the provider.
 
 | Env var | Default | Purpose |
 | :--- | :--- | :--- |
 | `CLAUDE_THINK_MODEL` | `claude-opus-5-5` | Claude thinker model id |
-| `THINK_EFFORT` | `high` | Default reasoning effort for thinking tasks (`--effort` overrides) |
+| `AGY_THINK_MODEL` | `gemini-4-argon` | AGY thinker model id |
+| `THINK_EFFORT` | `medium` | Default reasoning effort for thinking tasks (`--effort` overrides) |
 | `CLAUDE_THINK_EFFORT` | unset | Claude-specific thinker effort override |
-| `DISPATCH_THINKER_SKIP_CLAUDE` | unset | `1` marks Claude unavailable, so thinking mode fails closed |
+| `AGY_THINK_EFFORT` | unset | AGY-specific thinker effort override |
+| `DISPATCH_THINKER_SKIP_CLAUDE` | unset | `1` marks Claude unavailable |
 
 ## Plugin Bridge & Antigravity (agy) Context Budget (`ps-plugin-bridge`)
 

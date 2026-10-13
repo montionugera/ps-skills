@@ -359,6 +359,131 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertIsNone(res)
         self.assertFalse(self.flag.exists())
 
+    def test_agy_stop_accepts_no_tool_call_and_resolves_brain_transcript(self):
+        conv_id = f"agy-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        # 600,000 bytes -> ~150,000 estimated tokens (> default 128,000 AGY threshold)
+        (logs_dir / "transcript_full.jsonl").write_text("x" * 600_000)
+
+        payload = {
+            "conversationId": conv_id,
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir)},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        res = json.loads(out.stdout)
+        self.assertEqual(res["decision"], "continue")
+        self.assertIn("AUTO-HANDOFF", res["reason"])
+        self.assertIn("--kind agy", res["reason"])
+        self.assertTrue((self.state_dir / f"agy-auto-handoff-{conv_id}.flag").exists())
+
+    def test_agy_stop_resolves_conversation_db_and_wal_bytes(self):
+        conv_id = f"agy-db-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-db"
+        conv_dir = app_dir / "conversations"
+        conv_dir.mkdir(parents=True)
+        (conv_dir / f"{conv_id}.db").write_bytes(b"d" * 300_000)
+        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 300_000)
+
+        payload = {
+            "conversationId": conv_id,
+            "terminationReason": "MAX_TOKEN_BUDGET_EXCEEDED",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir)},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        res = json.loads(out.stdout)
+        self.assertEqual(res["decision"], "continue")
+        self.assertIn("150000 tokens", res["reason"])
+
+    def test_agy_stop_ignores_error_termination_reason(self):
+        conv_id = f"agy-err-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-err"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        (logs_dir / "transcript.jsonl").write_text("x" * 600_000)
+
+        payload = {
+            "conversationId": conv_id,
+            "terminationReason": "USER_CANCELLED",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir)},
+        )
+        self.assertEqual(out.returncode, 0)
+        self.assertEqual(json.loads(out.stdout), {})
+
+    def test_herdr_handoff_script_supports_t3code_and_help(self):
+        script = HOOK.parent.parent / "scripts" / "herdr-handoff.sh"
+        help_res = subprocess.run(["bash", str(script), "--help"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(help_res.returncode, 0)
+        self.assertIn("--multiplexer", help_res.stdout)
+        self.assertIn("t3code", help_res.stdout)
+
+        handoff_doc = Path(self.tmp.name) / "handoff-2026-10-13-t3.md"
+        handoff_doc.write_text("# Handoff\nImmediate Next Action: verify t3\n")
+        dry_res = subprocess.run(
+            ["bash", str(script), str(handoff_doc), "--kind", "agy", "--multiplexer", "t3", "--dry-run"],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(dry_res.returncode, 0, dry_res.stderr)
+        self.assertIn("RESOLVED_MUX=t3", dry_res.stdout)
+        self.assertIn("AGENT_KIND=agy", dry_res.stdout)
+        self.assertTrue((Path(self.tmp.name) / "handoff-2026-10-13-t3.prompt.txt").is_file())
+
+    def test_agy_subagent_stop_ignored_and_session_id_sanitized(self):
+        conv_id = f"agy-sub-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-sub"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        (logs_dir / "transcript_full.jsonl").write_text("x" * 600_000)
+
+        # Subagent stop with parentConversationId must be ignored
+        sub_out = self.run_hook_raw(
+            json.dumps({
+                "conversationId": conv_id,
+                "parentConversationId": "parent-123",
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": True,
+                "workspacePaths": [str(self.repo)],
+            }),
+            env={"AGY_APP_DATA_DIR": str(app_dir)},
+        )
+        self.assertEqual(json.loads(sub_out.stdout), {})
+
+        # Path traversal in conversationId cannot escape state_dir
+        sanitized_id = "escapedconv"
+        esc_logs = app_dir / "brain" / sanitized_id / ".system_generated" / "logs"
+        esc_logs.mkdir(parents=True)
+        (esc_logs / "transcript_full.jsonl").write_text("x" * 600_000)
+        esc_out = self.run_hook_raw(
+            json.dumps({
+                "conversationId": "../../escaped/conv",
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": True,
+                "workspacePaths": [str(self.repo)],
+            }),
+            env={"AGY_APP_DATA_DIR": str(app_dir)},
+        )
+        self.assertEqual(json.loads(esc_out.stdout)["decision"], "continue")
+        self.assertFalse((self.state_dir.parent / "escaped" / "conv.flag").exists())
+        self.assertTrue((self.state_dir / f"agy-auto-handoff-{sanitized_id}.flag").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -1,19 +1,34 @@
 #!/usr/bin/env python3
-# PreToolUse hook: mid-turn context check for the auto-handoff rule.
+# PreToolUse (Claude Code) & PreInvocation (Antigravity / AGY) hook:
+# mid-turn / pre-invocation context check for the auto-handoff rule.
 #
 # A Stop hook only runs when a turn ends, and a single turn can add hundreds of
 # thousands of tokens. This check reads the newest usage record from the tail of
-# the transcript before each tool call and, the first time the main session passes
-# each level, adds a note to the model's context. It never denies a tool call, so it
-# cannot interrupt a change in progress; it only asks the agent to wrap up the unit
-# of work and end the turn, where auto-handoff-stop.py takes over.
+# the transcript (or estimates context bytes in AGY brain logs / conversation DB)
+# and, the first time the main session passes each level, adds a note to the
+# model's context.
+#
+# Output contract:
+#   - Claude Code PreToolUse:
+#       {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}
+#   - Antigravity (AGY) PreInvocation:
+#       {"injectSteps": [{"ephemeralMessage": note}]}
 #
 # Env:
-#   CLAUDE_AUTO_HANDOFF=0                  disable (same switch as the Stop hook)
-#   CLAUDE_AUTO_HANDOFF_MIDTURN_LEVELS     comma list of token levels (default 250000,300000,400000,500000)
-#   CLAUDE_AUTO_HANDOFF_NOTICES=1          add the note to the context (default: log only, same switch as the Stop hook)
-#   CLAUDE_AUTO_HANDOFF_LOG                decision log (default ~/.claude/logs/auto-handoff.log)
-#   CLAUDE_AUTO_HANDOFF_STATE_DIR          marker files (default /tmp)
+#   CLAUDE_AUTO_HANDOFF=0 / AGY_AUTO_HANDOFF=0
+#       disable (same switch as the Stop hook)
+#   CLAUDE_AUTO_HANDOFF_MIDTURN_LEVELS / AGY_AUTO_HANDOFF_MIDTURN_LEVELS
+#       comma list of token levels (default 250000,300000,400000,500000 for Claude;
+#       100000,128000,160000,200000 for AGY)
+#   CLAUDE_AUTO_HANDOFF_NOTICES=1 / AGY_AUTO_HANDOFF_NOTICES=1
+#       add the note to the context (Claude default: log only unless =1;
+#       AGY default: emit unless AGY_AUTO_HANDOFF_NOTICES=0)
+#   CLAUDE_AUTO_HANDOFF_LOG
+#       decision log (default ~/.claude/logs/auto-handoff.log)
+#   CLAUDE_AUTO_HANDOFF_STATE_DIR
+#       marker files (default /tmp)
+#   AGY_APP_DATA_DIR / ANTIGRAVITY_APP_DATA_DIR
+#       override Antigravity app data root
 
 import json
 import os
@@ -22,17 +37,88 @@ import sys
 import time
 
 TAIL_BYTES = 1 << 20  # the newest usage record is always near the end
+BYTES_PER_TOKEN = 4
 
 
-def levels():
+def is_agy_payload(data):
+    """Detect Antigravity (AGY) payload (camelCase keys) vs Claude Code (snake_case)."""
+    return any(
+        k in data
+        for k in (
+            "conversationId",
+            "terminationReason",
+            "workspacePaths",
+            "transcriptPath",
+            "fullyIdle",
+        )
+    )
+
+
+def resolve_agy_app_dirs():
+    override = os.environ.get("AGY_APP_DATA_DIR") or os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
+    if override:
+        return [pathlib.Path(override).expanduser()]
+    return [
+        pathlib.Path("~/.gemini/antigravity-cli").expanduser(),
+        pathlib.Path("~/.gemini/antigravity").expanduser(),
+    ]
+
+
+def resolve_agy_transcript_and_bytes(data, conversation_id):
+    explicit = data.get("transcriptPath") or data.get("transcript_path") or ""
+    if explicit and os.path.isfile(explicit):
+        try:
+            return explicit, os.path.getsize(explicit)
+        except OSError:
+            pass
+
+    if not conversation_id or conversation_id == "unknown":
+        return None, 0
+
+    best_transcript = None
+    best_bytes = 0
+
+    for root in resolve_agy_app_dirs():
+        logs_dir = root / "brain" / conversation_id / ".system_generated" / "logs"
+        for name in ("transcript_full.jsonl", "transcript.jsonl"):
+            candidate = logs_dir / name
+            if candidate.is_file():
+                try:
+                    sz = candidate.stat().st_size
+                    if sz > best_bytes:
+                        best_bytes = sz
+                        best_transcript = str(candidate)
+                except OSError:
+                    pass
+
+        conv_dir = root / "conversations"
+        db_file = conv_dir / f"{conversation_id}.db"
+        wal_file = conv_dir / f"{conversation_id}.db-wal"
+        db_bytes = 0
+        for fpath in (db_file, wal_file):
+            if fpath.is_file():
+                try:
+                    db_bytes += fpath.stat().st_size
+                except OSError:
+                    pass
+        if db_bytes > best_bytes:
+            best_bytes = db_bytes
+
+    return best_transcript, best_bytes
+
+
+def levels(is_agy=False):
+    env_key = "AGY_AUTO_HANDOFF_MIDTURN_LEVELS" if is_agy and "AGY_AUTO_HANDOFF_MIDTURN_LEVELS" in os.environ else "CLAUDE_AUTO_HANDOFF_MIDTURN_LEVELS"
     try:
-        return sorted(int(x) for x in os.environ["CLAUDE_AUTO_HANDOFF_MIDTURN_LEVELS"].split(","))
+        return sorted(int(x) for x in os.environ[env_key].split(","))
     except (KeyError, ValueError):
-        return [250000, 300000, 400000, 500000]
+        return [100000, 128000, 160000, 200000] if is_agy else [250000, 300000, 400000, 500000]
 
 
 def latest_context(transcript):
     """Context size of the newest main-session assistant record in the file's tail, or 0."""
+    if not transcript or not os.path.isfile(transcript):
+        return 0
     with open(transcript, "rb") as f:
         f.seek(0, os.SEEK_END)
         size = f.tell()
@@ -66,31 +152,65 @@ def main():
     if os.environ.get("CLAUDE_AUTO_HANDOFF") == "0":
         return
     data = json.load(sys.stdin)
-    if data.get("agent_id"):  # a subagent's tool call: its context is not the session's
+    if not isinstance(data, dict):
         return
-    transcript = data.get("transcript_path")
-    if not transcript or not os.path.isfile(transcript):
+
+    is_agy = is_agy_payload(data)
+    if is_agy and os.environ.get("AGY_AUTO_HANDOFF") == "0":
+        print("{}")
         return
-    context = latest_context(transcript)
-    passed = [lv for lv in levels() if context >= lv]
+
+    if data.get("agent_id") or data.get("parentConversationId"):
+        if is_agy:
+            print("{}")
+        return
+
+    raw_session_id = data.get("conversationId") if is_agy else data.get("session_id")
+    session_id = "".join(c for c in str(raw_session_id or "unknown") if c.isalnum() or c in "-_") or "unknown"
+
+    if is_agy:
+        transcript, total_bytes = resolve_agy_transcript_and_bytes(data, session_id)
+        context = latest_context(transcript) or (total_bytes // BYTES_PER_TOKEN)
+        dry = os.environ.get("AGY_AUTO_HANDOFF_NOTICES") == "0" or (
+            "AGY_AUTO_HANDOFF_NOTICES" not in os.environ
+            and "CLAUDE_AUTO_HANDOFF_NOTICES" in os.environ
+            and os.environ.get("CLAUDE_AUTO_HANDOFF_NOTICES") != "1"
+        )
+        prefix = "agy-auto-handoff"
+    else:
+        transcript = data.get("transcript_path")
+        if not transcript or not os.path.isfile(transcript):
+            return
+        context = latest_context(transcript)
+        dry = os.environ.get("CLAUDE_AUTO_HANDOFF_NOTICES") != "1"
+        prefix = "claude-auto-handoff"
+
+    passed = [lv for lv in levels(is_agy=is_agy) if context >= lv]
     if not passed:
+        if is_agy:
+            print("{}")
         return
     level = passed[-1]
-    dry = os.environ.get("CLAUDE_AUTO_HANDOFF_NOTICES") != "1"
     state = pathlib.Path(os.environ.get("CLAUDE_AUTO_HANDOFF_STATE_DIR") or "/tmp")
-    session_id = "".join(c for c in str(data.get("session_id") or "unknown") if c.isalnum() or c in "-_") or "unknown"
-    marker = state / f"claude-auto-handoff-{session_id}.midturn{'.dry' if dry else ''}"
+    marker = state / f"{prefix}-{session_id}.midturn{'.dry' if dry else ''}"
     try:
         if int(marker.read_text()) >= level:
+            if is_agy:
+                print("{}")
             return  # already said so at this level
     except Exception:
         pass
     try:
         marker.write_text(str(level))
     except Exception:
+        if is_agy:
+            print("{}")
         return  # without the marker this would repeat on every tool call
     try:
         log = os.environ.get("CLAUDE_AUTO_HANDOFF_LOG") or os.path.expanduser("~/.claude/logs/auto-handoff.log")
+        d = os.path.dirname(log)
+        if d:
+            os.makedirs(d, exist_ok=True)
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "session": session_id,
                                 "context": context, "decision": "midturn-notice",
@@ -98,6 +218,8 @@ def main():
     except Exception:
         pass
     if dry:
+        if is_agy:
+            print("{}")
         return
     note = (
         f"AUTO-HANDOFF (mid-turn): context is {context} tokens, past {level}. This tool call "
@@ -105,7 +227,10 @@ def main():
         "start nothing new, launch no new background work, then end your turn so the "
         "handoff can run. Do not hand off in the middle of a change."
     )
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}))
+    if is_agy:
+        print(json.dumps({"injectSteps": [{"ephemeralMessage": note}]}))
+    else:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": note}}))
 
 
 if __name__ == "__main__":

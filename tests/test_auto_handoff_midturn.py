@@ -91,6 +91,32 @@ class MidturnTest(unittest.TestCase):
         self.assertFalse((self.dir.parent / "escaped.midturn").exists())
         self.assertTrue(any(p.name.startswith("claude-auto-handoff-") for p in self.dir.iterdir()))
 
+    def test_agy_preinvocation_emits_inject_steps_ephemeral_message(self):
+        conv_id = f"agy-mid-{uuid.uuid4().hex}"
+        app_dir = self.dir / "agy-app"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        # 560,000 bytes -> 140,000 tokens (passes AGY 100k & 128k levels)
+        (logs_dir / "transcript_full.jsonl").write_text("m" * 560_000)
+
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_AUTO_HANDOFF", "AGY_AUTO_HANDOFF"))}
+        env.update({
+            "CLAUDE_AUTO_HANDOFF_STATE_DIR": str(self.dir),
+            "CLAUDE_AUTO_HANDOFF_LOG": str(self.log),
+            "AGY_APP_DATA_DIR": str(app_dir),
+        })
+        payload = {"conversationId": conv_id, "workspacePaths": [str(self.dir)]}
+        r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertIn("injectSteps", out)
+        self.assertIn("past 128000", out["injectSteps"][0]["ephemeralMessage"])
+
+        # Second invocation at same level returns empty object "{}"
+        r2 = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(json.loads(r2.stdout), {})
+
 
 if __name__ == "__main__":
     unittest.main()
+

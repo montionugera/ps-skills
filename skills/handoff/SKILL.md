@@ -1,7 +1,7 @@
 ---
 name: handoff
-description: "Compact the current conversation into a high-density, action-first handoff document (zero-indirection, self-contained frontier) and auto-spawn a new tab/agent in Herdr."
-argument-hint: "[agent-kind (e.g. opencode, claude, codex, gemini, agy)] [goal or next step instructions]"
+description: "Compact the current conversation into a high-density, action-first handoff document (zero-indirection, self-contained frontier) and auto-spawn a new tab/agent in Herdr or T3Code. Supports AGY native auto-handoff hooks."
+argument-hint: "[agent-kind (e.g. opencode, claude, codex, gemini, agy, t3code)] [--multiplexer herdr|t3|auto] [goal or next step instructions]"
 ---
 
 # Handoff (with Herdr Auto-Tab)
@@ -13,6 +13,13 @@ The **Handoff** skill solves this by:
 1. Compacting the current session into a high-density, self-contained **Frontier Capsule** (zero pointer indirection).
 2. Saving it to the OS temporary directory (`/tmp/handoff-<timestamp>-<slug>.md`).
 3. Automatically opening a **new tab** in **Herdr**, starting a fresh coding agent (`opencode`, `claude`, `agy`, etc.), and prompting it to execute the immediate next action directly without burning tokens on historical archaeology.
+
+### Scope Boundary: In-Session AGY Subagents vs Herdr Handoff
+- **Inside AGY (In-Session)**: For parallel feature slices, research lookups, and adversarial reviews within the same session, use AGY's native `invoke_subagent` (`Workspace: "share"`/`"branch"`, `Model: "flash"`/`"inherit"`) and `send_message` for reactive wakeup. Do NOT spawn new Herdr tabs or file handoffs for standard in-session task delegation.
+- **When to Use Handoff**: Reserve this skill for:
+  1. **Context Window Exhaustion**: When the primary orchestrator session reaches >100k–200k tokens and needs a clean slate.
+  2. **Cross-Harness Transfers**: Handing off work between different agent harnesses (Claude Code $\leftrightarrow$ AGY $\leftrightarrow$ OpenCode).
+  3. **Cross-Terminal / Cross-Repo**: Long-running background handoffs across separate terminal panes or detached repositories.
 
 ### Auto-Trigger (context-size detection)
 
@@ -29,6 +36,12 @@ The **Handoff** skill solves this by:
   { "type": "command", "command": "python3 ~/.claude/hooks/auto-handoff-stop.py", "timeout": 10 }
   ```
 - **Mid-turn check (optional).** A Stop hook only runs when a turn ends, and one long turn can add hundreds of thousands of tokens. `hooks/auto-handoff-midturn.py` is a **PreToolUse hook** that reads the newest main-session usage record before each tool call and, once per level (`CLAUDE_AUTO_HANDOFF_MIDTURN_LEVELS`, default `250000,300000,400000,500000`), adds a note asking the agent to finish the unit of work and end the turn so the Stop hook can hand off. It never denies a tool call and ignores subagents. **Notes are off unless `CLAUDE_AUTO_HANDOFF_NOTICES=1`** (log only otherwise). Install like the Stop hook, under `hooks.PreToolUse[].hooks`. Tests: `tests/test_auto_handoff_midturn.py`.
+
+### AGY Native Auto-Handoff (`~/.gemini/config/hooks.json`)
+
+In Google Antigravity (`agy`), auto-handoff hooks operate natively via AGY's JSON hook schema:
+- **`Stop` Hook**: Fires when `terminationReason in ("NO_TOOL_CALL", "MAX_TOKEN_BUDGET_EXCEEDED")`. Inspects session token growth from `conversations/<id>.db*` or `transcript_full.jsonl`. When exceeding threshold (>200k tokens), blocks termination and returns `{"decision": "continue", "injectSteps": [{"type": "USER_INPUT", "content": "Context threshold exceeded. Execute handoff skill to new tab/session."}]}`.
+- **`PreInvocation` Hook**: Mid-turn hook that monitors cumulative token consumption before LLM calls. If approaching capacity, injects advisory notices instructing the agent to wrap up the current logical unit of work.
 
 ---
 
@@ -110,7 +123,10 @@ Save the generated markdown to `/tmp/`:
 
 ## Step 3: Auto-Spawn New Tab in Herdr
 
-**3a. Background-work check (BEFORE running the script).** Run `ListAgents` and look at the `Subagents` block, plus any `run_in_background` Bash / Monitor tasks you started. Count the ones still `running`.
+**3a. Background-work check (BEFORE running the script).**
+- In **Claude Code**: Run `ListAgents` and look at the `Subagents` block, plus any `run_in_background` Bash / Monitor tasks you started.
+- In **Antigravity (`agy`)**: Check both `manage_subagents(Action: "list")` and `manage_task(Action: "list")`. Record any active subagent `conversationId`s or detached `dispatch-worker` job IDs in the handoff document.
+Count the ones still `running`:
 - **0 running** → add `--close-source`: once the new agent is confirmed alive, the script closes THIS tab automatically after 20s.
 - **≥1 running** → do NOT pass `--close-source`. This tab must stay open to receive their results (2026-09-13 fact-board I-074: the handoff fired with 4 plan-writer agents still running; auto-closing would have lost 4 slice plans). Relay their results to the new tab via a file in the work folder, then report "safe to close" when the last one lands.
 
@@ -131,20 +147,28 @@ All handoffs launch with permission-skipping enabled by default (`--dangerously-
 - Unsure → `plan`. `--model <name>` overrides both.
 
 ### Supported Agent Kinds (`--kind`):
-- **Auto-detected by default** from the current session's environment (`agy`/`gemini` when in Antigravity, `codex` when in Codex, `claude` when in Claude Code, `opencode` when in OpenCode, `cursor` when in Cursor). Can be explicitly overridden with `--kind <name>` or `$HERDR_HANDOFF_AGENT_KIND`.
+- **Auto-detected by default** from the current session's environment (`agy`/`gemini` when in Antigravity, `codex` when in Codex, `claude` when in Claude Code, `opencode` when in OpenCode, `cursor` when in Cursor, `t3code` when targeting T3Code). Can be explicitly overridden with `--kind <name>` or `$HERDR_HANDOFF_AGENT_KIND`.
 - `agy` / `gemini`
 - `claude`
 - `codex`
 - `opencode`
 - `cursor`
+- `t3code`
 
-### Behavior:
-1. If **Herdr** is running:
-   - Creates a new tab: `herdr tab create --cwd "$PWD" --label "Handoff: <slug>" --focus`
-   - Starts the chosen agent in the pane via `herdr agent start`
-   - Delivers the execution-first prompt to execute the immediate action without forensic delay.
-2. If **Herdr** is not running:
-   - Gracefully outputs the path to the handoff file and a copy-pasteable prompt for manual startup.
+### Multiplexer Support (`--multiplexer {herdr,t3,auto}`):
+- **Herdr (`--multiplexer herdr`)**:
+  - Creates a new tab: `herdr tab create --cwd "$PWD" --label "Handoff: <slug>" --focus`
+  - Starts the chosen agent in the pane via `herdr agent start`
+  - Delivers the execution-first prompt to execute the immediate action without forensic delay.
+- **T3Code (`--multiplexer t3` / `--kind t3code`)**:
+  - Integrates directly with T3Code desktop app:
+    ```bash
+    t3 project add "$TARGET_CWD"
+    t3 app "$TARGET_CWD"
+    ```
+  - Automatically copies the self-contained bootstrap prompt to system clipboard for one-click pasting into the fresh T3Code agent panel.
+- **Auto (`--multiplexer auto` - default)**:
+  - Detects active Herdr daemon first; falls back to T3Code if available; otherwise gracefully outputs the path to the handoff file and a copy-pasteable prompt for manual startup.
 
 ---
 
