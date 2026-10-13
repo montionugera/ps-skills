@@ -52,7 +52,7 @@
 - `cwd`: `/Users/pasitnusso/ps-skills/.claude/worktrees/F-025-fix-the-32-open-vault-sync-review-findin`
 - `verify-cmd`:
   ```bash
-  cd tools/vault-engine && go vet ./... && go test -count=1 -race -timeout 40m ./pkg/vaultsync/ -run 'TestUndo_|TestRecover_|TestUpdate_|TestBegin_|TestWriteFileAtomic_|TestChargeDaily_|TestSave_' && test "$(grep -c -E '^func (TestUndo_RefusesWhenTheMarkerFileIsGone|TestUndo_RefusesAMarkerThatBelongsToAnotherSave|TestUndo_WhenTheUndoStartCannotBeRecordedNothingIsChanged|TestUpdate_AnInterruptedCompareLeavesTheClashingFileWhereItIs|TestUpdate_AClashingFileThatCannotBeHashedIsStillSetAside|TestWriteFileAtomic_SyncsTheFolderAfterTheRenameAndReturnsItsError)\(' pkg/vaultsync/recover_test.go)" -eq 6 && ! grep -q 'original, _ := os.ReadFile' pkg/vaultsync/recover_test.go
+  cd tools/vault-engine && go vet ./... && go test -count=1 -race -timeout 40m ./pkg/vaultsync/ -run 'TestUndo_|TestRecover_|TestUpdate_|TestBegin_|TestWriteFileAtomic_|TestChargeDaily_|TestSave_' && test "$(grep -c -E '^func (TestUndo_RefusesWhenTheMarkerFileIsGone|TestUndo_RefusesAMarkerThatBelongsToAnotherSave|TestUndo_WhenTheUndoStartCannotBeRecordedNothingIsChanged|TestUpdate_AnInterruptedCompareLeavesTheClashingFileWhereItIs|TestUpdate_AClashingFileThatCannotBeHashedIsStillSetAside|TestWriteFileAtomic_SyncsTheFolderAfterTheRenameAndReturnsItsError)\(' pkg/vaultsync/recover_test.go)" -eq 6 && test "$(grep -c 'original, _ := os.ReadFile' pkg/vaultsync/recover_test.go)" -eq 3
   ```
 - `acceptance`:
   1. `Undo` returns an error and changes nothing when no marker file is on disk, and when the marker on disk belongs to another save.
@@ -2004,7 +2004,7 @@ Run once, on the final code, after all six phase gates. All commands from the wo
 
 - [ ] **3. Commits name their items.** The feature branch `feat/F-025` starts at commit `bf09d62` (`chore(catalog): claim F-025`), which is also where it left `release/1.12`.
   ```bash
-  git log --format=%s bf09d62..HEAD | grep -oE 'A[0-9]+' | sort -u | wc -l
+  git log --format=%s b2e7798..HEAD | grep -oE 'A[0-9]+' | sort -u | wc -l
   ```
   Expected: `32`.
 
@@ -2035,7 +2035,7 @@ Run once, on the final code, after all six phase gates. All commands from the wo
 | A14 | 5 | `TestGitIn_IgnoresAnExportedGitDir`, `TestHarness_FixtureGitDropsEveryGitLocationVariable`; `placeEnv` in `runBuild` |
 | A15 | 1 | `TestUndo_WhenTheUndoStartCannotBeRecordedNothingIsChanged` |
 | A16 | 1 | `TestUndo_RefusesAMarkerThatBelongsToAnotherSave`, `TestUndo_RefusesWhenTheMarkerFileIsGone` |
-| A17 | 1 | no `original, _ := os.ReadFile` left in `recover_test.go` |
+| A17 | 1 | exactly 3 `original, _ := os.ReadFile` left in `recover_test.go` (lines 224, 582, 635 today: places A17 does not name, so they stay) |
 | A18 | 1 | head-equals-base assertion in `undoAfterFailedPass` |
 | A19 | 4 | `closedWhen`; checked `Atoi` in `TestDaemon_CancelCutsARunningGitCommandShort` |
 | A20 | 4 | `TestDaemon_CancelWithoutASignalAtMergeOrCommitIsSettledByTheNextPass` |
@@ -2072,3 +2072,7 @@ Decisions taken on what was raised (recorded so the tasks are not second-guessed
 4. **A13** (a `dir` argument on `PreReceive` and `batchCheck` as well as `hubGit`), **A11** (the quoted sentence at `harness_test.go:47` changes with the rules text) and **A22** (the lock test reads its own goroutine stacks, because Task 4 is tests only) are accepted as planned.
 5. **The harness script's own `go test` time limits stay untouched** (no `-timeout` on the short rounds, `-timeout 90m` on the full scenarios). If the short rounds ever run past Go's 10-minute default, report it; do not edit the script.
 6. **Path of the rules file:** it is `tools/vault-engine/templates/vault-rules/AGENTS.section.md`; there is no top-level `templates/vault-rules/`.
+
+## Appendix — audit trail
+- 2026-10-13 self-grill-audit: verdict safe-with-fixes. Corrected: (1) Task 1 verify-cmd demanded zero `original, _ := os.ReadFile` in `recover_test.go`, but A17 names only lines 53, 71, 161, 179, 840, 874, so three stay (224, 582, 635); the check now expects exactly 3, and the A17 row of the final table says the same. (2) The "32 items named" count now starts after the plan commit (`b2e7798`), whose own subject says "A1-A32" and would have pre-seeded the count. Handled by the orchestrator at dispatch time, not by plan edits: every verify-cmd is saved as a script file and passed as `bash <file>` (the inline form has `$(...)` that the dispatching shell would expand in the wrong folder); each script also runs `gofmt -l pkg/vaultsync cmd scripts`; Task 5's script runs the whole `pkg/vaultsync` package because A14 changes `gitIn`, which every test group uses. Pointed out to the Task 1 reviewer: A7's branch where the folder sync fails after the rename (file already in place, error returned; `chargeDaily` then refuses a send it has charged). Not fixed (LOW): the plan says twelve `Undo` calls in `recover_test.go`, there are 11; `type Repo` is at `repo.go:37-60`; Task 4's "only daemon_test.go changed" clause checks nothing; three acceptance points have no machine check (Task 2 "no cmd.Env in hubGit", Task 6 "comments only", A9 proven by grep only) and are left to the task reviewers.
+  Open: none.
