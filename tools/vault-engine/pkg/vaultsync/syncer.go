@@ -341,7 +341,10 @@ func (s *Syncer) record(paths []string, actor, subject, key string, m *Marker, a
 		return pushUnconfirmed, errorOutcome(err)
 	}
 	for try := 0; try < 3; try++ {
-		if r.Fetch() != nil {
+		if err := r.Fetch(); err != nil {
+			if errors.Is(err, ErrStopped) {
+				break // the program is stopping: asking again cannot help; the answer stays "not confirmed"
+			}
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
