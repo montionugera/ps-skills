@@ -518,8 +518,33 @@ func (r *Repo) hasCopy(rel string, data []byte) bool {
 	return false
 }
 
+// syncDir flushes a folder's own record to disk, so that a rename inside it
+// survives a power cut. A variable so a test can watch it or make it fail.
+var syncDir = func(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("sync folder %s: %w", dir, err)
+	}
+	serr := d.Sync()
+	if cerr := d.Close(); serr == nil {
+		serr = cerr
+	}
+	if serr != nil {
+		return fmt.Errorf("sync folder %s: %w", dir, serr)
+	}
+	return nil
+}
+
 // writeFileAtomic writes data to path through a temp file, fsync and rename,
-// so a crash leaves either the old file or the whole new one.
+// then syncs the folder, so a crash leaves either the old file or the whole
+// new one and a power cut cannot lose the rename. A folder sync that fails is
+// returned although the new file is already in place; a caller must treat
+// that like a crash right after the rename.
+//
+// The temp name is fixed (path + ".tmp"), so two writers of the same path
+// would share it: every caller must hold a lock that covers path (the folder
+// lock for the marker and for quarantine copies, usage.guard for the hub's
+// usage file).
 func writeFileAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -538,8 +563,9 @@ func writeFileAtomic(path string, data []byte) error {
 	}
 	if werr != nil {
 		_ = os.Remove(tmp)
+		return werr
 	}
-	return werr
+	return syncDir(filepath.Dir(path))
 }
 
 // freshTarget makes the folder for dst and refuses a dst that already exists.

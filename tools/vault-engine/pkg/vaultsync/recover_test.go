@@ -1098,3 +1098,44 @@ func TestUpdate_AClashingFileThatCannotBeHashedIsStillSetAside(t *testing.T) {
 		t.Fatalf("expected one report line for the link that was set aside, got %d", n)
 	}
 }
+
+func TestWriteFileAtomic_SyncsTheFolderAfterTheRenameAndReturnsItsError(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "file.json")
+	prev := syncDir
+	t.Cleanup(func() { syncDir = prev })
+
+	var synced []string
+	inPlace := false
+	syncDir = func(d string) error {
+		synced = append(synced, d)
+		got, err := os.ReadFile(target)
+		inPlace = err == nil && string(got) == "new"
+		return nil
+	}
+	if err := writeFileAtomic(target, []byte("new")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if len(synced) != 1 || synced[0] != dir || !inPlace {
+		t.Fatalf("the folder must be synced once, after the rename: synced %v, new file in place at that moment %v", synced, inPlace)
+	}
+
+	// A folder sync that fails is reported, although the new file is in place.
+	failed := errors.New("folder sync failed")
+	syncDir = func(string) error { return failed }
+	if err := writeFileAtomic(target, []byte("newer")); !errors.Is(err, failed) {
+		t.Fatalf("a failed folder sync must be returned, got %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "newer" {
+		t.Fatalf("the rename had already happened: (%q, %v)", got, err)
+	}
+	if _, err := os.Stat(target + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("the temp file was left behind: %v", err)
+	}
+
+	// The real folder sync works on an ordinary folder.
+	syncDir = prev
+	if err := writeFileAtomic(target, []byte("real")); err != nil {
+		t.Fatalf("write with the real folder sync: %v", err)
+	}
+}
