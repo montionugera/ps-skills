@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -522,9 +523,37 @@ func TestDaemon_StopSignalDuringPushStartsNoFurtherGitCommand(t *testing.T) {
 	}
 }
 
-// runAndCancel starts Run, waits for ready, cancels, and returns how long Run
-// took to return after the cancel. Run is always waited for before the test's
-// folders are removed.
+// closedWhen returns a channel that is closed once cond is true. Its polling
+// goroutine ends then, or when the test ends, whichever comes first.
+func closedWhen(t *testing.T, cond func() bool) <-chan struct{} {
+	t.Helper()
+	ready, stop := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		for !cond() {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		close(ready)
+	}()
+	return ready
+}
+
+// waitingForFolderLock reports whether a goroutine of this test binary is
+// inside AcquireFolderLockContext at this moment. A test that itself holds the
+// lock uses it to know that the daemon has really reached the wait.
+func waitingForFolderLock() bool {
+	buf := make([]byte, 1<<20)
+	return bytes.Contains(buf[:runtime.Stack(buf, true)], []byte("vaultsync.AcquireFolderLockContext("))
+}
+
+// runAndCancel starts Run, waits for ready, cancels at once, and returns how
+// long Run took to return after the cancel. ready must be a real sign that the
+// daemon is in the step under test; no settle time is added. Run is always
+// waited for before the test's folders are removed.
 func runAndCancel(t *testing.T, d *Daemon, ready <-chan struct{}) time.Duration {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -542,7 +571,6 @@ func runAndCancel(t *testing.T, d *Daemon, ready <-chan struct{}) time.Duration 
 	case <-time.After(20 * time.Second):
 		t.Fatalf("the daemon never reached the step under test")
 	}
-	time.Sleep(200 * time.Millisecond) // let it settle into the wait
 	cancel()
 	start := time.Now()
 	select {
@@ -573,23 +601,22 @@ func TestDaemon_CancelCutsARunningGitCommandShort(t *testing.T) {
 	srv.S.Cfg.PollIntervalMS = 50
 	srv.S.Repo.Remote = "slow"
 	srv.S.Repo.NetTimeout = 20 * time.Second
-	ready := make(chan struct{})
-	go func() { // the helper writes its pid once git has started it
-		for {
-			if _, err := os.Stat(pidFile); err == nil {
-				close(ready)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
+	// The helper writes its pid as its first act, once git has started it. The
+	// file is only "there" when it holds the pid: the cancel follows at once.
+	ready := closedWhen(t, func() bool {
+		data, err := os.ReadFile(pidFile)
+		return err == nil && len(bytes.TrimSpace(data)) > 0
+	})
 	took := runAndCancel(t, srv, ready)
 	t.Logf("Run returned %v after the cancel", took)
 	raw, err := os.ReadFile(pidFile)
 	if err != nil {
 		t.Fatalf("pid file: %v", err)
 	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("pid file holds %q: %v", raw, err)
+	}
 	if waitFor(2*time.Second, func() bool { return syscall.Kill(pid, 0) != nil }); syscall.Kill(pid, 0) == nil {
 		t.Fatalf("helper process %d is still running after the cancel", pid)
 	}
@@ -611,17 +638,9 @@ func TestDaemon_CancelEndsTheWaitForTheFolderLock(t *testing.T) {
 	srv := newDaemon(t, w.Srv)
 	srv.S.Cfg.PollIntervalMS = 50
 	srv.S.Cfg.LockTimeoutMS = 20000
-	ready := make(chan struct{})
-	var once sync.Once
-	srv.S.Repo.gate = func(args []string) error {
-		for _, a := range args {
-			if a == "--show-toplevel" { // the last git command before the lock is asked for
-				once.Do(func() { close(ready) })
-			}
-		}
-		return nil
-	}
-	took := runAndCancel(t, srv, ready)
+	// This test holds the lock, so a goroutine inside the lock function is the
+	// daemon waiting for it.
+	took := runAndCancel(t, srv, closedWhen(t, waitingForFolderLock))
 	t.Logf("Run returned %v after the cancel", took)
 	if st := mustGit(t, w.Srv, "status", "--porcelain"); st != "" {
 		t.Fatalf("a stopped wait must leave the folder as it was:\n%s", st)
