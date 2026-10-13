@@ -210,5 +210,11 @@
     "title": "dispatch-worker ends with no output and no reason on a read-only task",
     "created_at": "2026-10-13T03:48:15.925157+00:00",
     "promoted_to": null
+  },
+  {
+    "id": "I-035",
+    "title": "Fix the 32 open vault sync review findings",
+    "created_at": "2026-10-13T04:41:12.758879+00:00",
+    "promoted_to": null
   }
 ]
