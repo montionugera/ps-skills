@@ -45,3 +45,10 @@ output. Find out whether the worker can write outside its cwd, and say so in the
 - [ ] A read-only task with `--output-file` inside the cwd produces that file, or the report states the worker's own error.
 - [ ] When the worker produces nothing, the report shows the worker's exit code and its last lines of output, separate from the verify command's output.
 - [ ] `dispatch-worker --help` states whether a worker may write outside `--cwd`.
+
+## Update (2026-10-13)
+
+A fix to this tool landed on main the same day, after the four failed runs: "wait blocks
+until the job ends; zero-change unverified runs are not SUCCESS" (pull request 39). It was
+not re-tested against this problem. Check first whether it already covers any of the
+criteria above.

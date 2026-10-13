@@ -43,6 +43,15 @@ line numbers in the notes stop matching.
 
 ## Acceptance criteria
 
-- [ ] Every finding in `research.md` Parts 1 and 2 carries one of three marks (already fixed, still open, no longer applies), each with the file and line checked on `main`.
+- [x] Every finding in `research.md` Parts 1 and 2 carries one of three marks (already fixed, still open, no longer applies), each with the file and line checked on `main`.
 - [ ] Every still-open finding is either linked to a new idea or feature id, or dropped with a written reason.
-- [ ] No review notes for this build exist only in an uncommitted folder.
+- [x] No review notes for this build exist only in an uncommitted folder.
+
+## Progress (2026-10-13)
+
+- Done: every finding marked and reviewed (`triage.md`); the 76 open rows merged into 32
+  distinct open findings (`open-findings.md`).
+- Decided by the owner's session default: the nine findings a review ruled "not a defect"
+  stay closed (listed in `triage.md`).
+- Left: the second box above. Group the 32 findings into planned features, or drop them
+  with a reason.
