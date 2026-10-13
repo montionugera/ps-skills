@@ -204,5 +204,11 @@
     "title": "Release cleanup must not delete a work folder that holds unsaved files",
     "created_at": "2026-10-13T03:48:14.932321+00:00",
     "promoted_to": null
+  },
+  {
+    "id": "I-034",
+    "title": "dispatch-worker ends with no output and no reason on a read-only task",
+    "created_at": "2026-10-13T03:48:15.925157+00:00",
+    "promoted_to": null
   }
 ]
