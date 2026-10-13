@@ -646,3 +646,97 @@ func TestDaemon_CancelEndsTheWaitForTheFolderLock(t *testing.T) {
 		t.Fatalf("a stopped wait must leave the folder as it was:\n%s", st)
 	}
 }
+
+// cancelledAt runs the daemon with a context that is cancelled, without any
+// signal, at the moment git is asked for the command named word. Repo.run then
+// reports that command as ErrStopped. The pass ends there, under the folder
+// lock, with the save marker still on disk.
+func cancelledAt(t *testing.T, d *Daemon, word string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hit := false
+	d.S.Repo.gate = func(args []string) error {
+		for _, a := range args {
+			if a == word {
+				hit = true
+				cancel()
+			}
+		}
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("Run did not stop")
+	}
+	d.S.Repo.gate = nil
+	if !hit {
+		t.Fatalf("the pass never reached git %s", word)
+	}
+	if !d.S.Repo.hasMarker() {
+		t.Fatalf("a pass cancelled at git %s should leave its marker for the next pass", word)
+	}
+}
+
+// A cancel that is not a signal can land while a pass is changing the folder
+// under the lock. Whatever it leaves, the next pass settles it.
+func TestDaemon_CancelWithoutASignalAtMergeOrCommitIsSettledByTheNextPass(t *testing.T) {
+	t.Run("merge of an incoming update", func(t *testing.T) {
+		w := newWorld(t)
+		mac := newSyncer(t, w.Mac)
+		if _, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5)); out.Exit != 0 {
+			t.Fatalf("mac save: %+v", out) // srv now has an update to bring in
+		}
+		srv := newDaemon(t, w.Srv)
+		srv.S.Cfg.PollIntervalMS = 50
+		cancelledAt(t, srv, "merge")
+		if readSHA(t, w.Srv, note1) == readSHA(t, w.Mac, note1) {
+			t.Fatalf("the update should not have gone through in the cancelled pass")
+		}
+		if err := srv.Tick(); err != nil {
+			t.Fatalf("next pass: %v", err)
+		}
+		if srv.S.Repo.hasMarker() {
+			t.Fatalf("the next pass must settle the marker")
+		}
+		if readSHA(t, w.Srv, note1) != readSHA(t, w.Mac, note1) {
+			t.Fatalf("the next pass must bring the update in")
+		}
+		cleanExceptIgnored(t, w.Srv)
+		if _, err := os.Stat(filepath.Join(w.Srv, "_quarantine")); !os.IsNotExist(err) {
+			t.Fatalf("nothing was edited by hand, so nothing may be set aside (stat _quarantine: %v)", err)
+		}
+	})
+	t.Run("commit of an inbox drop", func(t *testing.T) {
+		w := newWorld(t)
+		quietDrop(t, w.Mac, "_inbox/human/hi.md", []byte("hi\n"))
+		mac := newDaemon(t, w.Mac)
+		mac.S.Cfg.PollIntervalMS = 50
+		cancelledAt(t, mac, "commit")
+		if st := mustGit(t, w.Mac, "status", "--porcelain"); st != "A  _inbox/human/hi.md" {
+			t.Fatalf("the cancelled pass should have left the drop staged and not committed, got %q", st)
+		}
+		if err := mac.Tick(); err != nil {
+			t.Fatalf("next pass: %v", err)
+		}
+		if mac.S.Repo.hasMarker() {
+			t.Fatalf("the next pass must settle the marker")
+		}
+		if text := mustGit(t, w.Hub, "show", "refs/heads/main:_inbox/human/hi.md"); text != "hi" {
+			t.Fatalf("the drop is not on the hub: %q", text)
+		}
+		if n := mustGit(t, w.Hub, "rev-list", "--count", "refs/heads/main"); n != "2" {
+			t.Fatalf("the hub should hold the seed and one send of the drop, has %s commits", n)
+		}
+		cleanExceptIgnored(t, w.Mac)
+		if _, err := os.Stat(filepath.Join(w.Mac, "_quarantine")); !os.IsNotExist(err) {
+			t.Fatalf("a drop is never set aside by a cancelled pass (stat _quarantine: %v)", err)
+		}
+	})
+}
