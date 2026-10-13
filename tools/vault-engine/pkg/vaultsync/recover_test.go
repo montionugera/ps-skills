@@ -966,3 +966,46 @@ func TestUndo_RefusesAMarkerThatBelongsToAnotherSave(t *testing.T) {
 		})
 	}
 }
+
+// The record "an undo was started" is written before the folder is moved back.
+// When it cannot be written, nothing is changed: not the folder, not the
+// marker on disk, not the marker the caller holds.
+func TestUndo_WhenTheUndoStartCannotBeRecordedNothingIsChanged(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	p := filepath.Join(w.Mac, "01_Ideas", "new.md")
+	writeFile(t, p, []byte("what the save wrote\n"))
+	if err := r.Commit([]string{"01_Ideas/new.md"}, "agent-olivier", "vault: commit", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	head, err := r.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	// A folder sits where the marker's temp file must go: the marker cannot be rewritten.
+	if err := os.Mkdir(r.markerPath()+".tmp", 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	err = r.Undo(m, []string{"01_Ideas/new.md"}, noRebuild)
+	if err == nil || !strings.Contains(err.Error(), "record undo start") {
+		t.Fatalf("undo must fail and name the step that failed, got %v", err)
+	}
+	if m.UndoStarted {
+		t.Fatalf("the caller's marker must not say an undo was started")
+	}
+	if now, herr := r.Head(); herr != nil || now != head {
+		t.Fatalf("the folder must not have been moved back: head (%s, %v), want %s", now, herr, head)
+	}
+	if got, rerr := os.ReadFile(p); rerr != nil || string(got) != "what the save wrote\n" {
+		t.Fatalf("the save's file must stay as it is: (%q, %v)", got, rerr)
+	}
+	disk, derr := r.readMarker()
+	if derr != nil || disk == nil || disk.UndoStarted {
+		t.Fatalf("the marker on disk must be as Begin wrote it: (%+v, %v)", disk, derr)
+	}
+}

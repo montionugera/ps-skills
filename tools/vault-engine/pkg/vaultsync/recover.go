@@ -113,12 +113,15 @@ func (r *Repo) Begin(op, actor string) (*Marker, error) {
 func (r *Repo) writeMarker(m *Marker) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("write save marker %s: %w", markerRel, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(r.markerPath()), 0755); err != nil {
-		return err
+		return fmt.Errorf("write save marker %s: %w", markerRel, err)
 	}
-	return writeFileAtomic(r.markerPath(), data)
+	if err := writeFileAtomic(r.markerPath(), data); err != nil {
+		return fmt.Errorf("write save marker %s: %w", markerRel, err)
+	}
+	return nil
 }
 
 func (r *Repo) End() error {
@@ -328,7 +331,7 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 		m.UndoStarted = true
 		if err := r.writeMarker(m); err != nil {
 			m.UndoStarted = false
-			return err
+			return fmt.Errorf("record undo start: %w", err)
 		}
 	}
 	if _, err := r.local("reset", "--quiet", "--mixed", m.Base); err != nil {
