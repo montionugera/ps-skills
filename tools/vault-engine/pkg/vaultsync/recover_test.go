@@ -898,3 +898,34 @@ func TestWriteFileAtomic_LeavesNoTempFileWhenTheRenameFails(t *testing.T) {
 		t.Fatalf("the temp file was left behind: %v", err)
 	}
 }
+
+// A Recover that succeeds settles the save and removes the marker. An Undo
+// that still holds the old marker and list must then refuse: with no record on
+// disk nothing proves the list, and a listed file may be a person's by now.
+func TestUndo_RefusesWhenTheMarkerFileIsGone(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := r.Recover(noRebuild); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if r.hasMarker() {
+		t.Fatalf("a successful recover must remove the marker")
+	}
+	p := filepath.Join(w.Mac, "01_Ideas", "new.md")
+	writeFile(t, p, []byte("typed by a person after the save was settled\n"))
+	err = r.Undo(m, []string{"01_Ideas/new.md"}, noRebuild)
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("undo with no marker on disk must refuse and say nothing was changed, got %v", err)
+	}
+	if got, rerr := os.ReadFile(p); rerr != nil || string(got) != "typed by a person after the save was settled\n" {
+		t.Fatalf("the listed file must stay as it is: (%q, %v)", got, rerr)
+	}
+	if r.hasMarker() || m.UndoStarted {
+		t.Fatalf("a refused undo must not write a marker (on disk %v, in memory %v)", r.hasMarker(), m.UndoStarted)
+	}
+}
