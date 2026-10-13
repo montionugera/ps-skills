@@ -929,3 +929,40 @@ func TestUndo_RefusesWhenTheMarkerFileIsGone(t *testing.T) {
 		t.Fatalf("a refused undo must not write a marker (on disk %v, in memory %v)", r.hasMarker(), m.UndoStarted)
 	}
 }
+
+// A marker on disk that belongs to another save is not this save's record:
+// Undo refuses whichever field differs, and changes nothing.
+func TestUndo_RefusesAMarkerThatBelongsToAnotherSave(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	p := filepath.Join(w.Mac, "01_Ideas", "new.md")
+	writeFile(t, p, []byte("written by the save that owns the marker\n"))
+	for name, change := range map[string]func(*Marker){
+		"other operation":  func(o *Marker) { o.Op = "update" },
+		"other actor":      func(o *Marker) { o.Actor = "agent-bestie" },
+		"other base":       func(o *Marker) { o.Base = strings.Repeat("1", 40) },
+		"other start time": func(o *Marker) { o.StartedAt = "2000-01-01T00:00:00Z" },
+		"other process":    func(o *Marker) { o.PID++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			other := *m
+			change(&other)
+			err := r.Undo(&other, []string{"01_Ideas/new.md"}, noRebuild)
+			if err == nil || !strings.Contains(err.Error(), "is not the one given to undo") || !strings.Contains(err.Error(), "nothing was changed") {
+				t.Fatalf("undo with another save's marker must refuse, got %v", err)
+			}
+			if got, rerr := os.ReadFile(p); rerr != nil || string(got) != "written by the save that owns the marker\n" {
+				t.Fatalf("the listed file must stay as it is: (%q, %v)", got, rerr)
+			}
+			disk, derr := r.readMarker()
+			if derr != nil || disk == nil || disk.UndoStarted || other.UndoStarted {
+				t.Fatalf("a refused undo must not record a start: on disk (%+v, %v), in memory %v", disk, derr, other.UndoStarted)
+			}
+		})
+	}
+}
