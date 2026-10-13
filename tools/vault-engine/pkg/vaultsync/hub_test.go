@@ -279,6 +279,55 @@ func TestChargeDaily_RefusesAnUnreadableOrCorruptLedger(t *testing.T) {
 	})
 }
 
+func TestChargeDaily_AFolderSyncFailureAfterTheRenameStillCountsAsCharged(t *testing.T) {
+	prev := syncDir
+	t.Cleanup(func() { syncDir = prev })
+	syncDir = func(string) error { return errors.New("simulated folder sync failure") }
+
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	file := filepath.Join(dir, "2026-10-10.json")
+
+	used1, ok, err := chargeDaily(dir, "mac-test", now, 100, 1000)
+	if err != nil || !ok {
+		t.Fatalf("first chargeDaily: ok=%v err=%v, want ok=true err=nil", ok, err)
+	}
+	if used1 != 100 {
+		t.Fatalf("first chargeDaily returned used=%d, want 100", used1)
+	}
+
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("reading usage file: %v", err)
+	}
+	var usage map[string]int64
+	if err := json.Unmarshal(data, &usage); err != nil {
+		t.Fatalf("unmarshaling usage file: %v", err)
+	}
+	if usage["mac-test"] != used1 {
+		t.Fatalf("usage file on disk has %d, chargeDaily returned %d", usage["mac-test"], used1)
+	}
+
+	used2, ok, err := chargeDaily(dir, "mac-test", now, 50, 1000)
+	if err != nil || !ok {
+		t.Fatalf("second chargeDaily: ok=%v err=%v, want ok=true err=nil", ok, err)
+	}
+	if used2 != used1+50 {
+		t.Fatalf("expected total to grow by exactly added amount once to %d, got %d", used1+50, used2)
+	}
+
+	data, err = os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("reading usage file after second charge: %v", err)
+	}
+	if err := json.Unmarshal(data, &usage); err != nil {
+		t.Fatalf("unmarshaling usage file after second charge: %v", err)
+	}
+	if usage["mac-test"] != used2 {
+		t.Fatalf("usage file on disk has %d, chargeDaily returned %d", usage["mac-test"], used2)
+	}
+}
+
 // hubLimitsCopy puts the shipped settings into a temp "hooks" folder; the
 // usage ledger then goes to <hooks>/../vault-usage, also in the temp folder.
 func hubLimitsCopy(t *testing.T) string {

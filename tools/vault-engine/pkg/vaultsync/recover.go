@@ -326,8 +326,10 @@ func (r *Repo) undo(m *Marker, mine []string, sweep bool, rebuild func() error) 
 		return err
 	}
 	// Record on disk, before the reset, that the proof (the save's commit) may
-	// be lost from here on. If the record cannot be written, nothing is changed
-	// and the marker (in memory and on disk) stays as it was.
+	// be lost from here on. If the write fails before the rename, nothing is
+	// changed and the marker stays as it was; if only the folder sync failed
+	// the record on disk already says the undo started, and that is safe
+	// because the next Undo or Recover reads the disk marker.
 	if !m.UndoStarted {
 		m.UndoStarted = true
 		if err := r.writeMarker(m); err != nil {
@@ -535,6 +537,10 @@ var syncDir = func(dir string) error {
 	return nil
 }
 
+// errFolderSync marks an error from the parent-folder sync that happens after
+// a successful rename in writeFileAtomic.
+var errFolderSync = errors.New("folder sync")
+
 // writeFileAtomic writes data to path through a temp file, fsync and rename,
 // then syncs the folder, so a crash leaves either the old file or the whole
 // new one and a power cut cannot lose the rename. A folder sync that fails is
@@ -565,7 +571,10 @@ func writeFileAtomic(path string, data []byte) error {
 		_ = os.Remove(tmp)
 		return werr
 	}
-	return syncDir(filepath.Dir(path))
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("%w: %w", errFolderSync, err)
+	}
+	return nil
 }
 
 // freshTarget makes the folder for dst and refuses a dst that already exists.

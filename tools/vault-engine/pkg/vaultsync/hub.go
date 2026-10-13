@@ -235,6 +235,11 @@ func chargeDaily(dir, place string, now time.Time, add, limit int64) (int64, boo
 		return 0, false, err
 	}
 	if err := writeFileAtomic(file, data); err != nil {
+		if errors.Is(err, errFolderSync) {
+			// The usage file is already in place; only the post-rename folder sync
+			// failed. Treat as charged (worst case after a power cut is an under-count).
+			return usage[place], true, nil
+		}
 		return 0, false, fmt.Errorf("writing usage file %s: %w", file, err)
 	}
 	return usage[place], true, nil
