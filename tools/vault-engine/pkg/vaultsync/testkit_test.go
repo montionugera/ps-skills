@@ -85,7 +85,10 @@ func gitIn(t *testing.T, dir string, env []string, args ...string) (string, erro
 	full := append([]string{"-c", "user.name=test", "-c", "user.email=test@test.invalid", "-c", "commit.gpgsign=false"}, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	// Like a place (placeEnv): git's location variables are not passed on and
+	// git may not look for a repository above dir, so a runner that exports
+	// GIT_DIR cannot turn a fixture command onto another repository.
+	cmd.Env = append(placeEnv(dir), env...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
