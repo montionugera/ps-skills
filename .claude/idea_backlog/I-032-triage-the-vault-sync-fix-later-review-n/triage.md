@@ -28,9 +28,8 @@ To reopen them, flip those nine and their Part 1 twins (46, 47, 49, 50, 51, 52, 
 | Part 1, final code review list | 59 | 8 | 35 | 16 |
 | Part 2, per-task Minor findings | 63 | 6 | 41 | 16 |
 
-The two parts overlap: many Part 1 entries were drawn from Part 2. The parts have NOT been
-merged into one de-duplicated list, so the number of distinct open findings is not known;
-it is at most 76 and likely well below.
+The two parts overlap: many Part 1 entries were drawn from Part 2. Merged, the 76 OPEN
+rows are 32 distinct open findings: see `open-findings.md` in this folder.
 
 Not covered: the unnumbered Part 1 remark that `README.md:61` says the stop is "at once".
 
