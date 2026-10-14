@@ -90,7 +90,6 @@ link() {  # src dest
 
 for d in "$REPO"/skills/*/; do
   link "${d%/}" "$CLAUDE_HOME/skills/$(basename "$d")"
-  link "${d%/}" "$AGENTS_HOME/skills/$(basename "$d")"
   link "${d%/}" "$GEMINI_HOME/skills/$(basename "$d")"
   link "${d%/}" "$CURSOR_HOME/skills/$(basename "$d")"
 done

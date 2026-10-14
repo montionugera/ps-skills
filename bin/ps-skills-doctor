@@ -91,6 +91,48 @@ def main():
                     else:
                         issues.append(f"Broken symlink in {name} skills: {item} -> {target}")
 
+    # 4b. Check duplicate slash commands/skills across ~/.claude/skills, ~/.agents/skills, and ~/.claude/commands
+    claude_skills_dir = home / ".claude" / "skills"
+    agents_skills_dir = home / ".agents" / "skills"
+    claude_commands_dir = home / ".claude" / "commands"
+    if claude_skills_dir.is_dir():
+        claude_skill_names = {
+            item.name for item in claude_skills_dir.iterdir()
+            if not item.name.startswith(".") and (item.exists() or item.is_symlink())
+        }
+        if agents_skills_dir.is_dir():
+            for item in sorted(agents_skills_dir.iterdir()):
+                if item.name in claude_skill_names:
+                    if args.fix:
+                        try:
+                            if item.is_symlink() or item.is_file():
+                                item.unlink()
+                            else:
+                                import shutil
+                                shutil.rmtree(item)
+                            fixed.append(f"Removed duplicate skill in ~/.agents/skills/{item.name} (already in ~/.claude/skills)")
+                        except Exception as e:
+                            issues.append(f"Failed to remove duplicate ~/.agents/skills/{item.name}: {e}")
+                    else:
+                        issues.append(
+                            f"Duplicate skill in ~/.agents/skills/{item.name} shadows ~/.claude/skills/{item.name} "
+                            f"(causes duplicate slash commands in Claude Code)"
+                        )
+        if claude_commands_dir.is_dir():
+            for cmd in sorted(claude_commands_dir.glob("*.md")):
+                stem = cmd.stem
+                if stem in claude_skill_names:
+                    if args.fix:
+                        try:
+                            cmd.unlink()
+                            fixed.append(f"Removed legacy duplicate command ~/.claude/commands/{cmd.name} (already in ~/.claude/skills/{stem})")
+                        except Exception as e:
+                            issues.append(f"Failed to remove duplicate command {cmd}: {e}")
+                    else:
+                        issues.append(
+                            f"Duplicate command ~/.claude/commands/{cmd.name} shadows skill ~/.claude/skills/{stem}"
+                        )
+
     # 5. Antigravity Skill Context Budget Audit
     gemini_skills_dir = home / ".gemini" / "config" / "skills"
     gemini_plugins_dir = home / ".gemini" / "config" / "plugins"
