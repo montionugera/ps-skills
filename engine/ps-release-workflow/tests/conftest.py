@@ -26,6 +26,20 @@ def _isolate_home(tmp_path: Path, monkeypatch) -> Path:
     return home
 
 
+@pytest.fixture(autouse=True)
+def _isolate_gate_locks(tmp_path: Path, monkeypatch) -> None:
+    """Keep every test off the machine-wide gate slots.
+
+    gate_lock.LOCK_DIR is resolved from the real HOME at import time, so the HOME
+    guard above does not move it. This repo's own Gate 2 (scripts/integration.sh)
+    runs this suite while `psrw promote` holds one of the two real slots; a test
+    that ships or promotes would otherwise queue behind real gates.
+    """
+    from lib import gate_lock
+
+    monkeypatch.setattr(gate_lock, "LOCK_DIR", tmp_path / "_gate_locks")
+
+
 @pytest.fixture
 def tmp_repo(tmp_path: Path) -> Path:
     """A temp directory initialized as a git repo with an initial commit."""

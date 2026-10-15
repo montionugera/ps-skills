@@ -7,7 +7,20 @@ from pathlib import Path
 import pytest
 
 SHIM = Path(__file__).resolve().parent.parent / "bin" / "pandoc-shim"
-REAL = shutil.which("pandoc")
+
+
+def _real_pandoc():
+    # The first `pandoc` on PATH may be an installed copy of this shim (install.sh
+    # links it into ~/.local/bin). Using it as PANDOC_REAL makes the shim exec
+    # itself forever, so skip anything that resolves to a pandoc-shim.
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        c = Path(d) / "pandoc"
+        if c.is_file() and os.access(c, os.X_OK) and c.resolve().name != SHIM.name:
+            return str(c)
+    return None
+
+
+REAL = _real_pandoc()
 pytestmark = pytest.mark.skipif(REAL is None, reason="pandoc not installed")
 
 TILES = '# t\n\n<div class="metric-grid">\n  <div class="metric-tile">\n    <div class="metric-label">X</div>\n  </div>\n</div>\n'

@@ -465,5 +465,3 @@ status: active
 		t.Errorf("unexpected search hit: %+v", results[0])
 	}
 }
-
-

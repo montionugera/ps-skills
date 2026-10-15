@@ -16,10 +16,11 @@ if [[ -z "$real" ]]; then
   IFS=: read -ra _dirs <<< "$PATH"
   for d in "${_dirs[@]}"; do
     c="$d/pandoc"
-    [[ -x "$c" && ! "$c" -ef "$self" ]] && { real="$c"; break; }
+    [[ -x "$c" && ! "$c" -ef "$self" && "$(readlink -f "$c")" != */pandoc-shim ]] && { real="$c"; break; }
   done
 fi
 [[ -n "$real" ]] || { echo "pandoc-shim: ❌ real pandoc not found on PATH" >&2; exit 127; }
+[[ "$real" -ef "$self" || "$(readlink -f "$real")" == */pandoc-shim ]] && { echo "pandoc-shim: ❌ PANDOC_REAL points at a pandoc-shim, not the real pandoc" >&2; exit 127; }
 [[ "${PANDOC_SHIM_OFF:-0}" == "1" ]] && exec "$real" "$@"
 
 args=("$@")
