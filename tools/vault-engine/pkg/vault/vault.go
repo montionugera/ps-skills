@@ -249,7 +249,6 @@ func (v *VaultEngine) ValidateFrontmatter(fm map[string]interface{}) []string {
 		}
 	}
 
-
 	return errs
 }
 
@@ -558,7 +557,6 @@ func (v *VaultEngine) RebuildIndexes() error {
 
 	return nil
 }
-
 
 func (v *VaultEngine) AcquireLock(recordID, agentID, operation string) (*LockContext, error) {
 	lockDir := filepath.Join(v.Root, "_meta", "locks", fmt.Sprintf("%s.lock", recordID))
@@ -1003,7 +1001,6 @@ func (v *VaultEngine) PublishKnowledge(filePath string, category string, author 
 	return id, nil
 }
 
-
 func (v *VaultEngine) CommitRecord(req CommitRequest) error {
 	guardsDir := filepath.Join(v.Root, "_meta", "guards")
 	if err := os.MkdirAll(guardsDir, 0755); err != nil {
@@ -1134,4 +1131,3 @@ func (v *VaultEngine) SearchIndexes(query string) ([]IndexEntry, error) {
 	}
 	return results, nil
 }
-
