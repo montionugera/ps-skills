@@ -223,6 +223,18 @@ build when any tracked test file is not run by a CI step, when a step uses `unit
 collects pytest-style tests), or when a test step can be skipped or have its failures ignored
 (`if:`, `continue-on-error`, `|| true`). A new test suite therefore needs a CI step.
 
+This repo's own release gates run a subset of the same suites locally:
+
+- **Gate 1** ([`scripts/precheck.sh`](scripts/precheck.sh), run by `psrw ship`, a few seconds):
+  Python compile check of `engine/` and `tests/`, `go vet` and a `gofmt` check for
+  `tools/vault-engine`, and that tool's Go tests except `pkg/vaultsync`.
+- **Gate 2** ([`scripts/integration.sh`](scripts/integration.sh), run by `psrw promote`, about
+  17 minutes): the full release-workflow engine suite (`pytest -q`), the root `tests/` suite, and
+  `go test -count=1 -race -timeout 40m ./...` in `tools/vault-engine`.
+- Both gates need `go`, `python3` and `pytest` (with the engine's dev extras) on `PATH`.
+- **Manual, in neither gate:** `tools/vault-engine/scripts/sync-harness.sh run` (about an hour, and
+  it fails on a busy machine) and `tools/vault-engine/test_e2e.sh`.
+
 ## License
 
 [MIT](LICENSE)
