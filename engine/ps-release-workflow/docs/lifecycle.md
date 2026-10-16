@@ -263,13 +263,22 @@ runs against the main checkout.
 ## Guard guarantees
 <a id="guard-guarantees"></a>
 
-The PreToolUse guard enforces exactly two things:
+The PreToolUse guard enforces exactly three things:
 
 1. **No edits on the main checkout of an opted-in repo.** Claim a feature and edit
    inside the worktree it creates. This keys off filesystem location, not branch name,
    so checking out a hotfix branch in the main checkout is still blocked.
 2. **Cross-machine claim safety.** A worktree claimed on another machine will not
    accept edits here.
+3. **No hand-run git writes on `release/<v>`.** `scripts/release_git_guard.py`, a Bash
+   PreToolUse hook, refuses `git merge|commit|cherry-pick|rebase|revert|reset|pull|am`
+   in a checkout on a `release/*` branch of an opted-in repo (directory from `git -C`,
+   the last `cd`, or the hook's cwd). Only psrw puts code there, because `ship` and
+   `sync-main` also run Gate 1, the catalog and the local deploy; a hand merge skipped
+   all three once and the owner's app never changed. psrw's own git runs as a child
+   process and is unaffected. `--abort`/`--quit` pass; for the exact command psrw prints
+   after a conflict, add `PSRW_ALLOW_RELEASE_GIT=1`. Work that is not a claimed feature
+   goes through idea, refine, claim and `ship`, or a hotfix PR to `main` then `sync-main`.
 
 It does **not** provide per-session isolation between two Claude sessions on the same
 machine: claims are created with a machine-cached fallback id, so local sessions

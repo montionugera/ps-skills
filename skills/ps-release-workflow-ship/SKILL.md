@@ -45,13 +45,7 @@ worktree — the release tree, not `main` — because the local DB may already b
 ahead of `main` by the release's own migrations. To deploy by hand after `--no-deploy`,
 run the script from a tree that is on `release/<v>` (the `_release` worktree is).
 
-## Never by hand
-
-Never `git merge`, `commit` or `cherry-pick` into `release/<v>` yourself: that skips Gate 1,
-the catalog and the local deploy (in joy-companion, the Mac app install), so "it's in the
-release" is false where the owner looks. Work that is not a claimed feature goes through
-idea, refine, claim and `psrw ship`, or a hotfix PR to `main` and then `psrw sync-main`.
-`scripts/release_git_guard.py` (a Bash PreToolUse hook) refuses the hand-run commands.
+Never hand-merge into `release/<v>`: it skips Gate 1 and the deploy (see lifecycle.md#guard-guarantees).
 
 ## Then
 
