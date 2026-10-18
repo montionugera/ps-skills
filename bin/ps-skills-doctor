@@ -170,6 +170,42 @@ def main():
             f"    Fix: run 'ps-plugin-bridge --sync' to prune disabled plugins."
         )
 
+    # 5b. T3 Code Antigravity Provider Hook Parity Check
+    t3_agy_root = home / ".t3" / "userdata" / "providers" / "antigravity"
+    gemini_hooks_dir = home / ".gemini" / "config" / "hooks"
+    if t3_agy_root.is_dir():
+        for t3_cfg in sorted(t3_agy_root.glob("*/config")):
+            if not t3_cfg.is_dir():
+                continue
+            t3_hooks_link = t3_cfg / "hooks"
+            t3_hooks_json = t3_cfg / "hooks.json"
+            if not t3_hooks_link.exists():
+                if args.fix and gemini_hooks_dir.is_dir():
+                    try:
+                        if t3_hooks_link.is_symlink():
+                            t3_hooks_link.unlink()
+                        t3_hooks_link.symlink_to(gemini_hooks_dir)
+                        fixed.append(f"Linked T3 Antigravity hooks dir: {t3_hooks_link} -> {gemini_hooks_dir}")
+                    except Exception as e:
+                        issues.append(f"Failed to link {t3_hooks_link}: {e}")
+                else:
+                    warnings.append(f"T3 Antigravity provider missing hooks symlink: {t3_hooks_link} (run with --fix)")
+            if not t3_hooks_json.is_file():
+                if args.fix:
+                    try:
+                        import json as _json
+                        t3_hooks_json.write_text(_json.dumps({
+                            "auto-handoff": {
+                                "PreInvocation": [{"command": f"python3 {gemini_hooks_dir}/auto-handoff-midturn.py", "timeout": 10, "type": "command"}],
+                                "Stop": [{"command": f"python3 {gemini_hooks_dir}/auto-handoff-stop.py", "timeout": 10, "type": "command"}],
+                            }
+                        }, indent=2) + "\n", encoding="utf-8")
+                        fixed.append(f"Created T3 Antigravity auto-handoff config: {t3_hooks_json}")
+                    except Exception as e:
+                        issues.append(f"Failed to create {t3_hooks_json}: {e}")
+                else:
+                    warnings.append(f"T3 Antigravity provider missing hooks.json: {t3_hooks_json} (run with --fix)")
+
     # Report
     print("=== ps-skills-doctor ===")
     if fixed:

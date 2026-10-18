@@ -45,18 +45,20 @@ In Google Antigravity (`agy`), auto-handoff hooks operate natively via AGY's JSO
 
 ---
 
-## Non-Negotiable Handoff Rules (Anti-Slop Guardrails)
+## Non-Negotiable Handoff Rules (Anti-Slop + Context Retention Guardrails)
 
-1. **Self-Contained Frontier (No Nested Handoffs):**
+1. **Preserve Main Context + Self-Contained Frontier (No Nested Handoffs):**
    - ❌ **NEVER** write `"Read previous handoff HANDOFF-YYYY-MM-DD.md"`.
-   - ❌ **NEVER** give reading lists of historical review sheets or audit logs for orientation.
-   - ✅ **ALWAYS** state the live frontier directly at `git HEAD` (branch, commit, test status, active review state).
+   - ❌ **NEVER** give unfocused reading lists of historical review sheets or audit logs.
+   - ❌ **NEVER** compress the session down to just the last 5 minutes of debugging while dropping the original user objective, active epic/spec, or user corrections.
+   - ✅ **ALWAYS** include in Section 1: (a) the **Original User Objective & Definition of Done**, (b) the **Governing Spec / Plan / Epic path** (if one exists, e.g. `spec.md`, `plan.md`, `progress.md` — which the new session *should* consult when moving between tasks), and (c) **Key User Decisions & Corrections** made during this session so the new agent never repeats rejected approaches.
+   - ✅ **ALWAYS** state the live frontier directly at `git HEAD` (branch, commit, test status, active review state, and any in-flight subagents/delegated tasks).
 2. **Action-First Contract:**
-   - The **Immediate Next Action** must begin with the **exact shell command to run** or **exact file:line to edit**.
+   - The **Immediate Next Action** must begin with the **exact shell command to run** or **exact file:line to edit**, followed by the remaining roadmap steps toward the Section 1 objective.
    - Must include an explicit fallback: *"If local files are missing, do not search other directories; run `<command>` immediately."*
 3. **No Skill Slop or Ceremony:**
    - Do NOT generate generic "Suggested Skills" sections that bloat context.
-   - Keep the document lean (target ≤ 1KB - 2KB). Every line must serve the immediate next action.
+   - Keep the document high-density (target ≤ 2KB - 4KB): rich on main context, user decisions, and exact technical state; zero fluff.
 4. **Claim Protocol (mandatory, added 2026-09-14):**
    - A Herdr tab, and a receiving agent inside it, can end up duplicated (observed: one Herdr tab with `pane_count: 2`, both panes running an agent against the same handoff — root cause on Herdr's side, unconfirmed, not fixed here) or a human can reopen the same handoff prompt in an unrelated tab. `herdr tab list` / `ListAgents` do not catch this — they show a peer is *busy*, not that it is busy with *this exact handoff*.
    - Every generated handoff doc MUST embed the claim command from the template below as the literal first thing the receiving agent is told to run — before it reads the goal, before it acts. This makes the doc self-defending even if it reaches two agents at once, per rule (1) above: nothing about the fix should require the receiving agent to already know this skill or this rule.
@@ -82,8 +84,12 @@ mkdir "<this-file's-own-absolute-path>.claim" 2>/dev/null && echo "$(whoami) pid
 If it prints `ALREADY CLAIMED`: STOP. Another agent (possibly a duplicate pane/tab of this same spawn) already owns this handoff. Do not read further or dispatch anything — message that session/owner if you can identify it, or tell the user two sessions raced this handoff, and end your turn.
 If it prints `CLAIMED`: proceed to section 1.
 
-## 1. Goal (Verbatim)
-<One clear sentence stating the objective>
+## 1. Main Context (Big Picture & User Decisions)
+- **Original User Objective & Definition of Done:** <What the user originally asked for and what complete success looks like across the whole task/epic>
+- **Governing Spec / Plan / Epic:** <Exact path to active `spec.md`, `plan.md`, `progress.md`, or epic/feature folder — or `None` if ad-hoc. Read this when transitioning between plan steps.>
+- **Key User Decisions & Non-Negotiables:**
+  - <Decision/correction 1 from the user during this session, e.g., architectural choice, rejected approach, or preference>
+  - <Decision/correction 2>
 
 ## 2. Accomplished This Session
 - <Key milestone / file created / test suite passing with exact count, e.g. "107/107 green">
@@ -92,15 +98,18 @@ If it prints `CLAIMED`: proceed to section 1.
 ## 3. Live Frontier (Truth at HEAD)
 - **Verified State:** `<file:line>` — <exact state verified by command or test>
 - **Active Review/Gate Status:** <exact state of the current loop/gate, e.g. "Segment control operating at s0.45; latest verdict is Verdict #11 (materials-probe)">
+- **In-Flight Subagents / Delegated Tasks:** <`None`, or list active `taskId` + `childThreadId` (for T3 `delegate_task` — note: the new thread must use `t3_thread_wait`/`t3_thread_read` on `childThreadId` since `task_status` is bound to the old parent thread) and `conversationId` (for AGY `invoke_subagent`)>
 - **Assumptions / Unverified:** <any unverified assumptions stated explicitly>
 
-## 4. Immediate Next Action (Zero Ambiguity)
+## 4. Immediate Next Action & Remaining Roadmap (Zero Ambiguity)
 1. **First Action / Command to Run:**
    ```bash
    <exact shell command to execute>
    ```
 2. **Fallback on Missing Assets:** If local assets/PNGs are missing, DO NOT explore or search checkouts — run `<command>` immediately.
-3. **Subsequent Actions:** <1-2 short bullet points for the follow-up steps>
+3. **Remaining Roadmap Steps (toward Section 1 Objective):**
+   - <Next step after the immediate action>
+   - <Final verification / completion gate>
 
 ## 5. Known Traps & Constraints
 - <Trap 1: e.g. "GPU tunnel must be up on port 8188 (curl -s http://127.0.0.1:8188/system_stats)">
@@ -121,14 +130,16 @@ Save the generated markdown to `/tmp/`:
 
 ---
 
-## Step 3: Auto-Spawn New Tab in Herdr
+## Step 3: Auto-Spawn New Tab in Herdr (or T3 Code)
 
 **3a. Background-work check (BEFORE running the script).**
 - In **Claude Code**: Run `ListAgents` and look at the `Subagents` block, plus any `run_in_background` Bash / Monitor tasks you started.
-- In **Antigravity (`agy`)**: Check both `manage_subagents(Action: "list")` and `manage_task(Action: "list")`. Record any active subagent `conversationId`s or detached `dispatch-worker` job IDs in the handoff document.
+- In **Antigravity (`agy`)**: Check both `manage_subagents(Action: "list")` and `manage_task(Action: "list")`.
+- In **T3 Code (any harness)**: Check any T3-owned `delegate_task` runs launched in this thread (`task_status`). Note: `task_status` is bound to the parent thread that created the task, so if a handoff must occur while a T3 `delegate_task` is still running, record its `childThreadId` in Section 3 so the new thread can inspect/wait on it via `t3_thread_wait(threadId=childThreadId)` and `t3_thread_read(threadId=childThreadId)`.
 Count the ones still `running`:
 - **0 running** → add `--close-source`: once the new agent is confirmed alive, the script closes THIS tab automatically after 20s.
 - **≥1 running** → do NOT pass `--close-source`. This tab must stay open to receive their results (2026-09-13 fact-board I-074: the handoff fired with 4 plan-writer agents still running; auto-closing would have lost 4 slice plans). Relay their results to the new tab via a file in the work folder, then report "safe to close" when the last one lands.
+- **Native T3 Code Thread Launch (Optional when running inside T3 Code with `t3_thread_launch` MCP tool available):** After running `herdr-handoff.sh` (which writes `$PROMPT_FILE` with the full inlined handoff document and copies it to clipboard), you may also directly spawn the continuation thread in T3 Code by calling `t3_thread_launch` with `title: "Handoff: <slug>"`, the matching `workspaceStrategy` (`existing_worktree` or `root`), and `message` set to the contents of `$PROMPT_FILE`.
 
 Run the bundled Herdr handoff script:
 

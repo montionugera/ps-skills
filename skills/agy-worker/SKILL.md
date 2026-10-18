@@ -40,6 +40,13 @@ When executing inside Antigravity (`agy`), orchestrators MUST prioritize native 
   - Step 3 Adversarial review (`code-reviewer`, `self-grill-audit`).
   - Round 3+ Escalation: If Round 2 fails review/verification, terminate the Flash subagent (`manage_subagents(Action: "kill")`) and escalate to a fresh `gemini-4-argon` subagent (`Model: "inherit"`). Also default to Argon for `[complex]` or `[architectural]` tasks.
 
+### Mode 1b: T3 Code Native Cross-Provider Delegation (`t3-code:delegate_task`)
+
+When running inside **T3 Code** (either as Antigravity `antigravity` or Claude Code `claudeAgent`), use the `t3-code` MCP server for cross-provider child tasks:
+- **Discover live models**: Call `orchestrator_capabilities` to inspect active providers (`claudeAgent`: `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-1`, `claude-haiku-5-5`; `antigravity`: `gemini-4-argon-*`, `gemini-3.8-flash-*`) and effort options.
+- **Dispatch (`delegate_task`)**: Use `mode: "async"` with `target: {"providerInstanceId": "claudeAgent", "model": "claude-sonnet-5-5", "options": [{"id": "effort", "value": "high"}]}` (or vice versa from Claude to `antigravity`).
+- **Zero-Polling Reactive Monitoring**: End your turn after `delegate_task(mode="async")`. T3 Code automatically wakes the parent thread when the child reaches a terminal state; then call `task_status(taskId)` to read the summary, or `t3_thread_read(threadId=childThreadId)` to inspect detailed steps.
+
 ### Mode 2: External Cross-Harness CLI Dispatch (`dispatch-worker --agent agy`)
 
 When orchestrating from Claude Code, OpenCode, or headless CI:

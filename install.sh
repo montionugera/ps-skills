@@ -59,7 +59,7 @@ mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$AGENTS_HOME/skills" "$GEMI
 replace_destination() {  # dest
   local dest="$1"
   case "$dest" in
-    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
+    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$GEMINI_HOME/hooks/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
     *) echo "refuse unsafe destination: $dest" >&2; return 1 ;;
   esac
   rm -rf -- "$dest"
@@ -93,9 +93,46 @@ for d in "$REPO"/skills/*/; do
   link "${d%/}" "$GEMINI_HOME/skills/$(basename "$d")"
   link "${d%/}" "$CURSOR_HOME/skills/$(basename "$d")"
 done
+mkdir -p "$GEMINI_HOME/hooks"
 for h in "$REPO"/skills/*/hooks/*; do
-  if [[ -f "$h" ]]; then link "$h" "$CLAUDE_HOME/hooks/$(basename "$h")"; fi
+  if [[ -f "$h" ]]; then
+    link "$h" "$CLAUDE_HOME/hooks/$(basename "$h")"
+    link "$h" "$GEMINI_HOME/hooks/$(basename "$h")"
+  fi
 done
+# Ensure T3 Code Antigravity provider configs have hooks symlink + auto-handoff hooks.json
+if [[ -d "$HOME/.t3/userdata/providers/antigravity" ]]; then
+  for t3_cfg in "$HOME"/.t3/userdata/providers/antigravity/*/config; do
+    [[ -d "$t3_cfg" ]] || continue
+    if [[ ! -e "$t3_cfg/hooks" && ! -L "$t3_cfg/hooks" ]]; then
+      ln -s "$GEMINI_HOME/hooks" "$t3_cfg/hooks"
+      echo "symlink: $t3_cfg/hooks -> $GEMINI_HOME/hooks"
+    fi
+    if [[ ! -f "$t3_cfg/hooks.json" ]]; then
+      cat > "$t3_cfg/hooks.json" <<EOF_HOOKS
+{
+  "auto-handoff": {
+    "PreInvocation": [
+      {
+        "command": "python3 $GEMINI_HOME/hooks/auto-handoff-midturn.py",
+        "timeout": 10,
+        "type": "command"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "python3 $GEMINI_HOME/hooks/auto-handoff-stop.py",
+        "timeout": 10,
+        "type": "command"
+      }
+    ]
+  }
+}
+EOF_HOOKS
+      echo "wrote: $t3_cfg/hooks.json"
+    fi
+  done
+fi
 link "$REPO/engine/ps-release-workflow" "$CLAUDE_HOME/ps-release-workflow"
 link "$REPO/engine/ps-release-workflow/bin/psrw" "$BIN_HOME/psrw"
 link "$REPO/bin/ps-skills-sync" "$BIN_HOME/ps-skills-sync"

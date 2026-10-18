@@ -117,6 +117,31 @@ class MidturnTest(unittest.TestCase):
         self.assertEqual(json.loads(r2.stdout), {})
 
 
+    def test_agy_preinvocation_ignores_preallocated_db_wal_when_transcript_exists(self):
+        conv_id = f"agy-mid-prec-{uuid.uuid4().hex}"
+        app_dir = self.dir / "agy-app-prec"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        # 20 KB compact transcript (~5,000 tokens, below 100k level)
+        (logs_dir / "transcript.jsonl").write_text("m" * 20_000)
+        conv_dir = app_dir / "conversations"
+        conv_dir.mkdir(parents=True)
+        # 491,520 bytes SQLite WAL pre-allocation (would be 122,880 tokens if not ignored)
+        (conv_dir / f"{conv_id}.db").write_bytes(b"d" * 491_520)
+        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 491_520)
+
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_AUTO_HANDOFF", "AGY_AUTO_HANDOFF"))}
+        env.update({
+            "CLAUDE_AUTO_HANDOFF_STATE_DIR": str(self.dir),
+            "CLAUDE_AUTO_HANDOFF_LOG": str(self.log),
+            "AGY_APP_DATA_DIR": str(app_dir),
+        })
+        payload = {"conversationId": conv_id, "transcriptPath": str(conv_dir / f"{conv_id}.db"), "workspacePaths": [str(self.dir)]}
+        r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {})
+
+
 if __name__ == "__main__":
     unittest.main()
 

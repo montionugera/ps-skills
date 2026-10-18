@@ -76,10 +76,22 @@ def resolve_agy_app_dirs():
     override = os.environ.get("AGY_APP_DATA_DIR") or os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
     if override:
         return [pathlib.Path(override).expanduser()]
-    return [
+    dirs = []
+    gemini_home = os.environ.get("GEMINI_HOME")
+    if gemini_home:
+        gh_acp = pathlib.Path(gemini_home).expanduser() / "antigravity-acp"
+        if gh_acp.is_dir():
+            dirs.append(gh_acp)
+    dirs.extend([
         pathlib.Path("~/.gemini/antigravity-cli").expanduser(),
         pathlib.Path("~/.gemini/antigravity").expanduser(),
-    ]
+    ])
+    t3_prov = pathlib.Path("~/.t3/userdata/providers/antigravity").expanduser()
+    if t3_prov.is_dir():
+        for sub in sorted(t3_prov.glob("*/antigravity-acp")):
+            if sub.is_dir() and sub not in dirs:
+                dirs.append(sub)
+    return dirs
 
 
 def resolve_agy_transcript_and_bytes(data, conversation_id):
@@ -89,46 +101,61 @@ def resolve_agy_transcript_and_bytes(data, conversation_id):
       1. Explicit `transcriptPath` / `transcript_path` in hook payload.
       2. `<appDataDir>/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl`
          and `transcript.jsonl`.
-      3. `<appDataDir>/conversations/<conversationId>.db` (+ `.db-wal`).
+      3. `<appDataDir>/conversations/<conversationId>.db` (+ `.db-wal`) ONLY as a fallback
+         when no JSONL transcript file exists yet.
     """
     explicit = data.get("transcriptPath") or data.get("transcript_path") or ""
+    explicit_db_root = None
     if explicit and os.path.isfile(explicit):
-        try:
-            return explicit, os.path.getsize(explicit)
-        except OSError:
-            pass
+        if str(explicit).endswith((".db", ".sqlite", ".sqlite3")):
+            # Antigravity passes conversations/<id>.db as transcriptPath; use its parent
+            # appDataDir to locate brain/<id>/.system_generated/logs/transcript.jsonl first.
+            explicit_db_root = pathlib.Path(explicit).resolve().parent.parent
+        else:
+            try:
+                return explicit, os.path.getsize(explicit)
+            except OSError:
+                pass
 
     if not conversation_id or conversation_id == "unknown":
         return None, 0
 
     best_transcript = None
     best_bytes = 0
+    app_dirs = resolve_agy_app_dirs()
+    if explicit_db_root and explicit_db_root.is_dir() and explicit_db_root not in app_dirs:
+        app_dirs = [explicit_db_root] + app_dirs
 
-    for root in resolve_agy_app_dirs():
+    for root in app_dirs:
         logs_dir = root / "brain" / conversation_id / ".system_generated" / "logs"
-        for name in ("transcript_full.jsonl", "transcript.jsonl"):
+        # Prefer compact transcript.jsonl (actual model context with truncated large outputs)
+        # over transcript_full.jsonl (which stores untruncated raw tool dumps).
+        for name in ("transcript.jsonl", "transcript_full.jsonl"):
             candidate = logs_dir / name
             if candidate.is_file():
                 try:
                     sz = candidate.stat().st_size
-                    if sz > best_bytes:
+                    if sz > 0 and sz > best_bytes:
                         best_bytes = sz
                         best_transcript = str(candidate)
+                        break
                 except OSError:
                     pass
 
-        conv_dir = root / "conversations"
-        db_file = conv_dir / f"{conversation_id}.db"
-        wal_file = conv_dir / f"{conversation_id}.db-wal"
-        db_bytes = 0
-        for fpath in (db_file, wal_file):
-            if fpath.is_file():
-                try:
-                    db_bytes += fpath.stat().st_size
-                except OSError:
-                    pass
-        if db_bytes > best_bytes:
-            best_bytes = db_bytes
+    if best_transcript is None:
+        for root in app_dirs:
+            conv_dir = root / "conversations"
+            db_file = conv_dir / f"{conversation_id}.db"
+            wal_file = conv_dir / f"{conversation_id}.db-wal"
+            db_bytes = 0
+            for fpath in (db_file, wal_file):
+                if fpath.is_file():
+                    try:
+                        db_bytes += fpath.stat().st_size
+                    except OSError:
+                        pass
+            if db_bytes > best_bytes:
+                best_bytes = db_bytes
 
     return best_transcript, best_bytes
 
@@ -145,8 +172,18 @@ LAUNCHED = re.compile(
     r"Async agent launched successfully.{0,400}?agentId: ([\w-]+)"
     r"|Command running in background with ID: ([\w-]+)"
     r"|moved to the background \(ID: ([\w-]+)\)"
+    r"|Tool is running as a background task with task id: ([\w/-]+)"
+    r'|(?:\\?"taskId\\?"\s*:\s*\\?"(node:delegated-task:[^"\\]+)\\?".*?\\?"status\\?"\s*:\s*\\?"running\\?")'
 )
-FINISHED = re.compile(r"<task-id>([\w-]+)</task-id>")
+FINISHED = re.compile(
+    r"<task-id>([\w-]+)</task-id>"
+    r'|Task id \\?"([\w/-]+)\\?" finished with result:'
+    r"|sender=([\w/-]+)\s+priority="
+    r"|Successfully killed task ([\w/-]+)"
+    r"|Task ([\w/-]+) is not running"
+    r"|Delegated task (node:delegated-task:[^\s.]+?)\.? reached a terminal state"
+    r'|(?:\\?"taskId\\?"\s*:\s*\\?"(node:delegated-task:[^"\\]+)\\?".*?\\?"status\\?"\s*:\s*\\?"(?:completed|failed|cancelled|canceled)\\?")'
+)
 
 
 def dirty_tree(cwd):
@@ -208,8 +245,15 @@ def parse_transcript_usage_and_tasks(transcript):
             line = line.strip()
             if not line:
                 continue
-            launched.update(next(filter(None, ids)) for ids in LAUNCHED.findall(line))
-            finished.update(FINISHED.findall(line))
+            if ("CHECKPOINT" in line and ("type" in line)) or "# Resuming from a compaction" in line:
+                launched.clear()
+                finished.clear()
+            if "Task Description: Timer:" not in line:
+                launched.update(next(filter(None, ids)) for ids in LAUNCHED.findall(line))
+            finished.update(
+                (ids if isinstance(ids, str) else next(filter(None, ids)))
+                for ids in FINISHED.findall(line)
+            )
             try:
                 entry = json.loads(line)
             except Exception:
@@ -255,7 +299,13 @@ def main():
         raw_session_id = data.get("conversationId") or data.get("session_id") or "unknown"
         session_id = "".join(c for c in str(raw_session_id) if c.isalnum() or c in "-_") or "unknown"
         workspaces = data.get("workspacePaths") or []
-        cwd = data.get("cwd") or (workspaces[0] if workspaces else None)
+        non_skill_workspaces = [
+            w for w in workspaces
+            if not str(w).rstrip("/").endswith(("/skills", "/.gemini/skills", "/.agents/skills"))
+        ]
+        cwd = data.get("cwd") or (
+            non_skill_workspaces[0] if non_skill_workspaces else (workspaces[0] if workspaces else None)
+        )
         transcript, total_bytes = resolve_agy_transcript_and_bytes(data, session_id)
         usage, launched, finished = parse_transcript_usage_and_tasks(transcript)
         if usage:
@@ -369,10 +419,14 @@ def main():
             f"(threshold {threshold}). Do not continue the current task. "
             "Execute the handoff skill now: compact this session into "
             "/tmp/handoff-<YYYY-MM-DD-HHMMSS>-<slug>.md following the handoff skill "
-            "template, then run "
+            "template (MUST include Section 1 Main Context: Original User Objective, "
+            "Governing Spec/Plan/Epic path, and Key User Decisions/Corrections so the "
+            "new session does not lose the big picture), then run "
             f"{HANDOFF_SCRIPT} "
             "\"<doc-path>\" --kind agy --prompt \"auto-handoff: continue the work in "
-            "the new tab\" (absolute path). Report the handoff file path and Herdr/T3 "
+            "the new tab\" (absolute path). If running inside T3 Code with t3_thread_launch "
+            "available, also call t3_thread_launch with the generated .prompt.txt content "
+            "and matching workspaceStrategy. Report the handoff file path and Herdr/T3 "
             "target, then stop."
         )
     else:
@@ -381,7 +435,9 @@ def main():
             f"(threshold {threshold}). Do not continue the current task. "
             "Execute the handoff skill now: compact this session into "
             "/tmp/handoff-<YYYY-MM-DD-HHMMSS>-<slug>.md following the handoff skill "
-            "template, then run "
+            "template (MUST include Section 1 Main Context: Original User Objective, "
+            "Governing Spec/Plan/Epic path, and Key User Decisions/Corrections so the "
+            "new session does not lose the big picture), then run "
             f"{HANDOFF_SCRIPT} "
             "\"<doc-path>\" --kind claude --mode <code|plan> --prompt \"auto-handoff: "
             "continue the work in the new tab\". Pick --mode code (starts Sonnet) when "

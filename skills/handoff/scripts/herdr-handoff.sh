@@ -214,10 +214,34 @@ if [[ -z "$TAB_LABEL" ]]; then
   fi
 fi
 
-# Formulate prompt for incoming agent and write sidecar file before mux dispatch
-FINAL_PROMPT="Please read the handoff document at $HANDOFF_PATH and execute the 'Immediate Next Action' directly. Do NOT conduct historical audits, search other worktrees, or read past review logs inline — stay a thin orchestrator and begin the immediate action."
+# Formulate prompt for incoming agent and write sidecar file before mux dispatch.
+# Inline the full handoff markdown directly into PROMPT_FILE so the receiving agent
+# starts with the complete Main Context (Objective, Governing Spec/Plan, User Decisions,
+# and Live Frontier) already in Turn 0 without losing the big picture.
+HANDOFF_CONTENT="$(cat "$HANDOFF_PATH")"
 if [[ -n "$CUSTOM_PROMPT" ]]; then
-  FINAL_PROMPT="Please read the handoff document at $HANDOFF_PATH and execute: $CUSTOM_PROMPT. Do NOT conduct historical audits or read past review logs inline — begin the immediate action."
+  FINAL_PROMPT="Handoff file: $HANDOFF_PATH
+Task override / focus: $CUSTOM_PROMPT
+
+Instructions:
+1. Run the Section 0 Claim command first.
+2. Internalize Section 1 (Main Context: Original User Objective, Governing Spec/Plan/Epic, and Key User Decisions/Constraints) so you preserve the full big picture.
+3. Execute Section 4 (Immediate Next Action) and continue driving toward the Section 1 objective (consulting the Governing Spec/Plan file when transitioning between steps, without doing unfocused historical audits).
+
+--- BEGIN HANDOFF DOCUMENT ($HANDOFF_PATH) ---
+$HANDOFF_CONTENT
+--- END HANDOFF DOCUMENT ---"
+else
+  FINAL_PROMPT="Handoff file: $HANDOFF_PATH
+
+Instructions:
+1. Run the Section 0 Claim command first.
+2. Internalize Section 1 (Main Context: Original User Objective, Governing Spec/Plan/Epic, and Key User Decisions/Constraints) so you preserve the full big picture.
+3. Execute Section 4 (Immediate Next Action) and continue driving toward the Section 1 objective (consulting the Governing Spec/Plan file when transitioning between steps, without doing unfocused historical audits).
+
+--- BEGIN HANDOFF DOCUMENT ($HANDOFF_PATH) ---
+$HANDOFF_CONTENT
+--- END HANDOFF DOCUMENT ---"
 fi
 PROMPT_FILE="${HANDOFF_PATH%.md}.prompt.txt"
 printf '%s\n' "$FINAL_PROMPT" > "$PROMPT_FILE"
@@ -253,7 +277,7 @@ fi
 
 RESOLVED_MUX="$MULTIPLEXER"
 if [[ "$RESOLVED_MUX" == "auto" ]]; then
-  if [[ -n "${T3CODE_PROJECT_ID:-}" || "${TERM_PROGRAM:-}" == "t3code" ]]; then
+  if [[ -n "${T3CODE_PROJECT_ID:-}" || "${TERM_PROGRAM:-}" == "t3code" || "${__CFBundleIdentifier:-}" == "com.t3tools.t3code" || -n "${T3CODE_CLI_PATH:-}" ]]; then
     RESOLVED_MUX="t3"
   elif [[ "$HERDR_AVAILABLE" == "true" ]]; then
     RESOLVED_MUX="herdr"

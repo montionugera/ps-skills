@@ -435,7 +435,7 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertIn("t3code", help_res.stdout)
 
         handoff_doc = Path(self.tmp.name) / "handoff-2026-10-13-t3.md"
-        handoff_doc.write_text("# Handoff\nImmediate Next Action: verify t3\n")
+        handoff_doc.write_text("# Handoff\n## 1. Main Context\n- Original User Objective: keep full context\nImmediate Next Action: verify t3\n")
         dry_res = subprocess.run(
             ["bash", str(script), str(handoff_doc), "--kind", "agy", "--multiplexer", "t3", "--dry-run"],
             capture_output=True, text=True, timeout=10,
@@ -443,7 +443,11 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertEqual(dry_res.returncode, 0, dry_res.stderr)
         self.assertIn("RESOLVED_MUX=t3", dry_res.stdout)
         self.assertIn("AGENT_KIND=agy", dry_res.stdout)
-        self.assertTrue((Path(self.tmp.name) / "handoff-2026-10-13-t3.prompt.txt").is_file())
+        prompt_file = Path(self.tmp.name) / "handoff-2026-10-13-t3.prompt.txt"
+        self.assertTrue(prompt_file.is_file())
+        prompt_text = prompt_file.read_text()
+        self.assertIn("BEGIN HANDOFF DOCUMENT", prompt_text)
+        self.assertIn("Original User Objective: keep full context", prompt_text)
 
     def test_agy_subagent_stop_ignored_and_session_id_sanitized(self):
         conv_id = f"agy-sub-{uuid.uuid4().hex}"
@@ -482,6 +486,115 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertEqual(json.loads(esc_out.stdout)["decision"], "continue")
         self.assertFalse((self.state_dir.parent / "escaped" / "conv.flag").exists())
         self.assertTrue((self.state_dir / f"agy-auto-handoff-{sanitized_id}.flag").exists())
+
+    def test_waits_while_t3_delegated_task_is_running_and_fires_when_completed(self):
+        task_id = "node:delegated-" + "task:command%3Amcp%3Atest-123"
+        launch_line = json.dumps({
+            "taskId": task_id,
+            "childThreadId": "thread:delegated-task:test-123",
+            "status": "running",
+            "workState": "working",
+        })
+        # While T3 delegate_task is running, hook must wait at safe point
+        self.assertWaits(self.run_hook(210_000, [launch_line]))
+
+        # When wakeup notification arrives ("Delegated task <id> reached a terminal state"), hook fires
+        wakeup_line = f"Delegated task {task_id} reached a terminal state."
+        self.assertFires(self.run_hook(210_000, [launch_line, wakeup_line]))
+
+        # Or when task_status returns status="completed", hook also fires
+        self.session = f"test-{uuid.uuid4().hex}"
+        self.flag = self.state_dir / f"claude-auto-handoff-{self.session}.flag"
+        done_line = json.dumps({
+            "taskId": task_id,
+            "status": "completed",
+            "workState": "result_available",
+        })
+        res = self.run_hook(210_000, [launch_line, done_line])
+        self.assertFires(res)
+        self.assertIn("Main Context", res["reason"])
+
+    def test_waits_while_agy_background_task_is_running_and_fires_when_finished(self):
+        agy_task_id = "ace8d432-102c/task-69"
+        launch_line = "Tool is running as a " + f"background task with task id: {agy_task_id}"
+        self.assertWaits(self.run_hook(210_000, [launch_line]))
+
+        done_line = f'Task id "{agy_task_id}" finished with result:'
+        self.assertFires(self.run_hook(210_000, [launch_line, done_line]))
+
+    def test_agy_workspace_paths_prefers_project_repo_over_skills_dirs(self):
+        conv_id = f"agy-ws-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-ws"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        (logs_dir / "transcript_full.jsonl").write_text("x" * 600_000)
+
+        # Make repo dirty, and pass a fake /skills path first in workspacePaths
+        (self.repo / "tracked.txt").write_text("dirty-in-repo\n")
+        payload = {
+            "conversationId": conv_id,
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": True,
+            "workspacePaths": [
+                "/tmp/fake-home/.gemini/antigravity-cli/skills",
+                "/tmp/fake-home/.gemini/config/skills",
+                str(self.repo),
+            ],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir), "AGY_AUTO_HANDOFF_NOTICES": "1"},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        res = json.loads(out.stdout)
+        # Should detect dirty_tree=True on self.repo and emit drain notice rather than firing handoff
+        self.assertIn("AUTO-HANDOFF pending", res["reason"])
+        self.assertIn("dirty_tree=True", res["reason"])
+        self.assertFalse((self.state_dir / f"agy-auto-handoff-{conv_id}.flag").exists())
+
+
+    def test_agy_transcript_jsonl_takes_precedence_over_preallocated_db_wal(self):
+        conv_id = f"agy-prec-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-prec"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        # 40 KB compact transcript (~10,000 tokens, well below 128k threshold)
+        (logs_dir / "transcript.jsonl").write_text("x" * 40_000)
+        # 800 KB full transcript (untruncated tool dumps) and 600 KB SQLite WAL pre-allocation
+        (logs_dir / "transcript_full.jsonl").write_text("f" * 800_000)
+        conv_dir = app_dir / "conversations"
+        conv_dir.mkdir(parents=True)
+        (conv_dir / f"{conv_id}.db").write_bytes(b"d" * 600_000)
+        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 600_000)
+
+        payload = {
+            "conversationId": conv_id,
+            "transcriptPath": str(conv_dir / f"{conv_id}.db"),
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir)},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {})
+        self.assertFalse((self.state_dir / f"agy-auto-handoff-{conv_id}.flag").exists())
+
+    def test_agy_schedule_timer_and_checkpoint_do_not_block_safe_point(self):
+        timer_line = (
+            "Tool is running as a "
+            "background task with task id: conv-1/task-99\n"
+            "Task Description: Timer: 15s, Prompt: Check status"
+        )
+        orphan_before_checkpoint = (
+            "Tool is running as a "
+            "background task with task id: conv-1/task-12"
+        )
+        checkpoint_line = '{"step_index":50,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE"}'
+        res = self.run_hook(210_000, [orphan_before_checkpoint, checkpoint_line, timer_line])
+        self.assertFires(res)
 
 
 if __name__ == "__main__":
