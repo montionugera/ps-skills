@@ -76,6 +76,62 @@ def resolve_agy_app_dirs():
     return dirs
 
 
+def active_transcript_bytes(path):
+    """Return active bytes after the last compaction CHECKPOINT line in a JSONL transcript."""
+    try:
+        raw = pathlib.Path(path).read_bytes()
+    except OSError:
+        return 0
+    total = len(raw)
+    if total == 0:
+        return 0
+    if b"CHECKPOINT" not in raw and b"# Resuming from a compaction" not in raw:
+        return total
+    offset = 0
+    last_reset_end = 0
+    for line in raw.splitlines(keepends=True):
+        offset += len(line)
+        if (b"CHECKPOINT" in line and b"type" in line) or b"# Resuming from a compaction" in line:
+            last_reset_end = offset
+    return max(0, total - last_reset_end)
+
+
+def is_delegated_subagent(data, transcript=None, session_id=None):
+    """True when invoked inside a native subagent or a T3 Code delegate_task child run."""
+    if os.environ.get("T3_DELEGATED_TASK") == "1":
+        return True
+    if data.get("agent_id") or data.get("parentConversationId"):
+        return True
+    if transcript and os.path.isfile(transcript):
+        try:
+            with open(transcript, "rb") as f:
+                head = f.read(16384).decode("utf-8", "replace")
+            if "Act as the " in head and "sub-agent for this task." in head:
+                return True
+        except OSError:
+            pass
+    if session_id and session_id != "unknown" and len(session_id) >= 8:
+        t3_db = os.environ.get("T3_STATE_DB") or os.path.expanduser("~/.t3/userdata/statev2.sqlite")
+        if os.path.isfile(t3_db):
+            try:
+                import sqlite3
+                uri = f"file:{t3_db}?mode=ro"
+                with sqlite3.connect(uri, uri=True, timeout=0.2) as conn:
+                    cur = conn.cursor()
+                    pat = f"%{session_id}%"
+                    cur.execute(
+                        "SELECT 1 FROM orchestration_v2_projection_provider_threads "
+                        "WHERE (thread_id LIKE 'thread:delegated-task:%' OR thread_id LIKE 'thread:provider:%') "
+                        "AND (provider_thread_id LIKE ? OR payload_json LIKE ?) LIMIT 1",
+                        (pat, pat),
+                    )
+                    if cur.fetchone():
+                        return True
+            except Exception:
+                pass
+    return False
+
+
 def resolve_agy_transcript_and_bytes(data, conversation_id):
     explicit = data.get("transcriptPath") or data.get("transcript_path") or ""
     explicit_db_root = None
@@ -86,7 +142,7 @@ def resolve_agy_transcript_and_bytes(data, conversation_id):
             explicit_db_root = pathlib.Path(explicit).resolve().parent.parent
         else:
             try:
-                return explicit, os.path.getsize(explicit)
+                return explicit, active_transcript_bytes(explicit)
             except OSError:
                 pass
 
@@ -94,6 +150,7 @@ def resolve_agy_transcript_and_bytes(data, conversation_id):
         return None, 0
 
     best_transcript = None
+    best_raw_size = 0
     best_bytes = 0
     app_dirs = resolve_agy_app_dirs()
     if explicit_db_root and explicit_db_root.is_dir() and explicit_db_root not in app_dirs:
@@ -107,9 +164,10 @@ def resolve_agy_transcript_and_bytes(data, conversation_id):
             candidate = logs_dir / name
             if candidate.is_file():
                 try:
-                    sz = candidate.stat().st_size
-                    if sz > 0 and sz > best_bytes:
-                        best_bytes = sz
+                    raw_sz = candidate.stat().st_size
+                    if raw_sz > 0 and raw_sz > best_raw_size:
+                        best_raw_size = raw_sz
+                        best_bytes = active_transcript_bytes(candidate)
                         best_transcript = str(candidate)
                         break
                 except OSError:
@@ -155,6 +213,8 @@ def latest_context(transcript):
     if size > TAIL_BYTES:
         lines = lines[1:]  # the first line of the tail is cut in the middle
     for line in reversed(lines):
+        if ("CHECKPOINT" in line and "type" in line) or "# Resuming from a compaction" in line:
+            break
         if '"usage"' not in line:
             continue
         try:
@@ -198,6 +258,9 @@ def main():
 
     if is_agy:
         transcript, total_bytes = resolve_agy_transcript_and_bytes(data, session_id)
+        if is_delegated_subagent(data, transcript=transcript, session_id=session_id):
+            print("{}")
+            return
         context = latest_context(transcript) or (total_bytes // BYTES_PER_TOKEN)
         dry = os.environ.get("AGY_AUTO_HANDOFF_NOTICES") == "0" or (
             "AGY_AUTO_HANDOFF_NOTICES" not in os.environ
@@ -208,6 +271,8 @@ def main():
     else:
         transcript = data.get("transcript_path")
         if not transcript or not os.path.isfile(transcript):
+            return
+        if is_delegated_subagent(data, transcript=transcript, session_id=session_id):
             return
         context = latest_context(transcript)
         dry = os.environ.get("CLAUDE_AUTO_HANDOFF_NOTICES") != "1"
