@@ -13,7 +13,6 @@
 #
 # What it does:
 #   skills/ps-*            -> $CLAUDE_HOME/skills/ps-*
-#   skills/ps-*            -> $AGENTS_HOME/skills/ps-*
 #   skills/ps-*            -> $GEMINI_HOME/skills/ps-*
 #   skills/*/hooks/*       -> $CLAUDE_HOME/hooks/*   (hook scripts; register them in settings.json)
 #   bin/ps-skills-sync     -> $HOME/.local/bin/ps-skills-sync
