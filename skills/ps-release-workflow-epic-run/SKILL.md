@@ -41,12 +41,8 @@ slice in order with `state`, `claimed_by`, `action`. Touch only slices in its `a
 4. Implement: dispatch a subagent that starts with `psrw claim F-NNN --resume`, then runs
    /writing-plans (plan path `.claude/refined_backlog/F-NNN-<slug>/plan.md`), an independent
    /self-grill-audit of that plan (accepted cost), then /subagent-driven-development.
-   - **In AGY (80/20 Progressive Escalation & Nested Dispatch)**:
-     - Plan authoring & `self-grill-audit`: runs on Frontier Tier (`gemini-4-argon`, `Model: "inherit"`).
-     - Nested subagent dispatch: enable via `enable_subagent_tools: true` on custom subagents (`define_subagent`), or dispatch `invoke_subagent` directly from the slice orchestrator.
-     - Task Implementer: runs with `Workspace: "share"` (for disjoint files) or `Workspace: "branch"`. Use `Model: "flash"` (`gemini-3.8-flash-high`) for Round 1 & Round 2 implementation.
-     - Warm Fix Loop: on Round 2, send reviewer feedback via `send_message(Recipient: "<convId>")` to the existing idle implementer.
-     - Escalation: if verification or review fails on Round 2, terminate the Flash subagent (`manage_subagents(Action: "kill")`) and escalate Round 3 to Frontier Tier (`Model: "inherit"` / `gemini-4-argon`).
+   - **In AGY**: plan + `self-grill-audit` on Frontier (`Model: "inherit"` / `gemini-4-argon`); Round 1-2 implementers on `Model: "flash"` (`gemini-3.8-flash-high`) with `Workspace: "share"` (disjoint files) or `"branch"`; nested dispatch via `enable_subagent_tools: true` (`define_subagent`) or direct `invoke_subagent`.
+   - **AGY fix rounds**: Round 2 sends reviewer feedback warm via `send_message(Recipient: "<convId>")` to the idle implementer; if Round 2 still fails, `manage_subagents(Action: "kill")` the Flash subagent and escalate Round 3 to Frontier (`Model: "inherit"`).
    - Brief the subagent: never ship, push, open a PR, promote, merge to main, or leave this worktree; never edit `_catalog.json`. On a resumed slice, tell it which plan tasks are already ticked.
 5. Independent whole-slice review of `git diff <base> HEAD`:
    - Always runs on Frontier Tier (`Model: "inherit"` / `gemini-4-argon` in AGY via `code-reviewer` and language reviewer; `model: opus` in Claude Code); step 4's per-task reviews are per-phase and do not replace it.
