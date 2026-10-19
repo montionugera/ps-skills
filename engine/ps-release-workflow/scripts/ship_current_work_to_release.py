@@ -79,14 +79,14 @@ def _merge_tree_conflicts(rel_wt: Path, base: str, theirs: str) -> list[str]:
     through to today's real `git merge` is the safe direction. Raises
     GateFailedError when merge-tree itself fails (exit > 1).
     """
-    mt = git_run(rel_wt, "merge-tree", "--write-tree", "--name-only", "--no-messages",
+    mt = git_run(rel_wt, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z",
                  base, theirs, check=False)
     if mt.returncode > 1:
         raise GateFailedError(f"merge-tree failed: {mt.stderr.strip()}")
     if mt.returncode == 0:
         return []
-    # stdout: the tree OID, then one conflicted path per line.
-    paths = list(dict.fromkeys(p for p in mt.stdout.splitlines()[1:] if p))
+    # stdout (-z): the tree OID, then each conflicted path, NUL-separated, unquoted.
+    paths = list(dict.fromkeys(p for p in mt.stdout.split("\0")[1:] if p))
     for src in (base, theirs):
         ca = git_run(rel_wt, "check-attr", "--source", src, "merge", "--", *paths, check=False)
         driven = [ln for ln in ca.stdout.splitlines() if not ln.endswith(": unspecified")]
@@ -197,6 +197,7 @@ def ship_current_work(
     # --no-sync-main skips the fetch too: the bypass exists for when main (or
     # origin) must not be consulted at all.
     main_ref = None if no_sync_main else resolve_main_ref(repo)
+    # (re-resolved after Gate 1 below so a hotfix landing mid-gate is absorbed)
 
     # Conflict precheck: refuse a merge that cannot succeed before Gate 1 runs.
     # Read outside the lock, so pairwise vs. this HEAD only — a ship landing
@@ -228,6 +229,8 @@ def ship_current_work(
     # Serialize the whole merge → re-verify → rollback → mark critical section on
     # the shared _release worktree so two concurrent ships can't corrupt the tree
     # or roll back the wrong commit.
+    # Re-fetch: a hotfix merged to main during Gate 1 must still be absorbed.
+    main_ref = None if no_sync_main else resolve_main_ref(repo)
     with file_lock(rel_wt):
         # Checked under the lock promote freezes under: a ship either lands
         # before promote starts (and is in the PR) or is refused here.

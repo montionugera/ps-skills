@@ -265,3 +265,27 @@ def test_sync_main_into_release_conflict_aborts_and_restores_the_tree(tmp_repo_w
     in_merge = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
                               cwd=rel, capture_output=True)
     assert in_merge.returncode != 0, "the conflicted merge must have been aborted"
+
+
+def test_ship_absorbs_a_hotfix_that_lands_during_gate1(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch
+):
+    """The conflict precheck resolves main before Gate 1; main must be fetched
+    again after it, or a hotfix merged mid-gate is missing from the release."""
+    import scripts.ship_current_work_to_release as ship_mod
+    repo = tmp_repo_with_release
+    _scaffold_precheck(repo)
+    wt = _claimed_feature_with_commit(repo, fixed_owner)
+    real = ship_mod._run_precheck
+    calls = []
+
+    def hotfix_lands_during_first_gate(tree):
+        if not calls:
+            _land_on_origin_main(repo, "hotfix.txt", "mid-gate\n")
+        calls.append(tree)
+        return real(tree)
+
+    monkeypatch.setattr(ship_mod, "_run_precheck", hotfix_lands_during_first_gate)
+    res = ship_current_work(wt)
+    assert res["main_synced"] == 1
+    assert (_rel_wt(repo) / "hotfix.txt").exists()
