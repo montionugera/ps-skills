@@ -6,6 +6,9 @@ description: |
   commits them on the release branch via the _release worktree. Never mints a
   feature. Supports AGY parallel subagent research (Model: "flash") and downstream
   subagent dispatch (Workspace: "branch"|"share", enable_subagent_tools: true).
+  After this skill: brainstorm each slice into its own approved spec before
+  refining it. Only the epic-run skill may chain refine and claim, and only for
+  slices a human allowlisted.
 argument-hint: "<epic-id> <slice-title-1> <slice-title-2> ..."
 ---
 
