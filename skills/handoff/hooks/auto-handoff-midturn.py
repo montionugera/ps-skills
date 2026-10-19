@@ -165,10 +165,13 @@ def resolve_agy_transcript_and_bytes(data, conversation_id):
             if candidate.is_file():
                 try:
                     raw_sz = candidate.stat().st_size
-                    if raw_sz > 0 and raw_sz > best_raw_size:
-                        best_raw_size = raw_sz
-                        best_bytes = active_transcript_bytes(candidate)
-                        best_transcript = str(candidate)
+                    if raw_sz > 0:
+                        if raw_sz > best_raw_size:
+                            best_raw_size = raw_sz
+                            best_bytes = active_transcript_bytes(candidate)
+                            best_transcript = str(candidate)
+                        # A non-empty compact transcript is this root's answer, even when
+                        # another spelling of the same root already chose it.
                         break
                 except OSError:
                     pass
