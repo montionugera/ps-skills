@@ -754,3 +754,73 @@ def test_ship_main_teardown_and_keep_worktree_flag(
     out = capsys.readouterr().out
     assert "kept (--keep-worktree)" in out
 
+
+
+def _two_features_editing_shared_file(repo: Path, fixed_owner: str, sentinel: Path,
+                                      attributes: str | None = None):
+    """Ship feature A (shared.txt = "A"), then return feature B's worktree with a
+    conflicting shared.txt = "B" commit. Gate 1 appends to `sentinel`, so a test
+    can prove whether it ran; it is reset after A's ship."""
+    _scaffold_precheck(repo, f'#!/bin/sh\necho ran >> "{sentinel}"\n')
+    (repo / "shared.txt").write_text("base\n")
+    paths = ["shared.txt"]
+    if attributes:
+        (repo / ".gitattributes").write_text(attributes)
+        paths.append(".gitattributes")
+    subprocess.run(["git", "add", *paths], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "shared base"], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=repo, check=True)
+    new_release(repo, version="1.1")
+    wts = []
+    for title, body in (("Feature A", "A\n"), ("Feature B", "B\n")):
+        idea = new_idea(repo, title=title)
+        feat = promote_idea_to_refined(repo, idea["id"], allow_empty_spec=True)
+        wt = Path(claim_feature(repo, feat["id"], owner=fixed_owner)["worktree"])
+        (wt / "shared.txt").write_text(body)
+        subprocess.run(["git", "commit", "-q", "-am", f"feat: {title}"], cwd=wt, check=True)
+        wts.append((wt, feat))
+    ship_current_work(wts[0][0])
+    sentinel.unlink()
+    return wts[1]
+
+
+def test_ship_refuses_a_conflicting_feature_before_gate1(
+    tmp_repo_with_release: Path, fixed_owner: str, tmp_path: Path
+):
+    """P1: a feature that cannot merge into release/<v> is refused by the
+    merge-tree precheck before Gate 1 runs, with the release untouched."""
+    import time
+    sentinel = tmp_path / "gate1-ran"
+    wt, feat = _two_features_editing_shared_file(tmp_repo_with_release, fixed_owner, sentinel)
+    rel_wt = tmp_repo_with_release / ".claude" / "worktrees" / "_release"
+    head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rel_wt,
+                                 capture_output=True, text=True, check=True).stdout.strip()
+    t0 = time.monotonic()
+    with pytest.raises(GateFailedError) as ei:
+        ship_current_work(wt)
+    elapsed = time.monotonic() - t0
+    msg = str(ei.value)
+    assert f"feat/{feat['id']}" in msg and "shared.txt" in msg
+    assert "(nothing run, nothing merged)" in msg
+    assert not sentinel.exists(), "Gate 1 must not run on a doomed merge"
+    assert elapsed < 5, f"precheck refusal took {elapsed:.2f}s"
+    head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rel_wt,
+                                capture_output=True, text=True, check=True).stdout.strip()
+    assert head_after == head_before
+    assert (rel_wt / "shared.txt").read_text() == "A\n"
+
+
+def test_ship_conflict_precheck_falls_through_on_a_merge_attribute(
+    tmp_repo_with_release: Path, fixed_owner: str, tmp_path: Path, capsys
+):
+    """merge-tree may not honour custom .gitattributes merge drivers: a conflict
+    on a path with a merge= attribute must warn and fall through to today's
+    flow (Gate 1 runs, the real merge decides), never refuse early."""
+    sentinel = tmp_path / "gate1-ran"
+    wt, feat = _two_features_editing_shared_file(
+        tmp_repo_with_release, fixed_owner, sentinel, attributes="shared.txt merge=custom\n")
+    with pytest.raises(GateFailedError) as ei:
+        ship_current_work(wt)
+    assert "merge of feat/" in str(ei.value), "the real merge, not the precheck, must refuse"
+    assert "conflict precheck skipped" in capsys.readouterr().err
+    assert sentinel.exists(), "fall-through must run today's Gate 1"

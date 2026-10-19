@@ -27,6 +27,7 @@ from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
 from lib.gate_lock import gate_slot
 from lib.hooks import HookPathError, resolve_hook
 from lib.main_sync import (
+    _BOOKKEEPING_DIRS, _BOOKKEEPING_FILE,
     MainSyncConflictError, missing_main_commits, resolve_main_ref, sync_main_into_release,
 )
 from lib.release_freeze import ReleaseFrozenError, frozen_error, frozen_since
@@ -66,6 +67,35 @@ def _run_precheck(tree: Path) -> int | None:
         return None
     with gate_slot(f"gate1 {tree.name}"):
         return subprocess.run([str(precheck)], cwd=tree).returncode
+
+
+def _merge_tree_conflicts(rel_wt: Path, base: str, theirs: str) -> list[str]:
+    """Paths `git merge-tree` reports conflicting when merging theirs into base.
+
+    A ~30ms, side-effect-free probe so a doomed merge refuses BEFORE Gate 1
+    burns minutes. Returns [] (proceed as before) when the merge is clean, or
+    when a conflicting path carries any `merge` attribute on either side:
+    merge-tree may not apply custom .gitattributes merge drivers, and falling
+    through to today's real `git merge` is the safe direction. Raises
+    GateFailedError when merge-tree itself fails (exit > 1).
+    """
+    mt = git_run(rel_wt, "merge-tree", "--write-tree", "--name-only", "--no-messages",
+                 base, theirs, check=False)
+    if mt.returncode > 1:
+        raise GateFailedError(f"merge-tree failed: {mt.stderr.strip()}")
+    if mt.returncode == 0:
+        return []
+    # stdout: the tree OID, then one conflicted path per line.
+    paths = list(dict.fromkeys(p for p in mt.stdout.splitlines()[1:] if p))
+    for src in (base, theirs):
+        ca = git_run(rel_wt, "check-attr", "--source", src, "merge", "--", *paths, check=False)
+        driven = [ln for ln in ca.stdout.splitlines() if not ln.endswith(": unspecified")]
+        if ca.returncode != 0 or driven:
+            print(f"⚠️  conflict precheck skipped for {theirs}: merge attribute on "
+                  f"{', '.join(driven) or ca.stderr.strip()} — merge-tree may not honour "
+                  f"custom merge drivers; falling through to the real merge", file=sys.stderr)
+            return []
+    return paths
 
 
 def _find_marker(worktree: Path) -> dict:
@@ -162,6 +192,31 @@ def ship_current_work(
                     + "\n".join(f"  - {r}" for r in res.reasons)
                 )
 
+    feat_branch = f"feat/{feature_id}"
+    # Fetch outside the lock (network); the merge itself happens under it.
+    # --no-sync-main skips the fetch too: the bypass exists for when main (or
+    # origin) must not be consulted at all.
+    main_ref = None if no_sync_main else resolve_main_ref(repo)
+
+    # Conflict precheck: refuse a merge that cannot succeed before Gate 1 runs.
+    # Read outside the lock, so pairwise vs. this HEAD only — a ship landing
+    # meanwhile (or a main+feature 3-way conflict) is still caught at merge time.
+    base = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
+    for theirs in filter(None, [main_ref, feat_branch]):
+        conflicts = _merge_tree_conflicts(rel_wt, base, theirs)
+        if theirs == main_ref and any(
+                p == _BOOKKEEPING_FILE or p.startswith(_BOOKKEEPING_DIRS) for p in conflicts):
+            conflicts = []  # sync_main_into_release has the specific bookkeeping refusal
+        if not conflicts:
+            continue
+        msg = (f"{theirs} conflicts with {release_branch}: {', '.join(conflicts)} "
+               f"(nothing run, nothing merged)")
+        if theirs == main_ref:
+            raise MainSyncConflictError(
+                f"{msg}.\nResolve by hand: cd {rel_wt} && git merge {main_ref}   "
+                f"# resolve, commit, then re-run the psrw command")
+        raise GateFailedError(msg)
+
     # Run Gate 1 from the FEATURE worktree — it verifies the code being shipped
     # (audit A5: resolving from `repo` ran the main checkout's precheck against
     # the main checkout's code). Missing precheck warns loudly but allows.
@@ -173,11 +228,6 @@ def ship_current_work(
     # Serialize the whole merge → re-verify → rollback → mark critical section on
     # the shared _release worktree so two concurrent ships can't corrupt the tree
     # or roll back the wrong commit.
-    feat_branch = f"feat/{feature_id}"
-    # Fetch outside the lock (network); the merge itself happens under it.
-    # --no-sync-main skips the fetch too: the bypass exists for when main (or
-    # origin) must not be consulted at all.
-    main_ref = None if no_sync_main else resolve_main_ref(repo)
     with file_lock(rel_wt):
         # Checked under the lock promote freezes under: a ship either lands
         # before promote starts (and is in the PR) or is refused here.
