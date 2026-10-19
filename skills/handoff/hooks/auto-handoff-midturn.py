@@ -201,6 +201,20 @@ def levels(is_agy=False):
         return [100000, 128000, 160000, 200000] if is_agy else [250000, 300000, 400000, 500000]
 
 
+def usage_context(usage):
+    """Context size of a usage record: its last `message` iteration when it has iterations
+    (an advisor call adds one, and the top-level totals then sum all of them), else its totals."""
+    for it in reversed(usage.get("iterations") or []):
+        if isinstance(it, dict) and it.get("type") == "message":
+            usage = it
+            break
+    return (
+        int(usage.get("input_tokens") or 0)
+        + int(usage.get("cache_read_input_tokens") or 0)
+        + int(usage.get("cache_creation_input_tokens") or 0)
+    )
+
+
 def latest_context(transcript):
     """Context size of the newest main-session assistant record in the file's tail, or 0."""
     if not transcript or not os.path.isfile(transcript):
@@ -226,11 +240,7 @@ def latest_context(transcript):
         u = (entry.get("message") or {}).get("usage")
         if not u:
             continue
-        context = (
-            int(u.get("input_tokens") or 0)
-            + int(u.get("cache_read_input_tokens") or 0)
-            + int(u.get("cache_creation_input_tokens") or 0)
-        )
+        context = usage_context(u)
         if context:  # synthetic records carry an all-zero usage
             return context
     return 0
@@ -317,8 +327,10 @@ def main():
     note = (
         f"AUTO-HANDOFF (mid-turn): context is {context} tokens, past {level}. This tool call "
         "is allowed. Finish the unit of work in progress (get it verified and committed), "
-        "start nothing new, launch no new background work, then end your turn so the "
-        "handoff can run. Do not hand off in the middle of a change."
+        "start nothing new, launch no new background work, then end your turn. The Stop hook "
+        "decides whether a handoff runs. Do not tell the owner a handoff, new tab or tab "
+        "close is happening unless herdr-handoff.sh's banner is in your output. Do not hand "
+        "off in the middle of a change."
     )
     if is_agy:
         print(json.dumps({"injectSteps": [{"ephemeralMessage": note}]}))

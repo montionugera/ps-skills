@@ -242,6 +242,15 @@ FINISHED = re.compile(
     r"|Delegated task (node:delegated-task:[^\s.]+?)\.? reached a terminal state"
     r'|(?:\\?"taskId\\?"\s*:\s*\\?"(node:delegated-task:[^"\\]+)\\?".*?\\?"status\\?"\s*:\s*\\?"(?:completed|failed|cancelled|canceled)\\?")'
 )
+# A SendMessage that wakes an agent which had already reported names it again here.
+RESUMED = re.compile(r'\\?"resumedAgentId\\?"\s*:\s*\\?"([\w-]+)')
+# Entries that only copy other entries' text (requests, queue operations) are not events.
+COPY_TYPES = ("api-request-blob", "api-request", "api-request-shape", "queue-operation")
+# Text that tells the owner a handoff is happening (checked only when none ran).
+HANDOFF_CLAIM = re.compile(
+    r"(?:next step|work) (?:happens|continues|moved) in the new tab|handing off now|has been handed off",
+    re.I,
+)
 
 
 def dirty_tree(cwd):
@@ -272,6 +281,25 @@ def log(session_id, context, decision, why, notices=False):
         pass
 
 
+def noticed_without_handoff(session_id):
+    """True when the log holds a midturn or drain notice for this session and no handoff."""
+    seen = set()
+    try:
+        with open(LOG, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if session_id not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("session") == session_id:
+                    seen.add(rec.get("decision"))
+    except OSError:
+        return False
+    return "handoff" not in seen and bool(seen & {"midturn-notice", "drain-notice"})
+
+
 def mark(path, context):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -292,37 +320,65 @@ def emit_noop(is_agy):
         print("{}")
 
 
+def usage_context(usage):
+    """Context size of a usage record: its last `message` iteration when it has iterations
+    (an advisor call adds one, and the top-level totals then sum all of them), else its totals."""
+    for it in reversed(usage.get("iterations") or []):
+        if isinstance(it, dict) and it.get("type") == "message":
+            usage = it
+            break
+    return (
+        int(usage.get("input_tokens") or 0)
+        + int(usage.get("cache_read_input_tokens") or 0)
+        + int(usage.get("cache_creation_input_tokens") or 0)
+    )
+
+
+def entry_text(entry):
+    """The text blocks of an assistant entry, joined."""
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    return " ".join(b.get("text", "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text")
+
+
 def parse_transcript_usage_and_tasks(transcript):
-    """Scan a JSONL transcript for Claude usage records and background task markers."""
-    usage = None
-    launched, finished = set(), set()
+    """Replay a JSONL transcript in order: (last usage, ids still running, last assistant text).
+
+    Per id the last event wins: a launch or a resume sets it running, a notification or kill
+    sets it done. So an agent that reported once and was then resumed is running again."""
+    usage, last_text = None, ""
+    state = {}
     if not transcript or not os.path.isfile(transcript):
-        return None, launched, finished
+        return None, set(), last_text
     with open(transcript, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             if ("CHECKPOINT" in line and ("type" in line)) or "# Resuming from a compaction" in line:
-                usage = None
-                launched.clear()
-                finished.clear()
-            if "Task Description: Timer:" not in line:
-                launched.update(next(filter(None, ids)) for ids in LAUNCHED.findall(line))
-            finished.update(
-                (ids if isinstance(ids, str) else next(filter(None, ids)))
-                for ids in FINISHED.findall(line)
-            )
+                usage, last_text = None, ""
+                state.clear()
             try:
                 entry = json.loads(line)
             except Exception:
+                entry = None
+            if isinstance(entry, dict) and entry.get("type") in COPY_TYPES:
                 continue
-            if entry.get("type") != "assistant":
+            events = []
+            if "Task Description: Timer:" not in line:
+                events += [(m.start(), next(filter(None, m.groups())), True) for m in LAUNCHED.finditer(line)]
+            events += [(m.start(), m.group(1), True) for m in RESUMED.finditer(line)]
+            events += [(m.start(), next(filter(None, m.groups())), False) for m in FINISHED.finditer(line)]
+            for _, task_id, running in sorted(events):
+                state[task_id] = running
+            if not isinstance(entry, dict) or entry.get("type") != "assistant":
                 continue
             u = (entry.get("message") or {}).get("usage")
             if u:
                 usage = u
-    return usage, launched, finished
+                last_text = entry_text(entry)
+    return usage, {i for i, running in state.items() if running}, last_text
 
 
 def main():
@@ -369,13 +425,9 @@ def main():
         if is_delegated_subagent(data, transcript=transcript, session_id=session_id):
             emit_noop(True)
             return
-        usage, launched, finished = parse_transcript_usage_and_tasks(transcript)
+        usage, running, last_text = parse_transcript_usage_and_tasks(transcript)
         if usage:
-            context = (
-                int(usage.get("input_tokens") or 0)
-                + int(usage.get("cache_read_input_tokens") or 0)
-                + int(usage.get("cache_creation_input_tokens") or 0)
-            )
+            context = usage_context(usage)
         else:
             context = total_bytes // BYTES_PER_TOKEN
         if context <= 0:
@@ -394,24 +446,32 @@ def main():
             return
         if is_delegated_subagent(data, transcript=transcript, session_id=session_id):
             return
-        usage, launched, finished = parse_transcript_usage_and_tasks(transcript)
+        usage, running, last_text = parse_transcript_usage_and_tasks(transcript)
         if not usage:
             return
-        context = (
-            int(usage.get("input_tokens") or 0)
-            + int(usage.get("cache_read_input_tokens") or 0)
-            + int(usage.get("cache_creation_input_tokens") or 0)
-        )
+        context = usage_context(usage)
         prefix = "claude-auto-handoff"
 
     flag = STATE_DIR / f"{prefix}-{session_id}.flag"
+    draining = STATE_DIR / f"{prefix}-{session_id}.draining"
     dry = ".dry" if not notices else ""
     drain = STATE_DIR / f"{prefix}-{session_id}.drain{dry}"
     refire = STATE_DIR / f"{prefix}-{session_id}.refire{dry}"
 
+    # Claim guard: a notice went out, no handoff ran, and the model says one is happening.
+    guard = STATE_DIR / f"{prefix}-{session_id}.claimguard"
+    if HANDOFF_CLAIM.search(last_text) and not guard.exists() and noticed_without_handoff(session_id):
+        mark(guard, context)
+        log(session_id, context, "claim-guard", "claimed a handoff that did not run", notices=notices)
+        if notices:
+            emit_decision(is_agy, "AUTO-HANDOFF: No handoff ran. Correct it in one line and keep working.")
+        else:
+            emit_noop(is_agy)
+        return
+
     if context < threshold:
         for p in (
-            *((flag,) if (notices or is_agy) else ()),
+            *((flag, draining) if (notices or is_agy) else ()),
             drain,
             refire,
             STATE_DIR / f"{prefix}-{session_id}.drain",
@@ -426,7 +486,10 @@ def main():
         emit_noop(is_agy)
         return
 
+    pending = sorted(running)
     if flag.exists():
+        if draining.exists() and not pending:
+            draining.unlink(missing_ok=True)
         try:
             last = max(int(p.read_text()) for p in (flag, refire) if p.exists())
         except Exception:
@@ -437,7 +500,15 @@ def main():
             return
         mark(refire, context)
         log(session_id, context, "retired-reminder", f"grew {context - last} since the last fire", notices=notices)
-        if notices:
+        if notices and draining.exists():
+            emit_decision(
+                is_agy,
+                f"AUTO-HANDOFF: this session already handed off but {len(pending)} background "
+                "agents it started are still running. Start nothing. Relay each report to the "
+                "new tab (SendMessage) and append it to the handoff file's \"Late results\" "
+                "section; after the last one reports, print 🟢 SAFE TO CLOSE THIS TAB and stop.",
+            )
+        elif notices:
             emit_decision(
                 is_agy,
                 f"AUTO-HANDOFF: this session already handed off and has since grown to {context} "
@@ -449,7 +520,6 @@ def main():
             emit_noop(is_agy)
         return
 
-    pending = sorted(launched - finished)
     agy_not_idle = is_agy and (data.get("fullyIdle") is False)
     dirty = dirty_tree(cwd)
     if context < hard_cap and (pending or agy_not_idle or dirty):
@@ -465,9 +535,10 @@ def main():
                 is_agy,
                 f"AUTO-HANDOFF pending: context is {context} tokens (threshold {threshold}) but "
                 f"this is not a safe point yet ({why}). Do not start a new task and do not "
-                "launch new background agents or commands. Finish the unit of work in progress, "
-                "let the running background work report back, commit, then end your turn; the "
-                f"handoff runs at the next clean stop, or regardless at {hard_cap} tokens. "
+                "launch new background agents or commands on your own. A newer owner instruction wins; "
+                "the handoff just waits until that work reports back. Finish the unit of work in "
+                "progress, let the running background work report back, commit, then end your turn; "
+                f"the handoff runs at the next clean stop, or regardless at {hard_cap} tokens. "
                 "If nothing is left to do right now, reply in one line and stop.",
             )
         else:
@@ -475,7 +546,14 @@ def main():
         return
 
     mark(flag, context)
+    n_running = len(pending) + (1 if agy_not_idle and not pending else 0)
+    if n_running:
+        mark(draining, context)
     log(session_id, context, "handoff", "hard-cap" if (pending or agy_not_idle or dirty) else "safe-point", notices=notices)
+    running_hint = (
+        f"--running {n_running} (the hook's count; raise it if your own check in handoff "
+        "skill step 3a finds more agents still running)"
+    )
 
     if is_agy:
         reason = (
@@ -488,7 +566,7 @@ def main():
             "new session does not lose the big picture), then run "
             f"{HANDOFF_SCRIPT} "
             "\"<doc-path>\" --kind agy --prompt \"auto-handoff: continue the work in "
-            "the new tab\" (absolute path). If running inside T3 Code with t3_thread_launch "
+            f"the new tab\" {running_hint} (absolute path). If running inside T3 Code with t3_thread_launch "
             "available, also call t3_thread_launch with the generated .prompt.txt content "
             "and matching workspaceStrategy. Report the handoff file path and Herdr/T3 "
             "target, then stop."
@@ -504,7 +582,7 @@ def main():
             "new session does not lose the big picture), then run "
             f"{HANDOFF_SCRIPT} "
             "\"<doc-path>\" --kind claude --mode <code|plan> --prompt \"auto-handoff: "
-            "continue the work in the new tab\". Pick --mode code (starts Sonnet) when "
+            f"continue the work in the new tab\" {running_hint}. Pick --mode code (starts Sonnet) when "
             "the Immediate Next Action is implementation: editing code, running/fixing "
             "tests, or executing tasks of an already-approved plan. Pick --mode plan "
             "(default model) for brainstorming, specs, plans, research, review/audit, "
