@@ -824,3 +824,22 @@ def test_ship_conflict_precheck_falls_through_on_a_merge_attribute(
     assert "merge of feat/" in str(ei.value), "the real merge, not the precheck, must refuse"
     assert "conflict precheck skipped" in capsys.readouterr().err
     assert sentinel.exists(), "fall-through must run today's Gate 1"
+
+
+def test_ship_refuses_a_missing_feature_branch_before_gate1(
+    tmp_repo_with_release: Path, fixed_owner: str, tmp_path: Path
+):
+    """A feat/<id> branch that no longer exists is refused with a clear message
+    before Gate 1, not as an opaque merge-tree failure."""
+    sentinel = tmp_path / "gate1-ran"
+    _scaffold_precheck(tmp_repo_with_release, f'#!/bin/sh\necho ran >> "{sentinel}"\n')
+    new_release(tmp_repo_with_release, version="1.1")
+    idea = new_idea(tmp_repo_with_release, title="Gone")
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"], allow_empty_spec=True)
+    wt = Path(claim_feature(tmp_repo_with_release, feat["id"], owner=fixed_owner)["worktree"])
+    subprocess.run(["git", "checkout", "-q", "--detach"], cwd=wt, check=True)
+    subprocess.run(["git", "branch", "-q", "-D", f"feat/{feat['id']}"], cwd=wt, check=True)
+    with pytest.raises(GateFailedError) as ei:
+        ship_current_work(wt)
+    assert f"feat/{feat['id']} does not exist" in str(ei.value)
+    assert not sentinel.exists()

@@ -23,7 +23,7 @@ from lib.backlog_paths import (
 from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped, update_entry
 from lib.epic import epic_children, epic_completeness, epic_folder_path, try_begin_verification
 from lib.epic_gate import run_and_record
-from lib.git_ops import GitError, _run as git_run, commit_all, is_dirty
+from lib.git_ops import GitError, _run as git_run, branch_exists, commit_all, is_dirty
 from lib.gate_lock import gate_slot
 from lib.hooks import HookPathError, resolve_hook
 from lib.main_sync import (
@@ -202,6 +202,8 @@ def ship_current_work(
     # Conflict precheck: refuse a merge that cannot succeed before Gate 1 runs.
     # Read outside the lock, so pairwise vs. this HEAD only — a ship landing
     # meanwhile (or a main+feature 3-way conflict) is still caught at merge time.
+    if not branch_exists(rel_wt, feat_branch):
+        raise GateFailedError(f"{feat_branch} does not exist (nothing run, nothing merged)")
     base = git_run(rel_wt, "rev-parse", "HEAD").stdout.strip()
     for theirs in filter(None, [main_ref, feat_branch]):
         conflicts = _merge_tree_conflicts(rel_wt, base, theirs)
