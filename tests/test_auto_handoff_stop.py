@@ -525,7 +525,20 @@ class AutoHandoffStopTest(unittest.TestCase):
     def test_draining_marker_clears_when_the_last_agent_reports(self):
         marker, out = self.reminder_after_handoff([LAUNCH_AGENT, notification("a1b2c3d4e5")])
         self.assertFalse(marker.exists())
-        self.assertIn("retired", out["reason"])
+        self.assertIn("last agent reported", out["reason"])
+        self.assertIn("SAFE TO CLOSE THIS TAB", out["reason"])
+
+    def test_relay_done_reminder_comes_once_without_waiting_for_growth(self):
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        self.assertFires(self.run_hook(300_000, [LAUNCH_AGENT], env=env))
+        out = self.run_hook(300_100, [LAUNCH_AGENT, notification("a1b2c3d4e5")], env=env)
+        self.assertIn("last agent reported", out["reason"])
+        self.assertIsNone(self.run_hook(300_200, [LAUNCH_AGENT, notification("a1b2c3d4e5")], env=env))
+
+    def test_running_hint_has_no_parentheses_inside_the_command(self):
+        out = self.run_hook(300_000, [LAUNCH_AGENT])
+        self.assertIn("--running 1.", out["reason"])
+        self.assertNotIn("--running 1 (", out["reason"])
 
     def test_drain_notice_states_the_precedence_rule(self):
         out = self.run_hook(210_000, [LAUNCH_AGENT], env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"})
@@ -557,6 +570,22 @@ class AutoHandoffStopTest(unittest.TestCase):
     def test_claim_guard_stays_quiet_without_a_notice_for_this_session(self):
         self.log_decision("midturn-notice", session="someone-else")
         self.assertIsNone(self.run_hook(129_140, last_text=self.CLAIM, env=self.guard_env()))
+
+    def test_claim_guard_accepts_a_manual_handoff_banner_in_the_transcript(self):
+        self.log_decision("midturn-notice")
+        banner = "✅  HANDOFF CONFIRMED — claude is working in tab t9"
+        self.assertIsNone(self.run_hook(129_140, [banner], last_text=self.CLAIM, env=self.guard_env()))
+
+    def test_claim_guard_is_not_satisfied_by_documentation_of_the_banner(self):
+        self.log_decision("midturn-notice")
+        doc = "`✅ HANDOFF CONFIRMED` followed by `⛔ KEEP THIS TAB OPEN — N agents still running`"
+        out = self.run_hook(129_140, [doc], last_text=self.CLAIM, env=self.guard_env())
+        self.assertEqual(out["decision"], "block")
+
+    def test_claim_guard_ignores_ticket_prose(self):
+        self.log_decision("drain-notice")
+        text = "The ticket has been handed off to QA."
+        self.assertIsNone(self.run_hook(129_140, last_text=text, env=self.guard_env()))
 
     def test_claim_guard_ignores_discussion_of_handoffs(self):
         self.log_decision("drain-notice")

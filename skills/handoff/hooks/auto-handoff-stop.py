@@ -248,8 +248,15 @@ RESUMED = re.compile(r'\\?"resumedAgentId\\?"\s*:\s*\\?"([\w-]+)')
 COPY_TYPES = ("api-request-blob", "api-request", "api-request-shape", "queue-operation")
 # Text that tells the owner a handoff is happening (checked only when none ran).
 HANDOFF_CLAIM = re.compile(
-    r"(?:next step|work) (?:happens|continues|moved) in the new tab|handing off now|has been handed off",
+    r"(?:next step|work) (?:happens|continues|moved) in the new tab|handing off now",
     re.I,
+)
+# The lines herdr-handoff.sh prints, so a manual /handoff (which logs nothing) is seen too.
+# The dash is matched loosely because a transcript line may hold it as a \u2014 escape.
+HANDOFF_BANNER = re.compile(
+    r"HANDOFF CONFIRMED .{1,8}? \w+ is \w+ in tab"
+    r"|DO NOT CLOSE THIS TAB .{1,8}? new agent NOT"
+    r"|KEEP THIS TAB OPEN .{1,8}? \d+ agents still running"
 )
 
 
@@ -282,7 +289,8 @@ def log(session_id, context, decision, why, notices=False):
 
 
 def noticed_without_handoff(session_id):
-    """True when the log holds a midturn or drain notice for this session and no handoff."""
+    """True when the log holds a midturn or drain notice for this session and no handoff
+    (the transcript's banner check is the caller's)."""
     seen = set()
     try:
         with open(LOG, encoding="utf-8", errors="replace") as f:
@@ -343,21 +351,22 @@ def entry_text(entry):
 
 
 def parse_transcript_usage_and_tasks(transcript):
-    """Replay a JSONL transcript in order: (last usage, ids still running, last assistant text).
+    """Replay a JSONL transcript in order: (last usage, ids still running, last assistant text,
+    whether a herdr-handoff.sh banner was printed).
 
     Per id the last event wins: a launch or a resume sets it running, a notification or kill
     sets it done. So an agent that reported once and was then resumed is running again."""
-    usage, last_text = None, ""
+    usage, last_text, banner = None, "", False
     state = {}
     if not transcript or not os.path.isfile(transcript):
-        return None, set(), last_text
+        return None, set(), last_text, banner
     with open(transcript, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             if ("CHECKPOINT" in line and ("type" in line)) or "# Resuming from a compaction" in line:
-                usage, last_text = None, ""
+                usage, last_text, banner = None, "", False
                 state.clear()
             try:
                 entry = json.loads(line)
@@ -365,6 +374,7 @@ def parse_transcript_usage_and_tasks(transcript):
                 entry = None
             if isinstance(entry, dict) and entry.get("type") in COPY_TYPES:
                 continue
+            banner = banner or bool(HANDOFF_BANNER.search(line))
             events = []
             if "Task Description: Timer:" not in line:
                 events += [(m.start(), next(filter(None, m.groups())), True) for m in LAUNCHED.finditer(line)]
@@ -378,7 +388,7 @@ def parse_transcript_usage_and_tasks(transcript):
             if u:
                 usage = u
                 last_text = entry_text(entry)
-    return usage, {i for i, running in state.items() if running}, last_text
+    return usage, {i for i, running in state.items() if running}, last_text, banner
 
 
 def main():
@@ -425,7 +435,7 @@ def main():
         if is_delegated_subagent(data, transcript=transcript, session_id=session_id):
             emit_noop(True)
             return
-        usage, running, last_text = parse_transcript_usage_and_tasks(transcript)
+        usage, running, last_text, banner = parse_transcript_usage_and_tasks(transcript)
         if usage:
             context = usage_context(usage)
         else:
@@ -446,7 +456,7 @@ def main():
             return
         if is_delegated_subagent(data, transcript=transcript, session_id=session_id):
             return
-        usage, running, last_text = parse_transcript_usage_and_tasks(transcript)
+        usage, running, last_text, banner = parse_transcript_usage_and_tasks(transcript)
         if not usage:
             return
         context = usage_context(usage)
@@ -460,7 +470,7 @@ def main():
 
     # Claim guard: a notice went out, no handoff ran, and the model says one is happening.
     guard = STATE_DIR / f"{prefix}-{session_id}.claimguard"
-    if HANDOFF_CLAIM.search(last_text) and not guard.exists() and noticed_without_handoff(session_id):
+    if HANDOFF_CLAIM.search(last_text) and not guard.exists() and not banner and noticed_without_handoff(session_id):
         mark(guard, context)
         log(session_id, context, "claim-guard", "claimed a handoff that did not run", notices=notices)
         if notices:
@@ -490,6 +500,17 @@ def main():
     if flag.exists():
         if draining.exists() and not pending:
             draining.unlink(missing_ok=True)
+            log(session_id, context, "relay-done", "last agent reported", notices=notices)
+            if notices:
+                emit_decision(
+                    is_agy,
+                    "AUTO-HANDOFF: the last agent reported. Relay its result to the new tab "
+                    "(SendMessage) and append it to the handoff file's \"Late results\" "
+                    "section, then print 🟢 SAFE TO CLOSE THIS TAB and stop.",
+                )
+            else:
+                emit_noop(is_agy)
+            return
         try:
             last = max(int(p.read_text()) for p in (flag, refire) if p.exists())
         except Exception:
@@ -550,9 +571,10 @@ def main():
     if n_running:
         mark(draining, context)
     log(session_id, context, "handoff", "hard-cap" if (pending or agy_not_idle or dirty) else "safe-point", notices=notices)
-    running_hint = (
-        f"--running {n_running} (the hook's count; raise it if your own check in handoff "
-        "skill step 3a finds more agents still running)"
+    running_hint = f"--running {n_running}"
+    running_note = (
+        " That N is this hook's count; raise it if your own check in handoff skill step 3a "
+        "finds more agents still running."
     )
 
     if is_agy:
@@ -566,7 +588,7 @@ def main():
             "new session does not lose the big picture), then run "
             f"{HANDOFF_SCRIPT} "
             "\"<doc-path>\" --kind agy --prompt \"auto-handoff: continue the work in "
-            f"the new tab\" {running_hint} (absolute path). If running inside T3 Code with t3_thread_launch "
+            f"the new tab\" {running_hint} (absolute path).{running_note} If running inside T3 Code with t3_thread_launch "
             "available, also call t3_thread_launch with the generated .prompt.txt content "
             "and matching workspaceStrategy. Report the handoff file path and Herdr/T3 "
             "target, then stop."
@@ -582,7 +604,7 @@ def main():
             "new session does not lose the big picture), then run "
             f"{HANDOFF_SCRIPT} "
             "\"<doc-path>\" --kind claude --mode <code|plan> --prompt \"auto-handoff: "
-            f"continue the work in the new tab\" {running_hint}. Pick --mode code (starts Sonnet) when "
+            f"continue the work in the new tab\" {running_hint}.{running_note} Pick --mode code (starts Sonnet) when "
             "the Immediate Next Action is implementation: editing code, running/fixing "
             "tests, or executing tasks of an already-approved plan. Pick --mode plan "
             "(default model) for brainstorming, specs, plans, research, review/audit, "

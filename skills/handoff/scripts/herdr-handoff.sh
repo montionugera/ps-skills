@@ -83,6 +83,7 @@ CLOSE_SOURCE=false
 CLOSE_GRACE_SECONDS=20
 RUNNING=""
 CONFIRM_TIMEOUT="${HERDR_HANDOFF_CONFIRM_TIMEOUT:-60}"
+[[ "$CONFIRM_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]] || CONFIRM_TIMEOUT=60
 YOLO=true
 DRY_RUN=false
 
@@ -134,10 +135,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --running)
       RUNNING="${2:-}"
-      if [[ ! "$RUNNING" =~ ^[0-9]+$ ]]; then
-        echo "Error: --running needs a whole number (got '$RUNNING')." >&2
+      if [[ ! "$RUNNING" =~ ^[0-9]{1,4}$ ]]; then
+        echo "Error: --running needs a whole number of up to 4 digits (got '$RUNNING')." >&2
         exit 1
       fi
+      RUNNING=$((10#$RUNNING))  # "08" is eight, not a bad octal
       shift 2
       ;;
     --close-source)
@@ -381,7 +383,7 @@ fi
 # close the source tab after a grace period.
 # --------------------------------------------------------------------------
 finish_handoff() {
-  local alive=false pane_json agent status=""
+  local alive=false pane_json agent="" status=""
   for _ in $(seq 1 "$CONFIRM_TIMEOUT"); do
     pane_json=$(herdr pane get "$ROOT_PANE" 2>/dev/null || true)
     agent=$(echo "$pane_json" | jq -r '.result.pane.agent // empty' 2>/dev/null || true)

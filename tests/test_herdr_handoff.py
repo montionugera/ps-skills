@@ -70,6 +70,17 @@ class HerdrHandoffTest(unittest.TestCase):
         self.assertIn("Closing THIS tab (t1)", r.stdout)
         self.assertNotIn("KEEP", r.stdout)
 
+    def test_leading_zero_is_decimal_not_octal(self):
+        r = self.run_script("--running", "08")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("KEEP THIS TAB OPEN — 8 agents still running", r.stdout)
+        self.assertNotIn("Closing THIS tab", r.stdout)
+
+    def test_non_numeric_confirm_timeout_falls_back(self):
+        r = self.run_script("--running", "1", timeout="abc")
+        self.assertIn("HANDOFF CONFIRMED", r.stdout)
+        self.assertNotIn("syntax error", r.stderr)
+
     def test_running_must_be_a_number(self):
         r = self.run_script("--running", "two")
         self.assertEqual(r.returncode, 1)
