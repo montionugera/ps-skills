@@ -30,6 +30,23 @@ GIT_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 GIT_ENV.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
 
 
+def resume_result(agent_id):
+    """The SendMessage tool result that resumes an agent that had already reported."""
+    return json.dumps({"success": True, "message": f"Resuming agent {agent_id[:7]}", "resumedAgentId": agent_id})
+
+
+# The incident's usage record: an advisor call adds an iteration, so the top-level totals
+# double-count; the real context is the last `message` iteration (2 + 126985 + 2153).
+ADVISOR_USAGE = {
+    "input_tokens": 4, "cache_read_input_tokens": 250165, "cache_creation_input_tokens": 3300,
+    "iterations": [
+        {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 123000, "cache_creation_input_tokens": 1000},
+        {"type": "advisor_message", "input_tokens": 127338},
+        {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 126985, "cache_creation_input_tokens": 2153},
+    ],
+}
+
+
 def notification(task_id, status="completed"):
     return f"<task-notification>\n<task-" + f"id>{task_id}</task-id>\n<status>{status}</status>\n</task-notification>"
 
@@ -60,13 +77,18 @@ class AutoHandoffStopTest(unittest.TestCase):
     def git(self, *args):
         subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True, env=GIT_ENV)
 
-    def run_hook(self, tokens, texts=(), env=None, cwd=None, stop_hook_active=None):
-        """Runs the hook on a transcript holding texts, then one assistant turn of `tokens`."""
+    def run_hook(self, tokens, texts=(), env=None, cwd=None, stop_hook_active=None, usage=None, last_text=None):
+        """Runs the hook on a transcript holding texts, then one assistant turn of `tokens`.
+
+        A text that is a dict is written as the transcript entry itself."""
         transcript = Path(self.tmp.name) / "transcript.jsonl"
-        lines = [json.dumps({"type": "user", "message": {"content": t}}) for t in texts]
-        lines.append(json.dumps({"type": "assistant", "message": {"usage": {
+        lines = [json.dumps(t if isinstance(t, dict) else {"type": "user", "message": {"content": t}}) for t in texts]
+        message = {"usage": usage or {
             "input_tokens": 1000, "cache_read_input_tokens": tokens - 1000, "cache_creation_input_tokens": 0,
-        }}}))
+        }}
+        if last_text is not None:
+            message["content"] = [{"type": "text", "text": last_text}]
+        lines.append(json.dumps({"type": "assistant", "message": message}))
         transcript.write_text("\n".join(lines) + "\n")
         full_env = {k: v for k, v in GIT_ENV.items() if not k.startswith("CLAUDE_AUTO_HANDOFF")}
         full_env.setdefault("CLAUDE_AUTO_HANDOFF_STATE_DIR", str(self.state_dir))
@@ -448,6 +470,127 @@ class AutoHandoffStopTest(unittest.TestCase):
         prompt_text = prompt_file.read_text()
         self.assertIn("BEGIN HANDOFF DOCUMENT", prompt_text)
         self.assertIn("Original User Objective: keep full context", prompt_text)
+
+    # --- ordered replay: a resumed agent is running again (2026-10-19 incident) ---
+
+    def test_waits_for_an_agent_resumed_after_it_reported(self):
+        texts = [LAUNCH_AGENT, notification("a1b2c3d4e5"), resume_result("a1b2c3d4e5")]
+        self.assertWaits(self.run_hook(210_000, texts))
+        drain = [r for r in self.read_log() if r["decision"] == "drain-notice"]
+        self.assertEqual(len(drain), 1)
+        self.assertIn("background=1", drain[0]["why"])
+
+    def test_fires_once_the_resumed_agent_reports_again(self):
+        texts = [LAUNCH_AGENT, notification("a1b2c3d4e5"), resume_result("a1b2c3d4e5"), notification("a1b2c3d4e5")]
+        self.assertFires(self.run_hook(210_000, texts))
+
+    def test_a_notification_copy_in_an_api_request_blob_is_not_an_event(self):
+        texts = [LAUNCH_AGENT, {"type": "api-request-blob", "body": notification("a1b2c3d4e5")}]
+        self.assertWaits(self.run_hook(210_000, texts))
+
+    # --- context counts the last message iteration ---
+
+    def test_advisor_iteration_is_not_double_counted(self):
+        self.assertWaits(self.run_hook(0, usage=ADVISOR_USAGE))  # 129140, not ~256k
+        out = self.run_hook(0, usage=ADVISOR_USAGE, env={"CLAUDE_AUTO_HANDOFF_THRESHOLD": "129000"})
+        self.assertFires(out)
+        self.assertIn("129140 tokens", out["reason"])
+
+    # --- the handoff instruction carries the hook's own count ---
+
+    def test_handoff_instruction_carries_running_count(self):
+        out = self.run_hook(300_000, [LAUNCH_AGENT, LAUNCH_BASH])
+        self.assertFires(out)
+        self.assertIn("--running 2", out["reason"])
+
+    def test_handoff_instruction_says_running_zero_at_a_safe_point(self):
+        out = self.run_hook(200_000)
+        self.assertIn("--running 0", out["reason"])
+
+    # --- .draining marker: the retired reminder tells the old tab to relay ---
+
+    def reminder_after_handoff(self, second_texts):
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        self.assertFires(self.run_hook(300_000, [LAUNCH_AGENT], env=env))
+        marker = self.state_dir / f"claude-auto-handoff-{self.session}.draining"
+        return marker, self.run_hook(330_000, second_texts, env=env)
+
+    def test_handoff_with_running_agents_writes_draining_marker_and_reminder_says_relay(self):
+        marker, out = self.reminder_after_handoff([LAUNCH_AGENT])
+        self.assertTrue(marker.exists())
+        self.assertIn("Relay", out["reason"])
+        self.assertIn("SAFE TO CLOSE", out["reason"])
+        self.assertNotIn("retired", out["reason"])
+
+    def test_draining_marker_clears_when_the_last_agent_reports(self):
+        marker, out = self.reminder_after_handoff([LAUNCH_AGENT, notification("a1b2c3d4e5")])
+        self.assertFalse(marker.exists())
+        self.assertIn("last agent reported", out["reason"])
+        self.assertIn("SAFE TO CLOSE THIS TAB", out["reason"])
+
+    def test_relay_done_reminder_comes_once_without_waiting_for_growth(self):
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        self.assertFires(self.run_hook(300_000, [LAUNCH_AGENT], env=env))
+        out = self.run_hook(300_100, [LAUNCH_AGENT, notification("a1b2c3d4e5")], env=env)
+        self.assertIn("last agent reported", out["reason"])
+        self.assertIsNone(self.run_hook(300_200, [LAUNCH_AGENT, notification("a1b2c3d4e5")], env=env))
+
+    def test_running_hint_has_no_parentheses_inside_the_command(self):
+        out = self.run_hook(300_000, [LAUNCH_AGENT])
+        self.assertIn("--running 1.", out["reason"])
+        self.assertNotIn("--running 1 (", out["reason"])
+
+    def test_drain_notice_states_the_precedence_rule(self):
+        out = self.run_hook(210_000, [LAUNCH_AGENT], env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"})
+        self.assertIn("A newer owner instruction wins", out["reason"])
+
+    # --- claim guard (F8) ---
+
+    CLAIM = "Context is full; the next step happens in the new tab."
+
+    def guard_env(self):
+        return {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+
+    def log_decision(self, decision, session=None):
+        with open(self.log_path, "a") as f:
+            f.write(json.dumps({"session": session or self.session, "decision": decision}) + "\n")
+
+    def test_claim_guard_blocks_once_after_a_notice_with_no_handoff(self):
+        self.log_decision("midturn-notice")
+        out = self.run_hook(129_140, last_text=self.CLAIM, env=self.guard_env())
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("No handoff ran", out["reason"])
+        self.assertIsNone(self.run_hook(129_140, last_text=self.CLAIM, env=self.guard_env()))
+
+    def test_claim_guard_stays_quiet_when_a_handoff_ran(self):
+        self.log_decision("midturn-notice")
+        self.log_decision("handoff")
+        self.assertIsNone(self.run_hook(129_140, last_text=self.CLAIM, env=self.guard_env()))
+
+    def test_claim_guard_stays_quiet_without_a_notice_for_this_session(self):
+        self.log_decision("midturn-notice", session="someone-else")
+        self.assertIsNone(self.run_hook(129_140, last_text=self.CLAIM, env=self.guard_env()))
+
+    def test_claim_guard_accepts_a_manual_handoff_banner_in_the_transcript(self):
+        self.log_decision("midturn-notice")
+        banner = "✅  HANDOFF CONFIRMED — claude is working in tab t9"
+        self.assertIsNone(self.run_hook(129_140, [banner], last_text=self.CLAIM, env=self.guard_env()))
+
+    def test_claim_guard_is_not_satisfied_by_documentation_of_the_banner(self):
+        self.log_decision("midturn-notice")
+        doc = "`✅ HANDOFF CONFIRMED` followed by `⛔ KEEP THIS TAB OPEN — N agents still running`"
+        out = self.run_hook(129_140, [doc], last_text=self.CLAIM, env=self.guard_env())
+        self.assertEqual(out["decision"], "block")
+
+    def test_claim_guard_ignores_ticket_prose(self):
+        self.log_decision("drain-notice")
+        text = "The ticket has been handed off to QA."
+        self.assertIsNone(self.run_hook(129_140, last_text=text, env=self.guard_env()))
+
+    def test_claim_guard_ignores_discussion_of_handoffs(self):
+        self.log_decision("drain-notice")
+        text = "The handoff hook decides when a handoff runs. SAFE TO CLOSE THIS TAB once the relay is done."
+        self.assertIsNone(self.run_hook(129_140, last_text=text, env=self.guard_env()))
 
     def test_agy_subagent_stop_ignored_and_session_id_sanitized(self):
         conv_id = f"agy-sub-{uuid.uuid4().hex}"

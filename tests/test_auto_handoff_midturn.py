@@ -37,6 +37,23 @@ class MidturnTest(unittest.TestCase):
         self.assertEqual(r.stderr, "")
         return json.loads(r.stdout) if r.stdout.strip() else None
 
+    def test_advisor_iteration_is_not_double_counted(self):
+        # top-level totals sum three iterations (~256k); the real context is the last message (129140)
+        usage = {"input_tokens": 4, "cache_read_input_tokens": 250165, "cache_creation_input_tokens": 3300,
+                 "iterations": [
+                     {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 123000, "cache_creation_input_tokens": 1000},
+                     {"type": "advisor_message", "input_tokens": 127338},
+                     {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 126985, "cache_creation_input_tokens": 2153}]}
+        self.transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": usage}}) + "\n")
+        self.assertIsNone(self.run_hook())
+        self.assertFalse(self.log.exists())
+
+    def test_note_never_promises_a_handoff(self):
+        self.write(260_000)
+        note = self.run_hook()["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("The Stop hook decides whether a handoff runs", note)
+        self.assertIn("Do not tell the owner a handoff, new tab or tab close is happening", note)
+
     def test_under_lowest_level_is_silent(self):
         self.write(100_000)
         self.assertIsNone(self.run_hook())
