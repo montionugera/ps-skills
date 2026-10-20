@@ -58,7 +58,7 @@ Requires a [Claude Code](https://claude.com/claude-code), Codex, or [Google Anti
 ```bash
 git clone https://github.com/montionugera/ps-skills.git
 cd ps-skills
-./install.sh           # symlink skills into ~/.claude, ~/.agents, and ~/.gemini/config
+./install.sh           # symlink skills into ~/.claude and ~/.gemini/config
 # or
 ./install.sh --parity  # reconcile full parity: mirror Claude skills into Gemini & archive junk
 # or

@@ -13,7 +13,6 @@
 #
 # What it does:
 #   skills/ps-*            -> $CLAUDE_HOME/skills/ps-*
-#   skills/ps-*            -> $AGENTS_HOME/skills/ps-*
 #   skills/ps-*            -> $GEMINI_HOME/skills/ps-*
 #   skills/*/hooks/*       -> $CLAUDE_HOME/hooks/*   (hook scripts; register them in settings.json)
 #   bin/ps-skills-sync     -> $HOME/.local/bin/ps-skills-sync
@@ -54,7 +53,7 @@ while (($#)); do
   shift
 done
 
-mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$AGENTS_HOME/skills" "$GEMINI_HOME/skills" "$CURSOR_HOME/skills" "$BIN_HOME"
+mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$GEMINI_HOME/skills" "$CURSOR_HOME/skills" "$BIN_HOME"
 
 replace_destination() {  # dest
   local dest="$1"
@@ -482,7 +481,7 @@ EOF
 configure_dispatch
 
 echo
-echo "Installed into $CLAUDE_HOME, $AGENTS_HOME, $GEMINI_HOME, and $CURSOR_HOME. Restart Claude Code, Codex, Cursor, and Antigravity to pick up new skills."
+echo "Installed into $CLAUDE_HOME, $GEMINI_HOME, and $CURSOR_HOME. Restart Claude Code, Codex, Cursor, and Antigravity to pick up new skills."
 echo "ps-commu-explain is self-contained; ps-release-workflow-* use $CLAUDE_HOME/ps-release-workflow."
 
 if [[ -x "$REPO/bin/ps-skills-doctor" ]]; then
