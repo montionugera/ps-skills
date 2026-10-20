@@ -311,7 +311,7 @@ def main():
         emit_noop(is_agy)
         return
 
-    if data.get("stop_hook_active") or data.get("agent_id") or data.get("parentConversationId"):
+    if data.get("agent_id") or data.get("parentConversationId"):
         emit_noop(is_agy)
         return
 
@@ -364,6 +364,13 @@ def main():
             return
         context = usage_context(usage)
         prefix = "claude-auto-handoff"
+
+    # stop_hook_active means some Stop hook blocked the last stop. Stay silent only when that
+    # block was our own drain notice; a block by another hook (mesh guard, prompt-type verify)
+    # must not suppress the handoff the mid-turn hook already announced.
+    if data.get("stop_hook_active") and (STATE_DIR / f"{prefix}-{session_id}.drain").exists():
+        emit_noop(is_agy)
+        return
 
     flag = STATE_DIR / f"{prefix}-{session_id}.flag"
     draining = STATE_DIR / f"{prefix}-{session_id}.draining"

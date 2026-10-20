@@ -376,10 +376,24 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertIsNotNone(res_on)
         self.assertIn("AUTO-HANDOFF pending", res_on["reason"])
 
-    def test_stop_hook_active_is_silent(self):
+    def test_stop_hook_active_after_own_drain_block_is_silent(self):
+        drain = self.state_dir / f"claude-auto-handoff-{self.session}.drain"
+        drain.write_text("212000")
         res = self.run_hook(250_000, stop_hook_active=True)
         self.assertIsNone(res)
         self.assertFalse(self.flag.exists())
+
+    def test_stop_hook_active_from_another_hook_still_hands_off(self):
+        # Another Stop hook (mesh guard, prompt-type verify) blocked the stop: the
+        # continuation's next Stop carries stop_hook_active=true but no drain marker of ours.
+        res = self.run_hook(250_000, stop_hook_active=True)
+        self.assertFires(res)
+
+    def test_stop_hook_active_ignores_dry_drain_marker(self):
+        # A .drain.dry marker never blocked anything (notices off), so it is not our block.
+        (self.state_dir / f"claude-auto-handoff-{self.session}.drain.dry").write_text("212000")
+        res = self.run_hook(250_000, stop_hook_active=True)
+        self.assertFires(res)
 
     def test_agy_stop_accepts_no_tool_call_and_resolves_brain_transcript(self):
         conv_id = f"agy-{uuid.uuid4().hex}"
