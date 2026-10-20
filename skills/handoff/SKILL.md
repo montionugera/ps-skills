@@ -26,7 +26,7 @@ The **Handoff** skill solves this by:
 `hooks/auto-handoff-stop.py` is a Claude Code **Stop hook**. After each turn it reads the transcript's last `usage` block (input + cache tokens); once context reaches the threshold it blocks the stop and instructs the agent to run this skill end to end (doc → `herdr-handoff.sh --kind claude --mode <code|plan>`). One-shot per session (flag file `/tmp/claude-auto-handoff-<session_id>.flag`).
 
 - Threshold: `CLAUDE_AUTO_HANDOFF_THRESHOLD` (default `200000`). Disable: `CLAUDE_AUTO_HANDOFF=0`.
-- **It waits for a safe point.** Past the threshold the hook stays silent while this session has background work running (an agent or a background command launched in the transcript with no task notification yet) or the session's working tree has uncommitted changes to tracked files; it looks again after the next turn. Past the hard cap, `CLAUDE_AUTO_HANDOFF_HARD_CAP` (default 1.5 x the threshold), it fires regardless. Limits: only the session's own directory is checked for uncommitted changes, not other worktrees it edits; untracked files do not count; and transcript text that merely quotes a launch line counts as a launch, which only delays the handoff until the hard cap; so does a background task that ends without a task notification (for example one that dies with a restarted session). Tests: `tests/test_auto_handoff_stop.py`.
+- **It waits for a safe point.** Past the threshold the hook stays silent while this session has background work running or the session's working tree has uncommitted changes to tracked files; it looks again after the next turn. Running work is found by replaying the transcript in order, per task id: a launch (an agent, a background command) or a `SendMessage` resume sets it running, a task notification or kill sets it done, and whatever is running at the end counts. So an agent that reported once and was then resumed holds the handoff back again. Past the hard cap, `CLAUDE_AUTO_HANDOFF_HARD_CAP` (default 1.5 x the threshold), it fires regardless. When it fires, the instruction carries `--running N` with its own count, and with N>0 it writes a `.draining` marker so later reminders tell this tab to relay results instead of "stop", and one more tells it when the last agent has reported. A newer owner instruction wins over the drain notice. Context is the last `message` iteration of the newest usage record (an advisor call adds an iteration that the top-level totals would double-count). A guard blocks once when this session got a drain or mid-turn notice, no handoff ran, and the last reply claims one is happening; a `herdr-handoff.sh` banner in the transcript (a manual run) counts as a handoff. Limits: only the session's own directory is checked for uncommitted changes, not other worktrees it edits; untracked files do not count; transcript text that merely quotes a launch line counts as a launch, which only delays the handoff until the hard cap; so does a background task that ends without a task notification (for example one that dies with a restarted session). Subagents the transcript cannot show (AGY `manage_subagents`) are covered only by your own count in step 3a. Tests: `tests/test_auto_handoff_stop.py`, `tests/test_herdr_handoff.py`.
 - Install on a new machine:
   ```bash
   ln -s ~/.claude/skills/handoff/hooks/auto-handoff-stop.py ~/.claude/hooks/auto-handoff-stop.py
@@ -137,17 +137,19 @@ Save the generated markdown to `/tmp/`:
 - In **Antigravity (`agy`)**: Check both `manage_subagents(Action: "list")` and `manage_task(Action: "list")`.
 - In **T3 Code (any harness)**: Check any T3-owned `delegate_task` runs launched in this thread (`task_status`). Note: `task_status` is bound to the parent thread that created the task, so if a handoff must occur while a T3 `delegate_task` is still running, record its `childThreadId` in Section 3 so the new thread can inspect/wait on it via `t3_thread_wait(threadId=childThreadId)` and `t3_thread_read(threadId=childThreadId)`.
 Count the ones still `running`:
-- **0 running** → add `--close-source`: once the new agent is confirmed alive, the script closes THIS tab automatically after 20s.
-- **≥1 running** → do NOT pass `--close-source`. This tab must stay open to receive their results (2026-09-13 fact-board I-074: the handoff fired with 4 plan-writer agents still running; auto-closing would have lost 4 slice plans). Relay their results to the new tab via a file in the work folder, then report "safe to close" when the last one lands.
+Always pass `--running N`: your own count, or the larger of it and the `--running` the auto-handoff instruction gave you (the hook's count; it cannot see AGY `manage_subagents`).
+- **`--running 0`** → the script treats it as `--close-source`: once the new agent is confirmed alive, it closes THIS tab after 20s.
+- **`--running N`, N ≥ 1** → the tab never closes itself. It must stay open to receive their results (2026-09-13 fact-board I-074: the handoff fired with 4 plan-writer agents still running; auto-closing would have lost 4 slice plans). Start nothing new. As each agent reports, `SendMessage` the report to the new tab (peer sessions show in `ListAgents`) and append it to `<handoff>.md` under "Late results" as the fallback; after the last one, print `🟢 SAFE TO CLOSE THIS TAB`.
+- **No `--running`** (manual use) → the banner says "count unknown" and never SAFE; you still decide from this count.
 - **Native T3 Code Thread Launch (Optional when running inside T3 Code with `t3_thread_launch` MCP tool available):** After running `herdr-handoff.sh` (which writes `$PROMPT_FILE` with the full inlined handoff document and copies it to clipboard), you may also directly spawn the continuation thread in T3 Code by calling `t3_thread_launch` with `title: "Handoff: <slug>"`, the matching `workspaceStrategy` (`existing_worktree` or `root`), and `message` set to the contents of `$PROMPT_FILE`.
 
 Run the bundled Herdr handoff script:
 
 ```bash
-~/.claude/skills/handoff/scripts/herdr-handoff.sh "/tmp/handoff-<timestamp>-<slug>.md" --kind <agent-kind> --mode <code|plan> --prompt "<immediate next steps>" [--close-source] [--no-yolo]
+~/.claude/skills/handoff/scripts/herdr-handoff.sh "/tmp/handoff-<timestamp>-<slug>.md" --kind <agent-kind> --mode <code|plan> --prompt "<immediate next steps>" --running <N> [--no-yolo]
 ```
 
-The script ends with a banner — `✅ HANDOFF CONFIRMED` + `🟢 SAFE TO CLOSE` / `🚪 Closing THIS tab in 20s`, or `⛔ DO NOT CLOSE` (new agent not confirmed running after 60s; exit 1). It verifies via `herdr pane get` that the new pane actually runs an agent — "launched" is not "running".
+The script ends with a banner — `✅ HANDOFF CONFIRMED` followed by `⛔ KEEP THIS TAB OPEN — N agents still running` (N ≥ 1), `🚪 Closing THIS tab in 20s` (0 running), `🟢 SAFE TO CLOSE` (0 running, no tab id to close) or `⚠️ agents running: count unknown` (no `--running`); or `⚠️ new tab started, status unknown` / `⛔ DO NOT CLOSE` (no agent confirmed after 60s; exit 1). It polls `herdr pane get` and confirms only a `working`, `idle` or `blocked` agent; `unknown` keeps polling — "launched" is not "running".
 
 ### YOLO Mode (Default):
 All handoffs launch with permission-skipping enabled by default (`--dangerously-skip-permissions` for `claude`, `agy`, and `gemini`), ensuring the incoming agent never gets stalled on interactive permission prompts. Pass `--no-yolo` to disable.
@@ -186,8 +188,10 @@ All handoffs launch with permission-skipping enabled by default (`--dangerously-
 ## Step 4: Report to User
 
 Return a concise summary (≤10 lines). The FIRST line is the close verdict, as a heading so it can't be missed:
-- `# 🟢 SAFE TO CLOSE THIS TAB` — script banner confirmed AND 0 background agents running (or `# 🚪 THIS TAB CLOSES ITSELF IN 20s` when `--close-source` was passed)
-- `# ⛔ DON'T CLOSE THIS TAB YET — <N> background agents still running` — then say what they'll produce and that you'll announce `🟢 SAFE TO CLOSE` when the last one lands (and do so)
+Copy the verdict from the script's banner; never write a green line the banner did not print.
+- `# 🟢 SAFE TO CLOSE THIS TAB` — banner confirmed AND `--running 0` (or `# 🚪 THIS TAB CLOSES ITSELF IN 20s` when the banner says it closes)
+- `# ⛔ DON'T CLOSE THIS TAB YET — <N> background agents still running` — then say you will relay each report to the new tab and print `🟢 SAFE TO CLOSE THIS TAB` when the last one lands (and do so)
+- `# ⚠️ CHECK THE NEW TAB FIRST` — banner said status unknown; do not close until it is seen working
 - `# ⛔ DON'T CLOSE — handoff not confirmed` — script exited 1; give the manual launch command
 
 Then:

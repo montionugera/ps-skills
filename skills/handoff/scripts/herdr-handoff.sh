@@ -19,6 +19,10 @@ set -euo pipefail
 #   --no-agent                  Only open a shell tab without starting an agent
 #   --no-focus                  Do not switch focus to the new tab
 #   --use-agent-manager         Try `herdr agent start` first (direct interactive launch is default)
+#   --running <N>               How many background agents this session still has running.
+#                               0 implies --close-source; N>0 keeps this tab open (the banner
+#                               says so, and this tab relays their results). Omitted: the
+#                               banner says the count is unknown.
 #   --close-source              After the new agent is CONFIRMED running, close the
 #                               tab this script was run from ($HERDR_TAB_ID) after a grace period.
 #   --dry-run                   Validate arguments, formulate prompt, and print target plan without launching
@@ -39,6 +43,8 @@ Options:
   --no-agent                  Only open a shell tab without starting an agent
   --no-focus                  Do not switch focus to the new tab
   --use-agent-manager         Try `herdr agent start` first
+  --running <N>               Background agents this session still has running (0 = close this
+                              tab after the handoff; N>0 = keep it open and relay their results)
   --close-source              Close source Herdr tab ($HERDR_TAB_ID) after confirming agent alive
   --yolo / --no-yolo          Enable/disable permission-skipping flag (default: --yolo)
   --dry-run                   Print resolved multiplexer, agent kind, and prompt file without launching
@@ -75,6 +81,9 @@ FOCUS_FLAG="--focus"
 USE_AGENT_MANAGER=false
 CLOSE_SOURCE=false
 CLOSE_GRACE_SECONDS=20
+RUNNING=""
+CONFIRM_TIMEOUT="${HERDR_HANDOFF_CONFIRM_TIMEOUT:-60}"
+[[ "$CONFIRM_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]] || CONFIRM_TIMEOUT=60
 YOLO=true
 DRY_RUN=false
 
@@ -124,6 +133,15 @@ while [[ $# -gt 0 ]]; do
       USE_AGENT_MANAGER=true
       shift
       ;;
+    --running)
+      RUNNING="${2:-}"
+      if [[ ! "$RUNNING" =~ ^[0-9]{1,4}$ ]]; then
+        echo "Error: --running needs a whole number of up to 4 digits (got '$RUNNING')." >&2
+        exit 1
+      fi
+      RUNNING=$((10#$RUNNING))  # "08" is eight, not a bad octal
+      shift 2
+      ;;
     --close-source)
       CLOSE_SOURCE=true
       shift
@@ -154,6 +172,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Running agents hold this tab open whatever else was asked; none running closes it.
+if [[ -n "$RUNNING" ]]; then
+  if (( RUNNING > 0 )); then CLOSE_SOURCE=false; else CLOSE_SOURCE=true; fi
+fi
 
 if [[ -z "$HANDOFF_PATH" ]]; then
   echo "Error: Handoff file path is required." >&2
@@ -360,12 +383,13 @@ fi
 # close the source tab after a grace period.
 # --------------------------------------------------------------------------
 finish_handoff() {
-  local alive=false pane_json agent status
-  for _ in $(seq 1 60); do
+  local alive=false pane_json agent="" status=""
+  for _ in $(seq 1 "$CONFIRM_TIMEOUT"); do
     pane_json=$(herdr pane get "$ROOT_PANE" 2>/dev/null || true)
     agent=$(echo "$pane_json" | jq -r '.result.pane.agent // empty' 2>/dev/null || true)
     status=$(echo "$pane_json" | jq -r '.result.pane.agent_status // empty' 2>/dev/null || true)
-    if [[ -n "$agent" && "$status" != "" && "$status" != "exited" && "$status" != "dead" ]]; then
+    # Only a status that shows a live agent confirms; "unknown" and the rest keep polling.
+    if [[ -n "$agent" && ( "$status" == "working" || "$status" == "idle" || "$status" == "blocked" ) ]]; then
       alive=true
       break
     fi
@@ -376,22 +400,31 @@ finish_handoff() {
   echo
   echo "════════════════════════════════════════════════════════════"
   if [[ "$alive" != "true" ]]; then
-    echo "⛔  DO NOT CLOSE THIS TAB — new agent NOT confirmed running"
-    echo "    in tab $TAB_ID (pane $ROOT_PANE) after 60s."
+    if [[ -n "$agent" && "$status" != "exited" && "$status" != "dead" ]]; then
+      echo "⚠️   new tab started, status unknown — check it before closing this one"
+    else
+      echo "⛔  DO NOT CLOSE THIS TAB — new agent NOT confirmed running"
+    fi
+    echo "    in tab $TAB_ID (pane $ROOT_PANE) after ${CONFIRM_TIMEOUT}s."
     echo "    Handoff file: $HANDOFF_PATH"
     echo "════════════════════════════════════════════════════════════"
     return 1
   fi
   echo "✅  HANDOFF CONFIRMED — $agent is $status in tab $TAB_ID"
-  if [[ "$CLOSE_SOURCE" == "true" && -n "$source_tab" && "$source_tab" != "$TAB_ID" ]]; then
-    echo "🚪  Closing THIS tab ($source_tab) in ${CLOSE_GRACE_SECONDS}s."
-    echo "════════════════════════════════════════════════════════════"
+  if [[ -n "$RUNNING" ]] && (( RUNNING > 0 )); then
+    echo "⛔  KEEP THIS TAB OPEN — $RUNNING agents still running"
+    echo "    Relay each report to tab $TAB_ID (SendMessage) and append it to"
+    echo "    $HANDOFF_PATH under \"Late results\"; say it is fine to close after the last."
+  elif [[ "$CLOSE_SOURCE" == "true" && -n "$source_tab" && "$source_tab" != "$TAB_ID" ]]; then
+    echo "🚪  Closing THIS tab ($source_tab) in ${CLOSE_GRACE_SECONDS}s (0 agents running)."
     nohup sh -c 'sleep "$1"; herdr tab close "$2"' _ "$CLOSE_GRACE_SECONDS" "$source_tab" >/dev/null 2>&1 &
+  elif [[ -n "$RUNNING" ]]; then
+    echo "🟢  SAFE TO CLOSE THIS TAB${source_tab:+ ($source_tab)} — 0 agents running."
   else
-    echo "🟢  SAFE TO CLOSE THIS TAB${source_tab:+ ($source_tab)} — unless the"
-    echo "    session says background agents are still running."
-    echo "════════════════════════════════════════════════════════════"
+    echo "⚠️   agents running: count unknown (no --running given) — close this tab"
+    echo "    only if your own check found 0 agents running."
   fi
+  echo "════════════════════════════════════════════════════════════"
   return 0
 }
 
