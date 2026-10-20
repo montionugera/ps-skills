@@ -696,8 +696,7 @@ def test_claim_cli_prints_sync_hint_only_when_needed(
     payload = json.loads(out.splitlines()[0])
     assert payload["needs_sync"] is True
     assert "psrw sync" in out
-    assert "/plan.md)" not in out.replace(payload["plan"], ""), \
-        "the only plan.md path printed must be the real refined_backlog one"
+    assert "(reads " not in out, "the old <worktree>/plan.md pointer must be gone"
     assert payload["plan"] in out
 
     epic_sync(Path(payload["worktree"]))
@@ -705,3 +704,19 @@ def test_claim_cli_prints_sync_hint_only_when_needed(
     out = capsys.readouterr().out
     assert json.loads(out.splitlines()[0])["needs_sync"] is False
     assert "psrw sync" not in out
+
+
+def test_resume_by_another_owner_after_sync_is_not_needs_sync(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """The resume's own catalog commit on release/<v> must not count as 'ahead'."""
+    from scripts.epic import epic_sync
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+    claimed = claim_feature(repo, feat["id"], owner=fixed_owner)
+    epic_sync(Path(claimed["worktree"]))
+
+    resumed = resume_feature(repo, feat["id"], owner="other-session")
+    assert resumed["needs_sync"] is False
+    assert resumed["release_ahead"] == 0

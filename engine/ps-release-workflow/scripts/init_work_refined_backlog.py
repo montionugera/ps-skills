@@ -67,23 +67,26 @@ def release_ahead(repo: Path, branch: str) -> int:
     A fresh feature branch is cut from main, so its own spec/plan (committed on
     release/<v>) are missing until `psrw sync` merges the release in.
     """
-    state = read_release_state(repo)
-    if state is None or not state.get("version"):
-        return 0
-    res = git_run(
-        repo, "rev-list", "--count",
-        f"refs/heads/{branch}..refs/heads/release/{state['version']}", check=False,
-    )
     try:
+        state = read_release_state(repo)
+        if state is None or not state.get("version"):
+            return 0
+        # Local release branch only: the _release worktree always has it checked out.
+        res = git_run(
+            repo, "rev-list", "--count",
+            f"refs/heads/{branch}..refs/heads/release/{state['version']}", check=False,
+        )
         return int(res.stdout.strip()) if res.returncode == 0 else 0
-    except ValueError:
+    except (OSError, ValueError, GitError):
         return 0
 
 
-def _next_steps(repo: Path, branch: str, worktree: Path, folder: str, *,
-                check_sync: bool = True) -> dict:
-    """Machine-readable follow-up fields shared by claim and resume."""
-    ahead = release_ahead(repo, branch) if check_sync else 0
+def _next_steps(worktree: Path, folder: str, ahead: int) -> dict:
+    """Machine-readable follow-up fields shared by claim and resume.
+
+    `ahead` must be counted BEFORE the claim/resume catalog commit lands on
+    release/<v>, or that bookkeeping commit alone would read as "needs sync".
+    """
     needs_sync = ahead > 0
     nxt = (["psrw sync"] if needs_sync else []) + ["/subagent-driven-development"]
     return {
@@ -228,6 +231,9 @@ def claim_feature(
         elif (worktree_path / ".git").is_dir():
             (worktree_path / ".git" / "working-feature.json").write_text(json.dumps(marker_data, indent=2))
 
+        # --reopen bases on shipped_sha by design; never ask it to sync.
+        ahead = 0 if reopen else release_ahead(repo, branch_name)
+
         # SR-1: mark catalog status=claimed in the _release worktree and commit
         # THERE. If reopening an already-shipped feature, status remains "shipped".
         if not reopen:
@@ -270,9 +276,7 @@ def claim_feature(
         "owner": owner,
         "reattached": reattached,
         "reopened": reopen,
-        # --reopen bases on shipped_sha by design; never ask it to sync.
-        **_next_steps(repo, branch_name, worktree_path, f"{feature_id}-{slug}",
-                      check_sync=not reopen),
+        **_next_steps(worktree_path, f"{feature_id}-{slug}", ahead),
     }
 
 
@@ -367,6 +371,8 @@ def resume_feature(repo: Path, feature_id: str, *, owner: str) -> dict:
     # Commit when the entry changed OR the _release worktree is dirty (M-2): a
     # previous run that crashed between mutate and commit left the catalog
     # change uncommitted — "no change now" must not strand it forever.
+    ahead = release_ahead(repo, branch_name)  # before the reown commit below
+
     def reown(e: dict) -> None:
         e["claimed_by"] = owner
 
@@ -380,7 +386,7 @@ def resume_feature(repo: Path, feature_id: str, *, owner: str) -> dict:
         "branch": branch_name,
         "owner": owner,
         "recreated": recreated,
-        **_next_steps(repo, branch_name, worktree_path, f"{feature_id}-{slug}"),
+        **_next_steps(worktree_path, f"{feature_id}-{slug}", ahead),
     }
 
 
