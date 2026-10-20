@@ -417,7 +417,7 @@ finish_handoff() {
     echo "    $HANDOFF_PATH under \"Late results\"; say it is fine to close after the last."
   elif [[ "$CLOSE_SOURCE" == "true" && -n "$source_tab" && "$source_tab" != "$TAB_ID" ]]; then
     echo "🚪  Closing THIS tab ($source_tab) in ${CLOSE_GRACE_SECONDS}s (0 agents running)."
-    nohup sh -c 'sleep "$1"; herdr tab close "$2"' _ "$CLOSE_GRACE_SECONDS" "$source_tab" >/dev/null 2>&1 &
+    python3 -c 'import subprocess, sys; subprocess.Popen(["sh", "-c", "sleep \"$1\"; herdr tab close \"$2\"", "_", sys.argv[1], sys.argv[2]], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' "$CLOSE_GRACE_SECONDS" "$source_tab"
   elif [[ -n "$RUNNING" ]]; then
     echo "🟢  SAFE TO CLOSE THIS TAB${source_tab:+ ($source_tab)} — 0 agents running."
   else

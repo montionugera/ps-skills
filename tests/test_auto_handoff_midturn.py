@@ -159,6 +159,39 @@ class MidturnTest(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout), {})
 
 
+    def test_t3_delegated_subagent_transcript_ignored(self):
+        header = json.dumps({
+            "type": "queue-operation",
+            "content": "Act as the implementation sub-agent for this task.\n\nImplement Wave 1.",
+        })
+        usage = json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 350_000}}})
+        self.transcript.write_text(header + "\n" + usage + "\n")
+        self.assertIsNone(self.run_hook())
+        self.assertFalse(self.log.exists())
+
+    def test_agy_checkpoint_resets_active_transcript_bytes(self):
+        conv_id = f"agy-chk-{uuid.uuid4().hex}"
+        app_dir = self.dir / "agy-app-chk"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        # 800 KB before CHECKPOINT (would be 200k tokens), 12 KB after CHECKPOINT (~3k tokens)
+        pre_chk = ("m" * 800_000) + "\n"
+        chk = '{"step_index":42,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE"}\n'
+        post_chk = ("a" * 12_000) + "\n"
+        (logs_dir / "transcript.jsonl").write_text(pre_chk + chk + post_chk)
+
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_AUTO_HANDOFF", "AGY_AUTO_HANDOFF"))}
+        env.update({
+            "CLAUDE_AUTO_HANDOFF_STATE_DIR": str(self.dir),
+            "CLAUDE_AUTO_HANDOFF_LOG": str(self.log),
+            "AGY_APP_DATA_DIR": str(app_dir),
+        })
+        payload = {"conversationId": conv_id, "workspacePaths": [str(self.dir)]}
+        r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {})
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -740,6 +740,41 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertFires(res)
 
 
+    def test_t3_delegated_subagent_stop_ignored(self):
+        header = json.dumps({
+            "type": "queue-operation",
+            "content": "Act as the implementation sub-agent for this task.\n\nImplement Wave 1.",
+        })
+        self.assertIsNone(self.run_hook(350_000, [header]))
+
+    def test_agy_checkpoint_resets_active_bytes_in_stop_hook(self):
+        conv_id = f"agy-stop-chk-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-stop-chk"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        pre_chk = ("x" * 800_000) + "\n"
+        chk = '{"step_index":42,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE"}\n'
+        post_chk = ("y" * 16_000) + "\n"
+        (logs_dir / "transcript.jsonl").write_text(pre_chk + chk + post_chk)
+        conv_dir = app_dir / "conversations"
+        conv_dir.mkdir(parents=True)
+        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 900_000)
+
+        payload = {
+            "conversationId": conv_id,
+            "transcriptPath": str(conv_dir / f"{conv_id}.db"),
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir)},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {})
+
+
 if __name__ == "__main__":
     unittest.main()
 
