@@ -36,6 +36,15 @@ import pathlib
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from handoff_usage import (
+    dirty_tree,
+    parse_transcript_usage_and_tasks,
+    stop_thresholds,
+    stop_would_hand_off,
+    usage_context,
+)
+
 TAIL_BYTES = 1 << 20  # the newest usage record is always near the end
 BYTES_PER_TOKEN = 4
 
@@ -204,20 +213,6 @@ def levels(is_agy=False):
         return [100000, 128000, 160000, 200000] if is_agy else [250000, 300000, 400000, 500000]
 
 
-def usage_context(usage):
-    """Context size of a usage record: its last `message` iteration when it has iterations
-    (an advisor call adds one, and the top-level totals then sum all of them), else its totals."""
-    for it in reversed(usage.get("iterations") or []):
-        if isinstance(it, dict) and it.get("type") == "message":
-            usage = it
-            break
-    return (
-        int(usage.get("input_tokens") or 0)
-        + int(usage.get("cache_read_input_tokens") or 0)
-        + int(usage.get("cache_creation_input_tokens") or 0)
-    )
-
-
 def latest_context(transcript):
     """Context size of the newest main-session assistant record in the file's tail, or 0."""
     if not transcript or not os.path.isfile(transcript):
@@ -247,6 +242,21 @@ def latest_context(transcript):
         if context:  # synthetic records carry an all-zero usage
             return context
     return 0
+
+
+def next_stop_hands_off(data, is_agy, transcript, context, flag):
+    """True only when the Stop hook, under its own rules, is certain to return its handoff
+    decision at the next stop. Telling the agent to end its turn otherwise strands it: the
+    Stop hook stays silent and nothing resumes the session.
+
+    AGY: fullyIdle at the next stop cannot be known mid-turn, so only the hard cap is certain.
+    """
+    threshold, hard_cap = stop_thresholds(is_agy)
+    if is_agy:
+        return stop_would_hand_off(context, threshold, hard_cap, flag.exists(), (), False, agy_not_idle=True)
+    _, running, _, _ = parse_transcript_usage_and_tasks(transcript)
+    return stop_would_hand_off(context, threshold, hard_cap, flag.exists(), running,
+                               dirty_tree(data.get("cwd")))
 
 
 def main():
@@ -312,6 +322,7 @@ def main():
         if is_agy:
             print("{}")
         return  # without the marker this would repeat on every tool call
+    stop = next_stop_hands_off(data, is_agy, transcript, context, state / f"{prefix}-{session_id}.flag")
     try:
         log = os.environ.get("CLAUDE_AUTO_HANDOFF_LOG") or os.path.expanduser("~/.claude/logs/auto-handoff.log")
         d = os.path.dirname(log)
@@ -319,7 +330,7 @@ def main():
             os.makedirs(d, exist_ok=True)
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "session": session_id,
-                                "context": context, "decision": "midturn-notice",
+                                "context": context, "decision": "midturn-notice" if stop else "midturn-warning",
                                 "why": f"level {level}", "dry_run": dry}) + "\n")
     except Exception:
         pass
@@ -327,14 +338,22 @@ def main():
         if is_agy:
             print("{}")
         return
-    note = (
-        f"AUTO-HANDOFF (mid-turn): context is {context} tokens, past {level}. This tool call "
-        "is allowed. Finish the unit of work in progress (get it verified and committed), "
-        "start nothing new, launch no new background work, then end your turn. The Stop hook "
-        "decides whether a handoff runs. Do not tell the owner a handoff, new tab or tab "
-        "close is happening unless herdr-handoff.sh's banner is in your output. Do not hand "
-        "off in the middle of a change."
-    )
+    if stop:
+        note = (
+            f"AUTO-HANDOFF (mid-turn): context is {context} tokens, past {level}. This tool call "
+            "is allowed. Finish the unit of work in progress (get it verified and committed), "
+            "start nothing new, launch no new background work, then end your turn. The Stop hook "
+            "decides whether a handoff runs. Do not tell the owner a handoff, new tab or tab "
+            "close is happening unless herdr-handoff.sh's banner is in your output. Do not hand "
+            "off in the middle of a change."
+        )
+    else:
+        note = (
+            f"AUTO-HANDOFF (mid-turn, warning only): context is {context} tokens, past {level}. "
+            "Context is high; continue your current work. A handoff will be offered at a safe "
+            "point (a stop with no background work running and changes committed). Keep working; "
+            "this note is not a reason to stop."
+        )
     if is_agy:
         print(json.dumps({"injectSteps": [{"ephemeralMessage": note}]}))
     else:
