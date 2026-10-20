@@ -389,6 +389,10 @@ class AutoHandoffStopTest(unittest.TestCase):
         res = self.run_hook(250_000, stop_hook_active=True)
         self.assertFires(res)
 
+    def test_stop_hook_active_after_handoff_does_not_refire_within_step(self):
+        self.assertFires(self.run_hook(250_000))
+        self.assertIsNone(self.run_hook(255_000, stop_hook_active=True))
+
     def test_stop_hook_active_ignores_dry_drain_marker(self):
         # A .drain.dry marker never blocked anything (notices off), so it is not our block.
         (self.state_dir / f"claude-auto-handoff-{self.session}.drain.dry").write_text("212000")

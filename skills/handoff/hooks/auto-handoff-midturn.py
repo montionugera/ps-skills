@@ -250,7 +250,7 @@ def next_stop_hands_off(data, is_agy, transcript, context, flag, drain):
     Stop hook stays silent and nothing resumes the session.
 
     A `.drain` marker means the Stop hook already blocked a stop with its drain notice; later
-    stops in that continuation carry stop_hook_active=true, which the Stop hook ignores.
+    stops in that continuation carry stop_hook_active=true, on which the Stop hook stays silent.
     AGY: fullyIdle at the next stop cannot be known mid-turn, so only the hard cap is certain.
     """
     if drain.exists():
