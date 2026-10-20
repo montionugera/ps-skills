@@ -244,13 +244,17 @@ def latest_context(transcript):
     return 0
 
 
-def next_stop_hands_off(data, is_agy, transcript, context, flag):
+def next_stop_hands_off(data, is_agy, transcript, context, flag, drain):
     """True only when the Stop hook, under its own rules, is certain to return its handoff
     decision at the next stop. Telling the agent to end its turn otherwise strands it: the
     Stop hook stays silent and nothing resumes the session.
 
+    A `.drain` marker means the Stop hook already blocked a stop with its drain notice; later
+    stops in that continuation carry stop_hook_active=true, which the Stop hook ignores.
     AGY: fullyIdle at the next stop cannot be known mid-turn, so only the hard cap is certain.
     """
+    if drain.exists():
+        return False
     threshold, hard_cap = stop_thresholds(is_agy)
     if is_agy:
         return stop_would_hand_off(context, threshold, hard_cap, flag.exists(), (), False, agy_not_idle=True)
@@ -322,7 +326,11 @@ def main():
         if is_agy:
             print("{}")
         return  # without the marker this would repeat on every tool call
-    stop = next_stop_hands_off(data, is_agy, transcript, context, state / f"{prefix}-{session_id}.flag")
+    try:
+        stop = next_stop_hands_off(data, is_agy, transcript, context, state / f"{prefix}-{session_id}.flag",
+                                   state / f"{prefix}-{session_id}.drain")
+    except Exception:
+        stop = False  # unsure: warn rather than strand the turn
     try:
         log = os.environ.get("CLAUDE_AUTO_HANDOFF_LOG") or os.path.expanduser("~/.claude/logs/auto-handoff.log")
         d = os.path.dirname(log)

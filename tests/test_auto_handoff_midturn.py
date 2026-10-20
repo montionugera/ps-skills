@@ -266,6 +266,13 @@ class MidturnTest(unittest.TestCase):
         self.write(260_000)
         self.assertNotIn("end your turn", self.note(self.run_hook()))
 
+    def test_after_a_stop_drain_block_gets_a_warning_only(self):
+        # The Stop hook blocked once with its drain notice, so later stops in that continuation
+        # carry stop_hook_active=true and the Stop hook stays silent: no stop instruction.
+        (self.dir / f"claude-auto-handoff-{self.session}.drain").write_text("210000")
+        self.write(260_000)
+        self.assertNotIn("end your turn", self.note(self.run_hook(cwd=self.git_repo(dirty=False))))
+
     def test_stop_threshold_above_context_gets_a_warning_only(self):
         self.write(260_000)
         out = self.run_hook_env({"CLAUDE_AUTO_HANDOFF_THRESHOLD": "270000"})
