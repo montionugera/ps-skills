@@ -61,6 +61,39 @@ def _drop_claim(claims_file: Path, feature_id: str) -> None:
     mutate_state(claims_file, drop, default={})
 
 
+def release_ahead(repo: Path, branch: str) -> int:
+    """Commits on release/<v> that `branch` lacks (0 when unknown — never raises).
+
+    A fresh feature branch is cut from main, so its own spec/plan (committed on
+    release/<v>) are missing until `psrw sync` merges the release in.
+    """
+    state = read_release_state(repo)
+    if state is None or not state.get("version"):
+        return 0
+    res = git_run(
+        repo, "rev-list", "--count",
+        f"refs/heads/{branch}..refs/heads/release/{state['version']}", check=False,
+    )
+    try:
+        return int(res.stdout.strip()) if res.returncode == 0 else 0
+    except ValueError:
+        return 0
+
+
+def _next_steps(repo: Path, branch: str, worktree: Path, folder: str, *,
+                check_sync: bool = True) -> dict:
+    """Machine-readable follow-up fields shared by claim and resume."""
+    ahead = release_ahead(repo, branch) if check_sync else 0
+    needs_sync = ahead > 0
+    nxt = (["psrw sync"] if needs_sync else []) + ["/subagent-driven-development"]
+    return {
+        "plan": str(worktree / ".claude" / "refined_backlog" / folder / "plan.md"),
+        "needs_sync": needs_sync,
+        "release_ahead": ahead,
+        "next": nxt,
+    }
+
+
 def claim_feature(
     repo: Path, feature_id: Optional[str], *, owner: str, select_next: bool = False,
     skip_readiness: bool = False, reopen: bool = False
@@ -237,6 +270,9 @@ def claim_feature(
         "owner": owner,
         "reattached": reattached,
         "reopened": reopen,
+        # --reopen bases on shipped_sha by design; never ask it to sync.
+        **_next_steps(repo, branch_name, worktree_path, f"{feature_id}-{slug}",
+                      check_sync=not reopen),
     }
 
 
@@ -344,6 +380,7 @@ def resume_feature(repo: Path, feature_id: str, *, owner: str) -> dict:
         "branch": branch_name,
         "owner": owner,
         "recreated": recreated,
+        **_next_steps(repo, branch_name, worktree_path, f"{feature_id}-{slug}"),
     }
 
 
@@ -420,10 +457,18 @@ def main() -> int:
     elif args.reopen:
         print(f"\n✅ Reopened {result['feature']} (worktree: {result['worktree']})")
         print(f"   Catalog status remains 'shipped'. Edit and run `psrw ship` when done.")
+        return 0
     else:
         print(f"\n✅ Claimed {result['feature']} (worktree: {result['worktree']})")
-        print("   Implement: /superpowers:subagent-driven-development")
-        print(f"   (reads {result['worktree']}/plan.md)")
+    if result["needs_sync"]:
+        print(
+            f"   ⚠ release branch is {result['release_ahead']} commit(s) ahead "
+            f"(your spec/plan live there): run `psrw sync` in the worktree first"
+        )
+        print(f"   Plan (available after the sync): {result['plan']}")
+    else:
+        print(f"   Plan: {result['plan']}")
+    print("   Implement: /subagent-driven-development")
     return 0
 
 

@@ -46,6 +46,8 @@ To abandon a claim instead of resuming it: `psrw unclaim F-NNN`.
 
 ## Then
 
+If the claim JSON has `needs_sync: true`, run `psrw sync` inside the new worktree before reading `plan.md`: the worktree is cut from `main`, while the feature's spec and plan live on `release/<v>`. The JSON's `plan` field is the path to read.
+
 Implement via `/subagent-driven-development` (it reads the F-NNN `plan.md`).
 
 ## Refuses if
