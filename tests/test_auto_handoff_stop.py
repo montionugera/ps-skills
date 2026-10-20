@@ -740,6 +740,93 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertFires(res)
 
 
+    def test_t3_delegated_subagent_stop_ignored(self):
+        header = json.dumps({
+            "type": "queue-operation",
+            "content": "Act as the implementation sub-agent for this task.\n\nImplement Wave 1.",
+        })
+        self.assertIsNone(self.run_hook(350_000, [header]))
+
+    def test_agy_checkpoint_resets_active_bytes_in_stop_hook(self):
+        conv_id = f"agy-stop-chk-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-stop-chk"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        pre_chk = ("x" * 800_000) + "\n"
+        chk = '{"step_index":42,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE"}\n'
+        post_chk = ("y" * 16_000) + "\n"
+        (logs_dir / "transcript.jsonl").write_text(pre_chk + chk + post_chk)
+        conv_dir = app_dir / "conversations"
+        conv_dir.mkdir(parents=True)
+        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 900_000)
+
+        payload = {
+            "conversationId": conv_id,
+            "transcriptPath": str(conv_dir / f"{conv_id}.db"),
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir)},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {})
+
+    # --- Fix A: a multi-iteration record is measured by its last message iteration ---
+
+    MULTI_ITERATION_USAGE = {
+        # req_011CgD1q: top level sums to 256,557; the real context is 129,395.
+        "input_tokens": 4, "cache_creation_input_tokens": 5147, "cache_read_input_tokens": 251406,
+        "iterations": [
+            {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 124246,
+             "cache_creation_input_tokens": 2914},
+            {"type": "advisor_message", "input_tokens": 129387},
+            {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 127160,
+             "cache_creation_input_tokens": 2233},
+        ],
+    }
+
+    def test_multi_iteration_record_is_not_double_counted(self):
+        transcript = Path(self.tmp.name) / "multi.jsonl"
+        transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": self.MULTI_ITERATION_USAGE}}) + "\n")
+        out = self.run_hook_raw(json.dumps({"transcript_path": str(transcript), "session_id": self.session,
+                                            "cwd": str(self.repo)}))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout, "")
+        self.assertFalse(self.flag.exists())
+
+    def test_multi_iteration_record_over_threshold_reports_the_real_context(self):
+        usage = {"input_tokens": 4, "cache_read_input_tokens": 420_000, "iterations": [
+            {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 205_000},
+            {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 210_000},
+        ]}
+        transcript = Path(self.tmp.name) / "multi2.jsonl"
+        transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": usage}}) + "\n")
+        out = self.run_hook_raw(json.dumps({"transcript_path": str(transcript), "session_id": self.session,
+                                            "cwd": str(self.repo)}))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        result = json.loads(out.stdout)
+        self.assertFires(result)
+        self.assertIn("210002 tokens", result["reason"])
+
+    def test_agy_multi_iteration_usage_is_not_double_counted(self):
+        conv_id = f"agy-iter-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-iter"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        (logs_dir / "transcript.jsonl").write_text(
+            json.dumps({"type": "assistant", "message": {"usage": self.MULTI_ITERATION_USAGE}}) + "\n")
+        payload = {"conversationId": conv_id, "terminationReason": "NO_TOOL_CALL", "fullyIdle": True,
+                   "workspacePaths": [str(self.repo)]}
+        # Threshold 150,000 sits between the real 129,395 and the summed 256,557.
+        out = self.run_hook_raw(json.dumps(payload), env={"AGY_APP_DATA_DIR": str(app_dir),
+                                                          "AGY_AUTO_HANDOFF_THRESHOLD": "150000"})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {})
+
+
 if __name__ == "__main__":
     unittest.main()
 

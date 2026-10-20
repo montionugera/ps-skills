@@ -159,6 +159,162 @@ class MidturnTest(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout), {})
 
 
+    def test_t3_delegated_subagent_transcript_ignored(self):
+        header = json.dumps({
+            "type": "queue-operation",
+            "content": "Act as the implementation sub-agent for this task.\n\nImplement Wave 1.",
+        })
+        usage = json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 350_000}}})
+        self.transcript.write_text(header + "\n" + usage + "\n")
+        self.assertIsNone(self.run_hook())
+        self.assertFalse(self.log.exists())
+
+    def test_agy_checkpoint_resets_active_transcript_bytes(self):
+        conv_id = f"agy-chk-{uuid.uuid4().hex}"
+        app_dir = self.dir / "agy-app-chk"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        # 800 KB before CHECKPOINT (would be 200k tokens), 12 KB after CHECKPOINT (~3k tokens)
+        pre_chk = ("m" * 800_000) + "\n"
+        chk = '{"step_index":42,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE"}\n'
+        post_chk = ("a" * 12_000) + "\n"
+        (logs_dir / "transcript.jsonl").write_text(pre_chk + chk + post_chk)
+
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_AUTO_HANDOFF", "AGY_AUTO_HANDOFF"))}
+        env.update({
+            "CLAUDE_AUTO_HANDOFF_STATE_DIR": str(self.dir),
+            "CLAUDE_AUTO_HANDOFF_LOG": str(self.log),
+            "AGY_APP_DATA_DIR": str(app_dir),
+        })
+        payload = {"conversationId": conv_id, "workspacePaths": [str(self.dir)]}
+        r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {})
+
+    # --- Fix A: a multi-iteration record is measured by its last message iteration ---
+
+    def test_multi_iteration_record_is_not_double_counted(self):
+        # req_011CgD1q: top level sums to 256,557; the real context is 129,395.
+        usage = {
+            "input_tokens": 4, "cache_creation_input_tokens": 5147, "cache_read_input_tokens": 251406,
+            "iterations": [
+                {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 124246,
+                 "cache_creation_input_tokens": 2914},
+                {"type": "advisor_message", "input_tokens": 129387},
+                {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 127160,
+                 "cache_creation_input_tokens": 2233},
+            ],
+        }
+        self.transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": usage}}) + "\n")
+        self.assertIsNone(self.run_hook())
+        self.assertFalse(self.log.exists())
+
+    # --- Fix C: "end your turn" only when the next Stop is certain to hand off ---
+
+    def git_repo(self, dirty):
+        repo = self.dir / "repo"
+        repo.mkdir()
+        git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        git_env.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+
+        def git(*args):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=git_env)
+        git("init", "-q")
+        (repo / "f.txt").write_text("one\n")
+        git("add", "f.txt")
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "init")
+        if dirty:
+            (repo / "f.txt").write_text("two\n")
+        return str(repo)
+
+    def note(self, out):
+        self.assertIsNotNone(out, "hook stayed silent, want a note")
+        return out["hookSpecificOutput"]["additionalContext"]
+
+    def decisions(self):
+        return [json.loads(line)["decision"] for line in self.log.read_text().splitlines()]
+
+    def test_safe_point_gets_the_stop_instruction(self):
+        self.write(260_000)
+        note = self.note(self.run_hook(cwd=self.git_repo(dirty=False)))
+        self.assertIn("end your turn", note)
+        self.assertEqual(self.decisions(), ["midturn-notice"])
+
+    def test_dirty_tree_gets_a_warning_only(self):
+        self.write(260_000)
+        note = self.note(self.run_hook(cwd=self.git_repo(dirty=True)))
+        self.assertIn("260000", note)
+        self.assertNotIn("end your turn", note)
+        self.assertIn("continue", note)
+        self.assertEqual(self.decisions(), ["midturn-warning"])
+
+    def test_dirty_tree_at_the_stop_hard_cap_gets_the_stop_instruction(self):
+        cwd = self.git_repo(dirty=True)
+        self.write(260_000)
+        self.assertNotIn("end your turn", self.note(self.run_hook(cwd=cwd)))
+        self.write(260_000, 300_000)  # hard cap = 1.5 x the 200,000 Stop threshold
+        self.assertIn("end your turn", self.note(self.run_hook(cwd=cwd)))
+
+    def test_pending_background_work_gets_a_warning_only(self):
+        launch = json.dumps({"type": "user", "message": {"content": "Command running in " +
+                                                          "background with ID: bj91cspfy. Output"}})
+        self.write(260_000, extra=(launch,))
+        self.assertNotIn("end your turn", self.note(self.run_hook()))
+
+    def test_already_handed_off_gets_a_warning_only(self):
+        (self.dir / f"claude-auto-handoff-{self.session}.flag").write_text("210000")
+        self.write(260_000)
+        self.assertNotIn("end your turn", self.note(self.run_hook()))
+
+    def test_after_a_stop_drain_block_gets_a_warning_only(self):
+        # The Stop hook blocked once with its drain notice, so later stops in that continuation
+        # carry stop_hook_active=true and the Stop hook stays silent: no stop instruction.
+        (self.dir / f"claude-auto-handoff-{self.session}.drain").write_text("210000")
+        self.write(260_000)
+        self.assertNotIn("end your turn", self.note(self.run_hook(cwd=self.git_repo(dirty=False))))
+
+    def test_stop_threshold_above_context_gets_a_warning_only(self):
+        self.write(260_000)
+        out = self.run_hook_env({"CLAUDE_AUTO_HANDOFF_THRESHOLD": "270000"})
+        self.assertNotIn("end your turn", self.note(out))
+
+    def run_hook_env(self, extra_env):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_AUTO_HANDOFF")}
+        env.update({"CLAUDE_AUTO_HANDOFF_STATE_DIR": str(self.dir), "CLAUDE_AUTO_HANDOFF_LOG": str(self.log),
+                    "CLAUDE_AUTO_HANDOFF_NOTICES": "1", **extra_env})
+        r = subprocess.run([sys.executable, str(HOOK)], capture_output=True, text=True, env=env, timeout=30,
+                           input=json.dumps({"session_id": self.session, "transcript_path": str(self.transcript)}))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout) if r.stdout.strip() else None
+
+    def test_agy_below_hard_cap_gets_a_warning_only(self):
+        # 140,000 tokens: past the AGY 128,000 Stop threshold but under its 192,000 hard cap;
+        # fullyIdle is unknown mid-turn, so only the hard cap makes the Stop certain.
+        out = self.run_agy(560_000)
+        msg = out["injectSteps"][0]["ephemeralMessage"]
+        self.assertIn("past 128000", msg)
+        self.assertNotIn("end your turn", msg)
+
+    def test_agy_at_hard_cap_gets_the_stop_instruction(self):
+        out = self.run_agy(800_000)  # 200,000 tokens >= 192,000 hard cap
+        self.assertIn("end your turn", out["injectSteps"][0]["ephemeralMessage"])
+
+    def run_agy(self, nbytes):
+        conv_id = f"agy-c-{uuid.uuid4().hex}"
+        app_dir = self.dir / "agy-app-c"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        (logs_dir / "transcript_full.jsonl").write_text("m" * nbytes)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_AUTO_HANDOFF", "AGY_AUTO_HANDOFF"))}
+        env.update({"CLAUDE_AUTO_HANDOFF_STATE_DIR": str(self.dir), "CLAUDE_AUTO_HANDOFF_LOG": str(self.log),
+                    "AGY_APP_DATA_DIR": str(app_dir)})
+        payload = {"conversationId": conv_id, "workspacePaths": [str(self.dir)]}
+        r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True,
+                           text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
 
