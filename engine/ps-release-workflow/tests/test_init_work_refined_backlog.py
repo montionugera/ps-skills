@@ -601,3 +601,122 @@ def test_claim_reopen_open_feature_refused(tmp_repo_with_release: Path, fixed_ow
     with pytest.raises(RuntimeError, match="status 'open', not 'shipped'"):
         claim_feature(repo, feat["id"], owner="new-session", reopen=True)
 
+
+
+# ── needs_sync hint (a fresh claim is cut from main; spec/plan live on release/<v>) ──
+
+def test_fresh_claim_reports_needs_sync_when_release_is_ahead(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+    result = claim_feature(repo, feat["id"], owner=fixed_owner)
+    # The feature's own spec/plan were committed on release/1.1, not main.
+    assert result["needs_sync"] is True
+    assert result["release_ahead"] > 0
+    assert result["next"][0] == "psrw sync"
+    assert result["plan"].endswith(f"/.claude/refined_backlog/{feat['id']}-x/plan.md")
+    assert result["plan"].startswith(result["worktree"])
+
+
+def test_needs_sync_is_false_right_after_sync(tmp_repo_with_release: Path, fixed_owner: str):
+    from scripts.epic import epic_sync
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+    claimed = claim_feature(repo, feat["id"], owner=fixed_owner)
+    epic_sync(Path(claimed["worktree"]))
+
+    assert claim_mod.release_ahead(repo, claimed["branch"]) == 0
+    resumed = resume_feature(repo, feat["id"], owner=fixed_owner)
+    assert resumed["needs_sync"] is False
+    assert resumed["release_ahead"] == 0
+    assert "psrw sync" not in resumed["next"]
+
+
+def test_resume_of_unsynced_claim_reports_needs_sync(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+    claim_feature(repo, feat["id"], owner=fixed_owner)
+    resumed = resume_feature(repo, feat["id"], owner=fixed_owner)
+    assert resumed["needs_sync"] is True
+    assert resumed["release_ahead"] > 0
+
+
+def test_reopen_never_reports_needs_sync(tmp_repo_with_release: Path, fixed_owner: str):
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+    claimed = claim_feature(repo, feat["id"], owner=fixed_owner)
+    wt = Path(claimed["worktree"])
+    cat = _release_catalog_path(repo)
+    entries = json.loads(cat.read_text())
+    for e in entries:
+        if e["id"] == feat["id"]:
+            e["status"] = "shipped"
+            e["release_version"] = "1.1"
+    cat.write_text(json.dumps(entries))
+    subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=repo, check=True)
+
+    result = claim_feature(repo, feat["id"], owner="new-session", reopen=True)
+    assert result["needs_sync"] is False
+    assert result["release_ahead"] == 0
+
+
+def test_release_ahead_is_zero_without_release_or_branch(tmp_repo_with_release: Path):
+    repo = tmp_repo_with_release
+    # No release in progress: never raises, reports 0.
+    assert claim_mod.release_ahead(repo, "feat/F-001") == 0
+    new_release(repo, version="1.1")
+    # Release in progress but the branch does not exist: never raises, reports 0.
+    assert claim_mod.release_ahead(repo, "feat/F-404") == 0
+
+
+def _run_claim_main(monkeypatch, repo: Path, *argv: str) -> int:
+    import sys as _sys
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(_sys, "argv", ["init_work_refined_backlog.py", *argv])
+    return claim_mod.main()
+
+
+def test_claim_cli_prints_sync_hint_only_when_needed(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, capsys
+):
+    from scripts.epic import epic_sync
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+
+    assert _run_claim_main(monkeypatch, repo, feat["id"]) == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out.splitlines()[0])
+    assert payload["needs_sync"] is True
+    assert "psrw sync" in out
+    assert "(reads " not in out, "the old <worktree>/plan.md pointer must be gone"
+    assert payload["plan"] in out
+
+    epic_sync(Path(payload["worktree"]))
+    assert _run_claim_main(monkeypatch, repo, "--resume", feat["id"]) == 0
+    out = capsys.readouterr().out
+    assert json.loads(out.splitlines()[0])["needs_sync"] is False
+    assert "psrw sync" not in out
+
+
+def test_resume_by_another_owner_after_sync_is_not_needs_sync(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """The resume's own catalog commit on release/<v> must not count as 'ahead'."""
+    from scripts.epic import epic_sync
+    repo = tmp_repo_with_release
+    new_release(repo, version="1.1")
+    feat = _setup_feature(repo)
+    claimed = claim_feature(repo, feat["id"], owner=fixed_owner)
+    epic_sync(Path(claimed["worktree"]))
+
+    resumed = resume_feature(repo, feat["id"], owner="other-session")
+    assert resumed["needs_sync"] is False
+    assert resumed["release_ahead"] == 0

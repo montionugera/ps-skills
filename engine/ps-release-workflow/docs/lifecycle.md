@@ -353,6 +353,11 @@ implements automated absorption from `main` into `release/<v>` under **Option D 
 - **`psrw sync-main`**: On-demand sync of `main` into `release/<v>` with Gate 1 verification and atomic rollback.
   Supports `--deploy` and `--strict`; refuses while the release is frozen for promote.
 - **`psrw sync`**: Generalizes `psrw epic sync` to allow any feature worktree to pull `release/<v>` into its branch.
+  `claim` and `claim --resume` print `needs_sync` (true when `release/<v>` has commits the
+  feature branch lacks, counted before the claim's own catalog commit), `release_ahead` (that count), `plan` (the feature's `plan.md` path)
+  and `next` in their JSON line, plus a `run psrw sync` warning only when `needs_sync` is
+  true. A fresh claim is cut from `main`, so its own spec and plan appear only after the
+  sync. `--reopen` always reports `needs_sync: false`.
 - **`psrw status`**: Checks cached ref (without network fetch) and warns if `release/<v>` is behind `origin/main`.
 - **`psrw hotfix`**: Checklist prints step 8 hint pointing to auto-sync and `psrw sync-main` when release is in progress.
 
