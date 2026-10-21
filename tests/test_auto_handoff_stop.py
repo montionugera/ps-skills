@@ -6,6 +6,7 @@ handoff once a session's context passes a threshold.
 The hook is run as a subprocess against a temp transcript and a temp git repo.
 Nothing here starts an agent or a Herdr tab.
 """
+import shutil
 import json
 import os
 import subprocess
@@ -394,12 +395,12 @@ class AutoHandoffStopTest(unittest.TestCase):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
         res = self.run_hook(210_000, [LAUNCH_AGENT], env)  # our drain notice blocks
         self.assertEqual(res["decision"], "block")
-        # The continuation stops cleanly: that active stop is ours, so it stays silent.
+        # The continuation stops while the agent still runs: unsafe and .drain exists, so silent.
         self.assertIsNone(self.run_hook(210_000, [LAUNCH_AGENT], env, stop_hook_active=True))
         # Later the agent reported and another Stop hook blocks; the stale .drain must not mute us.
         self.assertFires(self.run_hook(250_000, [], env, stop_hook_active=True))
 
-    def test_interrupted_drain_continuation_does_not_leave_a_stale_drainblock(self):
+    def test_interrupted_drain_continuation_does_not_mute_a_later_other_hook_block(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
         res = self.run_hook(210_000, [LAUNCH_AGENT], env)  # our drain notice blocks
         self.assertEqual(res["decision"], "block")
@@ -407,6 +408,15 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertIsNone(self.run_hook(210_000, [LAUNCH_AGENT], env))
         # Later another Stop hook blocks; the leftover marker must not mute the handoff.
         self.assertFires(self.run_hook(250_000, [], env, stop_hook_active=True))
+
+    def test_stop_hook_active_stays_silent_when_state_cannot_be_written(self):
+        # Without writable markers (full disk) nothing bounds a repeat block, so the
+        # stop_hook_active stop must not block again.
+        shutil.rmtree(self.state_dir, ignore_errors=True)
+        self.state_dir.write_text("not a dir")
+        self.addCleanup(self.state_dir.mkdir)
+        self.addCleanup(self.state_dir.unlink)
+        self.assertIsNone(self.run_hook(250_000, stop_hook_active=True))
 
     def test_stop_hook_active_from_another_hook_still_hands_off(self):
         # Another Stop hook (mesh guard, prompt-type verify) blocked the stop: the

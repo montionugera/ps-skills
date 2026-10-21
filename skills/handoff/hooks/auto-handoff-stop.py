@@ -276,6 +276,17 @@ def mark(path, context):
         pass
 
 
+def state_writable():
+    probe = STATE_DIR / f".probe-{os.getpid()}"
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        probe.write_text("")
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
 def emit_decision(is_agy, reason):
     """Emit harness-appropriate Stop decision JSON (`continue` for AGY, `block` for Claude)."""
     decision = "continue" if is_agy else "block"
@@ -368,6 +379,10 @@ def main():
     # stop_hook_active is not an early exit: another Stop hook (mesh guard, prompt-type verify)
     # may have blocked, and our own drain continuation is the "next clean stop" its notice
     # promises. Loops stay bounded by our markers: .drain (unsafe again -> silent), .flag/.refire.
+    # Those markers are the only bound, so when they cannot be written (full disk) never re-block.
+    if data.get("stop_hook_active") and not state_writable():
+        emit_noop(is_agy)
+        return
     flag = STATE_DIR / f"{prefix}-{session_id}.flag"
     draining = STATE_DIR / f"{prefix}-{session_id}.draining"
     dry = ".dry" if not notices else ""
