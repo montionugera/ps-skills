@@ -365,19 +365,9 @@ def main():
         context = usage_context(usage)
         prefix = "claude-auto-handoff"
 
-    # stop_hook_active means some Stop hook blocked the last stop. Stay silent only when that
-    # block was our own drain notice; a block by another hook (mesh guard, prompt-type verify)
-    # must not suppress the handoff the mid-turn hook already announced. The .drainblock marker
-    # is one-shot: consumed by the continuation stop it belongs to, and dropped by any plain
-    # stop (interrupted continuation, killed hook, AGY never sending stop_hook_active).
-    drainblock = STATE_DIR / f"{prefix}-{session_id}.drainblock"
-    if data.get("stop_hook_active") and drainblock.exists():
-        drainblock.unlink(missing_ok=True)
-        emit_noop(is_agy)
-        return
-    if not data.get("stop_hook_active"):
-        drainblock.unlink(missing_ok=True)
-
+    # stop_hook_active is not an early exit: another Stop hook (mesh guard, prompt-type verify)
+    # may have blocked, and our own drain continuation is the "next clean stop" its notice
+    # promises. Loops stay bounded by our markers: .drain (unsafe again -> silent), .flag/.refire.
     flag = STATE_DIR / f"{prefix}-{session_id}.flag"
     draining = STATE_DIR / f"{prefix}-{session_id}.draining"
     dry = ".dry" if not notices else ""
@@ -400,7 +390,6 @@ def main():
             *((flag, draining) if (notices or is_agy) else ()),
             drain,
             refire,
-            drainblock,
             STATE_DIR / f"{prefix}-{session_id}.drain",
             STATE_DIR / f"{prefix}-{session_id}.drain.dry",
             STATE_DIR / f"{prefix}-{session_id}.refire",
@@ -465,8 +454,6 @@ def main():
             emit_noop(is_agy)
             return
         mark(drain, context)
-        if notices:
-            mark(drainblock, context)
         bg_count = len(pending) + (1 if agy_not_idle and not pending else 0)
         why = f"background={bg_count} dirty_tree={dirty}"
         log(session_id, context, "drain-notice", why, notices=notices)

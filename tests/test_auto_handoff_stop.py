@@ -376,12 +376,19 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertIsNotNone(res_on)
         self.assertIn("AUTO-HANDOFF pending", res_on["reason"])
 
-    def test_stop_hook_active_after_own_drain_block_is_silent(self):
-        drain = self.state_dir / f"claude-auto-handoff-{self.session}.drainblock"
-        drain.write_text("212000")
-        res = self.run_hook(250_000, stop_hook_active=True)
-        self.assertIsNone(res)
+    def test_drain_continuation_still_unsafe_stays_silent(self):
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        self.assertEqual(self.run_hook(210_000, [LAUNCH_AGENT], env)["decision"], "block")
+        self.assertIsNone(self.run_hook(212_000, [LAUNCH_AGENT], env, stop_hook_active=True))
         self.assertFalse(self.flag.exists())
+
+    def test_drain_continuation_that_reaches_a_clean_stop_hands_off(self):
+        # The drain notice promises "the handoff runs at the next clean stop"; that stop is
+        # the continuation itself and carries stop_hook_active=true.
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        self.assertEqual(self.run_hook(210_000, [LAUNCH_AGENT], env)["decision"], "block")
+        texts = [LAUNCH_AGENT, notification("a1b2c3d4e5")]
+        self.assertFires(self.run_hook(220_000, texts, env, stop_hook_active=True))
 
     def test_own_drain_block_does_not_silence_a_later_stop_blocked_by_another_hook(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
