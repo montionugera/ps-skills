@@ -392,6 +392,15 @@ class AutoHandoffStopTest(unittest.TestCase):
         # Later the agent reported and another Stop hook blocks; the stale .drain must not mute us.
         self.assertFires(self.run_hook(250_000, [], env, stop_hook_active=True))
 
+    def test_interrupted_drain_continuation_does_not_leave_a_stale_drainblock(self):
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        res = self.run_hook(210_000, [LAUNCH_AGENT], env)  # our drain notice blocks
+        self.assertEqual(res["decision"], "block")
+        # The owner interrupts the continuation: the next Stop is a plain one, not stop_hook_active.
+        self.assertIsNone(self.run_hook(210_000, [LAUNCH_AGENT], env))
+        # Later another Stop hook blocks; the leftover marker must not mute the handoff.
+        self.assertFires(self.run_hook(250_000, [], env, stop_hook_active=True))
+
     def test_stop_hook_active_from_another_hook_still_hands_off(self):
         # Another Stop hook (mesh guard, prompt-type verify) blocked the stop: the
         # continuation's next Stop carries stop_hook_active=true but no drain marker of ours.

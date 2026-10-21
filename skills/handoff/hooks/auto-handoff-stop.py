@@ -368,12 +368,15 @@ def main():
     # stop_hook_active means some Stop hook blocked the last stop. Stay silent only when that
     # block was our own drain notice; a block by another hook (mesh guard, prompt-type verify)
     # must not suppress the handoff the mid-turn hook already announced. The .drainblock marker
-    # is one-shot: consumed by the continuation stop it belongs to, so it cannot go stale.
+    # is one-shot: consumed by the continuation stop it belongs to, and dropped by any plain
+    # stop (interrupted continuation, killed hook, AGY never sending stop_hook_active).
     drainblock = STATE_DIR / f"{prefix}-{session_id}.drainblock"
     if data.get("stop_hook_active") and drainblock.exists():
         drainblock.unlink(missing_ok=True)
         emit_noop(is_agy)
         return
+    if not data.get("stop_hook_active"):
+        drainblock.unlink(missing_ok=True)
 
     flag = STATE_DIR / f"{prefix}-{session_id}.flag"
     draining = STATE_DIR / f"{prefix}-{session_id}.draining"
