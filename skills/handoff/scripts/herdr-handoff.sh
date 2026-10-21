@@ -341,7 +341,15 @@ launch_t3_handoff() {
   fi
   echo "📁 Handoff file:   $HANDOFF_PATH"
   echo "📝 Prompt sidecar: $PROMPT_FILE"
-  echo "💡 Paste (⌘V) in your new T3 Code thread (or AGY provider tab) to resume immediately."
+  echo "⚠️  NO THREAD WAS STARTED: a shell script cannot create T3 threads."
+  echo "👉 AGENT ACTION REQUIRED: call the t3_thread_launch MCP tool now with message = contents of $PROMPT_FILE"
+  if [[ "$YOLO" == "true" ]]; then
+    echo "   (title 'Handoff: <slug>', runtimeMode 'full-access', interactionMode 'default', workspaceStrategy matching this checkout)."
+    echo "   Never interactionMode 'plan': a plan-mode thread and its subagents refuse every edit."
+  else
+    echo "   (title 'Handoff: <slug>', runtimeMode 'approval-required' (--no-yolo), interactionMode 'default', workspaceStrategy matching this checkout)."
+  fi
+  echo "   Fallback for a human: paste (⌘V) into a new T3 Code thread."
   exit 0
 }
 
