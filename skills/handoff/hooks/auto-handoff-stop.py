@@ -367,8 +367,11 @@ def main():
 
     # stop_hook_active means some Stop hook blocked the last stop. Stay silent only when that
     # block was our own drain notice; a block by another hook (mesh guard, prompt-type verify)
-    # must not suppress the handoff the mid-turn hook already announced.
-    if data.get("stop_hook_active") and (STATE_DIR / f"{prefix}-{session_id}.drain").exists():
+    # must not suppress the handoff the mid-turn hook already announced. The .drainblock marker
+    # is one-shot: consumed by the continuation stop it belongs to, so it cannot go stale.
+    drainblock = STATE_DIR / f"{prefix}-{session_id}.drainblock"
+    if data.get("stop_hook_active") and drainblock.exists():
+        drainblock.unlink(missing_ok=True)
         emit_noop(is_agy)
         return
 
@@ -394,6 +397,7 @@ def main():
             *((flag, draining) if (notices or is_agy) else ()),
             drain,
             refire,
+            drainblock,
             STATE_DIR / f"{prefix}-{session_id}.drain",
             STATE_DIR / f"{prefix}-{session_id}.drain.dry",
             STATE_DIR / f"{prefix}-{session_id}.refire",
@@ -458,6 +462,8 @@ def main():
             emit_noop(is_agy)
             return
         mark(drain, context)
+        if notices:
+            mark(drainblock, context)
         bg_count = len(pending) + (1 if agy_not_idle and not pending else 0)
         why = f"background={bg_count} dirty_tree={dirty}"
         log(session_id, context, "drain-notice", why, notices=notices)

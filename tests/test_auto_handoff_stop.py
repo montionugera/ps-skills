@@ -377,11 +377,20 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertIn("AUTO-HANDOFF pending", res_on["reason"])
 
     def test_stop_hook_active_after_own_drain_block_is_silent(self):
-        drain = self.state_dir / f"claude-auto-handoff-{self.session}.drain"
+        drain = self.state_dir / f"claude-auto-handoff-{self.session}.drainblock"
         drain.write_text("212000")
         res = self.run_hook(250_000, stop_hook_active=True)
         self.assertIsNone(res)
         self.assertFalse(self.flag.exists())
+
+    def test_own_drain_block_does_not_silence_a_later_stop_blocked_by_another_hook(self):
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        res = self.run_hook(210_000, [LAUNCH_AGENT], env)  # our drain notice blocks
+        self.assertEqual(res["decision"], "block")
+        # The continuation stops cleanly: that active stop is ours, so it stays silent.
+        self.assertIsNone(self.run_hook(210_000, [LAUNCH_AGENT], env, stop_hook_active=True))
+        # Later the agent reported and another Stop hook blocks; the stale .drain must not mute us.
+        self.assertFires(self.run_hook(250_000, [], env, stop_hook_active=True))
 
     def test_stop_hook_active_from_another_hook_still_hands_off(self):
         # Another Stop hook (mesh guard, prompt-type verify) blocked the stop: the
