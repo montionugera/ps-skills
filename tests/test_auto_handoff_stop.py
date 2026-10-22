@@ -6,6 +6,7 @@ handoff once a session's context passes a threshold.
 The hook is run as a subprocess against a temp transcript and a temp git repo.
 Nothing here starts an agent or a Herdr tab.
 """
+import shutil
 import json
 import os
 import subprocess
@@ -376,10 +377,62 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertIsNotNone(res_on)
         self.assertIn("AUTO-HANDOFF pending", res_on["reason"])
 
-    def test_stop_hook_active_is_silent(self):
-        res = self.run_hook(250_000, stop_hook_active=True)
-        self.assertIsNone(res)
+    def test_drain_continuation_still_unsafe_stays_silent(self):
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        self.assertEqual(self.run_hook(210_000, [LAUNCH_AGENT], env)["decision"], "block")
+        self.assertIsNone(self.run_hook(212_000, [LAUNCH_AGENT], env, stop_hook_active=True))
         self.assertFalse(self.flag.exists())
+
+    def test_drain_continuation_that_reaches_a_clean_stop_hands_off(self):
+        # The drain notice promises "the handoff runs at the next clean stop"; that stop is
+        # the continuation itself and carries stop_hook_active=true.
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        self.assertEqual(self.run_hook(210_000, [LAUNCH_AGENT], env)["decision"], "block")
+        texts = [LAUNCH_AGENT, notification("a1b2c3d4e5")]
+        self.assertFires(self.run_hook(220_000, texts, env, stop_hook_active=True))
+
+    def test_own_drain_block_does_not_silence_a_later_stop_blocked_by_another_hook(self):
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        res = self.run_hook(210_000, [LAUNCH_AGENT], env)  # our drain notice blocks
+        self.assertEqual(res["decision"], "block")
+        # The continuation stops while the agent still runs: unsafe and .drain exists, so silent.
+        self.assertIsNone(self.run_hook(210_000, [LAUNCH_AGENT], env, stop_hook_active=True))
+        # Later the agent reported and another Stop hook blocks; the stale .drain must not mute us.
+        self.assertFires(self.run_hook(250_000, [], env, stop_hook_active=True))
+
+    def test_interrupted_drain_continuation_does_not_mute_a_later_other_hook_block(self):
+        env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
+        res = self.run_hook(210_000, [LAUNCH_AGENT], env)  # our drain notice blocks
+        self.assertEqual(res["decision"], "block")
+        # The owner interrupts the continuation: the next Stop is a plain one, not stop_hook_active.
+        self.assertIsNone(self.run_hook(210_000, [LAUNCH_AGENT], env))
+        # Later another Stop hook blocks; the leftover marker must not mute the handoff.
+        self.assertFires(self.run_hook(250_000, [], env, stop_hook_active=True))
+
+    def test_stop_hook_active_stays_silent_when_state_cannot_be_written(self):
+        # Without writable markers (full disk) nothing bounds a repeat block, so the
+        # stop_hook_active stop must not block again.
+        shutil.rmtree(self.state_dir, ignore_errors=True)
+        self.state_dir.write_text("not a dir")
+        self.addCleanup(self.state_dir.mkdir)
+        self.addCleanup(self.state_dir.unlink)
+        self.assertIsNone(self.run_hook(250_000, stop_hook_active=True))
+
+    def test_stop_hook_active_from_another_hook_still_hands_off(self):
+        # Another Stop hook (mesh guard, prompt-type verify) blocked the stop: the
+        # continuation's next Stop carries stop_hook_active=true but no drain marker of ours.
+        res = self.run_hook(250_000, stop_hook_active=True)
+        self.assertFires(res)
+
+    def test_stop_hook_active_after_handoff_does_not_refire_within_step(self):
+        self.assertFires(self.run_hook(250_000))
+        self.assertIsNone(self.run_hook(255_000, stop_hook_active=True))
+
+    def test_stop_hook_active_ignores_dry_drain_marker(self):
+        # A .drain.dry marker never blocked anything (notices off), so it is not our block.
+        (self.state_dir / f"claude-auto-handoff-{self.session}.drain.dry").write_text("212000")
+        res = self.run_hook(250_000, stop_hook_active=True)
+        self.assertFires(res)
 
     def test_agy_stop_accepts_no_tool_call_and_resolves_brain_transcript(self):
         conv_id = f"agy-{uuid.uuid4().hex}"

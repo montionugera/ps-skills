@@ -249,8 +249,8 @@ def next_stop_hands_off(data, is_agy, transcript, context, flag, drain):
     decision at the next stop. Telling the agent to end its turn otherwise strands it: the
     Stop hook stays silent and nothing resumes the session.
 
-    A `.drain` marker means the Stop hook already blocked a stop with its drain notice; later
-    stops in that continuation carry stop_hook_active=true, which the Stop hook ignores.
+    A `.drain` marker means the Stop hook already sent its drain notice; it stays silent while
+    the stop is still unsafe, so treat that as uncertain rather than tell the agent to stop.
     AGY: fullyIdle at the next stop cannot be known mid-turn, so only the hard cap is certain.
     """
     if drain.exists():
