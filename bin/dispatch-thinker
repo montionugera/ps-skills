@@ -19,7 +19,7 @@ for arg in "$@"; do
 done
 
 if [[ $HAS_ROUTING -eq 0 ]]; then
-    exec "$WORKER" --capability deep-design-v1 --priority "claude:claude-opus-5-5,agy:gemini-4-argon" "$@"
+    exec "$WORKER" --capability deep-design-v1 --priority "claude:claude-opus-5-5,agy:gemini-4-argon-medium" "$@"
 else
     exec "$WORKER" --capability deep-design-v1 "$@"
 fi

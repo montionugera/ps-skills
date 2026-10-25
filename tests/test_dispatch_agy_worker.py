@@ -1167,9 +1167,45 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertEqual(dispatch_mod.normalize_model_name("claude", "opus"), "claude-opus-5-5")
 
     def test_normalize_model_name_agy_aliases(self):
-        self.assertEqual(dispatch_mod.normalize_model_name("agy", "argon"), "gemini-4-argon")
-        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon"), "gemini-4-argon")
-        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon-thinking"), "gemini-4-argon")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "argon"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon-medium"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon-thinking"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("opus"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("claude-opus-5-5"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("sonnet"), "gemini-3.8-flash-high")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("claude-sonnet-5-5"), "gemini-3.8-flash-high")
+
+    def test_claude_quota_telemetry_yellow_and_red_zones(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfile = os.path.join(td, "claude-obs.json")
+            # 1. Green zone: 20% used -> 80% remaining (>= 50% yellow threshold)
+            with open(cfile, "w", encoding="utf-8") as f:
+                json.dump({"payload": {"rate_limits": {"seven_day": {"used_percentage": 20}}}}, f)
+            with mock.patch.dict(os.environ, {"CLAUDE_QUOTA_STATE_FILE": cfile}),                  mock.patch("shutil.which", return_value="/usr/local/bin/claude"):
+                el, r5, rw, msg = dispatch_mod.check_quota("claude")
+                self.assertTrue(el, msg)
+                self.assertEqual(rw, 80.0)
+
+            # 2. Yellow zone: 60% used -> 40% remaining (< 50% yellow threshold -> ineligible for background dispatch)
+            with open(cfile, "w", encoding="utf-8") as f:
+                json.dump({"payload": {"rate_limits": {"seven_day": {"used_percentage": 60}}}}, f)
+            with mock.patch.dict(os.environ, {"CLAUDE_QUOTA_STATE_FILE": cfile}),                  mock.patch("shutil.which", return_value="/usr/local/bin/claude"):
+                el2, r5_2, rw_2, msg2 = dispatch_mod.check_quota("claude")
+                self.assertFalse(el2, msg2)
+                self.assertEqual(rw_2, 40.0)
+
+            # 3. Red zone: 98% used -> 2% remaining -> priority chain falls back to agy:gemini-4-argon-medium
+            with open(cfile, "w", encoding="utf-8") as f:
+                json.dump({"payload": {"rate_limits": {"seven_day": {"used_percentage": 98}}}}, f)
+            afile = os.path.join(td, "agy-obs.json")
+            with open(afile, "w", encoding="utf-8") as f:
+                json.dump({"windows": [{"kind": "five_hour", "remaining_percent": 90.0}, {"kind": "weekly", "remaining_percent": 90.0}]}, f)
+            with mock.patch.dict(os.environ, {"CLAUDE_QUOTA_STATE_FILE": cfile, "AGY_QUOTA_STATE_FILE": afile}),                  mock.patch("shutil.which", return_value="/usr/local/bin/claude"):
+                agent, model, el3, _r5, _rw, _msg, _fb = dispatch_mod.route_thinker(
+                    agy_state_file=afile, priority="claude:claude-opus-5-5,agy:gemini-4-argon-medium"
+                )
+                self.assertEqual((agent, model, el3), ("agy", "gemini-4-argon-medium", True))
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "flash"), "gemini-3.8-flash-high")
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "3.8-flash"), "gemini-3.8-flash-high")
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-3.8-flash-high"), "gemini-3.8-flash-high")

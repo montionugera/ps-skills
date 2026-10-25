@@ -22,7 +22,9 @@ Exit Codes:
 
 import argparse
 import concurrent.futures
+import contextlib
 from contextlib import nullcontext
+import fcntl
 import datetime
 import hashlib
 import json
@@ -40,6 +42,8 @@ from pathlib import Path
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.config/dispatch/config.env")
 DEFAULT_AGY_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/agy-statusline.observation.json")
 DEFAULT_CODEX_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/codex-app-server.json")
+DEFAULT_CLAUDE_STATE = os.path.expanduser("~/.local/state/herdr/plugins/herdr-agent-quota/claude-statusline.observation.json")
+DEFAULT_CLAUDE_YELLOW_WEEKLY = float(os.environ.get("CLAUDE_YELLOW_ZONE_WEEKLY_QUOTA", "50.0"))
 DEFAULT_JOB_DIR = os.path.expanduser("~/.local/state/dispatch/jobs")
 DEFAULT_EVENTS_FILE = os.path.expanduser("~/.local/state/dispatch/events.jsonl")  # override: DISPATCH_EVENTS_FILE
 DEFAULT_LOG_DIR = "/tmp/dispatch-jobs"
@@ -53,8 +57,29 @@ STALE_OBSERVATION_MINUTES = 60
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 DEFAULT_AGY_WORKER_MODEL = os.environ.get("AGY_WORKER_MODEL", "gemini-3.8-flash-high")
-DEFAULT_AGY_THINK_MODEL = os.environ.get("AGY_THINK_MODEL", "gemini-4-argon")
-AGY_THINK_MODEL_NAMES = ("gemini-4-argon", "argon", "gemini-4-argon-thinking")
+DEFAULT_AGY_THINK_MODEL = os.environ.get("AGY_THINK_MODEL", "gemini-4-argon-medium")
+AGY_THINK_MODEL_NAMES = ("gemini-4-argon-medium", "gemini-4-argon", "argon", "gemini-4-argon-thinking")
+
+CLAUDE_TO_AGY_MODEL_MAP = {
+    "opus": DEFAULT_AGY_THINK_MODEL,
+    "claude-opus-5-5": DEFAULT_AGY_THINK_MODEL,
+    "sonnet": DEFAULT_AGY_WORKER_MODEL,
+    "claude-sonnet-5-5": DEFAULT_AGY_WORKER_MODEL,
+}
+
+
+def map_claude_to_agy_model(claude_model=None):
+    """Maps Claude model names to their Antigravity (agy) fallback equivalents (opus -> gemini-4-argon-medium, sonnet -> gemini-3.8-flash-high)."""
+    if not claude_model:
+        return DEFAULT_AGY_THINK_MODEL
+    m = claude_model.strip().lower()
+    if m in CLAUDE_TO_AGY_MODEL_MAP:
+        return CLAUDE_TO_AGY_MODEL_MAP[m]
+    if "opus" in m:
+        return DEFAULT_AGY_THINK_MODEL
+    if "sonnet" in m:
+        return DEFAULT_AGY_WORKER_MODEL
+    return DEFAULT_AGY_WORKER_MODEL
 
 # Agents the dispatcher refuses to route to, in every mode (auto, priority chain, thinker, batch,
 # runtime fallback). The single switch: remove a name here to route to that agent again.
@@ -172,11 +197,63 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
         agent = "agy"
 
     if agent == "claude":
-        # Claude has no herdr quota telemetry: "available" means the binary is on PATH.
         if os.environ.get("DISPATCH_THINKER_SKIP_CLAUDE") == "1":
             return False, 0.0, 0.0, "[CLAUDE] skipped (DISPATCH_THINKER_SKIP_CLAUDE=1)"
-        if not shutil.which("claude"):
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
             return False, 0.0, 0.0, "[CLAUDE] claude executable not found in PATH"
+        claude_state = os.environ.get("CLAUDE_QUOTA_STATE_FILE")
+        if not claude_state and state_file is None and "AGY_QUOTA_STATE_FILE" not in os.environ:
+            # Use live Herdr telemetry when running against the real system claude binary
+            if (claude_bin == os.path.expanduser("~/.local/bin/claude") or claude_bin in ("/usr/local/bin/claude", "/opt/homebrew/bin/claude")) and "--state-file" not in sys.argv and os.path.exists(DEFAULT_CLAUDE_STATE):
+                claude_state = DEFAULT_CLAUDE_STATE
+        if claude_state and os.path.exists(claude_state):
+            try:
+                with open(claude_state, "r", encoding="utf-8") as cf:
+                    cdata = json.load(cf)
+                if current_time is None:
+                    current_time = time.time()
+                c_rem_5h = None
+                c_rem_weekly = None
+                for w in (cdata.get("windows") or cdata.get("snapshot", {}).get("windows") or []):
+                    if w.get("kind") == "five_hour" and w.get("remaining_percent") is not None:
+                        val = float(w.get("remaining_percent", 0.0))
+                        rst = _parse_resets_at(w.get("resets_at"))
+                        if rst is not None and current_time > rst:
+                            val = 100.0
+                        c_rem_5h = val
+                    elif w.get("kind") == "weekly" and w.get("remaining_percent") is not None:
+                        val = float(w.get("remaining_percent", 0.0))
+                        rst = _parse_resets_at(w.get("resets_at"))
+                        if rst is not None and current_time > rst:
+                            val = 100.0
+                        c_rem_weekly = val
+                rl = (cdata.get("payload") or {}).get("rate_limits") or {}
+                if c_rem_weekly is None and (rl.get("seven_day") or {}).get("used_percentage") is not None:
+                    sd = rl["seven_day"]
+                    val = max(0.0, 100.0 - float(sd.get("used_percentage", 0.0)))
+                    rst = _parse_resets_at(sd.get("resets_at"))
+                    if rst is not None and current_time > rst:
+                        val = 100.0
+                    c_rem_weekly = val
+                if c_rem_5h is None and (rl.get("five_hour") or {}).get("used_percentage") is not None:
+                    fh = rl["five_hour"]
+                    val = max(0.0, 100.0 - float(fh.get("used_percentage", 0.0)))
+                    rst = _parse_resets_at(fh.get("resets_at"))
+                    if rst is not None and current_time > rst:
+                        val = 100.0
+                    c_rem_5h = val
+                if c_rem_weekly is not None or c_rem_5h is not None:
+                    if c_rem_5h is None:
+                        c_rem_5h = 100.0
+                    if c_rem_weekly is None:
+                        c_rem_weekly = 100.0
+                    yellow_min = float(os.environ.get("CLAUDE_YELLOW_ZONE_WEEKLY_QUOTA", str(DEFAULT_CLAUDE_YELLOW_WEEKLY)))
+                    eff_weekly_min = min_weekly if os.environ.get("DISPATCH_FORCE_CLAUDE") == "1" else max(min_weekly, yellow_min)
+                    c_el = (c_rem_5h >= min_5h) and (c_rem_weekly >= eff_weekly_min)
+                    return c_el, c_rem_5h, c_rem_weekly, f"[CLAUDE] 5h: {c_rem_5h:.1f}% (min {min_5h:.1f}%), Weekly: {c_rem_weekly:.1f}% (min {eff_weekly_min:.1f}%)"
+            except Exception as e:
+                return False, 0.0, 0.0, f"[CLAUDE] Failed to parse quota state at {claude_state}: {e}"
         return True, 100.0, 100.0, "[CLAUDE] available (no quota telemetry)"
 
     if agent == "cursor":
@@ -326,7 +403,7 @@ def normalize_model_name(agent, model):
     if agent == "claude" and clean.lower() == "opus":
         return DEFAULT_CLAUDE_THINK_MODEL
     if agent == "agy":
-        if clean.lower() in ("argon", "gemini-4-argon", "gemini-4-argon-thinking"):
+        if clean.lower() in ("argon", "gemini-4-argon", "gemini-4-argon-medium", "gemini-4-argon-thinking"):
             return DEFAULT_AGY_THINK_MODEL
         if clean.lower() in ("flash", "3.8-flash", "gemini-3.8-flash", "gemini-3.8-flash-high"):
             return DEFAULT_AGY_WORKER_MODEL
@@ -735,6 +812,53 @@ def inspect_git_changes(target_dir, initial_head=None):
     return files_changed, diff_summary, commit_count
 
 
+@contextlib.contextmanager
+def worker_concurrency_slot(label="worker", poll=0.25):
+    """Machine-wide counting lock so detached/batch worker storms cannot OOM the host."""
+    try:
+        max_slots = int(os.environ.get("DISPATCH_MAX_CONCURRENT", "4"))
+    except ValueError:
+        max_slots = 4
+    if max_slots <= 0:
+        yield None
+        return
+    slot_dir = Path(os.environ.get("DISPATCH_SLOT_DIR") or "/tmp/dispatch-worker-slots")
+    try:
+        slot_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        yield None
+        return
+    announced = False
+    while True:
+        for i in range(max_slots):
+            try:
+                fd = os.open(slot_dir / f"slot{i}.lock", os.O_CREAT | os.O_RDWR)
+            except OSError:
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                continue
+            except BaseException:
+                os.close(fd)
+                raise
+            try:
+                os.ftruncate(fd, 0)
+                os.write(fd, f"{os.getpid()} {label}\n".encode())
+                yield i
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+            return
+        if not announced:
+            print(f"[dispatch-worker] {label}: waiting for a free worker slot (max {max_slots} concurrent)", file=sys.stderr)
+            announced = True
+        time.sleep(poll)
+
+
 def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker", log_path=None):
     """
     Executes worker subprocess in target_dir with timeout.
@@ -742,10 +866,20 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
     The worker gets its own process group so a timeout kills the whole tree, and partial output is kept.
     With log_path, stdout/stderr lines are also appended to that file as they arrive (live --tail / --status).
     """
+    with worker_concurrency_slot(label=f"{agent_name}:{os.path.basename(str(target_dir))}"):
+        return _execute_worker_process_inner(cmd, target_dir, timeout_seconds, agent_name=agent_name, log_path=log_path)
+
+
+def _execute_worker_process_inner(cmd, target_dir, timeout_seconds, agent_name="worker", log_path=None):
+    child_env = os.environ.copy()
+    child_env.setdefault("CLAUDE_AUTO_HANDOFF", "0")
+    child_env.setdefault("AGY_AUTO_HANDOFF", "0")
+    child_env.setdefault("CLAUDE_VAULT_SUMMARY", "0")
     try:
         proc = subprocess.Popen(
             cmd,
             cwd=target_dir,
+            env=child_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2079,7 +2213,7 @@ def main():
     if is_deep_design:
         args.think = True
         # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 and Gemini 4 Argon
-        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "gemini-4-argon", "argon", "gemini-4-argon-thinking"]
+        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "gemini-4-argon-medium", "gemini-4-argon", "argon", "gemini-4-argon-thinking"]
         if "codex" not in DISABLED_AGENTS:
             ALLOWED_DEEP_DESIGN_MODELS += ["gpt-5.6-sol", "sol"]
         if chosen_model and chosen_model.lower() not in ALLOWED_DEEP_DESIGN_MODELS:
@@ -2201,6 +2335,14 @@ def main():
         )
     else:
         eligible, rem_5h, rem_weekly, msg = check_quota(chosen_agent, args.state_file, min_5h, min_weekly)
+        if not eligible and chosen_agent == "claude" and shutil.which("claude") and os.environ.get("DISPATCH_AUTO_SWITCH_AGY", "1") != "0":
+            el_a, r5_a, rw_a, msg_a = check_quota("agy", args.state_file if default_agent == "agy" else None, min_5h, min_weekly)
+            if el_a:
+                mapped_model = map_claude_to_agy_model(chosen_model or args.model)
+                chosen_agent = "agy"
+                chosen_model = mapped_model
+                eligible, rem_5h, rem_weekly = el_a, r5_a, rw_a
+                msg = f"[AUTO-SWITCH claude->agy ({mapped_model})] {msg_a} (from {msg})"
 
     if args.check_quota:
         if eligible:

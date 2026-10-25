@@ -217,6 +217,34 @@ dispatch-worker --isolated --task "..." \
 
 When using `subagent-driven-development`, select the execution path based on the orchestrator environment:
 
+### Path A.1: Inside T3 Code (App-Owned `delegate_task` Orchestration)
+
+When running inside **T3 Code** (where the `t3-code` MCP server exposes `delegate_task` and `orchestrator_capabilities`):
+
+1. **Never call `invoke_subagent` inside T3 Code**: Antigravity's ACP bridge in T3 Code does not initialize `PlatformClient`, so `invoke_subagent` fails with `PlatformClient is nil`. Always use `call_mcp_tool(ServerName="t3-code", ToolName="delegate_task", ...)`.
+2. **Always nest `providerInstanceId` and `model` inside `target` (never top-level)**:
+   Top-level `model` or `providerInstanceId` fields are ignored by T3 Code and silently fall back to the parent's provider/model.
+   ```json
+   {
+     "task": "Goal: ...\nFiles in scope: ...\nAcceptance criteria: ...\nVerify command: ...",
+     "description": "Implement Wave 1",
+     "subagentType": "implementation",
+     "mode": "async",
+     "isolation": "worktree",
+     "target": {
+       "providerInstanceId": "claudeAgent",
+       "model": "claude-opus-5-5"
+     },
+     "clientRequestId": "impl-wave-1-r1"
+   }
+   ```
+3. **Choose `isolation: "worktree"` for parallel code-writing subagents**:
+   - Default `isolation: "shared"` runs inside the parent's working tree. If the parent is sitting on `main` or `_release`, `release_git_guard.py` will block subagent commits, and parallel subagents will collide on the git index.
+   - Use `isolation: "worktree"` when parallel subagents write code, OR ensure the parent thread is already attached to a claimed feature worktree with disjoint file ownership before using `"shared"`.
+4. **Zero-Poll Reactive Wakeup (Never loop on `task_status` or `schedule_task`)**:
+   - After launching `delegate_task(mode="async")`, **stop calling tools to end your turn** once you have no more immediate local work. T3 Code automatically wakes the parent turn with `Delegated task <taskId> reached a terminal state` when each child finishes, at which point you call `task_status(taskId=...)` **once** to read the result.
+   - **NEVER** busy-poll `task_status` in a loop with `schedule` timers, and **NEVER** create recurring `schedule_task` intervals bound to your own thread as a "heartbeat" (which floods the thread queue with cancelled runs).
+
 ### Path A: In-Session Native AGY Orchestration (Preferred inside AGY)
 
 Inside AGY, never shell out to `dispatch-worker`. Use native tools with the 80/20 Flash-First pattern:
