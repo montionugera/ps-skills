@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""
+jev-gate: High-confidence System 1 (TypeSafe Jev) SDLC router & review-lens gatekeeper.
+
+Design principles (High-Confidence / Zero Quality Loss):
+  - Only makes a routing/skip decision when Jev calibrated confidence >= min_conf (default 0.85)
+    or when Noul probability is outside the uncertain band.
+  - Otherwise returns `escalate_to_frontier=True` so full System 2 (Argon / Opus) runs.
+  - Fails open gracefully if network/API is unreachable or TYPESAFE_API_KEY is unset.
+
+Subcommands:
+  1. classify-task [--prompt "<subagent prompt>"] [--hook-line]
+  2. triage-diff   [--repo <path>] [--base <ref>] [--head <ref>] [--diff-file <path>] [--spec <path>] [--hook-line]
+  3. triage-spec   [--spec <path>] [--hook-line]
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def _load_api_key() -> str:
+    key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+    if key:
+        return key
+    zshrc = Path.home() / ".zshrc"
+    if zshrc.exists():
+        for line in zshrc.read_text(errors="ignore").splitlines():
+            line = line.strip()
+            if line.startswith("export TYPESAFE_API_KEY=") or line.startswith("TYPESAFE_API_KEY="):
+                val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if val and not val.startswith("$"):
+                    os.environ["TYPESAFE_API_KEY"] = val
+                    return val
+    return ""
+
+
+def cmd_classify_task(args: argparse.Namespace) -> int:
+    key = _load_api_key()
+    if not key:
+        if not args.hook_line:
+            print(json.dumps({"error": "TYPESAFE_API_KEY not set", "fallback": True}))
+        return 0
+
+    try:
+        from typesafe_sdk import Choice, Noul, Score, TypeSafeClient
+
+        prompt_text = (args.prompt or sys.stdin.read()).strip()
+        if not prompt_text:
+            return 0
+
+        t0 = time.time()
+        client = TypeSafeClient(api_key=key, timeout=args.timeout)
+        res = client.system_one(
+            model=args.model,
+            state={"subagent_prompt": prompt_text[:28000]},
+            questions={
+                "route": Choice(
+                    instructions="Which agent tier should execute this subagent task?",
+                    criteria={
+                        "agy_flash": "Mechanical coding, writing unit/E2E tests, running CLI commands, file search, or straightforward implementation",
+                        "agy_argon": "Code review, spec audit, falsification, security audit, or multi-file architecture verification",
+                        "claude_opus": "Ambiguous product design, Thai creative localization, or complex cross-system root-cause debugging",
+                    },
+                ),
+                "is_reviewer": Noul(
+                    instructions="Is this task asking the agent to review, audit, critique, or verify existing work rather than write implementation code?"
+                ),
+                "touches_risky_surface": Noul(
+                    instructions="Does this task touch authentication, SSO, security guards/hooks, database migrations, payments, or production Kubernetes deploy configs?"
+                ),
+                "complexity": Score(
+                    instructions="Rate the engineering complexity of this task",
+                    criteria=[
+                        "Trivial 1-file edit, command execution, or lint fix",
+                        "Standard single-component implementation or scoped review",
+                        "Complex multi-service concurrency, security, or architectural design",
+                    ],
+                ),
+            },
+        )
+        dt_ms = round((time.time() - t0) * 1000)
+        ans = res.answers
+        route_choice = ans["route"].choice
+        route_conf = float(ans["route"].confidence)
+        risky_prob = float(ans["touches_risky_surface"].noul)
+        is_rev_prob = float(ans["is_reviewer"].noul)
+        comp_score = float(ans["complexity"].score)
+
+        # High-confidence safety rule: if risky surface >= 0.35 or confidence < min_conf,
+        # escalate to frontier thinker/reviewer (Argon Medium or Opus).
+        high_confidence = route_conf >= args.min_conf and risky_prob < 0.35
+        effective_route = route_choice if high_confidence else ("agy_argon" if is_rev_prob >= 0.5 else "claude_opus")
+
+        cli_map = {
+            "agy_flash": "dispatch-agy-worker --agent agy --model gemini-3.8-flash-high",
+            "agy_argon": "dispatch-thinker --agent agy --model gemini-4-argon-medium",
+            "claude_opus": "dispatch-thinker --agent agy --model gemini-4-argon-medium (or native claude-opus-5-5 if quota >50%)",
+        }
+        out = {
+            "model": res.model,
+            "latency_ms": dt_ms,
+            "input_tokens": res.usage.input_tokens,
+            "cost_usd": round(res.usage.input_tokens * 0.042 / 1_000_000, 7),
+            "raw_route": route_choice,
+            "route": effective_route,
+            "route_confidence": round(route_conf, 4),
+            "high_confidence_gate": high_confidence,
+            "recommended_cli": cli_map.get(effective_route, ""),
+            "is_reviewer_prob": round(is_rev_prob, 4),
+            "risky_surface_prob": round(risky_prob, 4),
+            "complexity_score": round(comp_score, 3),
+        }
+        if args.hook_line:
+            print(
+                f"[Jev System-1 Gate ({dt_ms}ms, conf={route_conf:.2f}, risk={risky_prob:.2f})]: "
+                f"tier={effective_route} -> prefer `{out['recommended_cli']}`"
+            )
+        else:
+            print(json.dumps(out, indent=2))
+        return 0
+    except Exception as exc:
+        if not args.hook_line:
+            print(json.dumps({"error": str(exc), "fallback": True}))
+        return 0
+
+
+def cmd_triage_diff(args: argparse.Namespace) -> int:
+    key = _load_api_key()
+    if not key:
+        if not args.hook_line:
+            print(json.dumps({"error": "TYPESAFE_API_KEY not set", "fallback": True}))
+        return 0
+
+    try:
+        from typesafe_sdk import Choice, Noul, Score, TypeSafeClient
+
+        if args.diff_file and os.path.isfile(args.diff_file):
+            diff_text = Path(args.diff_file).read_text(errors="replace")
+        else:
+            repo = args.repo or os.getcwd()
+            base = args.base or "HEAD~1"
+            head = args.head or "HEAD"
+            try:
+                diff_text = subprocess.check_output(
+                    ["git", "-C", repo, "diff", f"{base}..{head}"], stderr=subprocess.DEVNULL
+                ).decode("utf-8", errors="replace")
+                if not diff_text.strip():
+                    diff_text = subprocess.check_output(
+                        ["git", "-C", repo, "show", "--stat", "--patch", head],
+                        stderr=subprocess.DEVNULL,
+                    ).decode("utf-8", errors="replace")
+            except Exception as exc:
+                diff_text = f"Error reading git diff: {exc}"
+
+        spec_text = args.spec or ""
+        if spec_text and os.path.isfile(spec_text):
+            spec_text = Path(spec_text).read_text(errors="replace")[:12000]
+
+        t0 = time.time()
+        client = TypeSafeClient(api_key=key, timeout=args.timeout)
+        res = client.system_one(
+            model=args.model,
+            state={"git_diff": diff_text[:28000], "spec": spec_text[:10000]},
+            questions={
+                "needs_ux_review": Noul(
+                    instructions="Does this diff modify UI components, Svelte/HTML/TSX templates, CSS styles, visual layout, or user-facing screens?"
+                ),
+                "needs_security_review": Noul(
+                    instructions="Does this diff touch authentication, SSO, SQL queries, database migrations, permissions, secrets, shell execution, or network/API endpoints?"
+                ),
+                "needs_go_reviewer": Noul(
+                    instructions="Does this diff contain non-trivial Go (.go) code changes?"
+                ),
+                "needs_ts_reviewer": Noul(
+                    instructions="Does this diff contain non-trivial TypeScript/JavaScript/Svelte (.ts, .tsx, .js, .svelte) code changes?"
+                ),
+                "needs_py_reviewer": Noul(
+                    instructions="Does this diff contain non-trivial Python (.py) code changes?"
+                ),
+                "has_tests_included": Noul(
+                    instructions="Does this diff include unit, integration, or E2E test additions/updates?"
+                ),
+                "review_tier": Choice(
+                    instructions="What level of code review does this diff require?",
+                    criteria={
+                        "single_flash_reviewer": "Docs, comments, small isolated helper, or straightforward low-risk change with clear tests",
+                        "argon_or_opus_deep_review": "Non-trivial business logic, concurrency, state machine, database migration, security, or multi-file architecture change",
+                    },
+                ),
+                "risk_score": Score(
+                    instructions="How risky is this change to production stability?",
+                    criteria=[
+                        "Safe (docs, tests, or isolated helper)",
+                        "Moderate (standard feature logic or UI state)",
+                        "High risk (migrations, auth, concurrency, or core routing)",
+                    ],
+                ),
+            },
+        )
+        dt_ms = round((time.time() - t0) * 1000)
+        ans = res.answers
+
+        # High-confidence lens selection: only skip a specialist lens when probability < 0.15
+        ux_p = float(ans["needs_ux_review"].noul)
+        sec_p = float(ans["needs_security_review"].noul)
+        go_p = float(ans["needs_go_reviewer"].noul)
+        ts_p = float(ans["needs_ts_reviewer"].noul)
+        py_p = float(ans["needs_py_reviewer"].noul)
+        tests_p = float(ans["has_tests_included"].noul)
+        tier_choice = ans["review_tier"].choice
+        tier_conf = float(ans["review_tier"].confidence)
+        risk_val = float(ans["risk_score"].score)
+
+        lenses_to_run = ["code-reviewer"]
+        lenses_skipped = []
+
+        for name, prob in [
+            ("ux-impeccable", ux_p),
+            ("security-reviewer", sec_p),
+            ("go-reviewer", go_p),
+            ("typescript-reviewer", ts_p),
+            ("python-reviewer", py_p),
+        ]:
+            if prob >= 0.20:
+                lenses_to_run.append(name)
+            else:
+                lenses_skipped.append(name)
+
+        # High-confidence tier escalation: only use single_flash_reviewer if confidence >= 0.85 and risk < 0.8 and sec_p < 0.20
+        effective_tier = (
+            "single_flash_reviewer"
+            if (tier_choice == "single_flash_reviewer" and tier_conf >= args.min_conf and risk_val < 0.8 and sec_p < 0.20)
+            else "argon_or_opus_deep_review"
+        )
+
+        out = {
+            "model": res.model,
+            "latency_ms": dt_ms,
+            "input_tokens": res.usage.input_tokens,
+            "cost_usd": round(res.usage.input_tokens * 0.042 / 1_000_000, 7),
+            "review_tier": effective_tier,
+            "raw_review_tier": tier_choice,
+            "review_tier_confidence": round(tier_conf, 4),
+            "risk_score": round(risk_val, 3),
+            "has_tests_prob": round(tests_p, 4),
+            "lenses_to_run": lenses_to_run,
+            "lenses_skipped": lenses_skipped,
+            "probabilities": {
+                "ux": round(ux_p, 4),
+                "security": round(sec_p, 4),
+                "go": round(go_p, 4),
+                "typescript": round(ts_p, 4),
+                "python": round(py_p, 4),
+            },
+        }
+        if args.hook_line:
+            print(
+                f"jev-gate triage ({dt_ms}ms, ${out['cost_usd']:.5f}): tier={effective_tier} (conf={tier_conf:.2f}, risk={risk_val:.2f}) | "
+                f"run={','.join(lenses_to_run)} | skip={','.join(lenses_skipped) or 'none'}"
+            )
+        else:
+            print(json.dumps(out, indent=2))
+        return 0
+    except Exception as exc:
+        if not args.hook_line:
+            print(json.dumps({"error": str(exc), "fallback": True}))
+        return 0
+
+
+def cmd_triage_spec(args: argparse.Namespace) -> int:
+    key = _load_api_key()
+    if not key or not os.path.isfile(args.spec):
+        if not args.hook_line:
+            print(json.dumps({"error": "TYPESAFE_API_KEY not set or spec missing", "fallback": True}))
+        return 0
+
+    try:
+        from typesafe_sdk import Noul, Score, TypeSafeClient
+
+        spec_text = Path(args.spec).read_text(errors="replace")[:30000]
+        t0 = time.time()
+        client = TypeSafeClient(api_key=key, timeout=args.timeout)
+        res = client.system_one(
+            model=args.model,
+            state={"spec_markdown": spec_text},
+            questions={
+                "needs_ux_lens": Noul(
+                    instructions="Does this specification design or modify user-facing UI screens, interactive visual flows, modals, forms, or frontend components (rather than purely backend/CLI/file generation)?"
+                ),
+                "needs_security_focus": Noul(
+                    instructions="Does this specification involve authentication, permissions, secrets, external network inputs, or destructive database operations?"
+                ),
+                "spec_clarity": Score(
+                    instructions="How concrete and testable are the acceptance criteria in this spec?",
+                    criteria=[
+                        "Vague prose with missing edge cases",
+                        "Moderately specified with some ambiguities",
+                        "Concrete, falsifiable acceptance criteria with explicit file/API contracts",
+                    ],
+                ),
+            },
+        )
+        dt_ms = round((time.time() - t0) * 1000)
+        ans = res.answers
+        ux_p = float(ans["needs_ux_lens"].noul)
+        sec_p = float(ans["needs_security_focus"].noul)
+        clarity = float(ans["spec_clarity"].score)
+
+        lenses = ["tech", "qa", "product"]
+        skipped = []
+        if ux_p >= 0.25:
+            lenses.append("ux")
+        else:
+            skipped.append("ux")
+
+        out = {
+            "model": res.model,
+            "latency_ms": dt_ms,
+            "input_tokens": res.usage.input_tokens,
+            "cost_usd": round(res.usage.input_tokens * 0.042 / 1_000_000, 7),
+            "lenses_to_run": lenses,
+            "lenses_skipped": skipped,
+            "needs_ux_prob": round(ux_p, 4),
+            "needs_security_prob": round(sec_p, 4),
+            "spec_clarity_score": round(clarity, 3),
+        }
+        if args.hook_line:
+            print(
+                f"jev-gate spec-triage ({dt_ms}ms): lenses={','.join(lenses)} (skip={','.join(skipped) or 'none'}, ux_prob={ux_p:.2f}, clarity={clarity:.2f}/2.0)"
+            )
+        else:
+            print(json.dumps(out, indent=2))
+        return 0
+    except Exception as exc:
+        if not args.hook_line:
+            print(json.dumps({"error": str(exc), "fallback": True}))
+        return 0
+
+
+def main() -> int:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--model", default="jev-latest", help="Jev model ID (default: jev-latest)")
+    common.add_argument("--min-conf", type=float, default=0.85, help="Minimum confidence threshold (default: 0.85)")
+    common.add_argument("--timeout", type=float, default=3.5, help="API timeout in seconds (default: 3.5)")
+    parser = argparse.ArgumentParser(description="Jev System 1 SDLC Gatekeeper", parents=[common])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_cls = sub.add_parser("classify-task", parents=[common], help="Classify a subagent task prompt")
+    p_cls.add_argument("--prompt", default="", help="Task prompt string (or pass via stdin)")
+    p_cls.add_argument("--hook-line", action="store_true", help="Output compact 1-line summary for hooks")
+    p_cls.set_defaults(func=cmd_classify_task)
+
+    p_diff = sub.add_parser("triage-diff", parents=[common], help="Triage git diff to select required review lenses")
+    p_diff.add_argument("--repo", default="", help="Git repository path")
+    p_diff.add_argument("--base", default="HEAD~1", help="Git base ref (default: HEAD~1)")
+    p_diff.add_argument("--head", default="HEAD", help="Git head ref (default: HEAD)")
+    p_diff.add_argument("--diff-file", default="", help="Existing review-package diff file")
+    p_diff.add_argument("--spec", default="", help="Optional spec/brief file path")
+    p_diff.add_argument("--hook-line", action="store_true", help="Output compact 1-line summary")
+    p_diff.set_defaults(func=cmd_triage_diff)
+
+    p_spec = sub.add_parser("triage-spec", parents=[common], help="Triage a spec markdown file for required review lenses")
+    p_spec.add_argument("--spec", required=True, help="Path to spec markdown file")
+    p_spec.add_argument("--hook-line", action="store_true", help="Output compact 1-line summary")
+    p_spec.set_defaults(func=cmd_triage_spec)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
