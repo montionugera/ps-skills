@@ -110,5 +110,54 @@ class ParseTranscriptTest(unittest.TestCase):
         self.assertEqual(self.pending(launch, done, resume), {"X"})
 
 
+class ClaudeLowQuotaTest(unittest.TestCase):
+    def test_detects_low_quota_window_and_ignores_expired_windows(self):
+        import json, os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            snap = {
+                "provider": "claude",
+                "windows": [
+                    {"kind": "five_hour", "remaining_percent": 2.0, "resets_at": 1000},
+                    {"kind": "weekly", "remaining_percent": 8.5, "resets_at": 9999999999},
+                ],
+            }
+            (Path(d) / "claude-statusline.json").write_text(json.dumps(snap))
+            old_env = os.environ.get("HERDR_PLUGIN_STATE_DIR")
+            os.environ["HERDR_PLUGIN_STATE_DIR"] = d
+            try:
+                low, rem, thr, kind = hu.claude_low_quota(now=2000)
+                self.assertTrue(low)
+                self.assertEqual(rem, 8.5)
+                self.assertEqual(thr, 10.0)
+                self.assertEqual(kind, "weekly")
+            finally:
+                if old_env is None:
+                    os.environ.pop("HERDR_PLUGIN_STATE_DIR", None)
+                else:
+                    os.environ["HERDR_PLUGIN_STATE_DIR"] = old_env
+
+    def test_above_threshold_returns_false(self):
+        import json, os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            snap = {
+                "provider": "claude",
+                "windows": [
+                    {"kind": "weekly", "remaining_percent": 20.0, "resets_at": 9999999999},
+                ],
+            }
+            (Path(d) / "claude-statusline.json").write_text(json.dumps(snap))
+            old_env = os.environ.get("HERDR_PLUGIN_STATE_DIR")
+            os.environ["HERDR_PLUGIN_STATE_DIR"] = d
+            try:
+                low, rem, thr, kind = hu.claude_low_quota(now=2000)
+                self.assertFalse(low)
+                self.assertEqual(rem, 20.0)
+            finally:
+                if old_env is None:
+                    os.environ.pop("HERDR_PLUGIN_STATE_DIR", None)
+                else:
+                    os.environ["HERDR_PLUGIN_STATE_DIR"] = old_env
+
+
 if __name__ == "__main__":
     unittest.main()

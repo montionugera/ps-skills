@@ -2168,6 +2168,22 @@ class TestCodexDisabled(unittest.TestCase):
         self.assertNotIn("codex", proc.stdout.lower())
 
 
+    def test_thinker_auto_switches_to_agy_argon_when_claude_quota_is_low(self):
+        self._fake_claude()
+        claude_state = self.root / "claude_low.json"
+        claude_state.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 5.0, "resets_at": 9999999999},
+                {"kind": "weekly", "remaining_percent": 8.0, "resets_at": 9999999999},
+            ]
+        }))
+        with mock.patch.dict(os.environ, {"CLAUDE_QUOTA_STATE_FILE": str(claude_state)}):
+            proc = self._run("--think", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon-medium", proc.stdout)
+        self.assertIn("AUTO-SWITCH claude->agy", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
 

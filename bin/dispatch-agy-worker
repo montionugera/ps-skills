@@ -58,7 +58,7 @@ DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 DEFAULT_AGY_WORKER_MODEL = os.environ.get("AGY_WORKER_MODEL", "gemini-3.8-flash-high")
 DEFAULT_AGY_THINK_MODEL = os.environ.get("AGY_THINK_MODEL", "gemini-4-argon-medium")
-AGY_THINK_MODEL_NAMES = ("gemini-4-argon-medium", "gemini-4-argon", "argon", "gemini-4-argon-thinking")
+AGY_THINK_MODEL_NAMES = ("gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon", "argon", "gemini-4-argon-thinking")
 
 CLAUDE_TO_AGY_MODEL_MAP = {
     "opus": DEFAULT_AGY_THINK_MODEL,
@@ -405,6 +405,8 @@ def normalize_model_name(agent, model):
     if agent == "agy":
         if clean.lower() in ("argon", "gemini-4-argon", "gemini-4-argon-medium", "gemini-4-argon-thinking"):
             return DEFAULT_AGY_THINK_MODEL
+        if clean.lower() == "gemini-4-argon-high":
+            return "gemini-4-argon-high"
         if clean.lower() in ("flash", "3.8-flash", "gemini-3.8-flash", "gemini-3.8-flash-high"):
             return DEFAULT_AGY_WORKER_MODEL
     return clean
@@ -600,6 +602,13 @@ def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H
         if el:
             eligible_picks.append((agent, agent_model, r5, rw, msg))
 
+    if not eligible_picks and candidates and candidates[0][0] == "claude" and not any(a == "agy" for a, _ in candidates):
+        # Auto-switch thinker from Claude to AGY (Argon) only when Claude failed due to low quota (not missing binary)
+        if traces and ("Weekly:" in traces[0] or "5h:" in traces[0]) and os.environ.get("DISPATCH_AUTO_SWITCH_AGY", "1") != "0":
+            el_a, r5_a, rw_a, msg_a = check_quota("agy", agy_state_file, DEFAULT_MIN_5H, DEFAULT_MIN_WEEKLY, current_time=current_time)
+            if el_a:
+                agy_model = DEFAULT_AGY_THINK_MODEL
+                return "agy", agy_model, True, r5_a, rw_a, f"[AUTO-SWITCH claude->agy ({agy_model})] {msg_a} (from {traces[0]})", None
     if not eligible_picks:
         agent, agent_model = candidates[0]
         return agent, agent_model, False, 0.0, 0.0, "; ".join(traces), None
