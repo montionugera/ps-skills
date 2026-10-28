@@ -360,8 +360,15 @@ if [[ "$RESOLVED_MUX" == "none" || "$HERDR_AVAILABLE" != "true" ]]; then
   exit 0
 fi
 
-echo "🚀 Creating Herdr tab in '$TARGET_CWD'..."
-CREATE_RES=$(herdr tab create --cwd "$TARGET_CWD" --label "$TAB_LABEL" "$FOCUS_FLAG")
+# Pin the new tab to the workspace this session runs in; without --workspace
+# herdr picks one itself (often a brand-new workspace, scattering related work).
+WORKSPACE_ARGS=()
+if [[ -n "${HERDR_WORKSPACE_ID:-}" ]]; then
+  WORKSPACE_ARGS=(--workspace "$HERDR_WORKSPACE_ID")
+fi
+
+echo "🚀 Creating Herdr tab in '$TARGET_CWD'${HERDR_WORKSPACE_ID:+ (workspace $HERDR_WORKSPACE_ID)}..."
+CREATE_RES=$(herdr tab create ${WORKSPACE_ARGS[@]+"${WORKSPACE_ARGS[@]}"} --cwd "$TARGET_CWD" --label "$TAB_LABEL" "$FOCUS_FLAG")
 TAB_ID=$(echo "$CREATE_RES" | jq -r '.result.tab.tab_id // .result.tab_id // empty')
 ROOT_PANE=$(echo "$CREATE_RES" | jq -r '.result.root_pane.pane_id // .result.pane_id // empty')
 
