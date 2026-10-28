@@ -170,7 +170,7 @@ All handoffs launch with permission-skipping enabled by default (`--dangerously-
 
 ### Multiplexer Support (`--multiplexer {herdr,t3,auto}`):
 - **Herdr (`--multiplexer herdr`)**:
-  - Creates a new tab: `herdr tab create --cwd "$PWD" --label "Handoff: <slug>" --focus`
+  - Creates a new tab in the caller's own workspace: `herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$PWD" --label "Handoff: <slug>" --focus` (`--workspace` is omitted only when `HERDR_WORKSPACE_ID` is unset, e.g. run outside Herdr)
   - Starts the chosen agent in the pane via `herdr agent start`
   - Delivers the execution-first prompt to execute the immediate action without forensic delay.
 - **T3Code (`--multiplexer t3` / `--kind t3code`)**:
