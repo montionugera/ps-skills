@@ -32,8 +32,17 @@ in `.release.json`, a precheck that already PASSED on an identical git tree
 (`HEAD^{tree}` + a hash of the precheck script) within the TTL is skipped with a
 `gate cache HIT` line; FAIL results are never cached. Absent => behaviour unchanged.
 Force a real run with `psrw ship|sync-main --no-gate-cache` or `PSRW_GATE_CACHE=off`.
-Never applies to Gate 2, integration or promote. Risks (env drift on an unchanged
-tree; a skipped re-check) are documented in `lib/gate_cache.py`.
+Never applies to Gate 2, integration or promote. The key also includes the commit of
+`origin/main` (else `main`, else `none`), so a moved main misses. A dirty tree (including
+assume-unchanged / skip-worktree edits), a tree that changes during the run, or an invalid
+`ttl_hours` (≤0, negative, non-numeric, bool, NaN/inf; only a *missing* key means 24h)
+disables caching and runs the gate.
+**Risks:** env drift on an unchanged tree; a skipped re-check; prechecks that compare
+against another ref (migration numbering, codegen drift, diffs vs a ref other than
+`origin/main`/`main`) give different answers for the same tree once that ref moves —
+`sync-main` and a re-ship are exactly that case; uninitialised submodules / LFS objects;
+files sourced from outside the tree. For any of those use `--no-gate-cache`. More in
+`lib/gate_cache.py`.
 
 **Gate 2 — `scripts/integration.sh`**, run by `promote` from the `_release` worktree,
 **on by default**. Opt out with `--no-gate2`. If the gate is requested and the script

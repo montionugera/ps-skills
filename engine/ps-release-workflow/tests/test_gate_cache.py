@@ -240,10 +240,20 @@ def test_not_opted_in_always_runs_and_writes_nothing(gate: Gate, clock, cfg):
     assert not gate.state.exists()
 
 
-def test_invalid_ttl_falls_back_to_default(gate: Gate, clock):
-    for bad in ("soon", -1, 0, None, True):
-        assert gate_cache.load_config(_cfg_tree(gate.repo, {"enabled": True, "ttl_hours": bad})
-                                      ).ttl_seconds == 24 * HOUR
+@pytest.mark.parametrize("bad", ["soon", "24", -1, 0, 0.0, None, True, False, float("nan"), float("inf"), [], {}])
+def test_invalid_ttl_disables_the_cache(gate: Gate, clock, capsys, bad):
+    tree = _cfg_tree(gate.repo, {"enabled": True, "ttl_hours": bad})
+    assert gate_cache.load_config(tree).enabled is False
+    assert "ttl_hours" in capsys.readouterr().err
+    _commit_all(gate.repo, "bad ttl")
+    gate.run()
+    gate.run()
+    assert gate.runs == 2 and not gate.state.exists()
+
+
+def test_missing_ttl_key_falls_back_to_default(gate: Gate, clock):
+    cfg = gate_cache.load_config(_cfg_tree(gate.repo, {"enabled": True}))
+    assert cfg.enabled and cfg.ttl_seconds == 24 * HOUR
 
 
 def _cfg_tree(repo: Path, block) -> Path:
@@ -398,3 +408,135 @@ def test_cache_is_not_wired_into_gate_2_or_promote():
     root = Path(__file__).resolve().parent.parent
     for rel in ("scripts/promote_release.py", "lib/epic_gate.py", "scripts/epic.py"):
         assert "gate_cache" not in (root / rel).read_text(), rel
+
+
+# ── remediation round: dirty detection that ignores user/repo git config ───────
+
+
+def test_untracked_file_is_dirty_even_with_show_untracked_files_no(gate: Gate, clock):
+    gate.run()
+    _git(gate.repo, "config", "status.showUntrackedFiles", "no")
+    (gate.repo / "sneaky.txt").write_text("x\n")
+    gate.run()
+    assert gate.runs == 2, "a hidden untracked file must bypass the cache"
+
+
+def test_assume_unchanged_edit_is_dirty(gate: Gate, clock):
+    (gate.repo / "src.txt").write_text("v1\n")
+    _commit_all(gate.repo, "src")
+    gate.run()
+    _git(gate.repo, "update-index", "--assume-unchanged", "src.txt")
+    (gate.repo / "src.txt").write_text("v2\n")
+    gate.run()
+    assert gate.runs == 2
+
+
+def test_skip_worktree_edit_is_dirty(gate: Gate, clock):
+    (gate.repo / "src.txt").write_text("v1\n")
+    _commit_all(gate.repo, "src")
+    gate.run()
+    _git(gate.repo, "update-index", "--skip-worktree", "src.txt")
+    (gate.repo / "src.txt").write_text("v2\n")
+    gate.run()
+    assert gate.runs == 2
+
+
+def test_state_dir_exclusion_does_not_hide_other_dirs(gate: Gate, clock):
+    (gate.repo / "a").mkdir()
+    (gate.repo / "a" / ".claude").mkdir()
+    (gate.repo / "a" / ".claude" / "state").mkdir()
+    (gate.repo / "a" / ".claude" / "state" / "x").write_text("x")
+    gate.run()
+    gate.run()
+    assert gate.runs == 2
+
+
+# ── origin/main is part of the key ─────────────────────────────────────────────
+
+
+def _with_origin(gate: Gate, tmp_path: Path) -> None:
+    if "origin" not in _git(gate.repo, "remote").split():
+        origin = tmp_path / "origin.git"
+        _git(tmp_path, "init", "-q", "--bare", str(origin))
+        _git(gate.repo, "remote", "add", "origin", str(origin))
+    _git(gate.repo, "push", "-q", "-f", "origin", "HEAD:refs/heads/main")
+    _git(gate.repo, "fetch", "-q", "origin")
+
+
+def test_moved_origin_main_misses(gate: Gate, clock, tmp_path):
+    _with_origin(gate, tmp_path)
+    gate.run()
+    gate.run()
+    assert gate.runs == 1
+    _git(gate.repo, "update-ref", "refs/remotes/origin/main", _git(gate.repo, "commit-tree",
+         "HEAD^{tree}", "-p", "HEAD", "-m", "moved"))
+    gate.run()
+    assert gate.runs == 2, "same tree, moved origin/main: the old PASS must not be reused"
+
+
+def test_no_main_ref_still_caches(gate: Gate, clock):
+    _git(gate.repo, "branch", "-m", "work")
+    gate.run()
+    gate.run()
+    assert gate.runs == 1
+
+
+# ── check-then-run gap ─────────────────────────────────────────────────────────
+
+
+def test_tree_mutated_during_run_records_nothing(gate: Gate, clock, capsys):
+    def run() -> int:
+        (gate.repo / "scripts" / "precheck.sh").write_text("#!/bin/sh\nexit 0 # mutated\n")
+        return 0
+    assert gate_cache.run_cached(gate.repo, gate.repo / "scripts" / "precheck.sh", run) == 0
+    assert not gate.state.exists()
+    assert "changed during" in capsys.readouterr().err
+
+
+def test_untracked_file_created_during_run_records_nothing(gate: Gate, clock):
+    def run() -> int:
+        (gate.repo / "generated.txt").write_text("x")
+        return 0
+    gate_cache.run_cached(gate.repo, gate.repo / "scripts" / "precheck.sh", run)
+    assert not gate.state.exists()
+
+
+def test_commit_made_during_run_records_nothing(gate: Gate, clock):
+    def run() -> int:
+        (gate.repo / "n.txt").write_text("n")
+        _commit_all(gate.repo, "during")
+        return 0
+    gate_cache.run_cached(gate.repo, gate.repo / "scripts" / "precheck.sh", run)
+    assert not gate.state.exists()
+
+
+# ── corrupt heal + concurrency ─────────────────────────────────────────────────
+
+
+def test_corrupt_heal_does_not_unlink(gate: Gate, clock, monkeypatch):
+    gate.state.parent.mkdir(parents=True, exist_ok=True)
+    gate.state.write_text("{not json")
+    unlinked = []
+    orig = Path.unlink
+    monkeypatch.setattr(Path, "unlink", lambda self, *a, **k: (unlinked.append(self), orig(self, *a, **k))[1])
+    gate.run()
+    assert gate.state not in unlinked
+    assert len(gate.records()) == 1
+
+
+def test_concurrent_writers_both_survive(gate: Gate, clock):
+    import threading
+    barrier = threading.Barrier(8)
+    errs = []
+
+    def rec(i: int) -> None:
+        try:
+            barrier.wait()
+            gate_cache._record_pass(gate.state, f"k{i}", f"t{i}", f"g{i}")
+        except Exception as e:  # pragma: no cover
+            errs.append(e)
+    ts = [threading.Thread(target=rec, args=(i,)) for i in range(8)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert not errs
+    assert set(gate.records()) == {f"k{i}" for i in range(8)}

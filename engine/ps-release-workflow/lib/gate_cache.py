@@ -11,12 +11,15 @@ file is touched. Applies to Gate 1 (precheck) only — never Gate 2, integration
 epic checks or promote.
 
 Key = sha256(`git rev-parse HEAD^{tree}` + hash of the precheck script's
-tree-relative path and bytes). Tree content (not commit, not checkout path), so
+tree-relative path and bytes + the commit of the canonical main ref
+(origin/main, else main, else the literal 'none' — never fetched)). Tree content (not commit, not checkout path), so
 the feature worktree and the _release worktree share hits. Only PASS records
 are stored (state: <repo>/.claude/state/gate-pass-cache.json, gitignored, TTL,
 capped at MAX_ENTRIES oldest-dropped). A FAIL never writes a record and
-removes a stale one for that key. Dirty trees, non-git trees and any cache I/O
-error fail OPEN to a real run.
+removes a stale one for that key. Dirty trees (detected independent of user/repo git config; assume-unchanged and
+skip-worktree entries count as dirty), a tree that changes while the precheck
+runs, an invalid `ttl_hours` (<=0, negative, non-numeric, bool, NaN/inf; only a
+missing key means 24h), non-git trees and any cache I/O error fail toward a real run.
 
 Overrides: `--no-gate-cache` (ship, sync-main) sets PSRW_GATE_CACHE=off; the
 env var forces a real run (the result still refreshes / clears the record).
@@ -25,6 +28,12 @@ Risks accepted by enabling it:
   * Environment drift — same tree, different toolchain, deps, services, env
     vars or gitignored files: the old PASS says nothing about the new setup.
     Use --no-gate-cache after upgrading the toolchain or when a flake is suspected.
+  * Prechecks whose verdict depends on another ref (origin/main diffs, migration
+    numbering, codegen drift) can answer differently for the same tree once main
+    moves — sync-main and a re-ship are exactly that case. The main commit is in
+    the key, but a ref other than origin/main/main is not: use --no-gate-cache.
+  * Inputs the tree hash cannot see: uninitialised submodules, LFS pointers whose
+    objects are missing, files sourced from outside the tree. Use --no-gate-cache.
   * A skipped run on a push that previously had its only re-check: a HIT means
     the verification you rely on is the earlier one, up to ttl_hours old.
 """
@@ -39,8 +48,9 @@ from pathlib import Path
 from typing import Callable
 
 from lib.git_ops import _run as git_run
+from lib.main_sync import cached_main_ref
 from lib.repo import RepoNotFoundError, find_repo_root
-from lib.state import mutate_state
+from lib.state import file_lock, mutate_state
 
 SCHEMA_VERSION = 1
 MAX_ENTRIES = 200
@@ -69,9 +79,11 @@ def load_config(tree: Path) -> Config:
     block = data.get("gate_cache") if isinstance(data, dict) else None
     if not isinstance(block, dict) or block.get("enabled") is not True:
         return off
-    ttl = block.get("ttl_hours")
+    ttl = block.get("ttl_hours", DEFAULT_TTL_HOURS)     # only a MISSING key defaults
     if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not math.isfinite(ttl) or ttl <= 0:
-        ttl = DEFAULT_TTL_HOURS
+        print(f"gate cache disabled: gate_cache.ttl_hours must be a positive finite number, "
+              f"got {ttl!r} — running precheck", file=sys.stderr)
+        return off
     return Config(True, float(ttl) * 3600)
 
 
@@ -94,16 +106,42 @@ def _tree_sha(tree: Path) -> str | None:
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
 
 
+_OWN_STATE = (STATE_REL, STATE_REL.with_suffix(STATE_REL.suffix + ".tmp"))
+
+
 def _is_clean(tree: Path) -> bool | None:
     """True/False for a clean/dirty worktree, None when git cannot say.
 
-    The cache's own state dir is excluded so recording a pass never dirties the
+    Immune to user/repo config that hides changes (status.showUntrackedFiles=no,
+    submodule ignore=dirty) and to index flags that hide tracked edits
+    (assume-unchanged, skip-worktree): any such entry counts as dirty. Only the
+    cache's own state file is excluded, so recording a pass never dirties the
     tree in a repo that forgot to gitignore .claude/state/.
     """
-    r = git_run(tree, "status", "--porcelain", "--", ".", ":(top,exclude).claude/state", check=False)
-    if r.returncode != 0:
+    excludes = [f":(top,exclude){p}" for p in _OWN_STATE]
+    r = git_run(tree, "-c", "status.showUntrackedFiles=all", "status", "--porcelain",
+                "--untracked-files=all", "--ignore-submodules=none", "--", ".", *excludes,
+                check=False)
+    if r.returncode != 0 or r.stdout.strip():
+        return None if r.returncode != 0 else False
+    ls = git_run(tree, "ls-files", "-v", check=False)
+    if ls.returncode != 0:
         return None
-    return not r.stdout.strip()
+    # tag is the first char: lowercase = assume-unchanged, S = skip-worktree
+    return not any(line[:1].islower() or line[:1] == "S" for line in ls.stdout.splitlines())
+
+
+def _main_sha(tree: Path) -> str:
+    """Commit of the canonical main ref (origin/main, else main), or 'none'.
+
+    Prechecks that diff against main answer differently for the same tree once
+    main moves, so it is part of the key. Never fetches.
+    """
+    ref = cached_main_ref(tree)
+    if ref is None:
+        return "none"
+    r = git_run(tree, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "none"
 
 
 def _iso(ts: float) -> str:
@@ -150,9 +188,28 @@ def _mutate(path: Path, fn: Callable[[dict], dict]) -> None:
         return {"version": SCHEMA_VERSION, "entries": fn(dict(_entries(state)))}
     try:
         mutate_state(path, apply, default={})
-    except ValueError:                      # corrupt JSON: heal by starting over
-        path.unlink(missing_ok=True)
+    except ValueError:                      # corrupt JSON: overwrite atomically, retry
+        _heal(path)
         mutate_state(path, apply, default={})
+
+
+def _heal(path: Path) -> None:
+    """Replace a corrupt state file with an empty one (atomic rename, under the lock).
+
+    Re-checks under the lock so a concurrent healer/writer's good file is kept.
+    A lost record only costs a re-run, never a skipped gate.
+    """
+    with file_lock(path):
+        try:
+            json.loads(path.read_text() or "{}")
+            return
+        except OSError:
+            return
+        except ValueError:
+            pass
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps({"version": SCHEMA_VERSION, "entries": {}}) + "\n")
+        tmp.replace(path)
 
 
 def _record_pass(path: Path, key: str, tree_sha: str, ghash: str) -> None:
@@ -189,7 +246,7 @@ def run_cached(tree: Path, precheck: Path, run: Callable[[], int]) -> int:
             return run()
         ghash = gate_hash(tree, precheck)
         path = find_repo_root(tree) / STATE_REL
-        key = hashlib.sha256(f"{tsha}\0{ghash}".encode()).hexdigest()
+        key = hashlib.sha256(f"{tsha}\0{ghash}\0{_main_sha(tree)}".encode()).hexdigest()
     except (OSError, ValueError, RepoNotFoundError) as e:
         print(f"gate cache unavailable ({e}) — running precheck", file=sys.stderr)
         return run()
@@ -205,6 +262,10 @@ def run_cached(tree: Path, precheck: Path, run: Callable[[], int]) -> int:
     rc = run()
     try:
         if rc == 0:
+            if _tree_sha(tree) != tsha or _is_clean(tree) is not True:
+                print("gate cache: tree changed during the precheck run — PASS not recorded",
+                      file=sys.stderr)
+                return rc
             _record_pass(path, key, tsha, ghash)
         else:
             _forget(path, key)
