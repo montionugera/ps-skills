@@ -27,6 +27,8 @@ import datetime
 import hashlib
 import json
 import os
+import pty
+import select
 import shutil
 import signal
 import statistics
@@ -165,7 +167,72 @@ def _parse_resets_at(val):
     return None
 
 
-def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, current_time=None):
+AGY_REFRESH_TIMEOUT_SECONDS = 20
+AGY_REFRESH_HINT = "to refresh by hand, run `agy` in a terminal for a few seconds, quit it, and retry"
+
+
+def _is_live_agy_observation(path):
+    """True only for the real herdr observation file, so test state files never spawn agy."""
+    return os.path.realpath(path) == os.path.realpath(DEFAULT_AGY_STATE)
+
+
+def refresh_agy_observation(target_file, timeout=AGY_REFRESH_TIMEOUT_SECONDS):
+    """Rewrites the agy quota observation without spending quota. Returns (refreshed, detail).
+
+    Only agy's interactive TUI runs its statusLine hook (herdr-agent-quota agy-statusline),
+    which is what writes the observation; `agy -p` never does, and agy has no usage command.
+    So start an idle agy on a pseudo-terminal in $HOME, send no prompt, wait for the file's
+    mtime to advance, then stop it.
+    """
+    agy_bin = shutil.which("agy") or os.path.expanduser("~/.local/bin/agy")
+    if not os.path.exists(agy_bin):
+        return False, "agy executable not found"
+    try:
+        before = os.path.getmtime(target_file)
+        master, slave = pty.openpty()
+    except OSError as e:
+        return False, f"could not prepare the refresh: {e}"
+    try:
+        proc = subprocess.Popen([agy_bin], stdin=slave, stdout=slave, stderr=slave, cwd=os.path.expanduser("~"),
+                                env=dict(os.environ, TERM=os.environ.get("TERM") or "xterm-256color"),
+                                start_new_session=True)
+    except OSError as e:
+        os.close(master)
+        os.close(slave)
+        return False, f"could not start agy: {e}"
+    os.close(slave)
+    refreshed = False
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline and proc.poll() is None:
+            ready, _, _ = select.select([master], [], [], 0.5)
+            if ready:
+                try:
+                    os.read(master, 65536)  # keep draining so the TUI never blocks on a full pty
+                except OSError:
+                    break
+            if os.path.getmtime(target_file) > before:
+                refreshed = True
+                break
+    except OSError:
+        pass
+    finally:
+        # Close the master before waiting: on macOS an exiting process blocks until its tty is released.
+        os.close(master)
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if proc.poll() is not None:
+                break
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, sig)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=2)
+    emit_event("quota_refresh", agent="agy", ok=refreshed)
+    if refreshed:
+        return True, "refreshed"
+    return False, f"no statusLine write from an idle agy within {timeout}s"
+
+
+def check_quota(agent="agy", state_file=None,min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, current_time=None):
     # Support positional state_file path for backwards compatibility
     if isinstance(agent, str) and ("/" in agent or "\\" in agent or agent.endswith(".json")) and state_file is None:
         state_file = agent
@@ -196,6 +263,17 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
     target_file = state_file or get_state_file(agent)
     if not os.path.exists(target_file):
         return False, 0.0, 0.0, f"Quota state file not found at {target_file}"
+
+    refresh_note = ""
+    if agent == "agy" and current_time is None and _is_live_agy_observation(target_file):
+        try:
+            age_minutes = int((time.time() - os.path.getmtime(target_file)) / 60)
+        except OSError:
+            age_minutes = 0
+        if age_minutes > STALE_OBSERVATION_MINUTES:
+            refreshed, detail = refresh_agy_observation(target_file)
+            if not refreshed:
+                refresh_note = f" [auto-refresh failed: {detail}; {AGY_REFRESH_HINT}]"
 
     try:
         with open(target_file, "r", encoding="utf-8") as f:
@@ -258,6 +336,8 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
         pass
 
     msg = f"[{agent.upper()}] 5h: {rem_5h:.1f}% (min {min_5h:.1f}%), Weekly: {rem_weekly:.1f}% (min {min_weekly:.1f}%){stale_suffix}"
+    if stale_suffix:
+        msg += refresh_note
     return eligible, rem_5h, rem_weekly, msg
 
 
