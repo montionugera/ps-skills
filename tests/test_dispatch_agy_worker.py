@@ -3,6 +3,7 @@
 Unit tests for bin/dispatch-agy-worker and bin/dispatch-codex-worker
 """
 
+import io
 import json
 import os
 import subprocess
@@ -2264,6 +2265,13 @@ for act in actions:
         while time.time() < end:
             sys.stdout.write(json.dumps({"event": "step_update", "step_update": {"conversation_id": "c-1", "step_index": 1, "state": "RUNNING", "step_type": "TOOL"}}) + "\\n"); sys.stdout.flush()
             time.sleep(0.1)
+    elif kind == "touch":
+        end = time.time() + act[1]
+        i = 0
+        while time.time() < end:
+            i += 1
+            open("touched%d.txt" % i, "w").write("x")
+            time.sleep(0.3)
     elif kind == "write":
         open(act[1], "w").write(act[2])
     elif kind == "exit":
@@ -2454,16 +2462,87 @@ class TestAgyIdleAndResume(FakeAgyBase):
         for phrase in ("killed", "Inspect", "do not ask"):
             self.assertIn(phrase.lower(), prompt.lower())
 
-    def test_resume_budget_is_at_least_900s(self):
-        self._plan(self.stall, [INIT, RESULT()])
-        budgets = []
-        real = dispatch_mod.execute_worker_process
-        def spy(cmd, target_dir, timeout_seconds, **kw):
-            budgets.append(timeout_seconds)
-            return real(cmd, target_dir, timeout_seconds, **kw)
-        with mock.patch.object(dispatch_mod, "execute_worker_process", side_effect=spy):
-            self._run(timeout=60)
-        self.assertEqual(budgets, [60, 900])
+    def test_resume_budget_never_exceeds_the_job_timeout(self):
+        # The resume would get max(900, timeout/2); clamped to --timeout it is killed by the wall clock at 2s.
+        self._plan(self.stall, [INIT, ["steps", 30]])
+        start = time.monotonic()
+        (code, _o, err, _f, _d), _info = self._run(timeout=2)
+        self.assertLess(time.monotonic() - start, 20)
+        self.assertEqual(code, 124)
+        self.assertIn("timed out after 2s", err)
+        self.assertIn("after resume", err)
+
+    def test_result_then_hang_is_a_finished_run_not_a_timeout(self):
+        self._plan([INIT, RESULT("finished and lingering"), ["sleep", 30]], [INIT, RESULT("redone")])
+        (code, out, _e, _f, _d), info = self._run(timeout=60)
+        self.assertEqual((code, out), (0, "finished and lingering"))
+        self.assertEqual(len(self._calls()), 1)
+        self.assertFalse(info["resumed"])
+        self.assertEqual(self._events("idle_timeout") + self._events("resume") + self._events("timeout"), [])
+
+    def test_failed_result_then_hang_is_not_success(self):
+        self._plan([INIT, RESULT("nope", status="ERROR"), ["sleep", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (code, _o, _e, _f, _d), _info = self._run(timeout=60)
+        self.assertNotEqual(code, 0)
+
+    def test_silent_step_that_changes_files_is_not_killed(self):
+        self._plan([INIT, ["touch", 3.5], RESULT("built")])
+        (code, out, _e, files, _d), info = self._run(timeout=60)
+        self.assertEqual((code, out), (0, "built"))
+        self.assertGreaterEqual(files, 3)
+        self.assertEqual(self._events("idle_timeout"), [])
+
+    def test_silent_step_that_changes_nothing_is_killed(self):
+        self._plan([INIT, ["sleep", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (code, _o, _e, _f, _d), info = self._run(timeout=60)
+        self.assertEqual((code, info["timeout_kind"]), (124, "idle"))
+
+    def test_idle_check_survives_a_failing_git(self):
+        self._plan([INIT, ["sleep", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}), \
+                mock.patch.object(dispatch_mod, "git_baseline", return_value=None):
+            (code, _o, _e, _f, _d), info = self._run(timeout=60)
+        self.assertEqual((code, info["timeout_kind"]), (124, "idle"))
+
+    def test_killed_run_reports_its_last_step_and_error_events(self):
+        step = ["event", {"event": "step_update", "step_update": {"conversation_id": "c-1", "step_index": 7,
+                                                                   "state": "RUNNING", "step_type": "RUN_COMMAND"}}]
+        err_ev = ["event", {"event": "error", "error": {"message": "tool exploded"}}]
+        self._plan([INIT, step, err_ev, ["sleep", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (code, out, _e, _f, _d), _info = self._run(timeout=60)
+        self.assertEqual(code, 124)
+        self.assertIn("step 7 RUN_COMMAND", out)
+        self.assertIn("tool exploded", out)
+
+    def test_evidence_tail_is_bounded(self):
+        evs = [["event", {"event": "warn", "n": i, "pad": "x" * 1000}] for i in range(50)]
+        self._plan([INIT, *evs, ["sleep", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (_c, out, _e, _f, _d), _info = self._run(timeout=60)
+        self.assertLess(len(out), dispatch_mod.STREAM_NOTE_LINES * (dispatch_mod.STREAM_NOTE_CHARS + 5) + 300)
+        self.assertIn('"n": 49', out)
+        self.assertNotIn('"n": 0,', out)
+
+    def test_non_string_response_is_not_success(self):
+        self._plan([INIT, ["event", {"event": "result", "result": {"status": "SUCCESS", "response": {"a": 1}}}]])
+        (code, _o, err, _f, _d), _info = self._run()
+        self.assertNotEqual(code, 0)
+        self.assertIn("not a string", err)
+
+    def test_pathological_line_does_not_kill_the_reader(self):
+        self._plan([INIT, ["raw", "[" * 200000], ["event", {"event": "init", "conversation_id": 12345}], RESULT("ok")])
+        (code, out, _e, _f, _d), info = self._run()
+        self.assertEqual((code, out), (0, "ok"))
+        self.assertEqual(info["conversation_id"], "c-1")  # the non-string id was ignored
+
+    def test_resumed_run_with_no_file_evidence_is_no_changes_unverified(self):
+        self._plan(self.stall, [INIT, RESULT("claims done")])
+        (code, _o, _e, files, _d), info = self._run(timeout=60)
+        self.assertEqual((code, files), (0, 0))
+        self.assertEqual(dispatch_mod.derive_status(code, files, info), "NO_CHANGES_UNVERIFIED")
 
     def test_resume_can_be_disabled(self):
         self._plan(self.stall, [INIT, RESULT()])
@@ -2518,7 +2597,10 @@ class TestResumedStatusConsumers(unittest.TestCase):
     def test_derive_status_table(self):
         d = dispatch_mod.derive_status
         self.assertEqual(d(0, 2, {"resumed": True, "verified": "skipped"}), "RESUMED_UNVERIFIED")
-        self.assertEqual(d(0, 0, {"resumed": True, "verified": "skipped"}), "RESUMED_UNVERIFIED")
+        self.assertEqual(d(0, 0, {"resumed": True, "verified": "skipped"}), "NO_CHANGES_UNVERIFIED")
+        self.assertEqual(d(0, 0, {"resumed": True, "verified": "skipped", "is_thinking": True}), "RESUMED_UNVERIFIED")
+        self.assertEqual(d(0, 0, {"resumed": True, "verified": "skipped", "has_artifact": True}), "RESUMED_UNVERIFIED")
+        self.assertEqual(d(0, 0, {"resumed": True, "verified": True}), "SUCCESS")
         self.assertEqual(d(0, 2, {"resumed": True, "verified": True}), "SUCCESS")
         self.assertEqual(d(0, 2, {"resumed": True, "verified": False}), "RESUMED_UNVERIFIED")
         self.assertEqual(d(0, 2, {"verified": "skipped"}), "SUCCESS")
@@ -2595,6 +2677,118 @@ class TestPerJobFileCounts(FakeAgyBase):
             with self.assertRaises(SystemExit):
                 dispatch_mod.run_internal_job("mine", job_dir=job_dir)
         self.assertFalse(dispatch_mod.load_job_state("mine", job_dir=job_dir)["files_changed_shared"])
+
+
+class TestJobStateSidecar(unittest.TestCase):
+    def test_concurrent_saves_and_conversation_writes_never_corrupt_or_lose_the_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors = []
+            def saver():
+                try:
+                    for i in range(60):
+                        dispatch_mod.save_job_state("j", {"job_id": "j", "status": "RUNNING", "n": i}, job_dir=tmp)
+                except Exception as e:
+                    errors.append(e)
+            def reader():
+                try:
+                    for _ in range(120):
+                        st = dispatch_mod.load_job_state("j", job_dir=tmp)
+                        assert st is None or st["job_id"] == "j"
+                except Exception as e:
+                    errors.append(e)
+            dispatch_mod.save_job_state("j", {"job_id": "j", "status": "RUNNING"}, job_dir=tmp)
+            threads = [threading.Thread(target=saver) for _ in range(4)] + [threading.Thread(target=reader)]
+            for t in threads:
+                t.start()
+            dispatch_mod.save_conversation_id("j", "c-77", job_dir=tmp)
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+            self.assertEqual(dispatch_mod.load_job_state("j", job_dir=tmp)["conversation_id"], "c-77")
+            self.assertEqual([j["conversation_id"] for j in dispatch_mod.list_all_jobs(job_dir=tmp)], ["c-77"])
+            self.assertEqual([p.name for p in Path(tmp).glob("*.tmp")], [])
+
+    def test_persist_failure_warns_instead_of_vanishing(self):
+        err = io.StringIO()
+        script = ["python3", "-c", 'import json;print(json.dumps({"event":"init","conversation_id":"c-9"}))']
+        def boom(_cid):
+            raise OSError("disk full")
+        with mock.patch.object(sys, "stderr", err):
+            dispatch_mod.execute_worker_process(script, ".", 10, stream_state={}, on_conversation_id=boom)
+        self.assertIn("could not persist conversation_id", err.getvalue())
+
+
+class TestBaselineRobustness(FakeAgyBase):
+    def _sh(self, script):
+        return mock.patch.object(dispatch_mod, "build_agent_command", return_value=["sh", "-c", script])
+
+    def test_quoted_unicode_path_that_was_already_dirty_is_not_counted(self):
+        (self.repo / "wéird file.txt").write_text("x")
+        with self._sh("true"):
+            (_c, _o, _e, files, _d), _ = self._run()
+        self.assertEqual(files, 0)
+
+    def test_fifo_and_symlink_in_the_tree_do_not_hang_or_crash(self):
+        os.mkfifo(self.repo / "pipe")
+        os.symlink("/nonexistent", self.repo / "dangling")
+        with self._sh("echo n > mine.txt"):
+            (code, _o, _e, files, _d), _ = self._run()
+        self.assertEqual((code, files), (0, 1))
+
+    def test_unavailable_baseline_is_reported_not_silent(self):
+        with self._sh("echo n > mine.txt"), mock.patch.object(dispatch_mod, "git_baseline", return_value=None):
+            (_c, _o, _e, files, _d), info = self._run()
+        self.assertTrue(info["baseline_unavailable"])
+        rep = dispatch_mod.format_report("agy", "SUCCESS", 0, "/r", files, "d", "out", verify_info=info)
+        self.assertIn("not baseline-adjusted", rep)
+
+
+class TestResumeThenRuntimeFallback(FakeAgyBase):
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "bin" / "claude").write_text(f"#!/bin/sh\necho claude >> '{self.tmp}/claude.log'\necho claude-ok\n")
+        (self.tmp / "bin" / "claude").chmod(0o755)
+        quota = {"windows": [{"kind": "five_hour", "remaining_percent": 95.0},
+                             {"kind": "weekly", "remaining_percent": 95.0}]}
+        self.agy_state = self.tmp / "agy.json"
+        self.claude_state = self.tmp / "claude.json"
+        for f in (self.agy_state, self.claude_state):
+            f.write_text(json.dumps(quota))
+        self.cenv = mock.patch.dict(os.environ, {
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state), "CLAUDE_QUOTA_STATE_FILE": str(self.claude_state),
+            "DISPATCH_CONFIG_FILE": str(self.tmp / "none.env")})
+        self.cenv.start()
+
+    def tearDown(self):
+        self.cenv.stop()
+        super().tearDown()
+
+    def _cli(self):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--priority", "agy > claude", "--no-verify", "--timeout", "60",
+             "--cwd", str(self.repo), "--task", "x"], capture_output=True, text=True, timeout=120)
+
+    def _claude_calls(self):
+        f = self.tmp / "claude.log"
+        return f.read_text().splitlines() if f.exists() else []
+
+    def test_two_stalls_without_changes_resume_once_then_fall_back(self):
+        stall = [INIT, ["sleep", 30]]
+        self._plan(stall, stall, stall)
+        proc = self._cli()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(len(self._calls()), 2)
+        self.assertEqual(self._claude_calls(), ["claude"])
+        kinds = [e["event"] for e in self._events()]
+        self.assertLess(kinds.index("resume"), kinds.index("fallback"))
+
+    def test_two_stalls_that_left_changes_refuse_the_fallback(self):
+        stall = [INIT, ["write", "half.txt", "x"], ["sleep", 30]]
+        self._plan(stall, stall, stall)
+        proc = self._cli()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self._claude_calls(), [])
+        self.assertIn("refusing fallback", proc.stderr)
 
 
 if __name__ == "__main__":

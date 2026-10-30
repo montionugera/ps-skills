@@ -21,8 +21,11 @@ Exit Codes:
 
 Agy runs stream (`--output-format stream-json`): the final `response` is the job's output, the conversation id is
 saved in the job state as soon as agy reports it, and the job log gets a throttled one-line heartbeat.
-  DISPATCH_AGY_IDLE_SECONDS  kill an agy run that emits no event for this long (default 600; 0 disables).
-                             --timeout stays the hard wall-clock cap.
+  DISPATCH_AGY_IDLE_SECONDS  kill an agy run that emits no event for this long (default 1200; 0 disables). When
+                             the limit expires and the folder's files changed since the last check, the timer
+                             resets instead; a silent step over the limit that changes no files is killed.
+                             --timeout stays the hard wall-clock cap. The resume gets min(max(900, timeout/2),
+                             timeout) seconds, so a job waits at most 2x --timeout in total.
   DISPATCH_AGY_RESUME        0 disables the single automatic resume (`agy --conversation <id>`) after an idle or
                              wall-clock kill. A resumed job reports RESUMED_UNVERIFIED (exit 0) unless its verify
                              command passed, in which case SUCCESS with resumed: true.
@@ -31,6 +34,7 @@ whose folder was also used by another job, where the count cannot be attributed.
 """
 
 import argparse
+import collections
 import contextlib
 import concurrent.futures
 from contextlib import nullcontext
@@ -42,6 +46,7 @@ import pty
 import select
 import shutil
 import signal
+import stat
 import statistics
 import subprocess
 import sys
@@ -89,7 +94,9 @@ VERIFY_TAIL_LINES = 40
 STALL_SECONDS = 300  # --status flags a RUNNING job STALLED? after this long without log output
 # Resumed (after an idle/wall-clock kill) and exited 0 without a passing verify: finished, but not proven.
 RESUMED_UNVERIFIED_STATUS = "RESUMED_UNVERIFIED"
-DEFAULT_AGY_IDLE_SECONDS = 600  # override: DISPATCH_AGY_IDLE_SECONDS (0 disables)
+DEFAULT_AGY_IDLE_SECONDS = 1200  # override: DISPATCH_AGY_IDLE_SECONDS (0 disables)
+STREAM_NOTE_LINES = 5  # agy non-result events kept as evidence for a run that never reports a result
+STREAM_NOTE_CHARS = 300
 HEARTBEAT_SECONDS = 30  # at most one agy progress line in the job log per this many seconds
 RESUME_MIN_BUDGET_SECONDS = 900
 
@@ -639,26 +646,38 @@ def git_status_entries(target_dir):
     return {line for line in proc.stdout.splitlines() if line.strip()}
 
 
-def _file_digest(target_dir, path):
-    """Content digest of a working-tree file, or None when it is missing or unreadable."""
+def _stat_signature(target_dir, path):
+    """(size, mtime_ns) of a regular file; a marker for non-regular or unstat-able paths. Never reads file content."""
     try:
-        with open(os.path.join(target_dir, path), "rb") as fh:
-            return hashlib.sha1(fh.read()).hexdigest()
+        st = os.lstat(os.path.join(target_dir, path))
     except OSError:
-        return None
-
-
-def _status_path(line):
-    path = line[3:]
-    return path.split(" -> ", 1)[1] if " -> " in path else path
+        return ("missing",)
+    if not stat.S_ISREG(st.st_mode):
+        return ("non-regular",)
+    return (st.st_size, st.st_mtime_ns)
 
 
 def git_baseline(target_dir):
-    """{path: content digest} of everything git status shows now, or None when git status is unavailable."""
-    entries = git_status_entries(target_dir)
-    if entries is None:
+    """{path: stat signature} of everything `git status -z` shows now, or None when git status is unavailable."""
+    try:
+        proc = subprocess.run(["git", "status", "--porcelain", "-z", "--untracked-files=all"],
+                              cwd=target_dir, capture_output=True, text=True, errors="replace", timeout=10)
+    except Exception:
         return None
-    return {p: _file_digest(target_dir, p) for p in (_status_path(l) for l in entries)}
+    if proc.returncode != 0:
+        return None
+    fields = proc.stdout.split("\0")
+    paths = []
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        paths.append(entry[3:])
+        if entry[0] in "RC":
+            i += 1  # the rename/copy source follows as its own field
+    return {p: _stat_signature(target_dir, p) for p in paths}
 
 
 def changes_left_behind(target_dir, before, ignore_path=None):
@@ -803,7 +822,8 @@ def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_t
 def inspect_git_changes(target_dir, initial_head=None, baseline=None):
     """
     Inspects target_dir for commits, modified files, and untracked files relative to initial_head.
-    With `baseline` (git_baseline() taken before the job), paths already dirty then and unchanged since are not counted.
+    With `baseline` (git_baseline() taken before the job), paths already dirty then and unchanged since are not counted
+    (an empty baseline is valid: a clean tree).
     Returns: (files_changed, diff_summary, commit_count)
     """
     commit_count = 0
@@ -833,7 +853,7 @@ def inspect_git_changes(target_dir, initial_head=None, baseline=None):
     else:
         diff_summary = stat_summary
 
-    diff_name_args = ["git", "diff", "--name-only", initial_head] if initial_head else ["git", "diff", "--name-only"]
+    diff_name_args = ["git", "diff", "--name-only", "-z", initial_head] if initial_head else ["git", "diff", "--name-only", "-z"]
     files_changed_res = subprocess.run(
         diff_name_args,
         cwd=target_dir,
@@ -842,15 +862,15 @@ def inspect_git_changes(target_dir, initial_head=None, baseline=None):
     ).stdout.strip()
 
     untracked_res = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         cwd=target_dir,
         capture_output=True,
         text=True,
     ).stdout.strip()
 
-    all_changed = set([f for f in files_changed_res.splitlines() if f] + [f for f in untracked_res.splitlines() if f])
-    if baseline:
-        all_changed = {f for f in all_changed if f not in baseline or _file_digest(target_dir, f) != baseline[f]}
+    all_changed = set([f for f in files_changed_res.split("\0") if f] + [f for f in untracked_res.split("\0") if f])
+    if baseline is not None:
+        all_changed = {f for f in all_changed if f not in baseline or _stat_signature(target_dir, f) != baseline[f]}
     files_changed = len(all_changed)
 
     return files_changed, diff_summary, commit_count
@@ -907,20 +927,27 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
         kind = rec.get("event")
         payload = rec.get(kind) if isinstance(rec.get(kind), dict) else {}
         cid = payload.get("conversation_id") or rec.get("conversation_id")
-        if cid and not stream_state.get("conversation_id"):
+        if isinstance(cid, str) and cid and not stream_state.get("conversation_id"):
             stream_state["conversation_id"] = cid
             _log(f"[agy] conversation_id={cid}\n")
             if on_conversation_id:
                 try:
                     on_conversation_id(cid)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[dispatch-worker] warning: could not persist conversation_id: {e}", file=sys.stderr)
         if kind == "result":
             stream_state["result"] = payload
             _log(f"[agy] result status={payload.get('status')} turns={payload.get('num_turns')}\n")
-        elif kind == "step_update" and time.monotonic() - last_beat[0] >= HEARTBEAT_SECONDS:
-            last_beat[0] = time.monotonic()
-            _log(f"[agy] step {payload.get('step_index')} {payload.get('step_type')} state={payload.get('state')}\n")
+            return
+        if kind == "step_update":
+            stream_state["last_step"] = f"step {payload.get('step_index')} {payload.get('step_type')} state={payload.get('state')}"
+            if time.monotonic() - last_beat[0] >= HEARTBEAT_SECONDS:
+                last_beat[0] = time.monotonic()
+                _log(f"[agy] {stream_state['last_step']}\n")
+        if kind not in ("init", "step_update") or "error" in payload:
+            # Anything else (errors, warnings): keep a bounded tail so a killed run still says something.
+            stream_state.setdefault("notes", collections.deque(maxlen=STREAM_NOTE_LINES)).append(
+                json.dumps(rec, default=str)[:STREAM_NOTE_CHARS])
 
     def _pump(pipe, key):
         # One reader per pipe so neither can fill up and deadlock the worker.
@@ -929,7 +956,7 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
                 stream_state["last_event"] = time.monotonic()
                 try:
                     rec = json.loads(line)
-                except ValueError:
+                except (ValueError, RecursionError):
                     rec = None
                 if isinstance(rec, dict) and isinstance(rec.get("event"), str):
                     _stream_event(rec)
@@ -949,12 +976,19 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
         else:
             # Hard wall-clock cap plus a no-activity limit: whichever trips first kills the worker.
             deadline = time.monotonic() + timeout_seconds
+            last_files = git_baseline(target_dir)  # folder state at the previous idle check
             while True:
                 now = time.monotonic()
                 if now >= deadline:
                     stream_state["timeout_kind"] = "wall"
                     raise subprocess.TimeoutExpired(cmd, timeout_seconds)
                 if now - stream_state["last_event"] >= idle_seconds:
+                    # Quiet is not stuck: a long tool step emits nothing but may still be editing files.
+                    files_now = git_baseline(target_dir)
+                    if files_now is not None and last_files is not None and files_now != last_files:
+                        last_files = files_now
+                        stream_state["last_event"] = time.monotonic()
+                        continue
                     stream_state["timeout_kind"] = "idle"
                     raise subprocess.TimeoutExpired(cmd, idle_seconds)
                 try:
@@ -990,9 +1024,21 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
         with log_lock:
             log_fh.close()
     out, err = "".join(chunks["out"]), "".join(chunks["err"])
-    if stream_state is not None and isinstance(stream_state.get("result"), dict):
-        response = stream_state["result"].get("response")
-        out = response if isinstance(response, str) else out
+    if stream_state is not None:
+        result = stream_state.get("result")
+        if isinstance(result, dict):
+            response = result.get("response")
+            if response is not None and not isinstance(response, str):
+                stream_state["bad_response"] = True
+                response = json.dumps(response, default=str)
+            out = response if response is not None else out
+            if is_timeout and result.get("status") == "SUCCESS":
+                # The run finished and only lingered: the kill ended a finished run, it did not time one out.
+                return 0, out.strip(), err.strip(), False
+        else:
+            evidence = [f"[agy] no result event; last {stream_state['last_step']}"] if stream_state.get("last_step") else []
+            evidence += list(stream_state.get("notes", []))
+            out = "\n".join(filter(None, [out.strip()] + evidence))
     if not is_timeout:
         return proc.returncode, out.strip(), err.strip(), False
     if stream_state is not None and stream_state.get("timeout_kind") == "idle":
@@ -1330,6 +1376,8 @@ def format_report(agent, status, exit_code, cwd, files_changed, diff_summary, ta
     if context_count > 0:
         lines.append(f"Context: {context_count} document(s) referenced")
     shared_note = " [shared folder: count not attributable to this job]" if (verify_info or {}).get("files_changed_shared") else ""
+    if (verify_info or {}).get("baseline_unavailable"):
+        shared_note += " [count not baseline-adjusted: git status failed at start]"
     lines.append(f"Files Modified: {files_changed} ({diff_summary}){shared_note}")
     lines.append(format_verified_line(verify_info))
     if (verify_info or {}).get("resumed"):
@@ -1392,13 +1440,32 @@ def get_job_path(job_id, job_dir=DEFAULT_JOB_DIR):
     return Path(job_dir) / f"{job_id}.json"
 
 
+def _atomic_write_json(path, data):
+    """Writes through a uniquely named temp file, so concurrent writers never share or corrupt it."""
+    temp_p = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{os.urandom(3).hex()}.tmp")
+    try:
+        with open(temp_p, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        temp_p.replace(path)
+    finally:
+        temp_p.unlink(missing_ok=True)
+
+
+def conversation_sidecar_path(job_id, job_dir=DEFAULT_JOB_DIR):
+    return Path(job_dir) / f"{job_id}.conversation"
+
+
+def save_conversation_id(job_id, cid, job_dir=DEFAULT_JOB_DIR):
+    """Records a job's agy conversation id in its own small file: the reader thread never rewrites the job JSON."""
+    p = conversation_sidecar_path(job_id, job_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(p, {"conversation_id": cid})
+
+
 def save_job_state(job_id, state, job_dir=DEFAULT_JOB_DIR):
     p = get_job_path(job_id, job_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    temp_p = p.with_suffix(".tmp")
-    with open(temp_p, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-    temp_p.replace(p)
+    _atomic_write_json(p, state)
 
 
 def load_job_state(job_id, job_dir=DEFAULT_JOB_DIR):
@@ -1407,7 +1474,15 @@ def load_job_state(job_id, job_dir=DEFAULT_JOB_DIR):
         return None
     try:
         with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+            state = json.load(f)
+        if isinstance(state, dict):
+            try:
+                cid = json.loads(conversation_sidecar_path(job_id, job_dir).read_text(encoding="utf-8")).get("conversation_id")
+            except (OSError, ValueError, AttributeError):
+                cid = None
+            if cid and not state.get("conversation_id"):
+                state["conversation_id"] = cid
+        return state
     except Exception:
         return None
 
@@ -1428,12 +1503,9 @@ def list_all_jobs(job_dir=DEFAULT_JOB_DIR):
         return []
     jobs = []
     for jf in sorted(p.glob("*.json")):
-        try:
-            with open(jf, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                jobs.append(data)
-        except Exception:
-            pass
+        data = load_job_state(jf.stem, job_dir)
+        if data is not None:
+            jobs.append(data)
     return jobs
 
 
@@ -1500,8 +1572,13 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, ou
 def derive_status(exit_code, files_changed, verify_info=None):
     if exit_code == 0:
         # A resumed run lost its first turn's prompt once already: exit 0 alone does not prove it did the task.
-        if verify_info is not None and verify_info.get("resumed") and verify_info.get("verified") is not True:
+        resumed_unproven = (verify_info is not None and verify_info.get("resumed")
+                            and verify_info.get("verified") is not True)
+        if resumed_unproven and (files_changed > 0 or verify_info.get("is_thinking") or verify_info.get("has_artifact")
+                                 or not verify_info.get("in_git_repo", True)):
             return RESUMED_UNVERIFIED_STATUS
+        if resumed_unproven:
+            return NO_CHANGES_UNVERIFIED_STATUS
         # Read-only work stays SUCCESS when it is a thinking-mode task or wrote a non-empty --output-file.
         # Outside a git repo changed files cannot be counted, so "0 files" is not evidence either way.
         if (verify_info is not None and files_changed == 0 and verify_info.get("verified", "skipped") == "skipped"
@@ -1598,6 +1675,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         text=True,
     ).stdout.strip()
     info["in_git_repo"] = bool(initial_head)
+    info["baseline_unavailable"] = bool(initial_head) and baseline is None
 
     def _artifact_signature():
         try:
@@ -1619,8 +1697,11 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         """One worker process. An agy stream run is judged by its result event, not by its exit code alone."""
         stream = {} if "stream-json" in cmd else None
         if stream is None:
-            return execute_worker_process(cmd, target_dir, timeout_seconds=budget, agent_name=chosen_agent,
-                                          log_path=log_path), None
+            result = execute_worker_process(cmd, target_dir, timeout_seconds=budget, agent_name=chosen_agent,
+                                            log_path=log_path)
+            if result[3]:
+                emit_event("timeout", run_id=run_id, agent=chosen_agent, model=chosen_model, timeout=budget)
+            return result, None
         code, out, err, timed_out = execute_worker_process(
             cmd, target_dir, timeout_seconds=budget, agent_name=chosen_agent, log_path=log_path,
             stream_state=stream, idle_seconds=agy_idle_seconds(), on_conversation_id=_note_conversation)
@@ -1633,7 +1714,9 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
                 emit_event("timeout", run_id=run_id, agent=chosen_agent, model=chosen_model, timeout=budget)
         elif code == 0:
             result = stream.get("result")
-            if result is None:
+            if stream.get("bad_response"):
+                code, err = 1, f"{err}\nFAILED: {chosen_agent} result response was not a string.".strip()
+            elif result is None:
                 code, err = 1, f"{err}\nFAILED: {chosen_agent} exited 0 without a result event.".strip()
             elif result.get("status") != "SUCCESS":
                 code, err = 1, f"{err}\nFAILED: {chosen_agent} result status {result.get('status')}.".strip()
@@ -1652,8 +1735,6 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=output_file, effort=resolved_effort)
         result, stream = _run_agent(cmd, timeout_seconds)
         if stream is None:
-            if result[3]:
-                emit_event("timeout", run_id=run_id, agent=chosen_agent, model=chosen_model, timeout=timeout_seconds)
             return result
         cid = stream.get("conversation_id")
         if not (result[3] and cid and not resume_used and os.environ.get("DISPATCH_AGY_RESUME", "1") != "0"):
@@ -1661,7 +1742,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         # One automatic resume per job, however many times the worker is re-invoked (verify retry included).
         resume_used.append(cid)
         info["resumed"] = True
-        budget = max(RESUME_MIN_BUDGET_SECONDS, timeout_seconds / 2)
+        budget = min(max(RESUME_MIN_BUDGET_SECONDS, timeout_seconds / 2), timeout_seconds)
         emit_event("resume", run_id=run_id, agent=chosen_agent, model=chosen_model, conversation_id=cid,
                    reason=info.get("timeout_kind"), budget=budget)
         if log_path:
@@ -1672,7 +1753,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
                 pass
         resume_cmd = build_agent_command(chosen_agent, chosen_model, build_resume_prompt(wrapped_task), target_dir,
                                          output_file=output_file, effort=resolved_effort, conversation_id=cid)
-        (code, out, err, timed_out), _stream2 = _run_agent(resume_cmd, budget)
+        (code, out, err, timed_out), _ = _run_agent(resume_cmd, budget)
         if timed_out:
             err = f"{err}\nFAILED: stalled again after resume; not resuming twice.".strip()
         elif code == 0 and ends_with_question(out):
@@ -2029,8 +2110,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     shared = bool(not isolated and sharing_jobs(job_id, cwd, float("inf"), job_dir))
 
     def _save_conversation(cid):
-        state["conversation_id"] = cid
-        save_job_state(job_id, state, job_dir)
+        save_conversation_id(job_id, cid, job_dir)
 
     def _execute(target_dir):
         return run_single_task(
@@ -2058,6 +2138,7 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     state["resumed"] = bool(verify_info.get("resumed"))
     state["conversation_id"] = verify_info.get("conversation_id") or state.get("conversation_id")
     state["files_changed_shared"] = shared
+    state["baseline_unavailable"] = bool(verify_info.get("baseline_unavailable"))
     state["verified"] = verify_info.get("verified", "skipped")
     state["verify_cmd"] = verify_info.get("verify_cmd")
     state["verify_output"] = verify_info.get("verify_output", "")
@@ -2211,7 +2292,9 @@ def main():
     parser.add_argument("--min-5h", type=float, default=DEFAULT_MIN_5H, help="Minimum 5h quota remaining percent")
     parser.add_argument("--min-weekly", type=float, default=DEFAULT_MIN_WEEKLY, help="Minimum weekly quota remaining percent")
     parser.add_argument("--timeout", type=int, default=None,
-                        help=f"Timeout in seconds for execution (default: {default_timeout}s)")
+                        help=f"Timeout in seconds for execution (default: {default_timeout}s). An agy run killed for idling or "
+                             f"timing out is resumed once with min(max(900, timeout/2), timeout) seconds, so the job "
+                             f"waits at most 2x this value")
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
