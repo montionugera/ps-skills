@@ -2507,9 +2507,10 @@ class TestAgyIdleAndResume(FakeAgyBase):
                 self._plan([INIT, ["sleep", 30]])
                 readings = itertools.chain([None, first], ({"seen": n} if first is None else None for n in itertools.count(1)))
                 with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}), \
-                        mock.patch.object(dispatch_mod, "git_baseline", side_effect=lambda _d: next(readings)):
+                        mock.patch.object(dispatch_mod, "git_baseline", side_effect=lambda _d: next(readings)) as git:
                     (code, _o, _e, _f, _d), info = self._run(timeout=12)
                 self.assertEqual((code, info["timeout_kind"]), (124, "idle"))
+                self.assertEqual(git.call_count, 3)  # job baseline, watcher start, the one idle check: no timer reset
 
     def test_killed_run_reports_its_last_step_and_error_events(self):
         step = ["event", {"event": "step_update", "step_update": {"conversation_id": "c-1", "step_index": 7,
