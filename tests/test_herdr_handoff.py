@@ -37,19 +37,33 @@ class HerdrHandoffTest(unittest.TestCase):
         self.doc = d / "handoff-2026-10-19-test.md"
         self.doc.write_text("# Handoff\n## 1. Main Context\n")
 
-    def run_script(self, *args, status="working", timeout=2):
+    def run_script(self, *args, status="working", timeout=2, extra_env=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
         env.update({
             "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}", "FAKE_LOG": str(self.log),
             "FAKE_STATUS": status, "HERDR_TAB_ID": "t1", "T3CODE_HOME": self.tmp.name,
             "HERDR_HANDOFF_CONFIRM_TIMEOUT": str(timeout),
         })
+        env.update(extra_env or {})
         r = subprocess.run(
             ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "plan", "--multiplexer", "herdr",
              "--cwd", self.tmp.name, *args],
             capture_output=True, text=True, env=env, timeout=60,
         )
         return r
+
+    def tab_create_line(self):
+        return next(l for l in self.log.read_text().splitlines() if l.startswith("tab create"))
+
+    def test_new_tab_is_pinned_to_the_callers_workspace(self):
+        r = self.run_script("--running", "1", extra_env={"HERDR_WORKSPACE_ID": "w7"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--workspace w7", self.tab_create_line())
+
+    def test_new_tab_omits_workspace_when_not_inside_herdr(self):
+        r = self.run_script("--running", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("--workspace", self.tab_create_line())
 
     def test_running_agents_keep_the_tab_open_and_never_say_safe(self):
         r = self.run_script("--running", "2")

@@ -32,6 +32,7 @@ from lib.main_sync import (
 )
 from lib.release_freeze import ReleaseFrozenError, frozen_error, frozen_since
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
+from lib.shipped_unmerged import unmerged_commits, unmerged_warning
 from lib.slug import slugify
 from lib.state import file_lock, mutate_state
 from lib.worktree_gc import removable
@@ -219,6 +220,14 @@ def ship_current_work(
                 f"{msg}.\nResolve by hand: cd {rel_wt} && git merge {main_ref}   "
                 f"# resolve, commit, then re-run the psrw command")
         raise GateFailedError(msg)
+
+    # Feature already catalogued shipped (a re-ship): warn, never block, if its
+    # branch still carries commits the release lacks (the F-138 failure mode).
+    prior = find_entry(get_backlog_catalog_path(repo, "refined"), feature_id)
+    if prior and prior.get("status") == "shipped":
+        n = unmerged_commits(rel_wt, release_version, feature_id)
+        if n:
+            print(f"⚠️ {unmerged_warning(feature_id, release_version, n)}", file=sys.stderr)
 
     # Run Gate 1 from the FEATURE worktree — it verifies the code being shipped
     # (audit A5: resolving from `repo` ran the main checkout's precheck against
