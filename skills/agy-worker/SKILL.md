@@ -169,7 +169,7 @@ The default `--timeout` is 900s. That fits a read-only check or a small edit; it
 - **Stall detection**: `dispatch-worker --status` shows `last output Ns ago` for RUNNING jobs and marks `STALLED?` after 300s of silence. Check `--tail` before killing it.
 - **Stats**: `dispatch-worker --stats [DAYS]` (default 7) prints runs, success %, timeouts, fallbacks, verify failures and median duration per agent.
 - **Recovery**: a run pinned with `--agent agy` is never retried on another agent, and a quota observation older than 60 minutes counts as not eligible.
-- **Stale quota reading**: when the `FALLBACK_INTERNAL` message contains `[stale: observation`, the reading is old, not low. The reading is rewritten by an interactive agy session's status line, so if `herdr agent list` shows a live `agy` pane, re-run the same dispatch once. If it is still stale, take the Sonnet fallback and say in your report that the cause was a stale reading, not low quota.
+- **Stale quota reading**: only an interactive agy session's status line rewrites the reading (`agy -p` does not), so when it is over 60 minutes old `dispatch-worker` starts an idle agy on a pseudo-terminal, sends no prompt, spends no quota, and rereads it (about 3s, 20s limit). A `FALLBACK_INTERNAL` message that still contains `[stale: observation` means that refresh failed: the reading is old, not low. Follow the refresh hint in the message, re-run the same dispatch once, and if it is still stale take the Sonnet fallback and say in your report that the cause was a stale reading, not low quota.
 - **Detached jobs do not get the runtime fallback**: a `--detach` job runs only the agent it was routed to; if it fails, re-dispatch it yourself.
 
 ### Exit Codes Contract

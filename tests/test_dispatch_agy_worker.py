@@ -206,6 +206,98 @@ class TestWindowRollover(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertNotIn("stale", msg)
 
+    def _check_as_live_observation(self, refresh):
+        with mock.patch.object(dispatch_mod, "DEFAULT_AGY_STATE", str(self.state_file)), \
+                mock.patch.object(dispatch_mod, "refresh_agy_observation", refresh):
+            return dispatch_mod.check_quota("agy", str(self.state_file), min_5h=30.0, min_weekly=10.0)
+
+    def test_stale_live_observation_is_refreshed_before_deciding(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+
+        def refresh(path):
+            self._write_healthy_state(0, time.time())
+            return True, "refreshed"
+
+        eligible, _r5, _rw, msg = self._check_as_live_observation(refresh)
+        self.assertTrue(eligible)
+        self.assertNotIn("stale", msg)
+
+    def test_failed_refresh_fails_closed_and_names_the_refresh_command(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+        eligible, _r5, _rw, msg = self._check_as_live_observation(mock.Mock(return_value=(False, "boom")))
+        self.assertFalse(eligible)
+        self.assertIn("[stale: observation", msg)
+        self.assertIn("boom", msg)
+        self.assertIn("run `agy`", msg)
+
+    def test_refresh_that_leaves_the_file_stale_still_fails_closed(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+        eligible, _r5, _rw, msg = self._check_as_live_observation(mock.Mock(return_value=(True, "refreshed")))
+        self.assertFalse(eligible)
+        self.assertIn("stale", msg)
+
+    def test_fresh_live_observation_is_not_refreshed(self):
+        self._write_healthy_state(1, time.time())
+        refresh = mock.Mock()
+        eligible, _r5, _rw, _msg = self._check_as_live_observation(refresh)
+        self.assertTrue(eligible)
+        refresh.assert_not_called()
+
+    def test_non_live_state_file_is_never_refreshed(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+        with mock.patch.object(dispatch_mod, "refresh_agy_observation") as refresh:
+            eligible, _r5, _rw, _msg = dispatch_mod.check_quota("agy", str(self.state_file))
+        self.assertFalse(eligible)
+        refresh.assert_not_called()
+
+
+class TestAgyObservationRefresh(unittest.TestCase):
+    """Runs refresh_agy_observation against a fake agy, never the real one."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_file = Path(self.temp_dir.name) / "observation.json"
+        self.state_file.write_text("{}", encoding="utf-8")
+        old = time.time() - 7200
+        os.utime(self.state_file, (old, old))
+        self.pid_file = Path(self.temp_dir.name) / "agy.pid"
+        self.fake_agy = Path(self.temp_dir.name) / "agy"
+
+    def _install_fake_agy(self, body):
+        self.fake_agy.write_text(f"#!/bin/sh\necho $$ > '{self.pid_file}'\n{body}\n", encoding="utf-8")
+        self.fake_agy.chmod(0o755)
+        patcher = mock.patch.dict(os.environ, {"PATH": f"{self.temp_dir.name}:{os.environ['PATH']}"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _assert_fake_agy_is_gone(self):
+        pid = int(self.pid_file.read_text().strip())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_succeeds_once_the_statusline_rewrites_the_file_and_stops_agy(self):
+        self._install_fake_agy(f"sleep 1\ntouch '{self.state_file}'\nexec sleep 60")
+        started = time.monotonic()
+        refreshed, _detail = dispatch_mod.refresh_agy_observation(str(self.state_file), timeout=10)
+        self.assertTrue(refreshed)
+        self.assertLess(time.monotonic() - started, 6)
+        self._assert_fake_agy_is_gone()
+
+    def test_gives_up_at_the_timeout_and_stops_agy(self):
+        self._install_fake_agy("exec sleep 60")
+        refreshed, detail = dispatch_mod.refresh_agy_observation(str(self.state_file), timeout=3)
+        self.assertFalse(refreshed)
+        self.assertIn("within 3s", detail)
+        self._assert_fake_agy_is_gone()
+
+    def test_agy_that_exits_early_is_reported_not_waited_on(self):
+        self._install_fake_agy("exit 3")
+        started = time.monotonic()
+        refreshed, _detail = dispatch_mod.refresh_agy_observation(str(self.state_file), timeout=10)
+        self.assertFalse(refreshed)
+        self.assertLess(time.monotonic() - started, 5)
+
 
 @codex_enabled()
 class TestBestRunwayAutoRouting(unittest.TestCase):
