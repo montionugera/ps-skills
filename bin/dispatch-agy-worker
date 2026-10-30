@@ -18,6 +18,16 @@ Exit Codes:
   2: Invalid arguments / missing required task prompt / a disabled agent was named
   12: deep-design-v1 thinker unavailable (Claude Opus 5.5 / Gemini 4 Argon) or forbidden model
   13: Worker exited 0 but the verify command failed (twice); nothing was merged
+
+Agy runs stream (`--output-format stream-json`): the final `response` is the job's output, the conversation id is
+saved in the job state as soon as agy reports it, and the job log gets a throttled one-line heartbeat.
+  DISPATCH_AGY_IDLE_SECONDS  kill an agy run that emits no event for this long (default 600; 0 disables).
+                             --timeout stays the hard wall-clock cap.
+  DISPATCH_AGY_RESUME        0 disables the single automatic resume (`agy --conversation <id>`) after an idle or
+                             wall-clock kill. A resumed job reports RESUMED_UNVERIFIED (exit 0) unless its verify
+                             command passed, in which case SUCCESS with resumed: true.
+`files_changed` counts only paths new or changed since the job started; files_changed_shared marks a detached job
+whose folder was also used by another job, where the count cannot be attributed.
 """
 
 import argparse
@@ -77,6 +87,11 @@ WAIT_STILL_RUNNING_EXIT_CODE = 75
 WAIT_ORPHAN_GRACE_SECONDS = 60
 VERIFY_TAIL_LINES = 40
 STALL_SECONDS = 300  # --status flags a RUNNING job STALLED? after this long without log output
+# Resumed (after an idle/wall-clock kill) and exited 0 without a passing verify: finished, but not proven.
+RESUMED_UNVERIFIED_STATUS = "RESUMED_UNVERIFIED"
+DEFAULT_AGY_IDLE_SECONDS = 600  # override: DISPATCH_AGY_IDLE_SECONDS (0 disables)
+HEARTBEAT_SECONDS = 30  # at most one agy progress line in the job log per this many seconds
+RESUME_MIN_BUDGET_SECONDS = 900
 
 PROTECTED_CONFIG_PATTERNS = [
     ".release.json",
@@ -624,6 +639,28 @@ def git_status_entries(target_dir):
     return {line for line in proc.stdout.splitlines() if line.strip()}
 
 
+def _file_digest(target_dir, path):
+    """Content digest of a working-tree file, or None when it is missing or unreadable."""
+    try:
+        with open(os.path.join(target_dir, path), "rb") as fh:
+            return hashlib.sha1(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def _status_path(line):
+    path = line[3:]
+    return path.split(" -> ", 1)[1] if " -> " in path else path
+
+
+def git_baseline(target_dir):
+    """{path: content digest} of everything git status shows now, or None when git status is unavailable."""
+    entries = git_status_entries(target_dir)
+    if entries is None:
+        return None
+    return {p: _file_digest(target_dir, p) for p in (_status_path(l) for l in entries)}
+
+
 def changes_left_behind(target_dir, before, ignore_path=None):
     """Paths whose git status changed since `before`, minus `ignore_path`. None if status can't be compared."""
     after = git_status_entries(target_dir)
@@ -763,9 +800,10 @@ def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_t
     return f"{contract_header}{context_section}{output_section}{acceptance_section}\nTask Brief:\n{task_prompt.strip()}"
 
 
-def inspect_git_changes(target_dir, initial_head=None):
+def inspect_git_changes(target_dir, initial_head=None, baseline=None):
     """
     Inspects target_dir for commits, modified files, and untracked files relative to initial_head.
+    With `baseline` (git_baseline() taken before the job), paths already dirty then and unchanged since are not counted.
     Returns: (files_changed, diff_summary, commit_count)
     """
     commit_count = 0
@@ -811,17 +849,22 @@ def inspect_git_changes(target_dir, initial_head=None):
     ).stdout.strip()
 
     all_changed = set([f for f in files_changed_res.splitlines() if f] + [f for f in untracked_res.splitlines() if f])
+    if baseline:
+        all_changed = {f for f in all_changed if f not in baseline or _file_digest(target_dir, f) != baseline[f]}
     files_changed = len(all_changed)
 
     return files_changed, diff_summary, commit_count
 
 
-def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker", log_path=None):
+def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker", log_path=None,
+                           stream_state=None, idle_seconds=None, on_conversation_id=None):
     """
     Executes worker subprocess in target_dir with timeout.
     Returns: (exit_code, stdout, stderr, is_timeout)
     The worker gets its own process group so a timeout kills the whole tree, and partial output is kept.
     With log_path, stdout/stderr lines are also appended to that file as they arrive (live --tail / --status).
+    stream_kw (agy stream-json runs): stream_state (dict filled with conversation_id, result, timeout_kind),
+    idle_seconds (kill after this long without an event) and on_conversation_id (callback).
     """
     try:
         proc = subprocess.Popen(
@@ -846,18 +889,53 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
             log_fh = None
     log_lock = threading.Lock()
     chunks = {"out": [], "err": []}
+    if stream_state is not None:
+        stream_state["last_event"] = time.monotonic()
+    last_beat = [0.0]
+
+    def _log(line):
+        if log_fh:
+            with log_lock:
+                try:
+                    log_fh.write(line)
+                    log_fh.flush()
+                except (OSError, ValueError):
+                    pass
+
+    def _stream_event(rec):
+        """Handles one agy stream-json event: remembers the conversation id and result, logs a throttled heartbeat."""
+        kind = rec.get("event")
+        payload = rec.get(kind) if isinstance(rec.get(kind), dict) else {}
+        cid = payload.get("conversation_id") or rec.get("conversation_id")
+        if cid and not stream_state.get("conversation_id"):
+            stream_state["conversation_id"] = cid
+            _log(f"[agy] conversation_id={cid}\n")
+            if on_conversation_id:
+                try:
+                    on_conversation_id(cid)
+                except Exception:
+                    pass
+        if kind == "result":
+            stream_state["result"] = payload
+            _log(f"[agy] result status={payload.get('status')} turns={payload.get('num_turns')}\n")
+        elif kind == "step_update" and time.monotonic() - last_beat[0] >= HEARTBEAT_SECONDS:
+            last_beat[0] = time.monotonic()
+            _log(f"[agy] step {payload.get('step_index')} {payload.get('step_type')} state={payload.get('state')}\n")
 
     def _pump(pipe, key):
         # One reader per pipe so neither can fill up and deadlock the worker.
         for line in iter(pipe.readline, ""):
+            if stream_state is not None and key == "out":
+                stream_state["last_event"] = time.monotonic()
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    rec = None
+                if isinstance(rec, dict) and isinstance(rec.get("event"), str):
+                    _stream_event(rec)
+                    continue
             chunks[key].append(line)
-            if log_fh:
-                with log_lock:
-                    try:
-                        log_fh.write(line)
-                        log_fh.flush()
-                    except (OSError, ValueError):
-                        pass
+            _log(line)
 
     readers = [threading.Thread(target=_pump, args=(proc.stdout, "out"), daemon=True),
                threading.Thread(target=_pump, args=(proc.stderr, "err"), daemon=True)]
@@ -866,7 +944,24 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
 
     is_timeout = False
     try:
-        proc.wait(timeout=timeout_seconds)
+        if stream_state is None or not idle_seconds:
+            proc.wait(timeout=timeout_seconds)
+        else:
+            # Hard wall-clock cap plus a no-activity limit: whichever trips first kills the worker.
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                now = time.monotonic()
+                if now >= deadline:
+                    stream_state["timeout_kind"] = "wall"
+                    raise subprocess.TimeoutExpired(cmd, timeout_seconds)
+                if now - stream_state["last_event"] >= idle_seconds:
+                    stream_state["timeout_kind"] = "idle"
+                    raise subprocess.TimeoutExpired(cmd, idle_seconds)
+                try:
+                    proc.wait(timeout=max(0.01, min(0.25, deadline - now)))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
     except subprocess.TimeoutExpired:
         is_timeout = True
         try:
@@ -895,8 +990,15 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
         with log_lock:
             log_fh.close()
     out, err = "".join(chunks["out"]), "".join(chunks["err"])
+    if stream_state is not None and isinstance(stream_state.get("result"), dict):
+        response = stream_state["result"].get("response")
+        out = response if isinstance(response, str) else out
     if not is_timeout:
         return proc.returncode, out.strip(), err.strip(), False
+    if stream_state is not None and stream_state.get("timeout_kind") == "idle":
+        timeout_msg = f"FAILED: {agent_name} idle for {idle_seconds:g}s (no events); killed."
+        combined_err = f"{timeout_msg}\n{err}".strip() if err else timeout_msg
+        return 124, out.strip(), combined_err.strip(), True
     timeout_msg = f"FAILED: {agent_name} timed out after {timeout_seconds}s."
     combined_err = f"{timeout_msg}\n{err}".strip() if err else timeout_msg
     return 124, out.strip(), combined_err.strip(), True
@@ -1227,11 +1329,12 @@ def format_report(agent, status, exit_code, cwd, files_changed, diff_summary, ta
         lines.append(f"Artifact: {artifact}")
     if context_count > 0:
         lines.append(f"Context: {context_count} document(s) referenced")
-    lines.extend([
-        f"Files Modified: {files_changed} ({diff_summary})",
-        format_verified_line(verify_info),
-        "Last Output:",
-    ])
+    shared_note = " [shared folder: count not attributable to this job]" if (verify_info or {}).get("files_changed_shared") else ""
+    lines.append(f"Files Modified: {files_changed} ({diff_summary}){shared_note}")
+    lines.append(format_verified_line(verify_info))
+    if (verify_info or {}).get("resumed"):
+        lines.append("Resumed: true (killed once, continued with --conversation)")
+    lines.append("Last Output:")
     out_lines = [line for line in tail_output.splitlines() if line.strip()]
     if not out_lines:
         lines.append("(no output)")
@@ -1338,7 +1441,8 @@ CLAUDE_ALLOWED_TOOLS = "Read,Grep,Glob,Write,Edit"
 CLAUDE_DISALLOWED_TOOLS = "Bash,WebFetch,WebSearch"
 
 
-def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=None, effort=None):
+def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=None, effort=None,
+                        conversation_id=None):
     if chosen_agent in DISABLED_AGENTS:
         raise ValueError(f"{chosen_agent} is disabled")
     if chosen_agent == "codex":
@@ -1382,7 +1486,10 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, ou
         cmd.append(wrapped_task)
         return cmd
     else:  # agy
-        cmd = ["agy", "--add-dir", target_dir, "-p", wrapped_task, "--dangerously-skip-permissions"]
+        cmd = ["agy", "--add-dir", target_dir, "-p", wrapped_task, "--dangerously-skip-permissions",
+               "--output-format", "stream-json"]
+        if conversation_id:
+            cmd.extend(["--conversation", conversation_id])
         if chosen_model:
             cmd.extend(["--model", chosen_model])
         if effort:
@@ -1392,6 +1499,9 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, ou
 
 def derive_status(exit_code, files_changed, verify_info=None):
     if exit_code == 0:
+        # A resumed run lost its first turn's prompt once already: exit 0 alone does not prove it did the task.
+        if verify_info is not None and verify_info.get("resumed") and verify_info.get("verified") is not True:
+            return RESUMED_UNVERIFIED_STATUS
         # Read-only work stays SUCCESS when it is a thinking-mode task or wrote a non-empty --output-file.
         # Outside a git repo changed files cannot be counted, so "0 files" is not evidence either way.
         if (verify_info is not None and files_changed == 0 and verify_info.get("verified", "skipped") == "skipped"
@@ -1404,6 +1514,29 @@ def derive_status(exit_code, files_changed, verify_info=None):
     if exit_code == 124:
         return "TIMEOUT_PARTIAL_WORK" if files_changed > 0 else "TIMEOUT_NO_PROGRESS"
     return "FAILED_PARTIAL_WORK" if files_changed > 0 else "FAILED"
+
+
+def agy_idle_seconds():
+    """No-event limit for agy runs (DISPATCH_AGY_IDLE_SECONDS); None when disabled by 0 or a negative value."""
+    try:
+        val = float(os.environ.get("DISPATCH_AGY_IDLE_SECONDS", DEFAULT_AGY_IDLE_SECONDS))
+    except ValueError:
+        val = float(DEFAULT_AGY_IDLE_SECONDS)
+    return val if val > 0 else None
+
+
+def build_resume_prompt(wrapped_task):
+    """Prompt for `agy --conversation <id>`: the killed turn's prompt can be lost, so the whole task is repeated."""
+    return (
+        "NOTICE: your previous run on this task was killed before it finished. Inspect the existing work in the "
+        "working tree first, keep everything already finished (do not redo or rewrite it), do not ask questions, "
+        "and complete the rest of the task. Finish it fully. The full original task follows.\n\n"
+        f"{wrapped_task}"
+    )
+
+
+def ends_with_question(text):
+    return (text or "").rstrip().rstrip("\"'`*_)").endswith("?")
 
 
 def verify_event_fields(info):
@@ -1429,7 +1562,7 @@ def verify_opts_from(source):
 
 def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_seconds, context_files=None, output_file=None,
                     is_thinking=False, verify_opts=None, verify_info=None, effort=None, run_id=None, isolated=False,
-                    log_path=None):
+                    log_path=None, on_conversation_id=None):
     """
     Runs the worker, then (worker exit 0 only) the verify command inside target_dir. On verify failure the same
     worker is re-invoked exactly once with the failure output; a second failure returns VERIFY_FAILED_EXIT_CODE,
@@ -1449,6 +1582,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         "verify_attempts": 0, "verify_output": "", "worktree": target_dir,
         "has_acceptance": bool((opts.get("acceptance") or "").strip()),
         "is_thinking": bool(is_thinking), "has_artifact": False,
+        "resumed": False, "conversation_id": None, "timeout_kind": None,
     })
     if verify_source == "none":
         print(
@@ -1456,6 +1590,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
             file=sys.stderr,
         )
 
+    baseline = git_baseline(target_dir)
     initial_head = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=target_dir,
@@ -1473,6 +1608,37 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
 
     artifact_before = _artifact_signature()
 
+    resume_used = []
+
+    def _note_conversation(cid):
+        info["conversation_id"] = cid
+        if on_conversation_id:
+            on_conversation_id(cid)
+
+    def _run_agent(cmd, budget):
+        """One worker process. An agy stream run is judged by its result event, not by its exit code alone."""
+        stream = {} if "stream-json" in cmd else None
+        if stream is None:
+            return execute_worker_process(cmd, target_dir, timeout_seconds=budget, agent_name=chosen_agent,
+                                          log_path=log_path), None
+        code, out, err, timed_out = execute_worker_process(
+            cmd, target_dir, timeout_seconds=budget, agent_name=chosen_agent, log_path=log_path,
+            stream_state=stream, idle_seconds=agy_idle_seconds(), on_conversation_id=_note_conversation)
+        if timed_out:
+            info["timeout_kind"] = stream.get("timeout_kind", "wall")
+            if info["timeout_kind"] == "idle":
+                emit_event("idle_timeout", run_id=run_id, agent=chosen_agent, model=chosen_model,
+                           idle_seconds=agy_idle_seconds(), conversation_id=stream.get("conversation_id"))
+            else:
+                emit_event("timeout", run_id=run_id, agent=chosen_agent, model=chosen_model, timeout=budget)
+        elif code == 0:
+            result = stream.get("result")
+            if result is None:
+                code, err = 1, f"{err}\nFAILED: {chosen_agent} exited 0 without a result event.".strip()
+            elif result.get("status") != "SUCCESS":
+                code, err = 1, f"{err}\nFAILED: {chosen_agent} result status {result.get('status')}.".strip()
+        return (code, out, err, timed_out), stream
+
     def _invoke_worker(prompt_text):
         wrapped_task = wrap_prompt_contract(
             prompt_text,
@@ -1484,11 +1650,34 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
         )
         resolved_effort = resolve_agent_effort(chosen_agent, effort, is_thinking=is_thinking)
         cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=output_file, effort=resolved_effort)
-        result = execute_worker_process(cmd, target_dir, timeout_seconds=timeout_seconds, agent_name=chosen_agent,
-                                        log_path=log_path)
-        if result[3]:
-            emit_event("timeout", run_id=run_id, agent=chosen_agent, model=chosen_model, timeout=timeout_seconds)
-        return result
+        result, stream = _run_agent(cmd, timeout_seconds)
+        if stream is None:
+            if result[3]:
+                emit_event("timeout", run_id=run_id, agent=chosen_agent, model=chosen_model, timeout=timeout_seconds)
+            return result
+        cid = stream.get("conversation_id")
+        if not (result[3] and cid and not resume_used and os.environ.get("DISPATCH_AGY_RESUME", "1") != "0"):
+            return result
+        # One automatic resume per job, however many times the worker is re-invoked (verify retry included).
+        resume_used.append(cid)
+        info["resumed"] = True
+        budget = max(RESUME_MIN_BUDGET_SECONDS, timeout_seconds / 2)
+        emit_event("resume", run_id=run_id, agent=chosen_agent, model=chosen_model, conversation_id=cid,
+                   reason=info.get("timeout_kind"), budget=budget)
+        if log_path:
+            try:
+                with open(log_path, "a", encoding="utf-8") as log_fh:
+                    log_fh.write(f"[Resume] {info.get('timeout_kind')} stall; resuming conversation {cid}\n")
+            except OSError:
+                pass
+        resume_cmd = build_agent_command(chosen_agent, chosen_model, build_resume_prompt(wrapped_task), target_dir,
+                                         output_file=output_file, effort=resolved_effort, conversation_id=cid)
+        (code, out, err, timed_out), _stream2 = _run_agent(resume_cmd, budget)
+        if timed_out:
+            err = f"{err}\nFAILED: stalled again after resume; not resuming twice.".strip()
+        elif code == 0 and ends_with_question(out):
+            code, err = 1, f"{err}\nFAILED: resumed run ended by asking a question instead of finishing.".strip()
+        return code, out, err, timed_out
 
     def _own_exit(code):
         # VERIFY_FAILED_EXIT_CODE is reserved for the dispatcher's verdict, never the worker's own exit status.
@@ -1536,7 +1725,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
             emit_event("verify_failed", run_id=run_id, agent=chosen_agent, model=chosen_model, verify_cmd=verify_cmd,
                        attempts=info["verify_attempts"])
 
-    files_changed, diff_summary, commit_count = inspect_git_changes(target_dir, initial_head)
+    files_changed, diff_summary, commit_count = inspect_git_changes(target_dir, initial_head, baseline=baseline)
     artifact_after = _artifact_signature()
     # Only a file this run wrote counts: a non-empty output file that is new or changed since the start.
     info["has_artifact"] = bool(artifact_after and artifact_after[1] > 0 and artifact_after != artifact_before)
@@ -1643,8 +1832,8 @@ def format_batch_report(results):
         task_preview = r.get("task", "")[:28] + "..." if len(r.get("task", "")) > 28 else r.get("task", "")
         status_icon = "SUCCESS" if r.get("exit_code") == 0 else (
             "VERIFY_FAILED" if r.get("exit_code") == VERIFY_FAILED_EXIT_CODE else "FAILED")
-        if r.get("status") == NO_CHANGES_UNVERIFIED_STATUS:
-            status_icon = NO_CHANGES_UNVERIFIED_STATUS
+        if r.get("status") in (NO_CHANGES_UNVERIFIED_STATUS, RESUMED_UNVERIFIED_STATUS):
+            status_icon = r["status"]
         agent = r.get("agent", "worker").upper()
         fc = r.get("files_changed", 0)
         ds = r.get("diff_summary", "no diff")
@@ -1680,7 +1869,8 @@ def format_status_report(jobs):
         ds = j.get("diff_summary", "")
         created = j.get("created_at", 0)
         elapsed = int(time.time() - created) if created else 0
-        diff_str = f" | {fc} files ({ds})" if fc > 0 else ""
+        shared = " shared" if j.get("files_changed_shared") else ""
+        diff_str = f" | {fc} files{shared} ({ds})" if fc > 0 else ""
 
         tail_snippet = ""
         log_file = j.get("log_file")
@@ -1745,7 +1935,7 @@ def format_stats_report(events, days=7, now=None):
             r["ok"] += e.get("status") == "SUCCESS"
             if isinstance(e.get("duration_s"), (int, float)):
                 r["durations"].append(e["duration_s"])
-        elif kind == "timeout":
+        elif kind in ("timeout", "idle_timeout"):
             _row(e.get("agent"))["timeouts"] += 1
         elif kind == "verify_failed":
             _row(e.get("agent"))["verify_failed"] += 1
@@ -1836,13 +2026,18 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     started = time.time()
 
     verify_info = {}
+    shared = bool(not isolated and sharing_jobs(job_id, cwd, float("inf"), job_dir))
+
+    def _save_conversation(cid):
+        state["conversation_id"] = cid
+        save_job_state(job_id, state, job_dir)
 
     def _execute(target_dir):
         return run_single_task(
             task, target_dir, agent, model, timeout,
             context_files=context_files, output_file=output_file, is_thinking=is_thinking,
             verify_opts=verify_opts_from(state), verify_info=verify_info, effort=effort,
-            run_id=job_id, isolated=isolated, log_path=state.get("log_file"),
+            run_id=job_id, isolated=isolated, log_path=state.get("log_file"), on_conversation_id=_save_conversation,
         )
 
     try:
@@ -1854,11 +2049,15 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
         exit_code, stdout, stderr, files_changed, diff_summary = 1, "", f"Execution error: {e}", 0, "error"
 
     status = derive_status(exit_code, files_changed, verify_info)
+    shared = shared or bool(not isolated and sharing_jobs(job_id, cwd, started, job_dir))
 
     tail_output = stdout if stdout else (stderr or "none")
     if status == "VERIFY_FAILED":
         tail_output = stderr or tail_output
     state["status"] = status
+    state["resumed"] = bool(verify_info.get("resumed"))
+    state["conversation_id"] = verify_info.get("conversation_id") or state.get("conversation_id")
+    state["files_changed_shared"] = shared
     state["verified"] = verify_info.get("verified", "skipped")
     state["verify_cmd"] = verify_info.get("verify_cmd")
     state["verify_output"] = verify_info.get("verify_output", "")
@@ -1871,9 +2070,25 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
     state["completed_at"] = time.time()
     save_job_state(job_id, state, job_dir)
     emit_event("finish", run_id=job_id, agent=agent, model=model, status=status, exit_code=exit_code,
-               duration_s=round(time.time() - started, 1), files_changed=files_changed, **verify_event_fields(verify_info))
+               duration_s=round(time.time() - started, 1), files_changed=files_changed,
+               conversation_id=state.get("conversation_id"), resumed=state["resumed"],
+               files_changed_shared=shared, **verify_event_fields(verify_info))
 
     sys.exit(exit_code)
+
+
+def sharing_jobs(job_id, cwd, since, job_dir=DEFAULT_JOB_DIR):
+    """Other non-isolated jobs on the same folder that were running at any point since `since`."""
+    here = os.path.realpath(cwd)
+    found = []
+    for j in list_all_jobs(job_dir=job_dir):
+        if j.get("job_id") == job_id or j.get("isolated") or os.path.realpath(j.get("cwd") or "") != here:
+            continue
+        if j.get("status") == "RUNNING" and is_pid_running(j.get("pid") or 0):
+            found.append(j["job_id"])
+        elif (j.get("completed_at") or 0) >= since:
+            found.append(j["job_id"])
+    return found
 
 
 def spawn_detached_process(job_id, cwd, log_file, job_dir=DEFAULT_JOB_DIR, script_path=None):
@@ -2527,7 +2742,9 @@ def main():
 
     status = derive_status(exit_code, files_changed, verify_info)
     emit_event("finish", run_id=run_id, agent=chosen_agent, model=chosen_model, status=status, exit_code=exit_code,
-               duration_s=round(time.time() - started, 1), files_changed=files_changed, **verify_event_fields(verify_info))
+               duration_s=round(time.time() - started, 1), files_changed=files_changed,
+               conversation_id=verify_info.get("conversation_id"), resumed=bool(verify_info.get("resumed")),
+               **verify_event_fields(verify_info))
 
     tail_output = stdout if stdout else (stderr or "none")
     if status == "VERIFY_FAILED":

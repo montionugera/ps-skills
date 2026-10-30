@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -1724,7 +1725,9 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
 
     def _fake(self, name, exit_code=0, output="ok", body=""):
         path = self.fake_bin / name
-        path.write_text(f"#!/bin/sh\necho \"{name}\" >> '{self.calls_log}'\n{body}\necho '{output}'\nexit {exit_code}\n",
+        # agy streams: a clean run ends with a result event whose response is the output.
+        line = json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": output}}) if name == "agy" else output
+        path.write_text(f"#!/bin/sh\necho \"{name}\" >> '{self.calls_log}'\n{body}\necho '{line}'\nexit {exit_code}\n",
                         encoding="utf-8")
         path.chmod(0o755)
 
@@ -2222,6 +2225,376 @@ class TestCodexDisabled(unittest.TestCase):
         proc = self._run("--help")
         self.assertEqual(proc.returncode, 0)
         self.assertNotIn("codex", proc.stdout.lower())
+
+
+    def test_thinker_auto_switches_to_agy_argon_when_claude_quota_is_low(self):
+        self._fake_claude()
+        claude_state = self.root / "claude_low.json"
+        claude_state.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 5.0, "resets_at": 9999999999},
+                {"kind": "weekly", "remaining_percent": 8.0, "resets_at": 9999999999},
+            ]
+        }))
+        with mock.patch.dict(os.environ, {"CLAUDE_QUOTA_STATE_FILE": str(claude_state)}):
+            proc = self._run("--think", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon-medium", proc.stdout)
+        self.assertIn("AUTO-SWITCH claude->agy", proc.stdout)
+
+
+FAKE_AGY = """#!/usr/bin/env python3
+import json, os, sys, time
+plan = json.load(open(os.environ["FAKE_AGY_PLAN"]))
+log = os.environ["FAKE_AGY_LOG"]
+with open(log, "a") as fh:
+    fh.write(json.dumps(sys.argv[1:]) + "\\n")
+n = len(open(log).read().splitlines())
+actions = plan["calls"][min(n, len(plan["calls"])) - 1]
+for act in actions:
+    kind = act[0]
+    if kind == "event":
+        sys.stdout.write(json.dumps(act[1]) + "\\n"); sys.stdout.flush()
+    elif kind == "raw":
+        sys.stdout.write(act[1] + "\\n"); sys.stdout.flush()
+    elif kind == "sleep":
+        time.sleep(act[1])
+    elif kind == "steps":
+        end = time.time() + act[1]
+        while time.time() < end:
+            sys.stdout.write(json.dumps({"event": "step_update", "step_update": {"conversation_id": "c-1", "step_index": 1, "state": "RUNNING", "step_type": "TOOL"}}) + "\\n"); sys.stdout.flush()
+            time.sleep(0.1)
+    elif kind == "write":
+        open(act[1], "w").write(act[2])
+    elif kind == "exit":
+        sys.exit(act[1])
+"""
+
+INIT = ["event", {"event": "init", "conversation_id": "c-1", "init": {}}]
+
+
+def RESULT(text="all done", status="SUCCESS"):
+    return ["event", {"event": "result", "result": {"conversation_id": "c-1", "status": status, "response": text,
+                                                    "duration_seconds": 1, "num_turns": 1, "usage": {}}}]
+
+
+class FakeAgyBase(unittest.TestCase):
+    """Runs the real command builder against a scripted fake `agy` first on PATH (no real model calls)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.temp_dir.name)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "i"],
+                       cwd=self.repo, check=True)
+        fake_bin = self.tmp / "bin"
+        fake_bin.mkdir()
+        (fake_bin / "agy").write_text(FAKE_AGY, encoding="utf-8")
+        (fake_bin / "agy").chmod(0o755)
+        self.plan = self.tmp / "plan.json"
+        self.calls_log = self.tmp / "calls.log"
+        self.events = self.tmp / "events.jsonl"
+        self.env = mock.patch.dict(os.environ, {
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}", "FAKE_AGY_PLAN": str(self.plan),
+            "FAKE_AGY_LOG": str(self.calls_log), "DISPATCH_EVENTS_FILE": str(self.events),
+            "DISPATCH_AGY_IDLE_SECONDS": "1", "DISPATCH_SLOT_DIR": str(self.tmp / "slots"),
+        })
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.temp_dir.cleanup()
+
+    def _plan(self, *calls):
+        self.plan.write_text(json.dumps({"calls": list(calls)}), encoding="utf-8")
+
+    def _calls(self):
+        if not self.calls_log.exists():
+            return []
+        return [json.loads(l) for l in self.calls_log.read_text(encoding="utf-8").splitlines()]
+
+    def _events(self, kind=None):
+        if not self.events.exists():
+            return []
+        evs = [json.loads(l) for l in self.events.read_text(encoding="utf-8").splitlines()]
+        return [e for e in evs if kind is None or e["event"] == kind]
+
+    def _run(self, task="implement the widget", timeout=30, **kw):
+        info = kw.pop("verify_info", {})
+        kw.setdefault("verify_opts", {"no_verify": True})
+        res = dispatch_mod.run_single_task(task, str(self.repo), "agy", "m1", timeout, verify_info=info, run_id="r1", **kw)
+        return res, info
+
+
+class TestAgyStreamParsing(FakeAgyBase):
+    def test_agy_command_always_streams_and_other_agents_do_not(self):
+        cmd = dispatch_mod.build_agent_command("agy", "m", "task", "/tmp")
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "stream-json")
+        self.assertNotIn("--conversation", cmd)
+        cmd = dispatch_mod.build_agent_command("agy", "m", "task", "/tmp", conversation_id="c-9")
+        self.assertEqual(cmd[cmd.index("--conversation") + 1], "c-9")
+        self.assertNotIn("stream-json", dispatch_mod.build_agent_command("cursor", "m", "task", "/tmp"))
+        self.assertNotIn("stream-json", dispatch_mod.build_agent_command("claude", "m", "task", "/tmp"))
+
+    def test_response_becomes_stdout_and_raw_events_stay_out_of_the_log(self):
+        self._plan([INIT, ["raw", "not json at all"], ["raw", "{broken"], RESULT("final text")])
+        log = self.tmp / "job.log"
+        (code, out, _err, _fc, _ds), info = self._run(log_path=str(log))
+        self.assertEqual((code, out), (0, "final text"))
+        self.assertEqual(info["conversation_id"], "c-1")
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("not json at all", text)
+        self.assertNotIn('"event"', text)
+
+    def test_exit_zero_without_result_event_is_not_success(self):
+        self._plan([INIT, ["event", {"event": "step_update", "step_update": {"step_index": 1}}]])
+        (code, _out, err, _fc, _ds), _info = self._run()
+        self.assertNotEqual(code, 0)
+        self.assertIn("result event", err)
+
+    def test_heartbeat_is_throttled(self):
+        self._plan([INIT, ["steps", 1.0], RESULT()])
+        log = self.tmp / "job.log"
+        with mock.patch.object(dispatch_mod, "HEARTBEAT_SECONDS", 30):
+            self._run(log_path=str(log))
+        beats = [l for l in log.read_text(encoding="utf-8").splitlines() if "step 1" in l and "TOOL" in l and "RUNNING" in l]
+        self.assertEqual(len(beats), 1)
+
+    def test_non_agy_agent_output_is_untouched(self):
+        with mock.patch.object(dispatch_mod, "build_agent_command", return_value=["sh", "-c", 'echo \'{"event":"result"}\''] ):
+            (code, out, _e, _f, _d), _info = (dispatch_mod.run_single_task(
+                "t", str(self.repo), "cursor", None, 30, verify_opts={"no_verify": True}, verify_info={}), None)
+        self.assertEqual((code, out), (0, '{"event":"result"}'))
+
+
+class TestAgyIdleAndResume(FakeAgyBase):
+    def setUp(self):
+        super().setUp()
+        self.stall = [INIT, ["sleep", 30]]
+
+    def test_conversation_id_is_saved_before_the_job_finishes(self):
+        self._plan([INIT, ["sleep", 2], RESULT()])
+        job_dir = str(self.tmp / "jobs")
+        dispatch_mod.save_job_state("j1", {"job_id": "j1", "agent": "agy", "task": "t", "cwd": str(self.repo),
+                                           "isolated": False, "timeout": 30, "no_verify": True}, job_dir=job_dir)
+        def _go():
+            try:
+                dispatch_mod.run_internal_job("j1", job_dir=job_dir)
+            except SystemExit:
+                pass
+        t = threading.Thread(target=_go)
+        t.start()
+        seen = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            st = dispatch_mod.load_job_state("j1", job_dir=job_dir) or {}
+            if st.get("conversation_id"):
+                seen = st
+                break
+            time.sleep(0.05)
+        t.join()
+        self.assertIsNotNone(seen)
+        self.assertEqual(seen["status"], "RUNNING")
+        self.assertEqual(dispatch_mod.load_job_state("j1", job_dir=job_dir)["conversation_id"], "c-1")
+        self.assertEqual(self._events("finish")[-1]["conversation_id"], "c-1")
+
+    def test_idle_kill_without_resume(self):
+        self._plan(self.stall)
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            start = time.monotonic()
+            (code, _o, err, _f, _d), info = self._run(timeout=60)
+        self.assertLess(time.monotonic() - start, 15)
+        self.assertEqual(code, 124)
+        self.assertIn("idle", err)
+        self.assertEqual(info["timeout_kind"], "idle")
+        self.assertEqual(len(self._events("idle_timeout")), 1)
+        self.assertEqual(len(self._calls()), 1)
+
+    def test_wall_clock_kill_is_distinct_from_idle(self):
+        self._plan([INIT, ["steps", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (code, _o, err, _f, _d), info = self._run(timeout=2)
+        self.assertEqual(code, 124)
+        self.assertEqual(info["timeout_kind"], "wall")
+        self.assertIn("timed out after 2s", err)
+        self.assertEqual(self._events("idle_timeout"), [])
+        self.assertEqual(len(self._events("timeout")), 1)
+
+    def test_single_resume_then_stop(self):
+        self._plan(self.stall, self.stall, self.stall)
+        (code, _o, err, _f, _d), info = self._run(timeout=60)
+        self.assertEqual(code, 124)
+        self.assertEqual(len(self._calls()), 2)  # never a third
+        self.assertEqual(len(self._events("resume")), 1)
+        self.assertTrue(info["resumed"])
+        self.assertIn("after resume", err)
+        self.assertEqual(dispatch_mod.derive_status(code, 0, info), "TIMEOUT_NO_PROGRESS")
+
+    def test_wall_clock_timeout_also_resumes(self):
+        self._plan([INIT, ["steps", 30]], [INIT, RESULT("finished")])
+        (code, out, _e, _f, _d), info = self._run(timeout=2)
+        self.assertEqual((code, out), (0, "finished"))
+        self.assertEqual(len(self._calls()), 2)
+        self.assertTrue(info["resumed"])
+
+    def test_resume_command_and_prompt(self):
+        self._plan(self.stall, [INIT, RESULT()])
+        self._run(task="UNIQUE-TASK-TEXT build the widget", timeout=60, output_file="out.md")
+        first, second = self._calls()
+        self.assertNotIn("--conversation", first)
+        self.assertEqual(second[second.index("--conversation") + 1], "c-1")
+        for flag in ("--model", "--effort"):
+            if flag in first:
+                self.assertEqual(second[second.index(flag) + 1], first[first.index(flag) + 1])
+        prompt = second[second.index("-p") + 1]
+        self.assertIn("UNIQUE-TASK-TEXT build the widget", prompt)
+        self.assertIn("out.md", prompt)  # the full contract is repeated, not just the brief
+        for phrase in ("killed", "Inspect", "do not ask"):
+            self.assertIn(phrase.lower(), prompt.lower())
+
+    def test_resume_budget_is_at_least_900s(self):
+        self._plan(self.stall, [INIT, RESULT()])
+        budgets = []
+        real = dispatch_mod.execute_worker_process
+        def spy(cmd, target_dir, timeout_seconds, **kw):
+            budgets.append(timeout_seconds)
+            return real(cmd, target_dir, timeout_seconds, **kw)
+        with mock.patch.object(dispatch_mod, "execute_worker_process", side_effect=spy):
+            self._run(timeout=60)
+        self.assertEqual(budgets, [60, 900])
+
+    def test_resume_can_be_disabled(self):
+        self._plan(self.stall, [INIT, RESULT()])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (code, _o, _e, _f, _d), info = self._run(timeout=60)
+        self.assertEqual(code, 124)
+        self.assertEqual(len(self._calls()), 1)
+        self.assertFalse(info.get("resumed"))
+
+    def test_no_resume_without_a_conversation_id(self):
+        self._plan([["sleep", 30]])
+        (code, _o, _e, _f, _d), _info = self._run(timeout=60)
+        self.assertEqual(code, 124)
+        self.assertEqual(len(self._calls()), 1)
+
+    def test_resumed_job_without_verify_is_resumed_unverified(self):
+        self._plan(self.stall, [INIT, ["write", "new.txt", "x"], RESULT("did it")])
+        (code, _o, _e, files, _d), info = self._run(timeout=60)
+        self.assertEqual(code, 0)
+        self.assertTrue(info["resumed"])
+        self.assertEqual(dispatch_mod.derive_status(code, files, info), "RESUMED_UNVERIFIED")
+
+    def test_resumed_job_with_passing_verify_is_success(self):
+        self._plan(self.stall, [INIT, ["write", "new.txt", "x"], RESULT("did it")])
+        (code, _o, _e, files, _d), info = self._run(timeout=60, verify_opts={"verify_cmd": "true"})
+        self.assertEqual(dispatch_mod.derive_status(code, files, info), "SUCCESS")
+        self.assertTrue(info["resumed"])
+
+    def test_resumed_run_ending_in_a_question_is_not_success(self):
+        self._plan(self.stall, [INIT, RESULT("Which file did you want me to edit?")])
+        (code, _o, err, _f, _d), info = self._run(timeout=60, verify_opts={"verify_cmd": "true"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("question", err)
+        self.assertNotEqual(dispatch_mod.derive_status(code, 0, info), "SUCCESS")
+
+    def test_resumed_exit_zero_without_result_is_not_success(self):
+        self._plan(self.stall, [INIT])
+        (code, _o, _e, _f, _d), info = self._run(timeout=60, verify_opts={"verify_cmd": "true"})
+        self.assertNotEqual(code, 0)
+        self.assertNotEqual(dispatch_mod.derive_status(code, 0, info), "SUCCESS")
+
+    def test_verify_retry_never_resumes_a_second_time(self):
+        verify = f"test -f '{self.repo}/ok'"
+        self._plan(self.stall, [INIT, RESULT()], self.stall, self.stall)
+        (code, _o, _e, _f, _d), info = self._run(timeout=60, verify_opts={"verify_cmd": verify})
+        self.assertEqual(len(self._calls()), 3)  # first, its one resume, the verify retry (which stalls and is not resumed)
+        self.assertEqual(len(self._events("resume")), 1)
+        self.assertEqual(code, 124)
+
+
+class TestResumedStatusConsumers(unittest.TestCase):
+    def test_derive_status_table(self):
+        d = dispatch_mod.derive_status
+        self.assertEqual(d(0, 2, {"resumed": True, "verified": "skipped"}), "RESUMED_UNVERIFIED")
+        self.assertEqual(d(0, 0, {"resumed": True, "verified": "skipped"}), "RESUMED_UNVERIFIED")
+        self.assertEqual(d(0, 2, {"resumed": True, "verified": True}), "SUCCESS")
+        self.assertEqual(d(0, 2, {"resumed": True, "verified": False}), "RESUMED_UNVERIFIED")
+        self.assertEqual(d(0, 2, {"verified": "skipped"}), "SUCCESS")
+        self.assertEqual(d(124, 2, {"resumed": True}), "TIMEOUT_PARTIAL_WORK")
+
+    def test_report_shows_status_resumed_and_shared(self):
+        rep = dispatch_mod.format_report("agy", "RESUMED_UNVERIFIED", 0, "/r", 4, "d", "out",
+                                         verify_info={"resumed": True, "files_changed_shared": True})
+        self.assertIn("Status: RESUMED_UNVERIFIED (exit 0)", rep)
+        self.assertIn("Resumed: true", rep)
+        self.assertIn("shared", rep)
+        self.assertLessEqual(len(rep.splitlines()), 15)
+
+    def test_batch_report_shows_the_status(self):
+        rep = dispatch_mod.format_batch_report([{"task": "t", "agent": "agy", "exit_code": 0, "status": "RESUMED_UNVERIFIED",
+                                                 "files_changed": 1, "diff_summary": "d"}])
+        self.assertIn("RESUMED_UNVERIFIED", rep)
+
+    def test_stats_do_not_count_resumed_unverified_as_ok_and_count_idle_timeouts(self):
+        now = time.time()
+        evs = [{"ts": now, "event": "finish", "agent": "agy", "status": "RESUMED_UNVERIFIED", "duration_s": 1},
+               {"ts": now, "event": "idle_timeout", "agent": "agy"}]
+        rep = dispatch_mod.format_stats_report(evs, now=now)
+        self.assertIn("0%", rep)
+        self.assertRegex(rep, r"agy\s+1\s+0%\s+1")
+
+
+class TestPerJobFileCounts(FakeAgyBase):
+    def _sh(self, script):
+        return mock.patch.object(dispatch_mod, "build_agent_command", return_value=["sh", "-c", script])
+
+    def test_preexisting_dirt_is_not_counted(self):
+        for i in range(3):
+            (self.repo / f"old{i}.txt").write_text("x")
+        with self._sh("echo n > mine.txt"):
+            (code, _o, _e, files, _d), _ = self._run()
+        self.assertEqual((code, files), (0, 1))
+
+    def test_editing_a_file_that_was_already_dirty_is_counted(self):
+        (self.repo / "old.txt").write_text("before")
+        with self._sh("echo after > old.txt"):
+            (_c, _o, _e, files, _d), _ = self._run()
+        self.assertEqual(files, 1)
+
+    def test_no_change_counts_zero_despite_dirt(self):
+        (self.repo / "old.txt").write_text("before")
+        with self._sh("true"):
+            (_c, _o, _e, files, _d), _ = self._run()
+        self.assertEqual(files, 0)
+
+    def test_committed_work_still_counts(self):
+        with self._sh("echo n > a.txt; git add a.txt; git -c user.email=a@b -c user.name=t commit -qm w"):
+            (_c, _o, _e, files, _d), _ = self._run()
+        self.assertEqual(files, 1)
+
+    def test_shared_flag_when_another_running_job_uses_the_cwd(self):
+        job_dir = str(self.tmp / "jobs")
+        base = {"agent": "agy", "task": "t", "cwd": str(self.repo), "isolated": False, "timeout": 30, "no_verify": True,
+                "model": None}
+        dispatch_mod.save_job_state("mine", {**base, "job_id": "mine"}, job_dir=job_dir)
+        dispatch_mod.save_job_state("other", {**base, "job_id": "other", "status": "RUNNING", "pid": os.getpid()}, job_dir=job_dir)
+        with self._sh("echo n > mine.txt"):
+            with self.assertRaises(SystemExit):
+                dispatch_mod.run_internal_job("mine", job_dir=job_dir)
+        st = dispatch_mod.load_job_state("mine", job_dir=job_dir)
+        self.assertTrue(st["files_changed_shared"])
+        self.assertEqual(st["files_changed"], 1)
+
+    def test_not_shared_when_alone(self):
+        job_dir = str(self.tmp / "jobs")
+        dispatch_mod.save_job_state("mine", {"job_id": "mine", "agent": "agy", "task": "t", "cwd": str(self.repo),
+                                             "isolated": False, "timeout": 30, "no_verify": True}, job_dir=job_dir)
+        with self._sh("echo n > mine.txt"):
+            with self.assertRaises(SystemExit):
+                dispatch_mod.run_internal_job("mine", job_dir=job_dir)
+        self.assertFalse(dispatch_mod.load_job_state("mine", job_dir=job_dir)["files_changed_shared"])
 
 
 if __name__ == "__main__":
