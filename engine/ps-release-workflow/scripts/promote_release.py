@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -167,9 +168,33 @@ def _create_or_adopt_pr(repo: Path, release_branch: str, version: str,
     raise Gate2FailedError(f"gh pr create failed: {err or out}")
 
 
+# Right after `gh pr create`, GitHub has not registered any check yet, and
+# `gh pr checks --watch` exits 1 with "no checks reported" — not a CI failure.
+_CHECKS_REGISTER_TIMEOUT_S = 180
+_CHECKS_REGISTER_POLL_S = 10
+
+
 def _watch_pr_checks(repo: Path, ref: str, runner) -> int:
-    """`gh pr checks <ref> --watch` — streams to the terminal; returns exit code."""
-    return runner(["gh", "pr", "checks", ref, "--watch"], cwd=repo).returncode
+    """`gh pr checks <ref> --watch` — streams to the terminal; returns exit code.
+
+    "no checks reported" means GitHub has not registered the checks yet: wait
+    and watch again, up to _CHECKS_REGISTER_TIMEOUT_S, then give up (non-zero,
+    so the caller refuses to merge). Any other failure returns immediately.
+    stdout stays attached to the terminal; only stderr is captured (and echoed).
+    """
+    deadline = time.monotonic() + _CHECKS_REGISTER_TIMEOUT_S
+    while True:
+        cp = runner(["gh", "pr", "checks", ref, "--watch"], cwd=repo,
+                    stderr=subprocess.PIPE, text=True)
+        err = cp.stderr or ""
+        if err:
+            print(err, end="" if err.endswith("\n") else "\n", file=sys.stderr)
+        if cp.returncode == 0 or "no checks reported" not in err.lower():
+            return cp.returncode
+        if time.monotonic() >= deadline:
+            return cp.returncode
+        print(f"   waiting for GitHub to register checks on {ref}...", file=sys.stderr)
+        time.sleep(_CHECKS_REGISTER_POLL_S)
 
 
 def _merge_pr_squash(repo: Path, ref: str, runner) -> subprocess.CompletedProcess:
