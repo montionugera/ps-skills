@@ -27,6 +27,14 @@ back) — never the main checkout, whose script may differ (audit A5). A missing
 `precheck.sh` is a loud stderr warning, not an error, so repos without one keep
 working.
 
+*Opt-in pass cache (Gate 1 only).* With `"gate_cache": {"enabled": true, "ttl_hours": 24}`
+in `.release.json`, a precheck that already PASSED on an identical git tree
+(`HEAD^{tree}` + a hash of the precheck script) within the TTL is skipped with a
+`gate cache HIT` line; FAIL results are never cached. Absent => behaviour unchanged.
+Force a real run with `psrw ship|sync-main --no-gate-cache` or `PSRW_GATE_CACHE=off`.
+Never applies to Gate 2, integration or promote. Risks (env drift on an unchanged
+tree; a skipped re-check) are documented in `lib/gate_cache.py`.
+
 **Gate 2 — `scripts/integration.sh`**, run by `promote` from the `_release` worktree,
 **on by default**. Opt out with `--no-gate2`. If the gate is requested and the script
 is missing, promote refuses — it never silently skips. `--allow-missing-gate2`

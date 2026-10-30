@@ -12,6 +12,7 @@ from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -91,7 +92,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--strict", action="store_true",
                    help="refuse (exit 1, nothing done) if origin/main cannot be fetched, "
                         "instead of syncing from the last-fetched origin/main with a warning")
+    p.add_argument("--no-gate-cache", action="store_true", dest="no_gate_cache",
+                   help="force a real Gate 1 run even if the opt-in gate_cache has a "
+                        "recent PASS for this tree (same as PSRW_GATE_CACHE=off)")
     args = p.parse_args(argv)
+    if args.no_gate_cache:
+        os.environ["PSRW_GATE_CACHE"] = "off"
 
     repo = find_repo_root(Path.cwd())
     try:
