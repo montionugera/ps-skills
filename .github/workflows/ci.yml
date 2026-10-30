@@ -39,6 +39,7 @@ jobs:
   ps-commu-lifecycle:
     name: ps-commu-explain lifecycle (bash, macOS)
     runs-on: macos-latest          # scripts use BSD stat/lsof; run on macOS
+    if: github.event_name == 'push'  # macOS minutes cost ~10x Linux: main only, not PRs
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
