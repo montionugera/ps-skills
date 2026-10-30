@@ -25,7 +25,8 @@ saved in the job state as soon as agy reports it, and the job log gets a throttl
                              the limit expires and the folder's files changed since the last check, the timer
                              resets instead; a silent step over the limit that changes no files is killed.
                              --timeout stays the hard wall-clock cap. The resume gets min(max(900, timeout/2),
-                             timeout) seconds, so a job waits at most 2x --timeout in total.
+                             timeout) seconds, so the agy runs take at most 2x --timeout; a verify retry and the
+                             verify commands add to that.
   DISPATCH_AGY_RESUME        0 disables the single automatic resume (`agy --conversation <id>`) after an idle or
                              wall-clock kill. A resumed job reports RESUMED_UNVERIFIED (exit 0) unless its verify
                              command passed, in which case SUCCESS with resumed: true.
@@ -657,11 +658,21 @@ def _stat_signature(target_dir, path):
     return (st.st_size, st.st_mtime_ns)
 
 
+def git_toplevel(target_dir):
+    """The repo root of target_dir (or target_dir itself outside a repo): `git status -z` paths are relative to it."""
+    try:
+        proc = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                              cwd=target_dir, capture_output=True, text=True, timeout=30)
+    except Exception:
+        return target_dir
+    return proc.stdout.rstrip("\n") if proc.returncode == 0 and proc.stdout.strip() else target_dir
+
+
 def git_baseline(target_dir):
-    """{path: stat signature} of everything `git status -z` shows now, or None when git status is unavailable."""
+    """{root-relative path: stat signature} of everything `git status -z` shows now, or None when git status is unavailable."""
     try:
         proc = subprocess.run(["git", "status", "--porcelain", "-z", "--untracked-files=all"],
-                              cwd=target_dir, capture_output=True, text=True, errors="replace", timeout=10)
+                              cwd=target_dir, capture_output=True, text=True, errors="replace", timeout=30)
     except Exception:
         return None
     if proc.returncode != 0:
@@ -677,7 +688,8 @@ def git_baseline(target_dir):
         paths.append(entry[3:])
         if entry[0] in "RC":
             i += 1  # the rename/copy source follows as its own field
-    return {p: _stat_signature(target_dir, p) for p in paths}
+    root = git_toplevel(target_dir)
+    return {p: _stat_signature(root, p) for p in paths}
 
 
 def changes_left_behind(target_dir, before, ignore_path=None):
@@ -862,7 +874,7 @@ def inspect_git_changes(target_dir, initial_head=None, baseline=None):
     ).stdout.strip()
 
     untracked_res = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        ["git", "ls-files", "--others", "--exclude-standard", "--full-name", "-z"],
         cwd=target_dir,
         capture_output=True,
         text=True,
@@ -870,7 +882,8 @@ def inspect_git_changes(target_dir, initial_head=None, baseline=None):
 
     all_changed = set([f for f in files_changed_res.split("\0") if f] + [f for f in untracked_res.split("\0") if f])
     if baseline is not None:
-        all_changed = {f for f in all_changed if f not in baseline or _stat_signature(target_dir, f) != baseline[f]}
+        root = git_toplevel(target_dir)
+        all_changed = {f for f in all_changed if f not in baseline or _stat_signature(root, f) != baseline[f]}
     files_changed = len(all_changed)
 
     return files_changed, diff_summary, commit_count
@@ -2293,8 +2306,8 @@ def main():
     parser.add_argument("--min-weekly", type=float, default=DEFAULT_MIN_WEEKLY, help="Minimum weekly quota remaining percent")
     parser.add_argument("--timeout", type=int, default=None,
                         help=f"Timeout in seconds for execution (default: {default_timeout}s). An agy run killed for idling or "
-                             f"timing out is resumed once with min(max(900, timeout/2), timeout) seconds, so the job "
-                             f"waits at most 2x this value")
+                             f"timing out is resumed once with min(max(900, timeout/2), timeout) seconds, so the agy runs "
+                             f"take at most 2x this value, plus any verify retry")
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")

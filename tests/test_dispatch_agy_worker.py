@@ -4,6 +4,7 @@ Unit tests for bin/dispatch-agy-worker and bin/dispatch-codex-worker
 """
 
 import io
+import itertools
 import json
 import os
 import subprocess
@@ -2307,7 +2308,7 @@ class FakeAgyBase(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {
             "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}", "FAKE_AGY_PLAN": str(self.plan),
             "FAKE_AGY_LOG": str(self.calls_log), "DISPATCH_EVENTS_FILE": str(self.events),
-            "DISPATCH_AGY_IDLE_SECONDS": "1", "DISPATCH_SLOT_DIR": str(self.tmp / "slots"),
+            "DISPATCH_AGY_IDLE_SECONDS": "3", "DISPATCH_SLOT_DIR": str(self.tmp / "slots"),
         })
         self.env.start()
 
@@ -2329,10 +2330,10 @@ class FakeAgyBase(unittest.TestCase):
         evs = [json.loads(l) for l in self.events.read_text(encoding="utf-8").splitlines()]
         return [e for e in evs if kind is None or e["event"] == kind]
 
-    def _run(self, task="implement the widget", timeout=30, **kw):
+    def _run(self, task="implement the widget", timeout=30, cwd=None, **kw):
         info = kw.pop("verify_info", {})
         kw.setdefault("verify_opts", {"no_verify": True})
-        res = dispatch_mod.run_single_task(task, str(self.repo), "agy", "m1", timeout, verify_info=info, run_id="r1", **kw)
+        res = dispatch_mod.run_single_task(task, str(cwd or self.repo), "agy", "m1", timeout, verify_info=info, run_id="r1", **kw)
         return res, info
 
 
@@ -2487,7 +2488,7 @@ class TestAgyIdleAndResume(FakeAgyBase):
         self.assertNotEqual(code, 0)
 
     def test_silent_step_that_changes_files_is_not_killed(self):
-        self._plan([INIT, ["touch", 3.5], RESULT("built")])
+        self._plan([INIT, ["touch", 7], RESULT("built")])
         (code, out, _e, files, _d), info = self._run(timeout=60)
         self.assertEqual((code, out), (0, "built"))
         self.assertGreaterEqual(files, 3)
@@ -2500,11 +2501,15 @@ class TestAgyIdleAndResume(FakeAgyBase):
         self.assertEqual((code, info["timeout_kind"]), (124, "idle"))
 
     def test_idle_check_survives_a_failing_git(self):
-        self._plan([INIT, ["sleep", 30]])
-        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}), \
-                mock.patch.object(dispatch_mod, "git_baseline", return_value=None):
-            (code, _o, _e, _f, _d), info = self._run(timeout=60)
-        self.assertEqual((code, info["timeout_kind"]), (124, "idle"))
+        # Every later reading differs, so a check that ignored a None reading would reset the timer until the wall limit.
+        for first in (None, {"seen": 0}):
+            with self.subTest(first=first):
+                self._plan([INIT, ["sleep", 30]])
+                readings = itertools.chain([None, first], ({"seen": n} if first is None else None for n in itertools.count(1)))
+                with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}), \
+                        mock.patch.object(dispatch_mod, "git_baseline", side_effect=lambda _d: next(readings)):
+                    (code, _o, _e, _f, _d), info = self._run(timeout=12)
+                self.assertEqual((code, info["timeout_kind"]), (124, "idle"))
 
     def test_killed_run_reports_its_last_step_and_error_events(self):
         step = ["event", {"event": "step_update", "step_update": {"conversation_id": "c-1", "step_index": 7,
@@ -2734,6 +2739,41 @@ class TestBaselineRobustness(FakeAgyBase):
         with self._sh("echo n > mine.txt"):
             (code, _o, _e, files, _d), _ = self._run()
         self.assertEqual((code, files), (0, 1))
+
+    def _sub_with_dirty_files(self):
+        sub = self.repo / "sub"
+        sub.mkdir()
+        (sub / "tracked.txt").write_text("v1\n")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-q", "-m", "t"],
+                       cwd=self.repo, check=True)
+        (sub / "tracked.txt").write_text("v2\n")
+        (sub / "old.txt").write_text("already here\n")
+        return sub
+
+    def test_noop_run_from_a_subdirectory_counts_nothing(self):
+        sub = self._sub_with_dirty_files()
+        with self._sh("true"):
+            (_c, _o, _e, files, _d), _ = self._run(cwd=sub)
+        self.assertEqual(files, 0)
+
+    def test_edit_of_a_dirty_file_from_a_subdirectory_is_counted(self):
+        sub = self._sub_with_dirty_files()
+        with self._sh("echo more >> tracked.txt"):
+            (_c, _o, _e, files, _d), _ = self._run(cwd=sub)
+        self.assertEqual(files, 1)
+
+    def test_new_file_from_a_subdirectory_is_counted_once(self):
+        sub = self._sub_with_dirty_files()
+        with self._sh("echo n > new.txt"):
+            (_c, _o, _e, files, _d), _ = self._run(cwd=sub)
+        self.assertEqual(files, 1)
+
+    def test_baseline_taken_from_a_subdirectory_sees_an_edit(self):
+        sub = self._sub_with_dirty_files()
+        before = dispatch_mod.git_baseline(str(sub))
+        (sub / "tracked.txt").write_text("v3 is longer\n")
+        self.assertNotEqual(dispatch_mod.git_baseline(str(sub)), before)
 
     def test_unavailable_baseline_is_reported_not_silent(self):
         with self._sh("echo n > mine.txt"), mock.patch.object(dispatch_mod, "git_baseline", return_value=None):
