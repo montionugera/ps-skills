@@ -257,7 +257,7 @@ def refresh_agy_observation(target_file, timeout=AGY_REFRESH_TIMEOUT_SECONDS):
     return False, f"no statusLine write from an idle agy within {timeout}s"
 
 
-def check_quota(agent="agy", state_file=None,min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, current_time=None):
+def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, current_time=None):
     # Support positional state_file path for backwards compatibility
     if isinstance(agent, str) and ("/" in agent or "\\" in agent or agent.endswith(".json")) and state_file is None:
         state_file = agent

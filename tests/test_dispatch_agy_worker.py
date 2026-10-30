@@ -286,9 +286,9 @@ class TestAgyObservationRefresh(unittest.TestCase):
 
     def test_gives_up_at_the_timeout_and_stops_agy(self):
         self._install_fake_agy("exec sleep 60")
-        refreshed, detail = dispatch_mod.refresh_agy_observation(str(self.state_file), timeout=1)
+        refreshed, detail = dispatch_mod.refresh_agy_observation(str(self.state_file), timeout=3)
         self.assertFalse(refreshed)
-        self.assertIn("within 1s", detail)
+        self.assertIn("within 3s", detail)
         self._assert_fake_agy_is_gone()
 
     def test_agy_that_exits_early_is_reported_not_waited_on(self):
