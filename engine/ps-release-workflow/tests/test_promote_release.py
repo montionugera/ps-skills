@@ -680,6 +680,69 @@ def test_promote_babysit_failing_checks_stops_before_merge(tmp_repo_with_release
     assert "release/1.1" in branches
 
 
+class _CheckRegistrationGh(FakeGh):
+    """`gh pr checks --watch` exits 1 with 'no checks reported' until GitHub has
+    registered the checks; `empty_polls` calls report that, later ones pass."""
+
+    def __init__(self, empty_polls: int, results: dict | None = None):
+        super().__init__(results)
+        self.empty_polls = empty_polls
+
+    def __call__(self, cmd, **kwargs):
+        if cmd[2] == "checks" and self.empty_polls > 0:
+            self.empty_polls -= 1
+            self.calls.append("checks")
+            self.commands.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="no checks reported on the 'release/1.1' branch\n")
+        return super().__call__(cmd, **kwargs)
+
+
+def test_promote_babysit_waits_for_checks_to_register_then_merges(
+        tmp_repo_with_release: Path, fixed_owner: str, monkeypatch):
+    """GitHub has not registered any check right after the PR opens, so
+    `gh pr checks --watch` exits 1 with 'no checks reported'. That is not a CI
+    failure: wait and watch again, then merge."""
+    import scripts.promote_release as pr_mod
+    monkeypatch.setattr(pr_mod.time, "sleep", lambda s: None)
+    feat = _setup_and_ship_feature(tmp_repo_with_release, fixed_owner)
+    gh = _CheckRegistrationGh(empty_polls=2)
+    _record_cleanup(monkeypatch, gh, delegate=False)
+    result = promote_release(tmp_repo_with_release, run_gate2=False, run_deploy=False,
+                             babysit=True, gh_runner=gh)
+    assert result["ok"] is True and result["merged"] is True
+    assert gh.calls == ["create", "checks", "checks", "checks", "merge", "cleanup"]
+
+
+def test_promote_babysit_checks_that_never_register_stop_before_merge(
+        tmp_repo_with_release: Path, fixed_owner: str, monkeypatch):
+    """If no check ever appears (CI misconfigured), do not merge unverified."""
+    import scripts.promote_release as pr_mod
+    now = [0.0]
+    monkeypatch.setattr(pr_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(pr_mod.time, "sleep", lambda s: now.__setitem__(0, now[0] + s))
+    feat = _setup_and_ship_feature(tmp_repo_with_release, fixed_owner)
+    gh = _CheckRegistrationGh(empty_polls=10_000)
+    with pytest.raises(Gate2FailedError, match="NOT merging"):
+        promote_release(tmp_repo_with_release, run_gate2=False, run_deploy=False,
+                        babysit=True, gh_runner=gh)
+    assert "merge" not in gh.calls
+    assert gh.calls.count("checks") > 1  # it did wait and retry
+    assert now[0] >= pr_mod._CHECKS_REGISTER_TIMEOUT_S
+
+
+def test_promote_babysit_real_check_failure_is_not_retried(
+        tmp_repo_with_release: Path, fixed_owner: str, monkeypatch):
+    import scripts.promote_release as pr_mod
+    monkeypatch.setattr(pr_mod.time, "sleep", lambda s: pytest.fail("must not wait on a real failure"))
+    feat = _setup_and_ship_feature(tmp_repo_with_release, fixed_owner)
+    gh = FakeGh({"checks": (1, "", "X some checks were not successful")})
+    with pytest.raises(Gate2FailedError, match="NOT merging"):
+        promote_release(tmp_repo_with_release, run_gate2=False, run_deploy=False,
+                        babysit=True, gh_runner=gh)
+    assert gh.calls.count("checks") == 1
+
+
 def test_promote_babysit_red_checks_leave_release_in_progress_and_rerunnable(
         tmp_repo_with_release: Path, fixed_owner: str):
     """M1: babysit order is create PR → watch checks → finalize → merge → cleanup.
