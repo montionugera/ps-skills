@@ -2229,7 +2229,6 @@ class TestCodexDisabled(unittest.TestCase):
         self.assertNotIn("codex", proc.stdout.lower())
 
 
-
 FAKE_AGY = """#!/usr/bin/env python3
 import json, os, sys, time
 plan = json.load(open(os.environ["FAKE_AGY_PLAN"]))

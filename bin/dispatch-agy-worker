@@ -896,7 +896,7 @@ def execute_worker_process(cmd, target_dir, timeout_seconds, agent_name="worker"
     Returns: (exit_code, stdout, stderr, is_timeout)
     The worker gets its own process group so a timeout kills the whole tree, and partial output is kept.
     With log_path, stdout/stderr lines are also appended to that file as they arrive (live --tail / --status).
-    stream_kw (agy stream-json runs): stream_state (dict filled with conversation_id, result, timeout_kind),
+    Agy stream-json runs also pass stream_state (dict filled with conversation_id, result, timeout_kind),
     idle_seconds (kill after this long without an event) and on_conversation_id (callback).
     """
     try:
