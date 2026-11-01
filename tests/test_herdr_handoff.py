@@ -121,5 +121,53 @@ class HerdrHandoffTest(unittest.TestCase):
                 self.assertIn("HANDOFF CONFIRMED", r.stdout)
 
 
+    def test_auto_switches_claude_to_agy_yolo_with_argon_model_when_quota_is_low(self):
+        import json
+        quota_dir = Path(self.tmp.name) / "quota"
+        quota_dir.mkdir(parents=True, exist_ok=True)
+        (quota_dir / "claude-statusline.json").write_text(json.dumps({
+            "provider": "claude",
+            "windows": [{"kind": "weekly", "remaining_percent": 5.0, "resets_at": 9999999999}],
+        }))
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}",
+            "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working",
+            "HERDR_TAB_ID": "t1",
+            "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2",
+            "HERDR_PLUGIN_STATE_DIR": str(quota_dir),
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "plan", "--no-yolo",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Auto-switching handoff to agy (yolo, model: gemini-4-argon-medium)", r.stdout)
+        log_text = self.log.read_text()
+        self.assertIn("agy --dangerously-skip-permissions --model gemini-4-argon-medium -i", log_text)
+
+    def test_agy_code_mode_uses_flash_high_model(self):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}",
+            "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working",
+            "HERDR_TAB_ID": "t1",
+            "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2",
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "agy", "--mode", "code",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log_text = self.log.read_text()
+        self.assertIn("agy --dangerously-skip-permissions --model gemini-3.8-flash-high -i", log_text)
+
+
 if __name__ == "__main__":
     unittest.main()

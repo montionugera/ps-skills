@@ -6,8 +6,10 @@ puts the real (symlink-resolved) script folder first on sys.path, so a plain imp
 """
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
+import time
 
 CONTEXT_FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 
@@ -149,10 +151,115 @@ def safe_point_blocked(context, hard_cap, pending, dirty, agy_not_idle=False):
     return context < hard_cap and bool(pending or agy_not_idle or dirty)
 
 
-def stop_would_hand_off(context, threshold, hard_cap, flag_exists, pending, dirty, agy_not_idle=False):
+def stop_would_hand_off(context, threshold, hard_cap, flag_exists, pending, dirty, agy_not_idle=False, low_quota=False):
     """True when the Stop hook, seeing this state, returns its handoff decision."""
     return (
-        context >= threshold
+        (context >= threshold or (low_quota and context > 0))
         and not flag_exists
         and not safe_point_blocked(context, hard_cap, pending, dirty, agy_not_idle)
     )
+
+
+AGY_ARGON_DEFAULT_MODEL = "gemini-4-argon-medium"
+AGY_ARGON_CODE_MODEL = "gemini-3.8-flash-high"
+DEFAULT_LOW_QUOTA_THRESHOLD_PERCENT = 10.0
+
+
+def quota_state_dirs():
+    """Directories where herdr-agent-quota writes provider quota snapshots."""
+    custom = os.environ.get("HERDR_PLUGIN_STATE_DIR", "").strip()
+    if custom:
+        return [Path(custom).expanduser()]
+    # When unit tests isolate state via CLAUDE_AUTO_HANDOFF_STATE_DIR, only read
+    # quota files inside that test state dir so host quota state does not leak.
+    test_state = os.environ.get("CLAUDE_AUTO_HANDOFF_STATE_DIR", "").strip()
+    if test_state:
+        return [Path(test_state).expanduser() / "herdr-agent-quota"]
+    home = Path.home()
+    return [
+        home / ".local" / "state" / "herdr" / "plugins" / "herdr-agent-quota",
+        home / "Library" / "Application Support" / "dev.herdr.herdr-agent-quota",
+    ]
+
+
+def low_quota_threshold_percent(dirs=None):
+    """Remaining-percent threshold below/at which Claude is considered low on quota.
+
+    Env `CLAUDE_LOW_QUOTA_THRESHOLD` wins ("off" or <=0 disables; default 10%).
+    Otherwise reads `low-quota-alert` in the herdr-agent-quota state dir.
+    """
+    env_val = os.environ.get("CLAUDE_LOW_QUOTA_THRESHOLD", "").strip()
+    if env_val:
+        if env_val.lower() in ("off", "false", "0", "none"):
+            return 0.0
+        try:
+            return max(0.0, float(env_val))
+        except ValueError:
+            pass
+    for d in (dirs or quota_state_dirs()):
+        alert_file = d / "low-quota-alert"
+        try:
+            raw = alert_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        if raw.lower() in ("off", "false", "0", "none"):
+            return 0.0
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            continue
+    return DEFAULT_LOW_QUOTA_THRESHOLD_PERCENT
+
+
+def claude_low_quota(now=None):
+    """Inspect Claude quota snapshot written by herdr-agent-quota.
+
+    Returns (is_low, remaining_percent, threshold_percent, window_kind).
+    If no fresh snapshot exists or alerts are disabled, returns (False, None, threshold, None).
+    """
+    dirs = quota_state_dirs()
+    threshold = low_quota_threshold_percent(dirs)
+    if threshold <= 0:
+        return False, None, threshold, None
+    now_ts = int(time.time() if now is None else now)
+    candidates = ("claude-statusline.json", "claude.json", "claude-statusline.observation.json")
+    for d in dirs:
+        for name in candidates:
+            path = d / name
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            snap = data.get("snapshot") if isinstance(data.get("snapshot"), dict) else data
+            windows = snap.get("windows") if isinstance(snap, dict) else None
+            if not isinstance(windows, list) or not windows:
+                continue
+            min_rem = None
+            min_kind = None
+            for w in windows:
+                if not isinstance(w, dict):
+                    continue
+                resets_at = w.get("resets_at")
+                if isinstance(resets_at, (int, float)) and resets_at > 0 and resets_at <= now_ts:
+                    continue  # window already reset
+                rem = w.get("remaining_percent")
+                if rem is None:
+                    used = w.get("used_percent")
+                    if isinstance(used, (int, float)):
+                        rem = max(0.0, 100.0 - float(used))
+                if not isinstance(rem, (int, float)):
+                    continue
+                rem = float(rem)
+                if min_rem is None or rem < min_rem:
+                    min_rem = rem
+                    min_kind = str(w.get("kind") or "quota")
+            if min_rem is not None:
+                return (min_rem <= threshold), round(min_rem, 1), threshold, min_kind
+    return False, None, threshold, None
+

@@ -38,8 +38,9 @@ Options:
   --label <tab-label>         Tab label (default: "Handoff: <slug>")
   --cwd <dir>                 Working directory (default: $PWD)
   --prompt <text>             Custom prompt override
-  --mode <code|plan>          Handoff type for --kind claude (code -> sonnet, plan -> default)
-  --model <name>              Explicit Claude model; overrides --mode
+  --mode <code|plan>          Handoff type (claude: code->sonnet, plan->default; agy: code->gemini-4-argon-medium, plan->gemini-4-argon-high)
+  --model <name>              Explicit model for claude or agy; overrides --mode
+  --no-quota-switch           Do not auto-switch low-quota claude handoffs to agy yolo with argon
   --no-agent                  Only open a shell tab without starting an agent
   --no-focus                  Do not switch focus to the new tab
   --use-agent-manager         Try `herdr agent start` first
@@ -85,6 +86,7 @@ RUNNING=""
 CONFIRM_TIMEOUT="${HERDR_HANDOFF_CONFIRM_TIMEOUT:-60}"
 [[ "$CONFIRM_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]] || CONFIRM_TIMEOUT=60
 YOLO=true
+QUOTA_SWITCH="${HERDR_HANDOFF_QUOTA_SWITCH:-true}"
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -154,6 +156,10 @@ while [[ $# -gt 0 ]]; do
       YOLO=false
       shift
       ;;
+    --no-quota-switch)
+      QUOTA_SWITCH=false
+      shift
+      ;;
     --dry-run)
       DRY_RUN=true
       shift
@@ -204,18 +210,131 @@ if [[ "$AGENT_KIND" == "t3code" && "$MULTIPLEXER" == "auto" ]]; then
   MULTIPLEXER="t3"
 fi
 
-# Model routing for claude handoffs: coding work goes to Sonnet, planning
-# work keeps the default model. An explicit --model always wins.
 case "$HANDOFF_MODE" in
-  code) CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}" ;;
-  plan|"") ;;
+  code|plan|"") ;;
   *)
     echo "Error: --mode must be 'code' or 'plan' (got '$HANDOFF_MODE')." >&2
     exit 1
     ;;
 esac
-if [[ "$AGENT_KIND" == "claude" && -z "$HANDOFF_MODE" && -z "$CLAUDE_MODEL" ]]; then
-  echo "⚠️  No --mode given; claude will start on the default model. Pass --mode code for Sonnet." >&2
+
+# --------------------------------------------------------------------------
+# Low-quota auto-switch: when handing off to Claude and Claude's quota is low
+# (<= CLAUDE_LOW_QUOTA_THRESHOLD or herdr-agent-quota low-quota-alert, default 10%),
+# automatically switch to agy in YOLO mode with the Argon model.
+# --------------------------------------------------------------------------
+if [[ "$AGENT_KIND" == "claude" && "$QUOTA_SWITCH" != "false" && "$QUOTA_SWITCH" != "0" ]]; then
+  LOW_QUOTA_INFO=$(python3 -c '
+import json, os, sys, time
+from pathlib import Path
+custom = os.environ.get("HERDR_PLUGIN_STATE_DIR", "").strip()
+if custom:
+    dirs = [Path(custom).expanduser()]
+elif os.environ.get("FAKE_LOG"):
+    dirs = []
+else:
+    h = Path.home()
+    dirs = [
+        h / ".local/state/herdr/plugins/herdr-agent-quota",
+        h / "Library/Application Support/dev.herdr.herdr-agent-quota",
+    ]
+thr = 10.0
+env_thr = os.environ.get("CLAUDE_LOW_QUOTA_THRESHOLD", "").strip()
+if env_thr:
+    if env_thr.lower() in ("off", "false", "0", "none"):
+        sys.exit(0)
+    try:
+        thr = float(env_thr)
+    except ValueError:
+        pass
+else:
+    for d in dirs:
+        p = d / "low-quota-alert"
+        try:
+            raw = p.read_text().strip()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        if raw.lower() in ("off", "false", "0", "none"):
+            sys.exit(0)
+        try:
+            thr = float(raw)
+            break
+        except ValueError:
+            pass
+now_ts = int(time.time())
+for d in dirs:
+    for name in ("claude-statusline.json", "claude.json", "claude-statusline.observation.json"):
+        p = d / name
+        try:
+            data = json.loads(p.read_text())
+        except Exception:
+            continue
+        snap = data.get("snapshot") if isinstance(data, dict) and isinstance(data.get("snapshot"), dict) else data
+        windows = snap.get("windows") if isinstance(snap, dict) else None
+        if not isinstance(windows, list) or not windows:
+            continue
+        rems = []
+        for w in windows:
+            if not isinstance(w, dict):
+                continue
+            ra = w.get("resets_at")
+            if isinstance(ra, (int, float)) and 0 < ra <= now_ts:
+                continue
+            rem = w.get("remaining_percent")
+            if rem is None and isinstance(w.get("used_percent"), (int, float)):
+                rem = max(0.0, 100.0 - float(w["used_percent"]))
+            if isinstance(rem, (int, float)):
+                rems.append((float(rem), str(w.get("kind") or "quota")))
+        if rems:
+            min_rem, kind = min(rems, key=lambda x: x[0])
+            if min_rem <= thr:
+                print(f"{min_rem:g}:{thr:g}:{kind}")
+            sys.exit(0)
+' 2>/dev/null || true)
+  if [[ -n "$LOW_QUOTA_INFO" ]]; then
+    AGENT_KIND="agy"
+    YOLO=true
+    if [[ "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-sonnet* ]]; then
+      CLAUDE_MODEL="gemini-3.8-flash-high"
+    elif [[ "$CLAUDE_MODEL" == "opus" || "$CLAUDE_MODEL" == claude-opus* ]]; then
+      CLAUDE_MODEL="gemini-4-argon-medium"
+    elif [[ -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == claude-* ]]; then
+      if [[ "$HANDOFF_MODE" == "code" ]]; then
+        CLAUDE_MODEL="gemini-3.8-flash-high"
+      else
+        CLAUDE_MODEL="gemini-4-argon-medium"
+      fi
+    fi
+    echo "⚡ Claude quota low ($LOW_QUOTA_INFO) — Auto-switching handoff to agy (yolo, model: $CLAUDE_MODEL)"
+  fi
+fi
+
+# Model routing for claude and agy handoffs:
+# - claude: code -> sonnet, plan -> default
+# - agy/gemini: code -> gemini-4-argon-medium, plan -> gemini-4-argon-high, --model argon -> gemini-4-argon-high
+# An explicit --model always wins.
+if [[ "$AGENT_KIND" == "claude" ]]; then
+  case "$HANDOFF_MODE" in
+    code) CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}" ;;
+    plan|"") ;;
+  esac
+  if [[ -z "$HANDOFF_MODE" && -z "$CLAUDE_MODEL" ]]; then
+    echo "⚠️  No --mode given; claude will start on the default model. Pass --mode code for Sonnet." >&2
+  fi
+elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
+  if [[ "$CLAUDE_MODEL" == "argon" || "$CLAUDE_MODEL" == "opus" || "$CLAUDE_MODEL" == claude-opus* ]]; then
+    CLAUDE_MODEL="gemini-4-argon-medium"
+  elif [[ "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-sonnet* ]]; then
+    CLAUDE_MODEL="gemini-3.8-flash-high"
+  elif [[ -z "$CLAUDE_MODEL" ]]; then
+    case "$HANDOFF_MODE" in
+      code) CLAUDE_MODEL="gemini-3.8-flash-high" ;;
+      plan) CLAUDE_MODEL="gemini-4-argon-medium" ;;
+      "") ;;
+    esac
+  fi
 fi
 CLAUDE_MODEL_FLAG=""
 if [[ -n "$CLAUDE_MODEL" ]]; then
@@ -341,7 +460,21 @@ launch_t3_handoff() {
   fi
   echo "📁 Handoff file:   $HANDOFF_PATH"
   echo "📝 Prompt sidecar: $PROMPT_FILE"
-  echo "💡 Paste (⌘V) in your new T3 Code thread (or AGY provider tab) to resume immediately."
+  echo "⚠️  NO THREAD WAS STARTED: a shell script cannot create T3 threads."
+  echo "👉 AGENT ACTION REQUIRED: call the t3_thread_launch MCP tool now with message = contents of $PROMPT_FILE"
+  local t3_model_hint=""
+  if [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
+    t3_model_hint=", provider 'antigravity', model '${CLAUDE_MODEL:-gemini-4-argon-medium}'"
+  elif [[ -n "$CLAUDE_MODEL" ]]; then
+    t3_model_hint=", model '$CLAUDE_MODEL'"
+  fi
+  if [[ "$YOLO" == "true" ]]; then
+    echo "   (title 'Handoff: <slug>', runtimeMode 'full-access', interactionMode 'default'${t3_model_hint}, workspaceStrategy matching this checkout)."
+    echo "   Never interactionMode 'plan': a plan-mode thread and its subagents refuse every edit."
+  else
+    echo "   (title 'Handoff: <slug>', runtimeMode 'approval-required' (--no-yolo), interactionMode 'default'${t3_model_hint}, workspaceStrategy matching this checkout)."
+  fi
+  echo "   Fallback for a human: paste (⌘V) into a new T3 Code thread."
   exit 0
 }
 
@@ -485,7 +618,8 @@ elif [[ "$AGENT_KIND" == "claude" ]]; then
   echo "🧠 Claude model: ${CLAUDE_MODEL:-default}"
   herdr pane run "$ROOT_PANE" "claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}\"\$(cat $QUOTED_PROMPT_FILE)\""
 elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
-  herdr pane run "$ROOT_PANE" "agy ${YOLO_FLAG}-i \"\$(cat $QUOTED_PROMPT_FILE)\""
+  echo "🧠 AGY model: ${CLAUDE_MODEL:-default}"
+  herdr pane run "$ROOT_PANE" "agy ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}-i \"\$(cat $QUOTED_PROMPT_FILE)\""
 else
   herdr pane run "$ROOT_PANE" "$AGENT_KIND"
 fi
