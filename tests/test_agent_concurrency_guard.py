@@ -82,11 +82,20 @@ class R2ReviewCapTest(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=4) as ex:
                 out = list(ex.map(lambda _: self.dispatch(AGENT_GUARD_NOW=at), range(4)))
             self.assertEqual(sum("permissionDecision" not in o for o in out), 1, f"trial {trial}")
-    def test_old_claims_are_cleaned_up(self):
-        now = int(time.time())
-        for step in range(5):
-            self.dispatch(AGENT_GUARD_NOW=str(now + step * 600))
-        self.assertLessEqual(len(list(self.subagents.glob(".r2-review-claim.*"))), 2)
+    def test_denied_retries_do_not_extend_the_block(self):
+        results = [self.dispatch(AGENT_GUARD_NOW=str(t)) for t in (119, 120, 178, 180)]
+        self.assertEqual(["permissionDecision" in o for o in results], [False, True, True, False])
+    def test_burst_across_a_minute_boundary_allows_exactly_one(self):
+        base = 6000 * 60
+        for trial in range(8):
+            first = base + trial * 600 - 1
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                out = list(ex.map(lambda i: self.dispatch(AGENT_GUARD_NOW=str(first + i % 2)), range(4)))
+            self.assertEqual(sum("permissionDecision" not in o for o in out), 1, f"trial {trial}")
+    def test_abandoned_lock_fails_open_and_clears(self):
+        lock = self.subagents / ".r2-review-lock"; lock.mkdir(parents=True)
+        self.assertNotIn("permissionDecision", self.dispatch())
+        self.assertFalse(lock.exists())
     def test_crashed_reviewer_stops_blocking_once_its_log_goes_stale(self):
         self.agent("a", "code-reviewer", age_minutes=45)
         self.assertNotIn("permissionDecision", self.dispatch())

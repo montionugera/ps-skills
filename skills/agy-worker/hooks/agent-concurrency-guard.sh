@@ -32,13 +32,14 @@ awk -v r="$SWAPR" -v d="$DENY" 'BEGIN{exit !(r+0>=d+0)}' && deny "Agent budget: 
 [ "$WORKERS" -ge "$MAXW" ] && deny "Agent budget: ${WORKERS} worker agents already run machine-wide (limit ${MAXW}, AGENT_MAX_WORKERS). Wait for one to finish with a single blocking wait, then dispatch."
 case "$TOOL" in delegate_task|mcp__t3-code__t3_thread_launch) [ "$T3COUNT" -ge "$MAXT3" ] && deny "T3 concurrency cap: ${T3COUNT} T3 Code agent threads already run (limit ${MAXT3}, T3_MAX_THREADS). Block once on t3_thread_wait, then launch." ;; esac
 # subagents/*.meta.json gains "finished":true when an agent ends; a crashed agent never does, so a log idle for
-# 30 min no longer counts. Reviewers fanned out in one message race the meta files, so a claim per 60 s bucket catches
-# them: mkdir is atomic within a bucket and the neighbour check covers a burst straddling two buckets.
+# 30 min no longer counts. Reviewers fanned out in one message race the meta files, so a stamp of the last allowed reviewer
+# catches them. A short mkdir lock serializes the read and write; only an allowed dispatch moves the stamp, so denied
+# retries never extend the block. A lock that outlives 1 s is abandoned: clear it and fail open.
 review_cap(){
   [ "${AGENT_R2_REVIEW_GUARD:-on}" = "off" ] && return 0
   case "$TOOL" in Agent|Task) ;; *) return 0 ;; esac
-  local re='reviewer|aios-(verifier|falsifier|silent-failures)' sub tp dir m claim old bucket label
-  local msg="R2 review cap: another reviewer was dispatched in this session in the last two minutes. Rule 7 gives R2 work ONE consolidated reviewer: merge the briefs into one agent. If the change is R1 or higher, label the briefs RISK: R1."
+  local re='reviewer|aios-(verifier|falsifier|silent-failures)' sub tp dir m lock stamp now last i got label
+  local msg="R2 review cap: another reviewer was dispatched in this session under a minute ago. Rule 7 gives R2 work ONE consolidated reviewer: merge the briefs into one agent. If the change is R1 or higher, label the briefs RISK: R1."
   sub="$(printf '%s' "$INPUT" | sed -nE 's/.*"subagent_type"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)"
   printf '%s' "$sub" | grep -Eq "$re" || return 0
   # Only the brief's own first label counts: a brief may quote other labels, and "prompt" with these exact quotes is
@@ -55,12 +56,16 @@ review_cap(){
     [ -n "$(find "${m%.meta.json}.jsonl" -mmin -30 2>/dev/null)" ] || continue
     deny "R2 review cap: reviewer '$(sed -nE 's/.*"description":"([^"\\]*).*/\1/p' "$m")' is still running. Rule 7 gives R2 work ONE consolidated reviewer: put this concern in that review or wait for it. If the change is R1 or higher, label the brief RISK: R1."
   done
-  bucket=$(( ${AGENT_GUARD_NOW:-$(date +%s)} / 60 )); claim="$dir/.r2-review-claim"
-  mkdir "$claim.$bucket" 2>/dev/null || deny "$msg"
-  { [ -e "$claim.$((bucket - 1))" ] || [ -e "$claim.$((bucket + 1))" ]; } && deny "$msg"
-  for old in "$claim".*; do
-    [ "${old##*.}" -lt $((bucket - 1)) ] 2>/dev/null && rmdir "$old" 2>/dev/null
+  lock="$dir/.r2-review-lock"; stamp="$dir/.r2-review-stamp"; got=""
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    mkdir "$lock" 2>/dev/null && { got=1; break; }
+    sleep 0.05
   done
+  [ -n "$got" ] || { rmdir "$lock" 2>/dev/null; return 0; }
+  now="${AGENT_GUARD_NOW:-$(date +%s)}"; last="$(cat "$stamp" 2>/dev/null)"
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  if [ $((now - last)) -lt 60 ]; then rmdir "$lock"; deny "$msg"; fi
+  printf '%s' "$now" > "$stamp"; rmdir "$lock"
   return 0
 }
 review_cap
