@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 
 
@@ -34,6 +35,21 @@ def create_branch(cwd: Path, name: str, start_point: str = "HEAD") -> None:
 def commit_all(cwd: Path, message: str) -> None:
     _run(cwd, "add", "-A")
     _run(cwd, "commit", "-m", message)
+
+
+def commit_paths(cwd: Path, message: str, paths: Iterable[str]) -> bool:
+    """Commit changes under `paths` and nothing else; True if a commit was made.
+
+    Use this instead of commit_all in a checkout that can hold other people's
+    work or untracked build output. Paths with no changes are skipped, so a path
+    that does not exist is fine.
+    """
+    changed = [p for p in paths if _run(cwd, "status", "--porcelain", "--", p).stdout.strip()]
+    if not changed:
+        return False
+    _run(cwd, "add", "-A", "--", *changed)
+    _run(cwd, "commit", "-m", message, "--", *changed)
+    return True
 
 
 def _seed_graft_if_present(parent_dir: Path, target_dir: Path) -> None:
