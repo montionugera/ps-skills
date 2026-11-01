@@ -313,6 +313,24 @@ class HerdrHandoffTest(unittest.TestCase):
         self.assertIn("## 0. Claim This Handoff", self.doc.read_text())
         self.assertIn(f'mkdir "{self.doc}.claim"', self.doc.with_suffix(".prompt.txt").read_text())
 
+    def test_a_doc_that_only_mentions_claims_still_gets_section_0(self):
+        self.doc.write_text("# Handoff: x\nThe old.claim dirs in /tmp need review.\n## 1\n## 4\n")
+        self.run_script("--running", "1")
+        self.assertIn(f'mkdir "{self.doc}.claim"', self.doc.read_text())
+
+    def test_a_doc_already_carrying_its_real_path_is_left_alone(self):
+        body = f'# Handoff: x\nmkdir "{self.doc}.claim"\n## 1\n## 4\n'
+        self.doc.write_text(body)
+        self.run_script("--running", "1")
+        self.assertEqual(self.doc.read_text(), body)
+
+    def test_shell_and_replacement_metacharacters_survive_the_rewrite(self):
+        tricky = 'a & b \\\\ c $(rm -rf /) `id` $HOME %s \\1 "q" \'s\'\n'
+        self.doc.write_text(f"# Handoff: x\n<this-file's-own-absolute-path>.claim\n{tricky}## 1\n## 4\n")
+        self.run_script("--running", "1")
+        self.assertIn(tricky, self.doc.read_text())
+        self.assertIn(tricky, self.doc.with_suffix(".prompt.txt").read_text())
+
     def test_dry_run_leaves_the_doc_byte_identical(self):
         original = "# Handoff: x\nno claim <this-file's-own-absolute-path>\n"
         self.doc.write_text(original)

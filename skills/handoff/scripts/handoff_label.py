@@ -12,7 +12,7 @@ DEFAULT_MAX = 36  # herdr sidebar_max_width
 SEP = " · "
 ELLIPSIS = "…"
 CLAUSE_SPLIT = re.compile(r",|;| — | \+ | then ")
-PLUGIN_PREFIX = re.compile(r"^\[\d+\]\s+")
+SOURCE_PREFIX = re.compile(r"^(\[\d+\]\s+)?(⏳ relay → )?")
 GENERATION = re.compile(r" #(\d+)$")
 
 
@@ -44,7 +44,7 @@ def choose_topic(topic, title, slug):
 
 def generation(project, source_label):
     """The next number in the chain, or None when the source is not part of one."""
-    source = PLUGIN_PREFIX.sub("", _clean(source_label))
+    source = SOURCE_PREFIX.sub("", _clean(source_label))
     if source.startswith("Handoff: "):
         return 2
     if not project or not source.startswith(project + SEP):
@@ -56,7 +56,7 @@ def generation(project, source_label):
 def truncate(topic, room):
     if len(topic) <= room:
         return topic
-    if room <= 0:
+    if room <= 1:  # no space for more than the ellipsis
         return ""
     cut = topic[: room - 1].rstrip()
     if " " in cut:

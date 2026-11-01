@@ -394,7 +394,7 @@ EOF
 ORIGINAL_CONTENT="$(cat "$HANDOFF_PATH")"
 CLAIM_PLACEHOLDER="<this-file's-own-absolute-path>"
 HANDOFF_CONTENT=${ORIGINAL_CONTENT//"$CLAIM_PLACEHOLDER"/"$HANDOFF_PATH"}
-if [[ "$HANDOFF_CONTENT" != *".claim"* ]]; then
+if [[ "$HANDOFF_CONTENT" != *"$CLAIM_DIR"* ]]; then
   DOC_FIRST_LINE="${HANDOFF_CONTENT%%$'\n'*}"
   DOC_REST=""
   [[ "$HANDOFF_CONTENT" == *$'\n'* ]] && DOC_REST="${HANDOFF_CONTENT#*$'\n'}"

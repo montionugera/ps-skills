@@ -70,6 +70,9 @@ class ComposeTest(unittest.TestCase):
         self.assertTrue(label.endswith(" #5"), label)
         self.assertLessEqual(len(label), 20)
 
+    def test_room_for_only_an_ellipsis_drops_the_topic(self):
+        self.assertEqual(hl.compose("p", topic="alpha", max_len=5), "p")
+
     def test_project_is_never_dropped_even_when_it_exceeds_the_cap(self):
         label = hl.compose("a-very-long-project-name-indeed", topic="topic", max_len=10)
         self.assertTrue(label.startswith("a-very-long-project-name-indeed"))
@@ -92,6 +95,7 @@ class GenerationTest(unittest.TestCase):
             ("[3] p · old #2", 3),
             ("Handoff: anything", 2),
             ("[2] Handoff: anything", 2),
+            ("⏳ relay → p · old #4", 5),
             ("other · old #7", None),
             ("zsh", None),
             ("", None),
