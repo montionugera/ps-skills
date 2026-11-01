@@ -98,3 +98,4 @@ A gate that cannot get a slot prints `[gate-lock] ... waiting` and retries every
 |---|---|---|
 | `PSRW_GATE_SLOTS` | `2` | Max gates running at once on this machine |
 | `PSRW_GATE_LOCK_DIR` | `~/.cache/psrw/gate-locks` | Where slot files live (`flock`; released by the kernel if a gate dies) |
+| `PSRW_MAX_WIP` | `3` | Features one repo may have claimed at once. `psrw claim` refuses a new claim at the limit; `--resume` and `--reopen` are exempt. `0` disables |

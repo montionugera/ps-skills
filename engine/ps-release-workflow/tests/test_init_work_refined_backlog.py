@@ -18,7 +18,9 @@ from scripts.init_work_refined_backlog import (
     NoFreeFeatureError,
     NotClaimedError,
     NoReleaseInProgressError,
+    WipLimitError,
 )
+from scripts.unclaim import unclaim_feature
 
 
 def _setup_feature(repo: Path, title: str = "X") -> dict:
@@ -720,3 +722,180 @@ def test_resume_by_another_owner_after_sync_is_not_needs_sync(
     resumed = resume_feature(repo, feat["id"], owner="other-session")
     assert resumed["needs_sync"] is False
     assert resumed["release_ahead"] == 0
+
+
+# --- WIP cap (PSRW_MAX_WIP) ---------------------------------------------------
+
+
+def _setup_features(repo: Path, count: int) -> list:
+    new_release(repo, version="1.1")
+    return [_setup_feature(repo, title=f"Wip {i}") for i in range(count)]
+
+
+def _set_catalog_status(repo: Path, feature_id: str, status: str) -> None:
+    cat = _release_catalog_path(repo)
+    entries = json.loads(cat.read_text())
+    for e in entries:
+        if e["id"] == feature_id:
+            e["status"] = status
+    cat.write_text(json.dumps(entries))
+
+
+def _ledger(repo: Path) -> dict:
+    return json.loads((repo / ".claude" / "state" / "claims.json").read_text())
+
+
+def test_claim_refused_at_default_wip_cap_naming_claimed_features(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch
+):
+    repo = tmp_repo_with_release
+    monkeypatch.delenv("PSRW_MAX_WIP", raising=False)
+    feats = _setup_features(repo, 4)
+    for f in feats[:3]:
+        claim_feature(repo, f["id"], owner=fixed_owner)
+
+    with pytest.raises(WipLimitError) as exc:
+        claim_feature(repo, feats[3]["id"], owner=fixed_owner)
+
+    msg = str(exc.value)
+    for f in feats[:3]:
+        assert f["id"] in msg
+    assert "ship or unclaim one first" in msg
+    # A refused claim leaves no half-state.
+    assert feats[3]["id"] not in _ledger(repo)
+    assert not list((repo / ".claude" / "worktrees").glob(f"{feats[3]['id']}-*"))
+
+
+def test_claim_next_also_respects_wip_cap(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch
+):
+    repo = tmp_repo_with_release
+    monkeypatch.setenv("PSRW_MAX_WIP", "1")
+    feats = _setup_features(repo, 2)
+    claim_feature(repo, feats[0]["id"], owner=fixed_owner)
+    with pytest.raises(WipLimitError):
+        claim_feature(repo, None, owner=fixed_owner, select_next=True)
+
+
+def test_wip_cap_ignores_stale_ledger_rows_of_shipped_features(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch
+):
+    """The ledger keeps rows for shipped/promoted features; only live work counts."""
+    repo = tmp_repo_with_release
+    monkeypatch.setenv("PSRW_MAX_WIP", "2")
+    feats = _setup_features(repo, 3)
+    claim_feature(repo, feats[0]["id"], owner=fixed_owner)
+    claim_feature(repo, feats[1]["id"], owner=fixed_owner)
+    _set_catalog_status(repo, feats[0]["id"], "shipped")
+
+    assert claim_feature(repo, feats[2]["id"], owner=fixed_owner)["feature"] == feats[2]["id"]
+
+
+def test_wip_cap_counts_catalog_claims_missing_from_ledger(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch
+):
+    """Catalog-only drift (audit B2) is still claimed work."""
+    repo = tmp_repo_with_release
+    monkeypatch.setenv("PSRW_MAX_WIP", "1")
+    feats = _setup_features(repo, 2)
+    _set_catalog_status(repo, feats[0]["id"], "claimed")
+    with pytest.raises(WipLimitError, match=feats[0]["id"]):
+        claim_feature(repo, feats[1]["id"], owner=fixed_owner)
+
+
+def test_wip_cap_counts_inflight_claim_not_yet_in_catalog(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch
+):
+    """A racing claim has its ledger row before the catalog says 'claimed'."""
+    repo = tmp_repo_with_release
+    monkeypatch.setenv("PSRW_MAX_WIP", "1")
+    feats = _setup_features(repo, 2)
+    claims_file = repo / ".claude" / "state" / "claims.json"
+    claims_file.parent.mkdir(parents=True, exist_ok=True)
+    claims_file.write_text(json.dumps({feats[0]["id"]: {"owner": "racer"}}))
+
+    with pytest.raises(WipLimitError, match=feats[0]["id"]):
+        claim_feature(repo, feats[1]["id"], owner=fixed_owner)
+
+
+def test_wip_cap_holds_under_concurrent_claims(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch
+):
+    repo = tmp_repo_with_release
+    monkeypatch.setenv("PSRW_MAX_WIP", "1")
+    feats = _setup_features(repo, 2)
+    won, refused = [], []
+
+    def attempt(feature_id: str) -> None:
+        try:
+            won.append(claim_feature(repo, feature_id, owner=fixed_owner))
+        except WipLimitError as exc:
+            refused.append(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        list(ex.map(attempt, [f["id"] for f in feats]))
+
+    assert len(won) == 1
+    assert len(refused) == 1
+
+
+def test_unclaim_frees_a_wip_slot(tmp_repo_with_release: Path, fixed_owner: str, monkeypatch):
+    repo = tmp_repo_with_release
+    monkeypatch.setenv("PSRW_MAX_WIP", "1")
+    feats = _setup_features(repo, 2)
+    claim_feature(repo, feats[0]["id"], owner=fixed_owner)
+    unclaim_feature(repo, feats[0]["id"])
+    assert claim_feature(repo, feats[1]["id"], owner=fixed_owner)["feature"] == feats[1]["id"]
+
+
+def test_resume_and_reopen_are_not_capped(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch
+):
+    """Neither adds new work: resume re-owns a claim, reopen fixes shipped work."""
+    repo = tmp_repo_with_release
+    monkeypatch.setenv("PSRW_MAX_WIP", "1")
+    feats = _setup_features(repo, 2)
+    claim_feature(repo, feats[0]["id"], owner=fixed_owner)
+    _set_catalog_status(repo, feats[1]["id"], "shipped")
+
+    assert resume_feature(repo, feats[0]["id"], owner="other")["feature"] == feats[0]["id"]
+    assert claim_feature(repo, feats[1]["id"], owner="other", reopen=True)["reopened"] is True
+
+
+@pytest.mark.parametrize("raw,allowed", [("0", 2), ("-1", 2), ("1", 1)])
+def test_max_wip_env_controls_the_cap(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, raw: str, allowed: int
+):
+    """0 or negative disables the cap."""
+    repo = tmp_repo_with_release
+    monkeypatch.setenv("PSRW_MAX_WIP", raw)
+    feats = _setup_features(repo, 2)
+    claimed = 0
+    for f in feats:
+        try:
+            claim_feature(repo, f["id"], owner=fixed_owner)
+            claimed += 1
+        except WipLimitError:
+            pass
+    assert claimed == allowed
+
+
+@pytest.mark.parametrize(
+    "raw,expected", [("nonsense", 3), ("", 3), ("5", 5), ("0", 0), ("-1", -1)]
+)
+def test_max_wip_value(monkeypatch, raw: str, expected: int):
+    monkeypatch.setenv("PSRW_MAX_WIP", raw)
+    assert claim_mod._max_wip() == expected
+
+
+def test_main_reports_wip_limit_cleanly(
+    tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, capsys
+):
+    repo = tmp_repo_with_release
+    monkeypatch.setenv("PSRW_MAX_WIP", "1")
+    feats = _setup_features(repo, 2)
+    claim_feature(repo, feats[0]["id"], owner=fixed_owner)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr("sys.argv", ["init_work_refined_backlog.py", feats[1]["id"]])
+    assert claim_mod.main() == 1
+    assert "ERROR: WipLimitError" in capsys.readouterr().err

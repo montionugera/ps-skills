@@ -52,7 +52,7 @@ Implement via `/subagent-driven-development` (it reads the F-NNN `plan.md`).
 
 ## Refuses if
 
-No release in progress · the feature is already claimed · `--next` with no free feature.
+No release in progress · the feature is already claimed · `--next` with no free feature · the repo already has `PSRW_MAX_WIP` (default 3) features claimed: ship or unclaim one first (`--resume` and `--reopen` are exempt).
 
 Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#d11-backlog-routing`
 Flags: `psrw claim --help`

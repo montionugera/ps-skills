@@ -11,6 +11,7 @@ from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,10 +48,34 @@ class NotClaimedError(Exception): pass
 
 
 class FeatureNotReadyError(Exception): pass
+class WipLimitError(Exception): pass
+
+
+DEFAULT_MAX_WIP = 3
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _max_wip() -> int:
+    """PSRW_MAX_WIP: claims allowed per repo. <= 0 disables; junk keeps the default."""
+    try:
+        return int(os.environ.get("PSRW_MAX_WIP", DEFAULT_MAX_WIP))
+    except ValueError:
+        return DEFAULT_MAX_WIP
+
+
+def _active_features(claims: dict, catalog: list) -> set:
+    """Features in flight: catalog `claimed`, plus ledger rows of `open` features.
+
+    A concurrent claim writes its ledger row before the catalog says `claimed`.
+    Rows for shipped/promoted features are stale and do not count.
+    """
+    status = {e["id"]: e.get("status") for e in catalog}
+    return {fid for fid, s in status.items() if s == "claimed"} | {
+        fid for fid in claims if status.get(fid) == "open"
+    }
 
 
 def _drop_claim(claims_file: Path, feature_id: str) -> None:
@@ -174,6 +199,14 @@ def claim_feature(
             raise AlreadyClaimedError(
                 f"{feature_id} held by owner={claims[feature_id]['owner']}"
             )
+        max_wip = _max_wip()
+        if max_wip > 0 and not reopen:
+            active = _active_features(claims, list_entries(refined_cat)) - {feature_id}
+            if len(active) >= max_wip:
+                raise WipLimitError(
+                    f"{len(active)} features already claimed (limit {max_wip}): "
+                    f"{', '.join(sorted(active))} — ship or unclaim one first"
+                )
         claims[feature_id] = {
             "owner": owner,
             "worktree": str(worktree_path),
@@ -447,6 +480,7 @@ def main() -> int:
         FeatureNotFoundError,
         FeatureNotReadyError,
         NotClaimedError,
+        WipLimitError,
         CatalogEntryNotFoundError,
         GitError,
         ValueError,
