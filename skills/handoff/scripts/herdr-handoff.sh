@@ -10,14 +10,15 @@ set -euo pipefail
 # Options:
 #   --kind <agent-kind>         Agent kind (agy, gemini, claude, codex, opencode, cursor, t3code)
 #   --multiplexer <mux>         Multiplexer/launcher target: herdr, t3 (or t3code), auto (default: auto)
-#   --label <tab-label>         Tab label (default: "Handoff: <slug>")
-#   --cwd <dir>                 Working directory (default: $PWD)
+#   --label <tab-label>         Exact tab label (default: "<project> · <topic> #N")
+#   --topic <text>              2-5 words on what the new session does next
+#   --cwd <dir>                 Working directory (default: the doc's Worktree/Repo, else $PWD)
 #   --prompt <text>             Custom prompt override
 #   --mode <code|plan>          Handoff type. For --kind claude: code -> Sonnet,
 #                               plan -> the default model (unset: default + warning)
 #   --model <name>              Explicit Claude model; overrides --mode
 #   --no-agent                  Only open a shell tab without starting an agent
-#   --no-focus                  Do not switch focus to the new tab
+#   --no-focus                  Never switch focus (default: follow only if you are on this tab)
 #   --use-agent-manager         Try `herdr agent start` first (direct interactive launch is default)
 #   --running <N>               How many background agents this session still has running.
 #                               0 implies --close-source; N>0 keeps this tab open (the banner
@@ -35,14 +36,15 @@ Usage: herdr-handoff.sh <handoff-markdown-path> [options]
 Options:
   --kind <agent-kind>         Agent kind: agy, gemini, claude, codex, opencode, cursor, t3code
   --multiplexer <mux>         Multiplexer target: herdr, t3 (or t3code), auto (default: auto)
-  --label <tab-label>         Tab label (default: "Handoff: <slug>")
-  --cwd <dir>                 Working directory (default: $PWD)
+  --label <tab-label>         Exact tab label (default: "<project> · <topic> #N")
+  --topic <text>              2-5 words on what the new session does next
+  --cwd <dir>                 Working directory (default: the doc's Worktree/Repo, else $PWD)
   --prompt <text>             Custom prompt override
   --mode <code|plan>          Handoff type (claude: code->sonnet, plan->default; agy: code->gemini-4-argon-medium, plan->gemini-4-argon-high)
   --model <name>              Explicit model for claude or agy; overrides --mode
   --no-quota-switch           Do not auto-switch low-quota claude handoffs to agy yolo with argon
   --no-agent                  Only open a shell tab without starting an agent
-  --no-focus                  Do not switch focus to the new tab
+  --no-focus                  Never switch focus (default: follow only if you are on this tab)
   --use-agent-manager         Try `herdr agent start` first
   --running <N>               Background agents this session still has running (0 = close this
                               tab after the handoff; N>0 = keep it open and relay their results)
@@ -73,7 +75,9 @@ fi
 AGENT_KIND="${HERDR_HANDOFF_AGENT_KIND:-$DETECTED_KIND}"
 MULTIPLEXER="${HERDR_HANDOFF_MULTIPLEXER:-auto}"
 TAB_LABEL=""
+TAB_TOPIC=""
 TARGET_CWD="$PWD"
+CWD_EXPLICIT=false
 CUSTOM_PROMPT=""
 HANDOFF_MODE=""
 CLAUDE_MODEL=""
@@ -83,8 +87,9 @@ USE_AGENT_MANAGER=false
 CLOSE_SOURCE=false
 CLOSE_GRACE_SECONDS=20
 RUNNING=""
-CONFIRM_TIMEOUT="${HERDR_HANDOFF_CONFIRM_TIMEOUT:-60}"
-[[ "$CONFIRM_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]] || CONFIRM_TIMEOUT=60
+# Stays under the 120s default of an agent's Bash tool; real claims take 5-15s.
+CONFIRM_TIMEOUT="${HERDR_HANDOFF_CONFIRM_TIMEOUT:-90}"
+[[ "$CONFIRM_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]] || CONFIRM_TIMEOUT=90
 YOLO=true
 QUOTA_SWITCH="${HERDR_HANDOFF_QUOTA_SWITCH:-true}"
 DRY_RUN=false
@@ -107,8 +112,13 @@ while [[ $# -gt 0 ]]; do
       TAB_LABEL="$2"
       shift 2
       ;;
+    --topic)
+      TAB_TOPIC="$2"
+      shift 2
+      ;;
     --cwd)
       TARGET_CWD="$2"
+      CWD_EXPLICIT=true
       shift 2
       ;;
     --prompt)
@@ -192,6 +202,16 @@ fi
 
 if [[ ! -f "$HANDOFF_PATH" ]]; then
   echo "Error: Handoff file '$HANDOFF_PATH' does not exist." >&2
+  exit 1
+fi
+[[ "$HANDOFF_PATH" == /* ]] || HANDOFF_PATH="$PWD/$HANDOFF_PATH"
+CLAIM_DIR="$HANDOFF_PATH.claim"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A claimed doc already has an owner; a second spawn could only race it.
+if [[ -d "$CLAIM_DIR" && "$DRY_RUN" != "true" && "$START_AGENT" == "true" ]]; then
+  echo "❌ Handoff already claimed by: $(cat "$CLAIM_DIR/owner" 2>/dev/null || echo unknown)" >&2
+  echo "   To spawn it again on purpose: rm -r '$CLAIM_DIR'" >&2
   exit 1
 fi
 
@@ -345,22 +365,55 @@ if [[ -n "$CLAUDE_MODEL" ]]; then
   CLAUDE_MODEL_FLAG="--model $CLAUDE_MODEL "
 fi
 
-# Determine default label
-if [[ -z "$TAB_LABEL" ]]; then
-  BASENAME=$(basename "$HANDOFF_PATH" .md)
-  SLUG=$(echo "$BASENAME" | sed -E 's/handoff(-[0-9_-]+)?-//; s/^[0-9_-]+//')
-  if [[ -n "$SLUG" && "$SLUG" != "$BASENAME" ]]; then
-    TAB_LABEL="Handoff: $SLUG"
-  else
-    TAB_LABEL="Handoff: $(basename "$TARGET_CWD")"
+# The doc says where the work lives; the calling shell may be somewhere else.
+if [[ "$CWD_EXPLICIT" != "true" ]]; then
+  DOC_CWD=$(sed -n '1,3p' "$HANDOFF_PATH" | sed -nE 's/.*\*\*(Worktree|Repo):\*\* `([^`]+)`.*/\2/p' | sed -n '1p')
+  if [[ -n "$DOC_CWD" && -d "$DOC_CWD" && "$DOC_CWD" != "$TARGET_CWD" ]]; then
+    echo "📂 Using the doc's directory: $DOC_CWD"
+    TARGET_CWD="$DOC_CWD"
   fi
 fi
+
+# The script owns the claim path, so a doc can never reach an agent without one.
+claim_section() {
+  cat <<EOF
+
+## 0. Claim This Handoff (run this FIRST, before reading further)
+\`\`\`bash
+mkdir "$CLAIM_DIR" 2>/dev/null && echo "\$(whoami) pid \$\$ \$(date -Iseconds)" > "$CLAIM_DIR/owner" && echo CLAIMED || { echo "ALREADY CLAIMED by:"; cat "$CLAIM_DIR/owner"; }
+\`\`\`
+If it prints \`ALREADY CLAIMED\`: STOP. Another agent already owns this handoff. Do not read further or dispatch anything; tell the user two sessions raced this handoff, and end your turn.
+If it prints \`CLAIMED\`: proceed to section 1.
+EOF
+}
 
 # Formulate prompt for incoming agent and write sidecar file before mux dispatch.
 # Inline the full handoff markdown directly into PROMPT_FILE so the receiving agent
 # starts with the complete Main Context (Objective, Governing Spec/Plan, User Decisions,
 # and Live Frontier) already in Turn 0 without losing the big picture.
-HANDOFF_CONTENT="$(cat "$HANDOFF_PATH")"
+ORIGINAL_CONTENT="$(cat "$HANDOFF_PATH")"
+CLAIM_PLACEHOLDER="<this-file's-own-absolute-path>"
+HANDOFF_CONTENT=${ORIGINAL_CONTENT//"$CLAIM_PLACEHOLDER"/"$HANDOFF_PATH"}
+if [[ "$HANDOFF_CONTENT" != *".claim"* ]]; then
+  DOC_FIRST_LINE="${HANDOFF_CONTENT%%$'\n'*}"
+  DOC_REST=""
+  [[ "$HANDOFF_CONTENT" == *$'\n'* ]] && DOC_REST="${HANDOFF_CONTENT#*$'\n'}"
+  HANDOFF_CONTENT="$DOC_FIRST_LINE
+$(claim_section)
+
+$DOC_REST"
+fi
+if [[ "$HANDOFF_CONTENT" != "$ORIGINAL_CONTENT" && "$DRY_RUN" != "true" ]]; then
+  printf '%s\n' "$HANDOFF_CONTENT" > "$HANDOFF_PATH"
+fi
+if [[ "$DRY_RUN" != "true" ]]; then
+  grep -q '^## 1' "$HANDOFF_PATH" || echo "⚠️  Handoff doc has no '## 1' (Main Context) section." >&2
+  grep -q '^## 4' "$HANDOFF_PATH" || echo "⚠️  Handoff doc has no '## 4' (Immediate Next Action) section." >&2
+  DOC_BYTES=$(wc -c < "$HANDOFF_PATH" | tr -d ' ')
+  if (( DOC_BYTES > 12288 )); then
+    echo "⚠️  Handoff doc is $DOC_BYTES bytes; the new session pays for all of it in turn 0." >&2
+  fi
+fi
 if [[ -n "$CUSTOM_PROMPT" ]]; then
   FINAL_PROMPT="Handoff file: $HANDOFF_PATH
 Task override / focus: $CUSTOM_PROMPT
@@ -395,8 +448,8 @@ if [[ "$DRY_RUN" != "true" ]] && command -v graft >/dev/null 2>&1; then
     if [[ -n "$_git_common" && ! -d "$TARGET_CWD/graft" ]]; then
       _main_repo="$(cd "$TARGET_CWD" && cd "$_git_common/.." 2>/dev/null && pwd)"
       if [[ -d "$_main_repo/graft" ]]; then
-        echo "🌱 Seeding graft context graph for worktree from $(basename "$_main_repo")..."
-        (cd "$TARGET_CWD" && graft build >/dev/null 2>&1 || true)
+        echo "🌱 Seeding graft context graph for worktree from $(basename "$_main_repo") in the background..."
+        (cd "$TARGET_CWD" && nohup graft build </dev/null >/dev/null 2>&1 &)
       fi
     fi
   fi
@@ -406,7 +459,8 @@ fi
 HERDR_AVAILABLE=false
 if command -v herdr >/dev/null 2>&1; then
   HERDR_STATUS=$(herdr status server 2>&1 || true)
-  if [[ "$HERDR_STATUS" == *"status: running"* || "$HERDR_STATUS" == *"running"* ]]; then
+  # An exact line: a stopped server prints "status: not running".
+  if grep -qE '^[[:space:]]*status: running[[:space:]]*$' <<<"$HERDR_STATUS"; then
     HERDR_AVAILABLE=true
   fi
 fi
@@ -430,6 +484,46 @@ if [[ "$RESOLVED_MUX" == "auto" ]]; then
   fi
 fi
 
+# Who is calling. `pane current` resolves HERDR_PANE_ID live, so it stays right
+# after a pane moves; the inherited HERDR_WORKSPACE_ID and HERDR_TAB_ID do not.
+CALLER_WORKSPACE="${HERDR_WORKSPACE_ID:-}"
+SOURCE_TAB="${HERDR_TAB_ID:-}"
+SOURCE_LABEL=""
+if [[ "$RESOLVED_MUX" == "herdr" && "$HERDR_AVAILABLE" == "true" ]]; then
+  if [[ -n "${HERDR_PANE_ID:-}" ]]; then
+    CALLER_JSON=$(herdr pane current 2>/dev/null || true)
+    LIVE_WORKSPACE=$(jq -r '.result.pane.workspace_id // empty' <<<"$CALLER_JSON" 2>/dev/null || true)
+    LIVE_TAB=$(jq -r '.result.pane.tab_id // empty' <<<"$CALLER_JSON" 2>/dev/null || true)
+    CALLER_WORKSPACE="${LIVE_WORKSPACE:-$CALLER_WORKSPACE}"
+    SOURCE_TAB="${LIVE_TAB:-$SOURCE_TAB}"
+  fi
+  if [[ -n "$SOURCE_TAB" ]]; then
+    SOURCE_JSON=$(herdr tab get "$SOURCE_TAB" 2>/dev/null || true)
+    SOURCE_LABEL=$(jq -r '.result.tab.label // empty' <<<"$SOURCE_JSON" 2>/dev/null || true)
+    # Not `// empty`: jq treats false as missing.
+    SOURCE_FOCUSED=$(jq -r '.result.tab.focused | tostring' <<<"$SOURCE_JSON" 2>/dev/null || true)
+    # Follow the handoff only if the user is on the parent; never pull them off other work.
+    [[ "$SOURCE_FOCUSED" == "false" ]] && FOCUS_FLAG="--no-focus"
+  fi
+fi
+
+if [[ -z "$TAB_LABEL" ]]; then
+  BASENAME=$(basename "$HANDOFF_PATH" .md)
+  SLUG=$(echo "$BASENAME" | sed -E 's/handoff(-[0-9_-]+)?-//; s/^[0-9_-]+//')
+  [[ "$SLUG" == "$BASENAME" ]] && SLUG=""
+  DOC_TITLE=$(sed -n '1s/^# *Handoff: *//p' "$HANDOFF_PATH")
+  GIT_COMMON=$(git -C "$TARGET_CWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [[ -n "$GIT_COMMON" ]]; then
+    PROJECT=$(basename "$(dirname "$GIT_COMMON")")
+  else
+    PROJECT=$(basename "$TARGET_CWD")
+  fi
+  TAB_LABEL=$(python3 "$SCRIPT_DIR/handoff_label.py" --cwd-project "$PROJECT" --topic "$TAB_TOPIC" \
+    --title "$DOC_TITLE" --slug "$SLUG" --source-label "$SOURCE_LABEL" \
+    --max "${HERDR_HANDOFF_LABEL_MAX:-40}" 2>/dev/null || true)
+  TAB_LABEL="${TAB_LABEL:-$PROJECT}"
+fi
+
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "DRY_RUN=true"
   echo "RESOLVED_MUX=$RESOLVED_MUX"
@@ -437,7 +531,15 @@ if [[ "$DRY_RUN" == "true" ]]; then
   echo "TARGET_CWD=$TARGET_CWD"
   echo "HANDOFF_PATH=$HANDOFF_PATH"
   echo "PROMPT_FILE=$PROMPT_FILE"
+  echo "TAB_LABEL=$TAB_LABEL"
+  echo "TARGET_WORKSPACE=$CALLER_WORKSPACE"
   exit 0
+fi
+
+# The installed skill is a checkout: a fix merged upstream does nothing until it lands here.
+DRIFT=$(git -C "$SCRIPT_DIR" rev-list --count HEAD..origin/main -- .. 2>/dev/null || true)
+if [[ "$DRIFT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "⚠️  This handoff skill is $DRIFT commit(s) behind origin/main ($SCRIPT_DIR): merged fixes are not active."
 fi
 
 # --------------------------------------------------------------------------
@@ -469,10 +571,10 @@ launch_t3_handoff() {
     t3_model_hint=", model '$CLAUDE_MODEL'"
   fi
   if [[ "$YOLO" == "true" ]]; then
-    echo "   (title 'Handoff: <slug>', runtimeMode 'full-access', interactionMode 'default'${t3_model_hint}, workspaceStrategy matching this checkout)."
+    echo "   (title '$TAB_LABEL', runtimeMode 'full-access', interactionMode 'default'${t3_model_hint}, workspaceStrategy matching this checkout)."
     echo "   Never interactionMode 'plan': a plan-mode thread and its subagents refuse every edit."
   else
-    echo "   (title 'Handoff: <slug>', runtimeMode 'approval-required' (--no-yolo), interactionMode 'default'${t3_model_hint}, workspaceStrategy matching this checkout)."
+    echo "   (title '$TAB_LABEL', runtimeMode 'approval-required' (--no-yolo), interactionMode 'default'${t3_model_hint}, workspaceStrategy matching this checkout)."
   fi
   echo "   Fallback for a human: paste (⌘V) into a new T3 Code thread."
   exit 0
@@ -493,23 +595,34 @@ if [[ "$RESOLVED_MUX" == "none" || "$HERDR_AVAILABLE" != "true" ]]; then
   exit 0
 fi
 
-# Pin the new tab to the workspace this session runs in; without --workspace
-# herdr picks one itself (often a brand-new workspace, scattering related work).
+# Pin the new tab to the caller's workspace. Without --workspace herdr uses the
+# workspace the user is looking at, and handoffs often fire while they are elsewhere.
 WORKSPACE_ARGS=()
-if [[ -n "${HERDR_WORKSPACE_ID:-}" ]]; then
-  WORKSPACE_ARGS=(--workspace "$HERDR_WORKSPACE_ID")
+if [[ -n "$CALLER_WORKSPACE" ]]; then
+  WORKSPACE_ARGS=(--workspace "$CALLER_WORKSPACE")
 fi
 
-echo "🚀 Creating Herdr tab in '$TARGET_CWD'${HERDR_WORKSPACE_ID:+ (workspace $HERDR_WORKSPACE_ID)}..."
-CREATE_RES=$(herdr tab create ${WORKSPACE_ARGS[@]+"${WORKSPACE_ARGS[@]}"} --cwd "$TARGET_CWD" --label "$TAB_LABEL" "$FOCUS_FLAG")
-TAB_ID=$(echo "$CREATE_RES" | jq -r '.result.tab.tab_id // .result.tab_id // empty')
-ROOT_PANE=$(echo "$CREATE_RES" | jq -r '.result.root_pane.pane_id // .result.pane_id // empty')
+echo "🚀 Creating Herdr tab in '$TARGET_CWD'${CALLER_WORKSPACE:+ (workspace $CALLER_WORKSPACE)}..."
+CREATE_RES=$(herdr tab create ${WORKSPACE_ARGS[@]+"${WORKSPACE_ARGS[@]}"} --cwd "$TARGET_CWD" --label "$TAB_LABEL" "$FOCUS_FLAG" 2>&1 || true)
+if [[ -n "$CALLER_WORKSPACE" && "$CREATE_RES" == *workspace_not_found* ]]; then
+  echo "⚠️  Workspace $CALLER_WORKSPACE no longer exists; opening the tab in the focused workspace."
+  CREATE_RES=$(herdr tab create --cwd "$TARGET_CWD" --label "$TAB_LABEL" "$FOCUS_FLAG" 2>&1 || true)
+fi
+TAB_ID=$(jq -r '.result.tab.tab_id // .result.tab_id // empty' <<<"$CREATE_RES" 2>/dev/null || true)
+ROOT_PANE=$(jq -r '.result.root_pane.pane_id // .result.pane_id // empty' <<<"$CREATE_RES" 2>/dev/null || true)
+ACTUAL_WORKSPACE=$(jq -r '.result.tab.workspace_id // empty' <<<"$CREATE_RES" 2>/dev/null || true)
 
 if [[ -z "$TAB_ID" || -z "$ROOT_PANE" ]]; then
   echo "❌ Failed to create Herdr tab. Response: $CREATE_RES" >&2
+  echo "📁 Handoff file is ready at: $HANDOFF_PATH — launch manually: $AGENT_KIND" >&2
   exit 1
 fi
 
+if [[ -n "$CALLER_WORKSPACE" && -n "$ACTUAL_WORKSPACE" && "$ACTUAL_WORKSPACE" != "$CALLER_WORKSPACE" ]]; then
+  echo "⚠️  Tab opened in workspace $ACTUAL_WORKSPACE, expected $CALLER_WORKSPACE."
+elif [[ -n "$ACTUAL_WORKSPACE" ]]; then
+  echo "📍 Workspace: $ACTUAL_WORKSPACE"
+fi
 echo "✅ Created tab: $TAB_ID (Pane: $ROOT_PANE, Label: '$TAB_LABEL')"
 
 if [[ "$START_AGENT" == "false" ]]; then
@@ -518,43 +631,69 @@ if [[ "$START_AGENT" == "false" ]]; then
 fi
 
 # --------------------------------------------------------------------------
-# finish_handoff: confirm the new agent is really alive, print the big
+# finish_handoff: confirm the new agent really took the work, print the big
 # close / don't-close banner, and (only if --close-source and confirmed)
 # close the source tab after a grace period.
+#
+# Only the claim confirms. It means the agent got its prompt and ran the first
+# command. An agent that is merely present can be stuck on a dialog.
 # --------------------------------------------------------------------------
+write_ledger() {
+  local path="${HERDR_HANDOFF_LEDGER:-${XDG_STATE_HOME:-$HOME/.local/state}/handoff/ledger.jsonl}"
+  {
+    mkdir -p "$(dirname "$path")" &&
+      jq -nc --arg ts "$(date -Iseconds)" --arg doc "$HANDOFF_PATH" --arg label "$TAB_LABEL" \
+        --arg kind "$AGENT_KIND" --arg model "$CLAUDE_MODEL" --arg cwd "$TARGET_CWD" \
+        --arg source_tab "$SOURCE_TAB" --arg tab "$TAB_ID" \
+        --arg workspace_expected "$CALLER_WORKSPACE" --arg workspace_actual "$ACTUAL_WORKSPACE" \
+        --argjson confirm_secs "$2" --arg outcome "$1" \
+        '$ARGS.named' >> "$path"
+  } 2>/dev/null || true
+}
+
 finish_handoff() {
-  local alive=false pane_json agent="" status=""
-  for _ in $(seq 1 "$CONFIRM_TIMEOUT"); do
+  local claimed=false pane_json agent="" status="" started=$SECONDS waited
+  while :; do
     pane_json=$(herdr pane get "$ROOT_PANE" 2>/dev/null || true)
-    agent=$(echo "$pane_json" | jq -r '.result.pane.agent // empty' 2>/dev/null || true)
-    status=$(echo "$pane_json" | jq -r '.result.pane.agent_status // empty' 2>/dev/null || true)
-    # Only a status that shows a live agent confirms; "unknown" and the rest keep polling.
-    if [[ -n "$agent" && ( "$status" == "working" || "$status" == "idle" || "$status" == "blocked" ) ]]; then
-      alive=true
+    agent=$(jq -r '.result.pane.agent // empty' <<<"$pane_json" 2>/dev/null || true)
+    status=$(jq -r '.result.pane.agent_status // empty' <<<"$pane_json" 2>/dev/null || true)
+    if [[ -d "$CLAIM_DIR" ]]; then
+      claimed=true
       break
     fi
-    sleep 1
+    [[ "$status" == "exited" || "$status" == "dead" ]] && break
+    (( SECONDS - started >= CONFIRM_TIMEOUT )) && break
+    sleep 0.5
   done
+  waited=$((SECONDS - started))
 
-  local source_tab="${HERDR_TAB_ID:-}"
+  local source_tab="$SOURCE_TAB"
   echo
   echo "════════════════════════════════════════════════════════════"
-  if [[ "$alive" != "true" ]]; then
+  if [[ "$claimed" != "true" ]]; then
+    write_ledger unclaimed "$waited"
     if [[ -n "$agent" && "$status" != "exited" && "$status" != "dead" ]]; then
       echo "⚠️   new tab started, status unknown — check it before closing this one"
+      echo "    (agent is ${status:-unknown} but has not claimed the handoff; it may be on a dialog)"
     else
       echo "⛔  DO NOT CLOSE THIS TAB — new agent NOT confirmed running"
     fi
-    echo "    in tab $TAB_ID (pane $ROOT_PANE) after ${CONFIRM_TIMEOUT}s."
+    echo "    in tab $TAB_ID (pane $ROOT_PANE) after ${waited}s."
     echo "    Handoff file: $HANDOFF_PATH"
     echo "════════════════════════════════════════════════════════════"
     return 1
   fi
-  echo "✅  HANDOFF CONFIRMED — $agent is $status in tab $TAB_ID"
+  write_ledger claimed "$waited"
+  [[ "$agent" =~ ^[A-Za-z0-9_]+$ ]] || agent="$AGENT_KIND"
+  [[ "$status" =~ ^[A-Za-z0-9_]+$ && "$status" != "unknown" ]] || status="claimed"
+  echo "✅  HANDOFF CONFIRMED — $agent is $status in tab $TAB_ID (claimed in ${waited}s)"
   if [[ -n "$RUNNING" ]] && (( RUNNING > 0 )); then
     echo "⛔  KEEP THIS TAB OPEN — $RUNNING agents still running"
     echo "    Relay each report to tab $TAB_ID (SendMessage) and append it to"
     echo "    $HANDOFF_PATH under \"Late results\"; say it is fine to close after the last."
+    if [[ -n "$source_tab" ]]; then
+      herdr tab rename "$source_tab" "⏳ relay → $TAB_LABEL" >/dev/null 2>&1 || true
+    fi
   elif [[ "$CLOSE_SOURCE" == "true" && -n "$source_tab" && "$source_tab" != "$TAB_ID" ]]; then
     echo "🚪  Closing THIS tab ($source_tab) in ${CLOSE_GRACE_SECONDS}s (0 agents running)."
     python3 -c 'import subprocess, sys; subprocess.Popen(["sh", "-c", "sleep \"$1\"; herdr tab close \"$2\"", "_", sys.argv[1], sys.argv[2]], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' "$CLOSE_GRACE_SECONDS" "$source_tab"
@@ -576,7 +715,8 @@ for _ in $(seq 1 20); do
   fi
   sleep 0.5
 done
-sleep 1
+# Wait for the shell's first output (0.4s on a normal zsh) instead of a blind sleep.
+herdr pane wait-output "$ROOT_PANE" --regex '\S' --timeout 5000 >/dev/null 2>&1 || true
 
 TIMESTAMP=$(date +%s)
 SHORT_ID=$(echo "$ROOT_PANE" | tr ':' '_' | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_')
@@ -613,15 +753,20 @@ fi
 QUOTED_PROMPT_FILE=$(printf '%q' "$PROMPT_FILE")
 
 if [[ "$AGENT_KIND" == "opencode" ]]; then
-  herdr pane run "$ROOT_PANE" "opencode --prompt \"\$(cat $QUOTED_PROMPT_FILE)\""
+  LAUNCH_CMD="opencode --prompt \"\$(cat $QUOTED_PROMPT_FILE)\""
 elif [[ "$AGENT_KIND" == "claude" ]]; then
   echo "🧠 Claude model: ${CLAUDE_MODEL:-default}"
-  herdr pane run "$ROOT_PANE" "claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}\"\$(cat $QUOTED_PROMPT_FILE)\""
+  LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $(printf '%q' "$TAB_LABEL") \"\$(cat $QUOTED_PROMPT_FILE)\""
 elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
   echo "🧠 AGY model: ${CLAUDE_MODEL:-default}"
-  herdr pane run "$ROOT_PANE" "agy ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}-i \"\$(cat $QUOTED_PROMPT_FILE)\""
+  LAUNCH_CMD="agy ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}-i \"\$(cat $QUOTED_PROMPT_FILE)\""
 else
-  herdr pane run "$ROOT_PANE" "$AGENT_KIND"
+  LAUNCH_CMD="$AGENT_KIND"
+fi
+if ! herdr pane run "$ROOT_PANE" "$LAUNCH_CMD"; then
+  echo "❌ Could not start $AGENT_KIND in pane $ROOT_PANE (tab $TAB_ID)." >&2
+  echo "📁 Handoff file is ready at: $HANDOFF_PATH — launch manually: $AGENT_KIND" >&2
+  exit 1
 fi
 echo "✨ Agent launched INTERACTIVELY in Herdr tab $TAB_ID with handoff context."
 if [[ "$AGENT_KIND" == "claude" || "$AGENT_KIND" == "opencode" || "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
