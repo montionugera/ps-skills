@@ -1,7 +1,7 @@
 ---
 name: handoff
 description: "Compact the current conversation into a high-density, action-first handoff document (zero-indirection, self-contained frontier) and auto-spawn a new tab/agent in Herdr or T3Code. Supports AGY native auto-handoff hooks."
-argument-hint: "[agent-kind (e.g. opencode, claude, codex, gemini, agy, t3code)] [--multiplexer herdr|t3|auto] [goal or next step instructions]"
+argument-hint: "[agent-kind (e.g. opencode, claude, codex, gemini, agy, t3code)] [--multiplexer herdr|t3|auto] [--topic <2-5 words>] [goal or next step instructions]"
 ---
 
 # Handoff (with Herdr Auto-Tab)
@@ -21,27 +21,9 @@ The **Handoff** skill solves this by:
   2. **Cross-Harness Transfers**: Handing off work between different agent harnesses (Claude Code $\leftrightarrow$ AGY $\leftrightarrow$ OpenCode).
   3. **Cross-Terminal / Cross-Repo**: Long-running background handoffs across separate terminal panes or detached repositories.
 
-### Auto-Trigger (context-size detection)
+### Auto-Trigger
 
-`hooks/auto-handoff-stop.py` is a Claude Code **Stop hook**. After each turn it reads the transcript's last `usage` block (input + cache tokens); once context reaches the threshold it blocks the stop and instructs the agent to run this skill end to end (doc → `herdr-handoff.sh --kind claude --mode <code|plan>`). One-shot per session (flag file `/tmp/claude-auto-handoff-<session_id>.flag`).
-
-- Threshold: `CLAUDE_AUTO_HANDOFF_THRESHOLD` (default `200000`). Disable: `CLAUDE_AUTO_HANDOFF=0`.
-- **It waits for a safe point.** Past the threshold the hook stays silent while this session has background work running or the session's working tree has uncommitted changes to tracked files; it looks again after the next turn. Running work is found by replaying the transcript in order, per task id: a launch (an agent, a background command) or a `SendMessage` resume sets it running, a task notification or kill sets it done, and whatever is running at the end counts. So an agent that reported once and was then resumed holds the handoff back again. Past the hard cap, `CLAUDE_AUTO_HANDOFF_HARD_CAP` (default 1.5 x the threshold), it fires regardless. When it fires, the instruction carries `--running N` with its own count, and with N>0 it writes a `.draining` marker so later reminders tell this tab to relay results instead of "stop", and one more tells it when the last agent has reported. A newer owner instruction wins over the drain notice. Context is the last `message` iteration of the newest usage record (an advisor call adds an iteration that the top-level totals would double-count). A guard blocks once when this session got a drain or mid-turn notice, no handoff ran, and the last reply claims one is happening; a `herdr-handoff.sh` banner in the transcript (a manual run) counts as a handoff. Limits: only the session's own directory is checked for uncommitted changes, not other worktrees it edits; untracked files do not count; transcript text that merely quotes a launch line counts as a launch, which only delays the handoff until the hard cap; so does a background task that ends without a task notification (for example one that dies with a restarted session). Subagents the transcript cannot show (AGY `manage_subagents`) are covered only by your own count in step 3a. Tests: `tests/test_auto_handoff_stop.py`, `tests/test_herdr_handoff.py`.
-- Install on a new machine:
-  ```bash
-  ln -s ~/.claude/skills/handoff/hooks/auto-handoff-stop.py ~/.claude/hooks/auto-handoff-stop.py
-  ```
-  then add to `~/.claude/settings.json` under `hooks.Stop[].hooks`:
-  ```json
-  { "type": "command", "command": "python3 ~/.claude/hooks/auto-handoff-stop.py", "timeout": 10 }
-  ```
-- **Mid-turn check (optional).** A Stop hook only runs when a turn ends, and one long turn can add hundreds of thousands of tokens. `hooks/auto-handoff-midturn.py` is a **PreToolUse hook** that reads the newest main-session usage record before each tool call and, once per level (`CLAUDE_AUTO_HANDOFF_MIDTURN_LEVELS`, default `250000,300000,400000,500000`), adds a note asking the agent to finish the unit of work and end the turn so the Stop hook can hand off. It never denies a tool call and ignores subagents. **Notes are off unless `CLAUDE_AUTO_HANDOFF_NOTICES=1`** (log only otherwise). Install like the Stop hook, under `hooks.PreToolUse[].hooks`. Tests: `tests/test_auto_handoff_midturn.py`.
-
-### AGY Native Auto-Handoff (`~/.gemini/config/hooks.json`)
-
-In Google Antigravity (`agy`), auto-handoff hooks operate natively via AGY's JSON hook schema:
-- **`Stop` Hook**: Fires when `terminationReason in ("NO_TOOL_CALL", "MAX_TOKEN_BUDGET_EXCEEDED")`. Inspects session token growth from `conversations/<id>.db*` or `transcript_full.jsonl`. When exceeding threshold (>200k tokens), blocks termination and returns `{"decision": "continue", "injectSteps": [{"type": "USER_INPUT", "content": "Context threshold exceeded. Execute handoff skill to new tab/session."}]}`.
-- **`PreInvocation` Hook**: Mid-turn hook that monitors cumulative token consumption before LLM calls. If approaching capacity, injects advisory notices instructing the agent to wrap up the current logical unit of work.
+A Claude Code Stop hook runs this skill end to end once context reaches `CLAUDE_AUTO_HANDOFF_THRESHOLD` (default `200000`; disable with `CLAUDE_AUTO_HANDOFF=0`). It waits for a safe point, and AGY has equivalent native hooks. Read [`references/auto-handoff-hooks.md`](references/auto-handoff-hooks.md) only when installing or debugging them.
 
 ---
 
@@ -69,7 +51,9 @@ In Google Antigravity (`agy`), auto-handoff hooks operate natively via AGY's JSO
 
 Extract the operational state from the current session.
 
-Note: you don't know the file's own final path until Step 2 writes it. Generate the doc first with a placeholder, then substitute the real `/tmp/handoff-<timestamp>-<slug>.md` path into section 0's two `<this-file's-own-absolute-path>` occurrences before or immediately after saving (e.g. `sed -i '' "s#<this-file's-own-absolute-path>#$HANDOFF_PATH#g" "$HANDOFF_PATH"`).
+Leave `<this-file's-own-absolute-path>` in section 0 as written: `herdr-handoff.sh` fills in the real path, and adds section 0 if a doc lacks it.
+
+The `# Handoff:` title becomes the tab name when `--topic` is not given, so start it with what the next session will do.
 
 ### Required Markdown Template:
 
@@ -141,15 +125,29 @@ Always pass `--running N`: your own count, or the larger of it and the `--runnin
 - **`--running 0`** → the script treats it as `--close-source`: once the new agent is confirmed alive, it closes THIS tab after 20s.
 - **`--running N`, N ≥ 1** → the tab never closes itself. It must stay open to receive their results (2026-09-13 fact-board I-074: the handoff fired with 4 plan-writer agents still running; auto-closing would have lost 4 slice plans). Start nothing new. As each agent reports, `SendMessage` the report to the new tab (peer sessions show in `ListAgents`) and append it to `<handoff>.md` under "Late results" as the fallback; after the last one, print `🟢 SAFE TO CLOSE THIS TAB`.
 - **No `--running`** (manual use) → the banner says "count unknown" and never SAFE; you still decide from this count.
-- **Native T3 Code Thread Launch (Optional when running inside T3 Code with `t3_thread_launch` MCP tool available):** After running `herdr-handoff.sh` (which writes `$PROMPT_FILE` with the full inlined handoff document and copies it to clipboard), you may also directly spawn the continuation thread in T3 Code by calling `t3_thread_launch` with `title: "Handoff: <slug>"`, the matching `workspaceStrategy` (`existing_worktree` or `root`), and `message` set to the contents of `$PROMPT_FILE`.
+- **Native T3 Code Thread Launch (Optional when running inside T3 Code with `t3_thread_launch` MCP tool available):** After running `herdr-handoff.sh` (which writes `$PROMPT_FILE` with the full inlined handoff document and copies it to clipboard), you may also directly spawn the continuation thread in T3 Code by calling `t3_thread_launch` with `title` set to the label the script prints, the matching `workspaceStrategy` (`existing_worktree` or `root`), and `message` set to the contents of `$PROMPT_FILE`.
 
 Run the bundled Herdr handoff script:
 
 ```bash
-~/.claude/skills/handoff/scripts/herdr-handoff.sh "/tmp/handoff-<timestamp>-<slug>.md" --kind <agent-kind> --mode <code|plan> --prompt "<immediate next steps>" --running <N> [--no-yolo]
+~/.claude/skills/handoff/scripts/herdr-handoff.sh "/tmp/handoff-<timestamp>-<slug>.md" --kind <agent-kind> --mode <code|plan> --topic "<2-5 words on what the next session does>" --prompt "<immediate next steps>" --running <N> [--no-yolo]
 ```
 
-The script ends with a banner — `✅ HANDOFF CONFIRMED` followed by `⛔ KEEP THIS TAB OPEN — N agents still running` (N ≥ 1), `🚪 Closing THIS tab in 20s` (0 running), `🟢 SAFE TO CLOSE` (0 running, no tab id to close) or `⚠️ agents running: count unknown` (no `--running`); or `⚠️ new tab started, status unknown` / `⛔ DO NOT CLOSE` (no agent confirmed after 60s; exit 1). It polls `herdr pane get` and confirms only a `working`, `idle` or `blocked` agent; `unknown` keeps polling — "launched" is not "running".
+The script ends with a banner — `✅ HANDOFF CONFIRMED` followed by `⛔ KEEP THIS TAB OPEN — N agents still running` (N ≥ 1), `🚪 Closing THIS tab in 20s` (0 running), `🟢 SAFE TO CLOSE` (0 running, no tab id to close) or `⚠️ agents running: count unknown` (no `--running`); or `⚠️ new tab started, status unknown` / `⛔ DO NOT CLOSE` (no agent confirmed after 60s; exit 1). **Only the handoff's `.claim` directory confirms** (typically 5-15s, `HERDR_HANDOFF_CONFIRM_TIMEOUT` default 90): it proves the agent got its prompt and ran the first command. A pane that merely shows an agent proves neither, since it can be stuck on a dialog, so the parent never closes on status alone. An already-claimed doc is refused before any tab opens.
+
+### Tab Names
+
+`<project> · <topic> #N`, e.g. `play-joymify · real audio shipped #3`, capped at `HERDR_HANDOFF_LABEL_MAX` (default 36, the sidebar's maximum width) characters.
+- **project:** the main repo's folder name, also from inside a worktree.
+- **topic:** `--topic`, else the first clause of the doc title, else the filename slug. Pass `--topic`: it is the only source written for a narrow sidebar.
+- **#N:** the handoff number in this chain, read from the parent tab's label, so a chain can be followed after its parents close.
+- `--label` overrides all of it. A Claude session gets the same name (`--name`), so `/resume` matches the tab. A parent kept open to relay agents is renamed `⏳ relay → <label>`.
+
+### Where the Tab Opens
+
+In the caller's own workspace, resolved live from `herdr pane current`, then verified against the created tab; a mismatch prints a ⚠️ line. Focus follows only if the user is on the parent tab, so a handoff never pulls them off other work. `--no-focus` forces it off. Without `--cwd`, the tab starts in the doc's `**Worktree:**` or `**Repo:**` directory.
+
+Each handoff appends one line to `~/.local/state/handoff/ledger.jsonl` (parent and child tab, workspaces, seconds to claim, outcome). If the script warns that the skill is behind `origin/main`, merged fixes are not active in this checkout.
 
 ### YOLO Mode (Default):
 All handoffs launch with permission-skipping enabled by default (`--dangerously-skip-permissions` for `claude`, `agy`, and `gemini`), ensuring the incoming agent never gets stalled on interactive permission prompts. Pass `--no-yolo` to disable.
@@ -170,7 +168,7 @@ All handoffs launch with permission-skipping enabled by default (`--dangerously-
 
 ### Multiplexer Support (`--multiplexer {herdr,t3,auto}`):
 - **Herdr (`--multiplexer herdr`)**:
-  - Creates a new tab in the caller's own workspace: `herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$PWD" --label "Handoff: <slug>" --focus` (`--workspace` is omitted only when `HERDR_WORKSPACE_ID` is unset, e.g. run outside Herdr)
+  - Creates a new tab in the caller's workspace: `herdr tab create --workspace <caller> --cwd <target> --label "<project> · <topic> #N"` (`--workspace` is omitted only outside Herdr)
   - Starts the chosen agent in the pane via `herdr agent start`
   - Delivers the execution-first prompt to execute the immediate action without forensic delay.
 - **T3Code (`--multiplexer t3` / `--kind t3code`)**:

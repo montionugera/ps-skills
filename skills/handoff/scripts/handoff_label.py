@@ -8,7 +8,7 @@ the tab that replaced a closed one can be followed.
 import argparse
 import re
 
-DEFAULT_MAX = 40
+DEFAULT_MAX = 36  # herdr sidebar_max_width
 SEP = " · "
 ELLIPSIS = "…"
 CLAUSE_SPLIT = re.compile(r",|;| — | \+ | then ")

@@ -520,7 +520,7 @@ if [[ -z "$TAB_LABEL" ]]; then
   fi
   TAB_LABEL=$(python3 "$SCRIPT_DIR/handoff_label.py" --cwd-project "$PROJECT" --topic "$TAB_TOPIC" \
     --title "$DOC_TITLE" --slug "$SLUG" --source-label "$SOURCE_LABEL" \
-    --max "${HERDR_HANDOFF_LABEL_MAX:-40}" 2>/dev/null || true)
+    --max "${HERDR_HANDOFF_LABEL_MAX:-36}" 2>/dev/null || true)
   TAB_LABEL="${TAB_LABEL:-$PROJECT}"
 fi
 
