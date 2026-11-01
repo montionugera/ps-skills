@@ -42,6 +42,12 @@ class AgentSpendTest(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertEqual(json.loads(res.stdout)[0]["main"]["context_tokens"], 100)
 
+    def test_since_days_zero_is_a_window_not_all_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write(Path(tmp) / "-x-repo-demo" / "s1.jsonl", [dict(asst("old", 100), timestamp="2020-01-01T00:00:00.000Z")])
+            res = subprocess.run([sys.executable, str(SCRIPT), "--json", "--since-days", "0", "--projects", tmp, "*repo-demo*"], capture_output=True, text=True)
+            self.assertEqual(json.loads(res.stdout)[0]["main"]["context_tokens"], 0)
+
     def test_since_days_skips_files_untouched_inside_the_window(self):
         old_stamp = (datetime.now(timezone.utc) - timedelta(days=30)).timestamp()
         with tempfile.TemporaryDirectory() as tmp:

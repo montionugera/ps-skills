@@ -78,6 +78,14 @@ class AgentSpendWeeklyTest(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(json.loads(log.read_text())["repos"][0]["commits"], 2)
 
+    def test_failed_fetch_warns_that_the_count_may_be_stale(self):
+        repo = self.make_repo("demo")
+        commit(repo, "one")
+        git(repo, "remote", "add", "origin", f"{self.tmp}/no-such-remote")
+        res, log = run(self.tmp, f"demo:{repo}:*x*")
+        self.assertEqual(json.loads(log.read_text())["repos"][0]["commits"], 1)
+        self.assertIn("fetch failed", res.stderr)
+
     def test_missing_repo_reports_null_commits_and_keeps_the_others(self):
         repo = self.make_repo("demo")
         commit(repo, "one")

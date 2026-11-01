@@ -26,7 +26,8 @@ def commits_on_main(path):
     if not os.path.isdir(path):
         return None
     try:
-        git(path, "fetch", "-q", "--no-tags", "origin", "main")  # offline: use the last fetch
+        if git(path, "fetch", "-q", "--no-tags", "origin", "main").returncode != 0:
+            print(f"agent-spend-weekly: fetch failed for {path}; commit count may be stale", file=sys.stderr)
         ref = "origin/main" if git(path, "rev-parse", "-q", "--verify", "refs/remotes/origin/main").returncode == 0 else "main"
         res = git(path, "rev-list", "--count", f"--since={WINDOW_DAYS}.days", ref)
     except (OSError, subprocess.TimeoutExpired):

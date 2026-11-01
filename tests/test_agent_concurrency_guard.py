@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """skills/agy-worker/hooks/agent-concurrency-guard.sh: machine-wide worker cap, T3 cap, swap deny (fake ps + fake swap)."""
 import json, os, subprocess, tempfile, time, unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 HOOK = Path(__file__).resolve().parent.parent / "skills" / "agy-worker" / "hooks" / "agent-concurrency-guard.sh"
 def shim(text):
@@ -50,8 +51,6 @@ class R2ReviewCapTest(unittest.TestCase):
         (self.subagents / f"agent-{name}.meta.json").write_text(json.dumps(meta, separators=(",", ":")))
         log = self.subagents / f"agent-{name}.jsonl"; log.write_text("{}\n")
         stamp = time.time() - age_minutes * 60; os.utime(log, (stamp, stamp))
-    def expire_claim(self):
-        claim = self.subagents / ".r2-review-claim"; stamp = time.time() - 300; os.utime(claim, (stamp, stamp))
     def test_second_reviewer_denied_while_one_runs(self):
         self.agent("a", "aios-reviewer")
         o = self.dispatch(); self.assertEqual(o["permissionDecision"], "deny"); self.assertIn("a desc", o["permissionDecisionReason"])
@@ -61,8 +60,33 @@ class R2ReviewCapTest(unittest.TestCase):
         self.assertNotIn("permissionDecision", self.dispatch())
         self.assertEqual(self.dispatch("python-reviewer")["permissionDecision"], "deny")
     def test_rereview_allowed_after_reviewer_finished(self):
-        self.dispatch(); self.expire_claim(); self.agent("a", "code-reviewer", finished=True)
-        self.assertNotIn("permissionDecision", self.dispatch())
+        now = int(time.time())
+        self.dispatch(AGENT_GUARD_NOW=str(now)); self.agent("a", "code-reviewer", finished=True)
+        self.assertNotIn("permissionDecision", self.dispatch(AGENT_GUARD_NOW=str(now + 300)))
+    def test_first_label_in_the_brief_decides(self):
+        self.agent("a", "code-reviewer")
+        brief = "RISK: R1. Review the guard: it denies a brief with `RISK: R2` while a reviewer runs."
+        self.assertNotIn("permissionDecision", self.dispatch(brief=brief))
+    def test_label_outside_the_brief_is_ignored(self):
+        self.agent("a", "code-reviewer")
+        tool_input = {"subagent_type": "code-reviewer", "description": "RISK: R2 mention", "prompt": "RISK: R1 review"}
+        e = dict(os.environ, AGENT_GUARD_PS_CMD=ps(), AGENT_GUARD_SWAP_CMD=swap(1000.0))
+        payload = {"tool_name": "Agent", "tool_input": tool_input, "transcript_path": str(self.transcript)}
+        r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=e)
+        self.assertNotIn("permissionDecision", json.loads(r.stdout)["hookSpecificOutput"])
+    def test_parallel_refanout_after_an_old_claim_allows_exactly_one(self):
+        now = int(time.time())
+        self.dispatch(AGENT_GUARD_NOW=str(now - 600))
+        for trial in range(8):
+            at = str(now + trial * 600)
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                out = list(ex.map(lambda _: self.dispatch(AGENT_GUARD_NOW=at), range(4)))
+            self.assertEqual(sum("permissionDecision" not in o for o in out), 1, f"trial {trial}")
+    def test_old_claims_are_cleaned_up(self):
+        now = int(time.time())
+        for step in range(5):
+            self.dispatch(AGENT_GUARD_NOW=str(now + step * 600))
+        self.assertLessEqual(len(list(self.subagents.glob(".r2-review-claim.*"))), 2)
     def test_crashed_reviewer_stops_blocking_once_its_log_goes_stale(self):
         self.agent("a", "code-reviewer", age_minutes=45)
         self.assertNotIn("permissionDecision", self.dispatch())

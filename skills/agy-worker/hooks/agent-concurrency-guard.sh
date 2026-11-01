@@ -32,14 +32,19 @@ awk -v r="$SWAPR" -v d="$DENY" 'BEGIN{exit !(r+0>=d+0)}' && deny "Agent budget: 
 [ "$WORKERS" -ge "$MAXW" ] && deny "Agent budget: ${WORKERS} worker agents already run machine-wide (limit ${MAXW}, AGENT_MAX_WORKERS). Wait for one to finish with a single blocking wait, then dispatch."
 case "$TOOL" in delegate_task|mcp__t3-code__t3_thread_launch) [ "$T3COUNT" -ge "$MAXT3" ] && deny "T3 concurrency cap: ${T3COUNT} T3 Code agent threads already run (limit ${MAXT3}, T3_MAX_THREADS). Block once on t3_thread_wait, then launch." ;; esac
 # subagents/*.meta.json gains "finished":true when an agent ends; a crashed agent never does, so a log idle for
-# 30 min no longer counts. Reviewers fanned out in one message race the meta files, so an atomic claim catches them.
+# 30 min no longer counts. Reviewers fanned out in one message race the meta files, so a claim per 60 s bucket catches
+# them: mkdir is atomic within a bucket and the neighbour check covers a burst straddling two buckets.
 review_cap(){
   [ "${AGENT_R2_REVIEW_GUARD:-on}" = "off" ] && return 0
   case "$TOOL" in Agent|Task) ;; *) return 0 ;; esac
-  local re='reviewer|aios-(verifier|falsifier|silent-failures)' sub tp dir m claim now
+  local re='reviewer|aios-(verifier|falsifier|silent-failures)' sub tp dir m claim old bucket label
+  local msg="R2 review cap: another reviewer was dispatched in this session in the last two minutes. Rule 7 gives R2 work ONE consolidated reviewer: merge the briefs into one agent. If the change is R1 or higher, label the briefs RISK: R1."
   sub="$(printf '%s' "$INPUT" | sed -nE 's/.*"subagent_type"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)"
   printf '%s' "$sub" | grep -Eq "$re" || return 0
-  printf '%s' "$INPUT" | grep -Eq 'RISK:[[:space:]]*R2([^0-9]|$)' || return 0
+  # Only the brief's own first label counts: a brief may quote other labels, and "prompt" with these exact quotes is
+  # the real key because quotes inside JSON strings are escaped.
+  label="$(printf '%s' "$INPUT" | sed -E 's/.*"prompt"[[:space:]]*:[[:space:]]*"//' | grep -oE 'RISK:[[:space:]]*R[0-9]+' | head -1)"
+  [ "${label##*[: ]}" = "R2" ] || return 0
   tp="$(printf '%s' "$INPUT" | sed -nE 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)"
   [ -n "$tp" ] || return 0
   dir="${tp%.jsonl}/subagents"; mkdir -p "$dir" 2>/dev/null || return 0
@@ -50,10 +55,13 @@ review_cap(){
     [ -n "$(find "${m%.meta.json}.jsonl" -mmin -30 2>/dev/null)" ] || continue
     deny "R2 review cap: reviewer '$(sed -nE 's/.*"description":"([^"\\]*).*/\1/p' "$m")' is still running. Rule 7 gives R2 work ONE consolidated reviewer: put this concern in that review or wait for it. If the change is R1 or higher, label the brief RISK: R1."
   done
-  claim="$dir/.r2-review-claim"; mkdir "$claim" 2>/dev/null && return 0
-  now="$(date +%s)"
-  [ $((now - $(stat -f %m "$claim" 2>/dev/null || stat -c %Y "$claim" 2>/dev/null || echo 0))) -lt 60 ] && deny "R2 review cap: another reviewer was dispatched in this session under a minute ago. Rule 7 gives R2 work ONE consolidated reviewer: merge the briefs into one agent. If the change is R1 or higher, label the briefs RISK: R1."
-  touch "$claim"
+  bucket=$(( ${AGENT_GUARD_NOW:-$(date +%s)} / 60 )); claim="$dir/.r2-review-claim"
+  mkdir "$claim.$bucket" 2>/dev/null || deny "$msg"
+  { [ -e "$claim.$((bucket - 1))" ] || [ -e "$claim.$((bucket + 1))" ]; } && deny "$msg"
+  for old in "$claim".*; do
+    [ "${old##*.}" -lt $((bucket - 1)) ] 2>/dev/null && rmdir "$old" 2>/dev/null
+  done
+  return 0
 }
 review_cap
 NOTE=""; awk -v r="$SWAPR" -v w="$WARN" 'BEGIN{exit !(r+0>=w+0)}' && NOTE=" Swap is ${SWAPR} full: keep this to one agent and no screenshots."
