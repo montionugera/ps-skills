@@ -1,0 +1,1 @@
+- herdr-board leftovers: board binaries are gone, but the plugin entry, herdr keybinding, skill and source folder remain (2026-11-01).
