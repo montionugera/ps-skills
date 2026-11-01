@@ -7,28 +7,34 @@ pools that hide from a plain `ls`: main threads, Agent subagents, Workflow agent
 
     agent-spend <glob> [<glob> ...]     globs match dirs under ~/.claude/projects
     agent-spend --json <glob>           machine-readable
+    agent-spend --since-days 7 <glob>   only messages from the last N days
 Example:
     agent-spend '*repos-play-joymify*' '*joy-quest*' '*atlas-world-svc*'
 """
-import argparse, glob, json, os, sys
+import argparse, glob, json, os, sys, time
 
 PROJECTS = os.path.expanduser(os.environ.get("CLAUDE_PROJECTS_DIR", "~/.claude/projects"))
 
-def pool_totals(files):
-    ctx = out = msgs = 0
+def pool_totals(files, since=None):
+    """`since` is a UTC epoch; undated messages are excluded when it is set."""
+    cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(since)) if since else ""
+    ctx = out = msgs = counted = 0
     for f in files:
         seen = set()
         try:
+            if since and os.path.getmtime(f) < since:
+                continue
             fh = open(f, encoding="utf-8")
         except OSError:
             continue
+        counted += 1
         with fh:
             for line in fh:
                 try:
                     d = json.loads(line)
                 except ValueError:
                     continue
-                if d.get("type") != "assistant":
+                if d.get("type") != "assistant" or (d.get("timestamp") or "") < cutoff:
                     continue
                 m = d.get("message") or {}
                 mid = m.get("id") or d.get("uuid")
@@ -39,15 +45,15 @@ def pool_totals(files):
                 ctx += (u.get("cache_read_input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0) + (u.get("input_tokens") or 0)
                 out += u.get("output_tokens") or 0
                 msgs += 1
-    return {"files": len(files), "messages": msgs, "context_tokens": ctx, "output_tokens": out}
+    return {"files": counted, "messages": msgs, "context_tokens": ctx, "output_tokens": out}
 
-def measure(pattern, projects=PROJECTS):
+def measure(pattern, projects=PROJECTS, since=None):
     base = f"{projects}/{pattern}"
     return {
         "pattern": pattern,
-        "main": pool_totals(glob.glob(f"{base}/*.jsonl")),
-        "subagents": pool_totals(glob.glob(f"{base}/*/subagents/*.jsonl")),
-        "workflows": pool_totals(glob.glob(f"{base}/*/subagents/workflows/*/*.jsonl")),
+        "main": pool_totals(glob.glob(f"{base}/*.jsonl"), since),
+        "subagents": pool_totals(glob.glob(f"{base}/*/subagents/*.jsonl"), since),
+        "workflows": pool_totals(glob.glob(f"{base}/*/subagents/workflows/*/*.jsonl"), since),
     }
 
 def fmt(n):
@@ -57,9 +63,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("patterns", nargs="+")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--since-days", type=float, default=None)
     ap.add_argument("--projects", default=PROJECTS, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
-    rows = [measure(p, a.projects) for p in a.patterns]
+    since = time.time() - a.since_days * 86400 if a.since_days else None
+    rows = [measure(p, a.projects, since) for p in a.patterns]
     if a.json:
         print(json.dumps(rows, indent=1)); return 0
     print(f"{'pattern':32}{'main ctx':>10}{'subagent ctx':>14}{'workflow ctx':>14}{'total':>9}{'  msgs(main/sub/wf)':>22}")
