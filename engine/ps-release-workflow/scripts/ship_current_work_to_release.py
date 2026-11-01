@@ -9,6 +9,7 @@ from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from lib.backlog_paths import (
 from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped, update_entry
 from lib.epic import epic_children, epic_completeness, epic_folder_path, try_begin_verification
 from lib.epic_gate import run_and_record
+from lib import gate_cache
 from lib.git_ops import GitError, _run as git_run, branch_exists, commit_all, is_dirty
 from lib.gate_lock import gate_slot
 from lib.hooks import HookPathError, resolve_hook
@@ -66,8 +68,12 @@ def _run_precheck(tree: Path) -> int | None:
     if not precheck.exists():
         print(f"⚠️ Gate 1 SKIPPED — {precheck} not found in {tree}", file=sys.stderr)
         return None
-    with gate_slot(f"gate1 {tree.name}"):
-        return subprocess.run([str(precheck)], cwd=tree).returncode
+    def run() -> int:
+        with gate_slot(f"gate1 {tree.name}"):
+            return subprocess.run([str(precheck)], cwd=tree).returncode
+    # Opt-in (.release.json gate_cache): skips the run on a recent PASS for this
+    # exact tree. A no-op unless enabled — see lib/gate_cache.py for the risks.
+    return gate_cache.run_cached(tree, precheck, run)
 
 
 def _merge_tree_conflicts(rel_wt: Path, base: str, theirs: str) -> list[str]:
@@ -375,9 +381,14 @@ def main() -> int:
     p.add_argument("--no-sync-main", action="store_true", dest="no_sync_main",
                    help="EMERGENCY BYPASS: do not absorb main (hotfixes) into release/<v> "
                         "before merging; the release may then lag main until psrw sync-main")
+    p.add_argument("--no-gate-cache", action="store_true", dest="no_gate_cache",
+                   help="force a real Gate 1 run even if the opt-in gate_cache has a "
+                        "recent PASS for this tree (same as PSRW_GATE_CACHE=off)")
     p.add_argument("--keep-worktree", action="store_true",
                    help="keep feature worktree after shipping (do not tear down)")
     args = p.parse_args()
+    if args.no_gate_cache:
+        os.environ["PSRW_GATE_CACHE"] = "off"
 
     cwd = Path.cwd()
     try:
