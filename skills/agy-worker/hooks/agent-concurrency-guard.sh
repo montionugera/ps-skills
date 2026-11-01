@@ -3,6 +3,8 @@
 # Matcher: Agent|Task|delegate_task|mcp__t3-code__t3_thread_launch
 # Denies a new dispatch when (a) swap is nearly full, or (b) too many worker `claude` processes already run
 # machine-wide, or (c) too many were spawned by T3 Code. Below the caps it adds the live counts as context.
+# It also caps review fan-out: a reviewer-type Agent whose brief says `RISK: R2` is denied while another reviewer
+# runs in this session (Rule 7: R2 gets ONE consolidated reviewer). Off switch: AGENT_R2_REVIEW_GUARD=off.
 # A "worker" is a claude CLI whose parent is not an interactive shell/terminal (so your own tabs don't count).
 # Env: AGENT_MAX_WORKERS (default 8), T3_MAX_THREADS (default 4), AGENT_SWAP_DENY (default 0.85 of swap total),
 #      AGENT_SWAP_WARN (default 0.70), AGENT_CONCURRENCY_GUARD=off to disable,
@@ -29,5 +31,30 @@ deny(){ printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionD
 awk -v r="$SWAPR" -v d="$DENY" 'BEGIN{exit !(r+0>=d+0)}' && deny "Agent budget: swap is ${SWAPR} full (deny at ${DENY}). The machine is already paging; another agent will freeze it. Wait for running work to finish or close idle sessions before dispatching. Override: AGENT_SWAP_DENY."
 [ "$WORKERS" -ge "$MAXW" ] && deny "Agent budget: ${WORKERS} worker agents already run machine-wide (limit ${MAXW}, AGENT_MAX_WORKERS). Wait for one to finish with a single blocking wait, then dispatch."
 case "$TOOL" in delegate_task|mcp__t3-code__t3_thread_launch) [ "$T3COUNT" -ge "$MAXT3" ] && deny "T3 concurrency cap: ${T3COUNT} T3 Code agent threads already run (limit ${MAXT3}, T3_MAX_THREADS). Block once on t3_thread_wait, then launch." ;; esac
+# subagents/*.meta.json gains "finished":true when an agent ends; a crashed agent never does, so a log idle for
+# 30 min no longer counts. Reviewers fanned out in one message race the meta files, so an atomic claim catches them.
+review_cap(){
+  [ "${AGENT_R2_REVIEW_GUARD:-on}" = "off" ] && return 0
+  case "$TOOL" in Agent|Task) ;; *) return 0 ;; esac
+  local re='reviewer|aios-(verifier|falsifier|silent-failures)' sub tp dir m claim now
+  sub="$(printf '%s' "$INPUT" | sed -nE 's/.*"subagent_type"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)"
+  printf '%s' "$sub" | grep -Eq "$re" || return 0
+  printf '%s' "$INPUT" | grep -Eq 'RISK:[[:space:]]*R2([^0-9]|$)' || return 0
+  tp="$(printf '%s' "$INPUT" | sed -nE 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)"
+  [ -n "$tp" ] || return 0
+  dir="${tp%.jsonl}/subagents"; mkdir -p "$dir" 2>/dev/null || return 0
+  for m in "$dir"/agent-*.meta.json; do
+    [ -f "$m" ] || continue
+    grep -q '"finished":true' "$m" && continue
+    sed -nE 's/.*"agentType":"([^"]+)".*/\1/p' "$m" | grep -Eq "$re" || continue
+    [ -n "$(find "${m%.meta.json}.jsonl" -mmin -30 2>/dev/null)" ] || continue
+    deny "R2 review cap: reviewer '$(sed -nE 's/.*"description":"([^"\\]*).*/\1/p' "$m")' is still running. Rule 7 gives R2 work ONE consolidated reviewer: put this concern in that review or wait for it. If the change is R1 or higher, label the brief RISK: R1."
+  done
+  claim="$dir/.r2-review-claim"; mkdir "$claim" 2>/dev/null && return 0
+  now="$(date +%s)"
+  [ $((now - $(stat -f %m "$claim" 2>/dev/null || stat -c %Y "$claim" 2>/dev/null || echo 0))) -lt 60 ] && deny "R2 review cap: another reviewer was dispatched in this session under a minute ago. Rule 7 gives R2 work ONE consolidated reviewer: merge the briefs into one agent. If the change is R1 or higher, label the briefs RISK: R1."
+  touch "$claim"
+}
+review_cap
 NOTE=""; awk -v r="$SWAPR" -v w="$WARN" 'BEGIN{exit !(r+0>=w+0)}' && NOTE=" Swap is ${SWAPR} full: keep this to one agent and no screenshots."
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Agent budget: %s/%s workers machine-wide, %s/%s T3 threads, swap %s full.%s Brief must carry the subagent budget; block once on the result instead of ending the turn with work pending."}}\n' "$WORKERS" "$MAXW" "$T3COUNT" "$MAXT3" "$SWAPR" "$NOTE"

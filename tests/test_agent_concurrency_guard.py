@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """skills/agy-worker/hooks/agent-concurrency-guard.sh: machine-wide worker cap, T3 cap, swap deny (fake ps + fake swap)."""
-import json, os, subprocess, tempfile, unittest
+import json, os, subprocess, tempfile, time, unittest
 from pathlib import Path
 HOOK = Path(__file__).resolve().parent.parent / "skills" / "agy-worker" / "hooks" / "agent-concurrency-guard.sh"
 def shim(text):
@@ -30,4 +30,57 @@ class GuardTest(unittest.TestCase):
         o = run("Agent", used=7500.0); self.assertNotIn("permissionDecision", o); self.assertIn("Swap is 0.73 full", o["additionalContext"])
     def test_other_tools_silent(self):
         self.assertIsNone(run("Bash", n_t3=9, used=9999.0))
+
+class R2ReviewCapTest(unittest.TestCase):
+    """Rule 7: R2 work gets ONE consolidated reviewer per session at a time."""
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(); self.addCleanup(self._tmp.cleanup)
+        self.transcript = Path(self._tmp.name) / "sess.jsonl"
+        self.subagents = Path(self._tmp.name) / "sess" / "subagents"
+    def dispatch(self, subagent_type="code-reviewer", brief="Review the diff. RISK: R2", **env):
+        tool_input = {"subagent_type": subagent_type, "prompt": brief, "description": "review"}
+        e = dict(os.environ, AGENT_GUARD_PS_CMD=ps(), AGENT_GUARD_SWAP_CMD=swap(1000.0), **env)
+        payload = {"tool_name": "Agent", "tool_input": tool_input, "transcript_path": str(self.transcript)}
+        r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=e)
+        return json.loads(r.stdout)["hookSpecificOutput"]
+    def agent(self, name, agent_type, finished=False, age_minutes=0):
+        self.subagents.mkdir(parents=True, exist_ok=True)
+        meta = {"agentType": agent_type, "description": f"{name} desc", "spawnDepth": 1}
+        if finished: meta["finished"] = True
+        (self.subagents / f"agent-{name}.meta.json").write_text(json.dumps(meta, separators=(",", ":")))
+        log = self.subagents / f"agent-{name}.jsonl"; log.write_text("{}\n")
+        stamp = time.time() - age_minutes * 60; os.utime(log, (stamp, stamp))
+    def expire_claim(self):
+        claim = self.subagents / ".r2-review-claim"; stamp = time.time() - 300; os.utime(claim, (stamp, stamp))
+    def test_second_reviewer_denied_while_one_runs(self):
+        self.agent("a", "aios-reviewer")
+        o = self.dispatch(); self.assertEqual(o["permissionDecision"], "deny"); self.assertIn("a desc", o["permissionDecisionReason"])
+    def test_first_reviewer_allowed(self):
+        self.assertNotIn("permissionDecision", self.dispatch())
+    def test_same_message_fanout_denied_before_any_meta_exists(self):
+        self.assertNotIn("permissionDecision", self.dispatch())
+        self.assertEqual(self.dispatch("python-reviewer")["permissionDecision"], "deny")
+    def test_rereview_allowed_after_reviewer_finished(self):
+        self.dispatch(); self.expire_claim(); self.agent("a", "code-reviewer", finished=True)
+        self.assertNotIn("permissionDecision", self.dispatch())
+    def test_crashed_reviewer_stops_blocking_once_its_log_goes_stale(self):
+        self.agent("a", "code-reviewer", age_minutes=45)
+        self.assertNotIn("permissionDecision", self.dispatch())
+    def test_r1_and_unlabelled_briefs_may_fan_out(self):
+        self.agent("a", "code-reviewer")
+        self.assertNotIn("permissionDecision", self.dispatch(brief="Review. RISK: R1"))
+        self.assertNotIn("permissionDecision", self.dispatch(brief="Review the diff."))
+    def test_r2_must_be_the_exact_label(self):
+        self.agent("a", "code-reviewer")
+        self.assertNotIn("permissionDecision", self.dispatch(brief="RISK: R20 is not a level"))
+    def test_non_review_agents_are_never_capped(self):
+        self.agent("a", "code-reviewer")
+        for kind in ("aios-builder", "aios-scout", "general-purpose"):
+            self.assertNotIn("permissionDecision", self.dispatch(kind))
+    def test_running_builder_does_not_block_a_reviewer(self):
+        self.agent("a", "aios-builder")
+        self.assertNotIn("permissionDecision", self.dispatch())
+    def test_off_switch(self):
+        self.agent("a", "code-reviewer")
+        self.assertNotIn("permissionDecision", self.dispatch(AGENT_R2_REVIEW_GUARD="off"))
 if __name__ == "__main__": unittest.main()
