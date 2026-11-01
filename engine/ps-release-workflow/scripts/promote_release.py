@@ -25,7 +25,7 @@ from lib.epic import (
 from lib.epic_gate import run_and_record
 from lib.gate_lock import gate_slot
 from lib.git_ops import (
-    GitError, _run as git_run, commit_all, is_dirty,
+    GitError, _run as git_run, commit_all, commit_paths, is_dirty,
     delete_branch_local, delete_branch_remote, push, remove_worktree,
 )
 from lib.hooks import resolve_hook
@@ -252,6 +252,9 @@ def _relevant_epics(refined_cat: Path, version: str) -> set[str]:
 # one directory: the epic catalog (the CAS-claim commit) and the E-NNN-<slug>/
 # folder the outcome check copies its output into (lib/epic_gate.py).
 _EPIC_BOOKKEEPING_PATHSPEC = ":(exclude).claude/epic_backlog"
+# Everything cleanup() writes in the main checkout.
+_CLEANUP_PATHS = (".release.json", ".claude/idea_backlog", ".claude/refined_backlog",
+                  ".claude/epic_backlog")
 
 
 def _verification_is_fresh(rel_wt: Path, verified_sha: str | None, head: str) -> bool:
@@ -1077,8 +1080,9 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
 
     # Commit any pending cleanup changes (archival, catalog, claims, and the
     # finalize above) regardless of the in_progress flag. No-op when clean.
-    if git_run(repo, "status", "--porcelain").stdout.strip():
-        commit_all(repo, f"chore(release): finalize {version} cleanup on main")
+    # Stage by name: the main checkout can hold build caches and other sessions'
+    # work, and `git add -A` here once swept 59,444 untracked files into main.
+    if commit_paths(repo, f"chore(release): finalize {version} cleanup on main", _CLEANUP_PATHS):
         if _has_origin(repo):
             try:
                 git_run(repo, "push", "origin", "main")

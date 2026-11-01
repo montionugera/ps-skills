@@ -457,6 +457,54 @@ def test_promote_cleanup_leaves_incomplete_non_split_epic_unarchived(
     assert epic_id in err
 
 
+def test_cleanup_commit_stages_only_bookkeeping_paths(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """Regression: --cleanup-only used `git add -A` on the main checkout and swept
+    59,444 untracked build-cache files into a commit that could not be pushed."""
+    repo = tmp_repo_with_release
+    _scaffold_gates(repo, integration=False)
+    new_release(repo, version="1.1")
+    promote_release(repo, run_gate2=False, run_deploy=False, push=False, keep=True, use_pr=False)
+
+    (repo / ".claude" / "cargo-target-shared").mkdir()
+    (repo / ".claude" / "cargo-target-shared" / "big.rlib").write_text("cache")
+    (repo / "wip-notes.md").write_text("someone else's work")
+    (repo / "README.md").write_text("edited by another session\n")
+    (repo / ".claude" / "refined_backlog" / "_catalog.json").write_text("[]\n")
+    before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                            capture_output=True, text=True).stdout.strip()
+
+    cleanup(repo, version="1.1", gh_runner=FakeGh({"view": (1, "", "no pull requests found")}))
+
+    changed = subprocess.run(["git", "diff", "--name-only", before, "HEAD"], cwd=repo, check=True,
+                             capture_output=True, text=True).stdout.split()
+    assert ".claude/refined_backlog/_catalog.json" in changed
+    assert [f for f in changed if f.startswith(".claude/cargo-target")] == []
+    assert "wip-notes.md" not in changed and "README.md" not in changed
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, check=True,
+                            capture_output=True, text=True).stdout
+    assert " M README.md" in status and "?? wip-notes.md" in status
+
+
+def test_cleanup_with_only_unrelated_dirt_makes_no_commit(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """Unrelated dirt alone must not reach `git commit` with nothing staged."""
+    repo = tmp_repo_with_release
+    _scaffold_gates(repo, integration=False)
+    new_release(repo, version="1.1")
+    promote_release(repo, run_gate2=False, run_deploy=False, push=False, keep=True, use_pr=False)
+    gh = FakeGh({"view": (1, "", "no pull requests found")})
+    cleanup(repo, version="1.1", gh_runner=gh)
+    (repo / "wip-notes.md").write_text("someone else's work")
+    head = lambda: subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                  capture_output=True, text=True).stdout
+    before = head()
+    cleanup(repo, version="1.1", gh_runner=gh)
+    assert head() == before
+
+
 def test_cli_has_allow_split_epic_flag():
     from scripts.promote_release import _build_parser
     p = _build_parser()
