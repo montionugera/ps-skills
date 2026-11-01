@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""agent-spend: token spend per repo from Claude Code transcripts, deduplicated per message.
+
+Raw jsonl sums double count: every content block is its own line and repeats the
+message usage. This counts each message id once and splits spend into the three
+pools that hide from a plain `ls`: main threads, Agent subagents, Workflow agents.
+
+    agent-spend <glob> [<glob> ...]     globs match dirs under ~/.claude/projects
+    agent-spend --json <glob>           machine-readable
+Example:
+    agent-spend '*repos-play-joymify*' '*joy-quest*' '*atlas-world-svc*'
+"""
+import argparse, glob, json, os, sys
+
+PROJECTS = os.path.expanduser(os.environ.get("CLAUDE_PROJECTS_DIR", "~/.claude/projects"))
+
+def pool_totals(files):
+    ctx = out = msgs = 0
+    for f in files:
+        seen = set()
+        try:
+            fh = open(f, encoding="utf-8")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("type") != "assistant":
+                    continue
+                m = d.get("message") or {}
+                mid = m.get("id") or d.get("uuid")
+                if mid in seen:
+                    continue
+                seen.add(mid)
+                u = m.get("usage") or {}
+                ctx += (u.get("cache_read_input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0) + (u.get("input_tokens") or 0)
+                out += u.get("output_tokens") or 0
+                msgs += 1
+    return {"files": len(files), "messages": msgs, "context_tokens": ctx, "output_tokens": out}
+
+def measure(pattern, projects=PROJECTS):
+    base = f"{projects}/{pattern}"
+    return {
+        "pattern": pattern,
+        "main": pool_totals(glob.glob(f"{base}/*.jsonl")),
+        "subagents": pool_totals(glob.glob(f"{base}/*/subagents/*.jsonl")),
+        "workflows": pool_totals(glob.glob(f"{base}/*/subagents/workflows/*/*.jsonl")),
+    }
+
+def fmt(n):
+    return f"{n/1e9:.2f}B" if n >= 1e9 else f"{n/1e6:.1f}M" if n >= 1e6 else str(n)
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("patterns", nargs="+")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--projects", default=PROJECTS, help=argparse.SUPPRESS)
+    a = ap.parse_args(argv)
+    rows = [measure(p, a.projects) for p in a.patterns]
+    if a.json:
+        print(json.dumps(rows, indent=1)); return 0
+    print(f"{'pattern':32}{'main ctx':>10}{'subagent ctx':>14}{'workflow ctx':>14}{'total':>9}{'  msgs(main/sub/wf)':>22}")
+    for r in rows:
+        tot = sum(r[k]["context_tokens"] for k in ("main", "subagents", "workflows"))
+        print(f"{r['pattern'][:32]:32}{fmt(r['main']['context_tokens']):>10}{fmt(r['subagents']['context_tokens']):>14}"
+              f"{fmt(r['workflows']['context_tokens']):>14}{fmt(tot):>9}  {r['main']['messages']}/{r['subagents']['messages']}/{r['workflows']['messages']}")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -346,6 +346,14 @@ class TestPromptContractVerify(unittest.TestCase):
     def test_no_acceptance_section_when_not_given(self):
         self.assertNotIn("Acceptance criteria:", dispatch_mod.wrap_prompt_contract("task"))
 
+    def test_contract_carries_worker_budget_rules_in_both_modes(self):
+        for kwargs in ({}, {"is_thinking": True}):
+            wrapped = dispatch_mod.wrap_prompt_contract("task", **kwargs)
+            self.assertIn("Worker budget (token economy):", wrapped)
+            self.assertIn("Never poll", wrapped)
+            self.assertIn("<=15 lines", wrapped)
+            self.assertLess(wrapped.index("Worker budget"), wrapped.index("Task Brief:"))
+
     def test_thinking_mode_contract_unchanged_by_verify(self):
         wrapped = dispatch_mod.wrap_prompt_contract("task", is_thinking=True, acceptance="must cover X")
         self.assertIn("Thinking / Architecture Mode", wrapped)

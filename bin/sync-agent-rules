@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sync-agent-rules: generate agy's rule file from the one hand-maintained source.
+"""sync-agent-rules: generate an agent's rule file (agy GEMINI.md, codex AGENTS.md) from the one hand-maintained source.
 
 ~/.gemini/GEMINI.md used to be a hand copy of ~/.claude/CLAUDE.md and went stale
 (the Target Fidelity Tiers block never reached agy). This makes it a build output:
@@ -93,12 +93,12 @@ def generate(source: Path, local: Path) -> str:
         raise SyncError(f"source not found: {source}")
     parts = [
         f"<!-- GENERATED from {_display(source)} by sync-agent-rules — do not edit by hand. "
-        f"Agy-only rules belong in {_display(local)}. -->\n",
+        f"Target-only rules (agy or codex) belong in {_display(local)}. -->\n",
         AGY_TOOL_MAPPING_BANNER,
         resolve_imports(source),
     ]
     if local.is_file():
-        parts.append(f"<!-- BEGIN {local.name} (hand-maintained, agy-only) -->\n")
+        parts.append(f"<!-- BEGIN {local.name} (hand-maintained, target-only) -->\n")
         parts.append(local.read_text(encoding="utf-8").rstrip("\n") + "\n")
     return "\n".join(parts)
 
