@@ -304,6 +304,7 @@ echo "$dir"
         env["TASK_BRIEF_BIN"] = str(self.fake_task_brief)
         env["REVIEW_PACKAGE_BIN"] = str(self.fake_review_package)
         env["SDD_WORKSPACE_BIN"] = str(self.fake_sdd_workspace)
+        env["ACCEPTANCE_TESTS_BIN"] = "/usr/bin/true"
         return env
 
     def run_sdd_drive(
@@ -380,6 +381,56 @@ sys.exit(1)
         self.assertIn("--timeout 200 ", call + " ")
         self.assertIn("--agent agy --model gemini-3.8-flash-high", call)
         self.assertNotIn("rejected", proc.stdout + proc.stderr)
+
+    def _fake_gate(self, script: str) -> str:
+        path = self.fake_bin_dir / "fake-gate"
+        self._make_executable(path, script)
+        return str(path)
+
+    def test_registered_tests_are_added_to_the_worker_gate(self) -> None:
+        gate = self._fake_gate('''#!/bin/bash
+while [ $# -gt 0 ]; do [ "$1" = --sdd-dir ] && touch "$2/task-1-tests.sha256"; shift; done
+''')
+        log = self._strict_worker()
+        self.run_sdd_drive(
+            ["--plan", str(self.plan_file), "--cwd", str(self.repo_dir)],
+            env_overrides={"ACCEPTANCE_TESTS_BIN": gate, "DISPATCH_WORKER_BIN": str(self.fake_bin_dir / "strict-worker")},
+        )
+        self.assertIn("--check-intact", log.read_text())
+
+    def test_gate_is_not_rerun_when_tests_are_already_registered(self) -> None:
+        calls = self.fake_bin_dir / "gate-calls"
+        gate = self._fake_gate(f'''#!/bin/bash
+echo x >> {calls}
+while [ $# -gt 0 ]; do [ "$1" = --sdd-dir ] && touch "$2/task-1-tests.sha256"; shift; done
+''')
+        env = {"ACCEPTANCE_TESTS_BIN": gate, "DISPATCH_WORKER_BIN": "/usr/bin/false"}
+        args = ["--plan", str(self.plan_file), "--cwd", str(self.repo_dir)]
+        self.run_sdd_drive(args, env_overrides=env)
+        self.run_sdd_drive(args, env_overrides=env)
+        self.assertEqual(len(calls.read_text().splitlines()), 1)
+
+    def test_rejected_acceptance_tests_stop_before_any_worker(self) -> None:
+        gate = self._fake_gate("#!/bin/sh\necho 'test passes before the work' >&2\nexit 1\n")
+        log = self._strict_worker()
+        proc = self.run_sdd_drive(
+            ["--plan", str(self.plan_file), "--cwd", str(self.repo_dir)],
+            env_overrides={"ACCEPTANCE_TESTS_BIN": gate, "DISPATCH_WORKER_BIN": str(self.fake_bin_dir / "strict-worker")},
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("acceptance tests rejected", proc.stdout + proc.stderr)
+        self.assertFalse(log.exists())
+
+    def test_verdict_tolerates_bold_and_headings_but_not_prose(self) -> None:
+        import importlib.machinery, importlib.util
+        loader = importlib.machinery.SourceFileLoader("sdd_drive_mod", str(Path(__file__).resolve().parent.parent / "bin" / "sdd-drive"))
+        spec = importlib.util.spec_from_loader("sdd_drive_mod", loader)
+        mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+        for text in ("**Verdict: Approved**", "## Verdict: Approved", "**Verdict:** Approved", "Verdict: Approved"):
+            self.assertEqual(mod.parse_review_verdict(text), "Approved", text)
+        self.assertEqual(mod.parse_review_verdict("**Verdict: Needs fixes**"), "Needs fixes")
+        for text in ("The verdict: Approved by me", "Verdict: Approved (was Needs fixes)", "**Verdict: Approved**\nVerdict: Needs fixes"):
+            self.assertIsNone(mod.parse_review_verdict(text), text)
 
     def test_rejected_dispatch_is_not_reported_as_a_verification_failure(self) -> None:
         path = self.fake_bin_dir / "rc2-worker"
