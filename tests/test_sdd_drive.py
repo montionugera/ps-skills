@@ -354,6 +354,44 @@ echo "$dir"
         content = progress_file.read_text()
         self.assertIn("complete", content.lower())
 
+    def _strict_worker(self) -> Path:
+        """Rejects what the real dispatch-worker rejects, and logs each call."""
+        log = self.fake_bin_dir / "strict.log"
+        path = self.fake_bin_dir / "strict-worker"
+        self._make_executable(path, f"""#!/usr/bin/env python3
+import sys
+args = sys.argv[1:]
+open({str(log)!r}, "a").write(" ".join(args) + "\\n")
+timeout = args[args.index("--timeout") + 1] if "--timeout" in args else "1"
+if not timeout.isdigit():
+    sys.stderr.write("dispatch-worker: error: argument --timeout: invalid int value\\n")
+    sys.exit(2)
+sys.exit(1)
+""")
+        return log
+
+    def test_timeout_is_a_whole_number_and_the_model_is_named(self) -> None:
+        log = self._strict_worker()
+        proc = self.run_sdd_drive(
+            ["--plan", str(self.plan_file), "--cwd", str(self.repo_dir), "--timeout", "200"],
+            env_overrides={"DISPATCH_WORKER_BIN": str(self.fake_bin_dir / "strict-worker")},
+        )
+        call = log.read_text().splitlines()[0]
+        self.assertIn("--timeout 200 ", call + " ")
+        self.assertIn("--agent agy --model gemini-3.8-flash-high", call)
+        self.assertNotIn("rejected", proc.stdout + proc.stderr)
+
+    def test_rejected_dispatch_is_not_reported_as_a_verification_failure(self) -> None:
+        path = self.fake_bin_dir / "rc2-worker"
+        self._make_executable(path, "#!/bin/sh\necho 'bad flag' >&2\nexit 2\n")
+        proc = self.run_sdd_drive(
+            ["--plan", str(self.plan_file), "--cwd", str(self.repo_dir)],
+            env_overrides={"DISPATCH_WORKER_BIN": str(path)},
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("dispatch command rejected", proc.stdout + proc.stderr)
+        self.assertNotIn("verification failure", proc.stdout + proc.stderr)
+
     def test_2_ledger_under_2048_bytes_after_every_transition(self) -> None:
         """(2) The ledger stays <= 2048 bytes after every transition and is written atomically."""
         proc = self.run_sdd_drive(["--plan", str(self.plan_file), "--cwd", str(self.repo_dir)])

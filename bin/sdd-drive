@@ -48,12 +48,14 @@ def file_lock(target: Path, timeout: Optional[float] = None):
             except OSError:
                 pass
 
+WORKER_MODEL = "gemini-3.8-flash-high"  # naming the model keeps auto-routing from picking another agent
+
 
 def notify_progress_sync(progress_file: Path, state_label: str, cwd: Path) -> None:
     sync_bin = os.environ.get("PROGRESS_SYNC_BIN") or "progress-sync"
     cmd = [sync_bin, "--file", str(progress_file), "--state-label", state_label, "--cwd", str(cwd)]
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=5.0)
+        subprocess.run(cmd, capture_output=True, text=True, timeout=5.0, stdin=subprocess.DEVNULL)
     except Exception as exc:
         sys.stderr.write(f"warning: progress-sync failed ({exc}); continuing\n")
 
@@ -213,13 +215,13 @@ def run_review(
         except OSError:
             pass
     rev_bin = os.environ.get("DISPATCH_WORKER_BIN" if tier == "single_flash_reviewer" else "DISPATCH_THINKER_BIN") or ("dispatch-worker" if tier == "single_flash_reviewer" else "dispatch-thinker")
-    model = "gemini-3.8-flash-high" if tier == "single_flash_reviewer" else "gemini-4-argon-medium"
+    model = WORKER_MODEL if tier == "single_flash_reviewer" else "gemini-4-argon-medium"
     desc = f"Review Task {task_id} diff against brief {brief_file}, diff {diff_file}, write findings to {review_file} with 'Verdict: Approved' or 'Verdict: Needs fixes'."
     if prior_review and prior_review.exists():
         desc = f"Review Task {task_id} fix diff against brief {brief_file}, review {prior_review} and diff {diff_file} with 'Verdict: Approved' or 'Verdict: Needs fixes'."
     cmd = [rev_bin, "--agent", "agy", "--model", model, "--cwd", str(cwd), "--task", desc, "--output-file", str(review_file)]
     if timeout:
-        cmd.extend(["--timeout", str(timeout)])
+        cmd.extend(["--timeout", str(int(timeout))])
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd), timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -247,6 +249,8 @@ def set_working(progress_file: Path, ledger: Dict[str, Any], cwd: Path, task_id:
 def check_worker_proc(proc: subprocess.CompletedProcess, w_status: str, w_files: int, w_verified: bool, task_id: int) -> Tuple[Optional[int], Optional[str], Optional[str]]:
     if proc.returncode == 10 or w_status == "FALLBACK_INTERNAL":
         return 4, "fallback_internal", f"Task {task_id} stopped: worker quota exhausted / FALLBACK_INTERNAL (exit 10)\n"
+    if proc.returncode == 2:
+        return 3, "dispatch_rejected", f"Task {task_id} stopped: dispatch command rejected: {proc.stderr.strip()[-200:]}\n"
     if "TIMEOUT" in w_status or proc.returncode == 124:
         return 7, "timeout", f"Task {task_id} stopped: worker timed out\n"
     if w_status == "BLOCKED":
@@ -264,7 +268,7 @@ def check_worker_proc(proc: subprocess.CompletedProcess, w_status: str, w_files:
 
 def run_worker_step(cmd: List[str], timeout: Optional[float], report_file: Path, cwd: Path, task_id: int) -> Tuple[Optional[int], Optional[str], Optional[str]]:
     if timeout:
-        cmd.extend(["--timeout", str(timeout)])
+        cmd.extend(["--timeout", str(int(timeout))])
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd), timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -354,7 +358,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         report_file = workspace / f"task-{task_id}-report.md"
         worker_cmd = [
-            dispatch_worker_bin, "--agent", "agy", "--cwd", str(cwd),
+            dispatch_worker_bin, "--agent", "agy", "--model", WORKER_MODEL, "--cwd", str(cwd),
             "--task", f"Read brief: {brief_file} and implement Task {task_id}",
             "--acceptance-file", str(brief_file), "--output-file", str(report_file),
             "--verify-cmd", verify_cmd,
@@ -388,7 +392,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             fix_report_file = workspace / f"task-{task_id}-report-fix1.md"
             fix_cmd = [
-                dispatch_worker_bin, "--agent", "agy", "--cwd", str(cwd),
+                dispatch_worker_bin, "--agent", "agy", "--model", WORKER_MODEL, "--cwd", str(cwd),
                 "--task", f"Fix issues identified in review {review_file} for Task {task_id}",
                 "--acceptance-file", str(brief_file), "--output-file", str(fix_report_file),
                 "--verify-cmd", verify_cmd,
