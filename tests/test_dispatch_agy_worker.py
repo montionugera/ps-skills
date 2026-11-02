@@ -2868,6 +2868,55 @@ class TestResumeThenRuntimeFallback(FakeAgyBase):
         self.assertIn("refusing fallback", proc.stderr)
 
 
+class ForegroundJobRegistrationTests(unittest.TestCase):
+    """A foreground run must be visible to --status and must block a second worker in the same folder."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.jobs = str(Path(self._tmp.name) / "jobs")
+        self.cwd = str(Path(self._tmp.name) / "repo")
+        os.makedirs(self.cwd)
+
+    def _register(self, job_id="dw-1-aaaaaa", cwd=None, isolated=False):
+        return dispatch_mod.register_foreground_job(
+            job_id, cwd or self.cwd, "agy", None, "t", isolated, 60, job_dir=self.jobs)
+
+    def test_registered_run_shows_in_the_job_list_as_running(self):
+        self._register()
+        listed = dispatch_mod.list_all_jobs(job_dir=self.jobs)
+        self.assertEqual([(j["job_id"], j["status"]) for j in listed], [("dw-1-aaaaaa", "RUNNING")])
+        self.assertIn("dw-1-aaaaaa", dispatch_mod.format_status_report(listed))
+
+    def test_second_run_in_the_same_folder_sees_the_first_as_busy(self):
+        self._register("dw-1-aaaaaa")
+        self.assertEqual(dispatch_mod.busy_jobs_on("dw-2-bbbbbb", self.cwd, job_dir=self.jobs), ["dw-1-aaaaaa"])
+
+    def test_other_folder_and_finished_jobs_are_not_busy(self):
+        self._register("dw-1-aaaaaa")
+        self.assertEqual(dispatch_mod.busy_jobs_on("dw-2-bbbbbb", self._tmp.name, job_dir=self.jobs), [])
+        dispatch_mod.finish_foreground_job("dw-1-aaaaaa", "SUCCESS", 0, 1, "d", job_dir=self.jobs)
+        self.assertEqual(dispatch_mod.busy_jobs_on("dw-2-bbbbbb", self.cwd, job_dir=self.jobs), [])
+
+    def test_exit_hook_marks_a_cut_short_run_dead_but_keeps_a_finished_one(self):
+        self._register("dw-1-aaaaaa")
+        dispatch_mod.mark_foreground_job_ended("dw-1-aaaaaa", job_dir=self.jobs)
+        self.assertEqual(dispatch_mod.load_job_state("dw-1-aaaaaa", self.jobs)["status"], "FAILED_DIED")
+        self._register("dw-3-cccccc")
+        dispatch_mod.finish_foreground_job("dw-3-cccccc", "SUCCESS", 0, 1, "d", job_dir=self.jobs)
+        dispatch_mod.mark_foreground_job_ended("dw-3-cccccc", job_dir=self.jobs)
+        self.assertEqual(dispatch_mod.load_job_state("dw-3-cccccc", self.jobs)["status"], "SUCCESS")
+
+    def test_cli_refuses_a_second_run_in_a_busy_folder(self):
+        self._register("dw-1-aaaaaa")  # pid is this test process, so it counts as alive
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--agent", "agy", "--cwd", self.cwd, "--job-dir", self.jobs,
+             "--task", "noop"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, dispatch_mod.BUSY_FOLDER_EXIT_CODE, proc.stderr)
+        self.assertIn("REFUSED", proc.stderr)
+        self.assertIn("dw-1-aaaaaa", proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
 

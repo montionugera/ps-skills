@@ -157,6 +157,7 @@ The default `--timeout` is 900s. That fits a read-only check or a small edit; it
 | One plan task implemented from a brief, with its tests | `3600` |
 | A multi-task plan part, or anything whose verify command runs a full suite or a build | `9000` |
 
+- **Foreground runs are tracked too, and one folder takes one worker.** A run without `--detach` registers itself, so `--status` lists it. A second non-isolated run on a `--cwd` that already has a running job exits 2 with `REFUSED`; wait for it, use `--isolated`, or pass `--allow-shared`. Prefer `--detach` for anything longer than a couple of minutes.
 - **Wait once, never poll.** After `--detach`, run `dispatch-worker --wait <job-id> --timeout <seconds>` as a single background command and do other work until it returns. Do not loop on `--status`, `--tail`, `sleep`, or marker files, and do not end the turn with a "still running" message.
 - `--wait` is bounded by its own `--timeout` (also 900s by default). Give it the job's `--timeout` plus the `--verify-timeout`; when the bound passes it reports `Status: UNKNOWN (exit 1)` while the job keeps running, so wait again rather than re-dispatching.
 - `--wait all` blocks on every running job; use it for a batch.

@@ -35,6 +35,7 @@ whose folder was also used by another job, where the count cannot be attributed.
 """
 
 import argparse
+import atexit
 import collections
 import contextlib
 import concurrent.futures
@@ -1666,6 +1667,42 @@ def list_all_jobs(job_dir=DEFAULT_JOB_DIR):
     return jobs
 
 
+BUSY_FOLDER_EXIT_CODE = 2
+
+
+def busy_jobs_on(job_id, cwd, job_dir=DEFAULT_JOB_DIR):
+    """Jobs that are running right now on `cwd` (completed ones do not count)."""
+    return sharing_jobs(job_id, cwd, float("inf"), job_dir)
+
+
+def register_foreground_job(job_id, cwd, agent, model, task, isolated, timeout, job_dir=DEFAULT_JOB_DIR):
+    """Record a foreground run so --status, --wait and the busy-folder check can see it."""
+    state = {
+        "job_id": job_id, "agent": agent, "model": model, "task": task, "cwd": cwd, "isolated": isolated,
+        "timeout": timeout, "status": "RUNNING", "pid": os.getpid(), "created_at": time.time(),
+        "foreground": True,
+    }
+    save_job_state(job_id, state, job_dir)
+    return state
+
+
+def finish_foreground_job(job_id, status, exit_code, files_changed, diff_summary, job_dir=DEFAULT_JOB_DIR):
+    state = load_job_state(job_id, job_dir)
+    if state is None:
+        return
+    state.update(status=status, exit_code=exit_code, files_changed=files_changed, diff_summary=diff_summary,
+                 completed_at=time.time())
+    save_job_state(job_id, state, job_dir)
+
+
+def mark_foreground_job_ended(job_id, job_dir=DEFAULT_JOB_DIR):
+    """Exit hook: a job still RUNNING when the process exits was cut short, so never leave it looking alive."""
+    state = load_job_state(job_id, job_dir)
+    if state and state.get("status") == "RUNNING":
+        state.update(status="FAILED_DIED", completed_at=time.time())
+        save_job_state(job_id, state, job_dir)
+
+
 CLAUDE_ALLOWED_TOOLS = "Read,Grep,Glob,Write,Edit"
 CLAUDE_DISALLOWED_TOOLS = "Bash,WebFetch,WebSearch"
 
@@ -2432,6 +2469,7 @@ def main():
     parser.add_argument("--batch", nargs="+", help="Multiple task prompts to run in parallel")
     parser.add_argument("--batch-file", type=str, help="JSON or text file containing list of tasks to run in parallel")
     parser.add_argument("--max-parallel", type=int, default=4, help="Max concurrent workers in batch mode (default: 4)")
+    parser.add_argument("--allow-shared", action="store_true", help="Run even if another job is already running on this --cwd")
     parser.add_argument("--detach", "--async", dest="detach", action="store_true", help="Launch task in background and exit immediately")
     parser.add_argument("--status", type=str, nargs="?", const="all", help="Check status of background job(s)")
     parser.add_argument("--wait", type=str, nargs="?", const="all", help="Wait for background job(s) to finish")
@@ -2964,6 +3002,16 @@ def main():
     pre_status = git_status_entries(cwd) if runtime_fallback else None
     pre_head = git_head(cwd) if runtime_fallback else None
 
+    if not args.isolated and not args.allow_shared:
+        busy = busy_jobs_on(run_id, cwd, args.job_dir)
+        if busy:
+            print(f"REFUSED: job(s) {', '.join(busy)} already running in {cwd}. Two workers in one folder overwrite "
+                  f"each other. Wait for them (dispatch-worker --wait <id>), use --isolated, or pass --allow-shared.",
+                  file=sys.stderr)
+            sys.exit(BUSY_FOLDER_EXIT_CODE)
+    register_foreground_job(run_id, cwd, chosen_agent, chosen_model, args.task, args.isolated, args.timeout,
+                            job_dir=args.job_dir)
+    atexit.register(mark_foreground_job_ended, run_id, args.job_dir)
     started = time.time()
     exit_code, stdout, stderr, files_changed, diff_summary = dispatch_once(chosen_agent, chosen_model)
     # VERIFY_FAILED means the worker ran and the task's checks failed: a task problem, not a worker problem.
@@ -2989,6 +3037,7 @@ def main():
             exit_code = 12  # Fail closed: THINKER_UNAVAILABLE
 
     status = derive_status(exit_code, files_changed, verify_info)
+    finish_foreground_job(run_id, status, exit_code, files_changed, diff_summary, job_dir=args.job_dir)
     emit_event("finish", run_id=run_id, agent=chosen_agent, model=chosen_model, status=status, exit_code=exit_code,
                duration_s=round(time.time() - started, 1), files_changed=files_changed,
                conversation_id=verify_info.get("conversation_id"), resumed=bool(verify_info.get("resumed")),
