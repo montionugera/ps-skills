@@ -979,9 +979,9 @@ def inspect_git_changes(target_dir, initial_head=None, baseline=None):
 def worker_concurrency_slot(label="worker", poll=0.25):
     """Machine-wide counting lock so detached/batch worker storms cannot OOM the host."""
     try:
-        max_slots = int(os.environ.get("DISPATCH_MAX_CONCURRENT", "4"))
+        max_slots = int(os.environ.get("DISPATCH_MAX_CONCURRENT", "8"))
     except ValueError:
-        max_slots = 4
+        max_slots = 8
     if max_slots <= 0:
         yield None
         return
