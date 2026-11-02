@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""sdd-drive: Event-driven subagent-driven-development batch driver."""
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+MAX_LEDGER_BYTES = 2048
+DEFAULT_TIMEOUT_SECONDS = 1800.0
+DEFAULT_LOCK_TIMEOUT = 10.0
+
+
+def _lock_path(target: Path) -> Path:
+    lockdir = Path(tempfile.gettempdir()) / "ps-sdd-drive-locks"
+    lockdir.mkdir(parents=True, exist_ok=True)
+    return lockdir / f"{hashlib.sha1(str(target.resolve()).encode()).hexdigest()}.lock"
+
+
+@contextlib.contextmanager
+def file_lock(target: Path, timeout: Optional[float] = None):
+    timeout = float(os.environ.get("SDD_LOCK_TIMEOUT", DEFAULT_LOCK_TIMEOUT)) if timeout is None else timeout
+    lockpath = _lock_path(target)
+    with open(lockpath, "a+") as fh:
+        start = time.time()
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if time.time() - start >= timeout:
+                    raise TimeoutError(f"Ledger lock timeout after {timeout}s on {target}")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+
+
+def notify_progress_sync(progress_file: Path, state_label: str, cwd: Path) -> None:
+    sync_bin = os.environ.get("PROGRESS_SYNC_BIN") or "progress-sync"
+    cmd = [sync_bin, "--file", str(progress_file), "--state-label", state_label, "--cwd", str(cwd)]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=5.0)
+    except Exception as exc:
+        sys.stderr.write(f"warning: progress-sync failed ({exc}); continuing\n")
+
+
+def git_rev(ref: str, cwd: Path) -> str:
+    try:
+        return subprocess.check_output(["git", "-C", str(cwd), "rev-parse", ref], stderr=subprocess.DEVNULL).decode("utf-8").strip()
+    except Exception:
+        return ""
+
+
+def resolve_workspace(plan_path: Path, cwd: Path) -> Path:
+    plan_hash = hashlib.sha256(str(plan_path.resolve()).encode("utf-8")).hexdigest()[:12]
+    base_dir = os.environ.get("SDD_WORKSPACE_DIR")
+    ws = (Path(base_dir) if base_dir else Path(git_rev("--show-toplevel", cwd) or str(cwd)) / ".superpowers" / "sdd") / plan_hash
+    ws.mkdir(parents=True, exist_ok=True)
+    gitignore = ws.parent / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("*\n")
+    return ws
+
+
+def parse_tasks_from_plan(plan_path: Path) -> List[int]:
+    tasks, in_fence = [], False
+    for line in plan_path.read_text(encoding="utf-8").splitlines():
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence:
+            m = re.match(r'^\s*#+\s+Task\s+(\d+)\b', line, re.IGNORECASE)
+            if m and int(m.group(1)) not in tasks:
+                tasks.append(int(m.group(1)))
+    return tasks
+
+
+def read_ledger(progress_file: Path, default_plan: str, base_sha: str) -> Dict[str, Any]:
+    if progress_file.exists():
+        text = progress_file.read_text(encoding="utf-8")
+        m = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+        for cand in [m.group(1) if m else None, text]:
+            try:
+                if cand:
+                    return json.loads(cand)
+            except Exception:
+                pass
+    return {"plan": default_plan, "base_sha": base_sha, "batches": []}
+
+
+def write_ledger(
+    progress_file: Path,
+    state_data: Dict[str, Any],
+    state_label: str,
+    max_bytes: int = MAX_LEDGER_BYTES,
+) -> None:
+    with file_lock(progress_file):
+        b_md = [f"- Task {b.get('id')}: {b.get('status', 'pending')}" for b in state_data.get("batches", [])]
+        batches_text = "\n".join(b_md) if b_md else "- (none)"
+        content = f"# SDD progress — plan: {Path(state_data.get('plan', '')).name}\n**State:** {state_label}\n\n## Batches\n{batches_text}\n\n```json\n{json.dumps(state_data, indent=2)}\n```\n"
+        raw_bytes = content.encode("utf-8")
+        if len(raw_bytes) > max_bytes:
+            raw_bytes = f"# SDD progress\n**State:** {state_label}\n\n{batches_text}\n\n```json\n{json.dumps(state_data, separators=(',', ':'))}\n```\n".encode("utf-8")
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{progress_file.name}.tmp.", dir=str(progress_file.parent))
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw_bytes)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(Path(tmp_name), progress_file)
+        finally:
+            if Path(tmp_name).exists():
+                try:
+                    Path(tmp_name).unlink()
+                except OSError:
+                    pass
+
+
+def extract_brief(plan_path: Path, task_id: int, brief_file: Path) -> Path:
+    m = re.search(rf'(?s)(#+\s+Task\s+{task_id}\b.*?)(?=#+\s+Task|\Z)', plan_path.read_text(encoding="utf-8"), re.IGNORECASE)
+    brief_file.parent.mkdir(parents=True, exist_ok=True)
+    brief_file.write_text(m.group(1) if m else f"## Task {task_id}\n", encoding="utf-8")
+    return brief_file
+
+
+def extract_verify_cmd(brief_file: Path) -> Optional[str]:
+    if brief_file.exists():
+        for line in brief_file.read_text(encoding="utf-8").splitlines():
+            m = re.match(r'^Verify-Cmd:\s*(.+)$', line)
+            if m:
+                return m.group(1).strip()
+    return None
+
+
+def parse_worker_output(stdout_text: str, report_file: Optional[Path], exit_code: int) -> Tuple[str, int, bool]:
+    text = stdout_text + ("\n" + report_file.read_text(encoding="utf-8", errors="replace") if report_file and report_file.exists() else "")
+    status = {10: "FALLBACK_INTERNAL", 13: "VERIFY_FAILED", 124: "TIMEOUT"}.get(exit_code, "SUCCESS" if exit_code == 0 else "FAILED")
+    files_modified, verified, in_fence = 1 if exit_code == 0 else 0, False, False
+    for line in text.splitlines():
+        sline = line.strip()
+        if sline.startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and not sline.startswith(">"):
+            sm = re.match(r'^Status:\s*([A-Za-z0-9_-]+)', sline, re.IGNORECASE)
+            if sm:
+                status = sm.group(1).upper()
+            fm = re.match(r'^Files\s+Modified:\s*(\d+)', sline, re.IGNORECASE)
+            if fm:
+                files_modified = int(fm.group(1))
+            vm = re.match(r'^Verified:\s*(true|false|skipped)', sline, re.IGNORECASE)
+            if vm:
+                verified = (vm.group(1).lower() == "true")
+    return status, files_modified, verified
+
+
+def create_review_package(base_sha: str, head_sha: str, diff_file: Path, cwd: Path) -> Path:
+    diff_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out = subprocess.check_output(["git", "-C", str(cwd), "diff", "-U10", f"{base_sha}..{head_sha}"], stderr=subprocess.DEVNULL).decode("utf-8", errors="replace")
+    except Exception:
+        out = ""
+    diff_file.write_text(f"# Diff {base_sha}..{head_sha}\n\n{out}\n", encoding="utf-8")
+    return diff_file
+
+
+def triage_diff_with_jev(diff_file: Path, base_sha: str, head_sha: str, cwd: Path) -> str:
+    jev_bin = os.environ.get("JEV_GATE_BIN") or "jev-gate"
+    try:
+        res = subprocess.run([jev_bin, "triage-diff", "--repo", str(cwd), "--base", base_sha, "--head", head_sha, "--diff-file", str(diff_file), "--hook-line"], capture_output=True, text=True, cwd=str(cwd), timeout=10.0)
+        if "tier=single_flash_reviewer" in res.stdout:
+            return "single_flash_reviewer"
+    except Exception:
+        pass
+    return "argon_or_opus_deep_review"
+
+
+def parse_review_verdict(review_text: str) -> Optional[str]:
+    if not review_text or not review_text.strip():
+        return None
+    verdicts, in_fence = [], False
+    for line in review_text.splitlines():
+        sline = line.strip()
+        if sline.startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and not sline.startswith(("> ", ">", '"', "'")):
+            m = re.match(r'^(?:Verdict|Quality):\s*(Approved|Needs fixes)$', sline, re.IGNORECASE)
+            if m:
+                verdicts.append("Approved" if m.group(1).lower() == "approved" else "Needs fixes")
+    return verdicts[-1] if verdicts and len(set(verdicts)) == 1 else None
+
+
+def run_review(
+    task_id: int, brief_file: Path, diff_file: Path, review_file: Path, cwd: Path,
+    tier: str, timeout: Optional[float], prior_review: Optional[Path] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    if review_file.exists():
+        try:
+            review_file.unlink()
+        except OSError:
+            pass
+    rev_bin = os.environ.get("DISPATCH_WORKER_BIN" if tier == "single_flash_reviewer" else "DISPATCH_THINKER_BIN") or ("dispatch-worker" if tier == "single_flash_reviewer" else "dispatch-thinker")
+    model = "gemini-3.8-flash-high" if tier == "single_flash_reviewer" else "gemini-4-argon-medium"
+    desc = f"Review Task {task_id} diff against brief {brief_file}, diff {diff_file}, write findings to {review_file} with 'Verdict: Approved' or 'Verdict: Needs fixes'."
+    if prior_review and prior_review.exists():
+        desc = f"Review Task {task_id} fix diff against brief {brief_file}, review {prior_review} and diff {diff_file} with 'Verdict: Approved' or 'Verdict: Needs fixes'."
+    cmd = [rev_bin, "--agent", "agy", "--model", model, "--cwd", str(cwd), "--task", desc, "--output-file", str(review_file)]
+    if timeout:
+        cmd.extend(["--timeout", str(timeout)])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    if proc.returncode != 0:
+        return None, f"reviewer crashed (exit {proc.returncode})"
+    rev_content = review_file.read_text(encoding="utf-8", errors="replace") if review_file.exists() else proc.stdout
+    verdict = parse_review_verdict(rev_content)
+    return verdict, ("review verdict missing, unparsable, or unknown" if not verdict else None)
+
+
+def set_blocked(progress_file: Path, ledger: Dict[str, Any], batch: Dict[str, Any], cwd: Path, task_id: int, status: str, msg: str, code: int) -> int:
+    sys.stderr.write(msg)
+    batch["status"], batch["blocker"] = status, msg.strip()
+    write_ledger(progress_file, ledger, f"blocked=Task {task_id}: {status}")
+    notify_progress_sync(progress_file, f"blocked=Task {task_id}: {status}", cwd)
+    return code
+
+
+def set_working(progress_file: Path, ledger: Dict[str, Any], cwd: Path, task_id: int, state: str) -> None:
+    write_ledger(progress_file, ledger, f"working=Task {task_id}: {state}")
+    notify_progress_sync(progress_file, f"working=Task {task_id}: {state}", cwd)
+
+
+def check_worker_proc(proc: subprocess.CompletedProcess, w_status: str, w_files: int, w_verified: bool, task_id: int) -> Tuple[Optional[int], Optional[str], Optional[str]]:
+    if proc.returncode == 10 or w_status == "FALLBACK_INTERNAL":
+        return 4, "fallback_internal", f"Task {task_id} stopped: worker quota exhausted / FALLBACK_INTERNAL (exit 10)\n"
+    if "TIMEOUT" in w_status or proc.returncode == 124:
+        return 7, "timeout", f"Task {task_id} stopped: worker timed out\n"
+    if w_status == "BLOCKED":
+        return 3, "blocked", f"Task {task_id} stopped: worker reported BLOCKED\n"
+    if w_status == "NEEDS_CONTEXT":
+        return 3, "needs_context", f"Task {task_id} stopped: worker reported NEEDS_CONTEXT\n"
+    if not w_verified or w_status == "VERIFY_FAILED" or proc.returncode == 13:
+        return 3, "verify_failed", f"Task {task_id} stopped: verification failure\n"
+    if w_files == 0:
+        return 3, "no_changes", f"Task {task_id} stopped: worker modified 0 files\n"
+    if proc.returncode != 0 or w_status != "SUCCESS":
+        return 3, "failed", f"Task {task_id} stopped: worker failed with status {w_status} (exit {proc.returncode})\n"
+    return None, None, None
+
+
+def run_worker_step(cmd: List[str], timeout: Optional[float], report_file: Path, cwd: Path, task_id: int) -> Tuple[Optional[int], Optional[str], Optional[str]]:
+    if timeout:
+        cmd.extend(["--timeout", str(timeout)])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 7, "timeout", f"Task {task_id} timed out after {timeout}s\n"
+    w_status, w_files, w_verified = parse_worker_output(proc.stdout + "\n" + proc.stderr, report_file, proc.returncode)
+    return check_worker_proc(proc, w_status, w_files, w_verified, task_id)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(prog="sdd-drive")
+    parser.add_argument("plan_pos", nargs="?")
+    parser.add_argument("--plan", "-p", dest="plan_opt")
+    parser.add_argument("--cwd", default=".")
+    parser.add_argument("--timeout", type=float, default=None)
+    parser.add_argument("--verify-cmd")
+    parser.add_argument("--no-drive", action="store_true")
+    args = parser.parse_args(argv)
+
+    if os.environ.get("SDD_DRIVE", "").strip().lower() == "off" or args.no_drive:
+        sys.stderr.write("SDD_DRIVE=off: sdd-drive is disabled\n")
+        return 2
+
+    raw_plan = args.plan_opt or args.plan_pos
+    if not raw_plan:
+        sys.stderr.write("error: plan file required (--plan <path>)\n")
+        return 1
+
+    cwd, plan_path = Path(args.cwd).resolve(), Path(raw_plan)
+    if not plan_path.is_absolute():
+        plan_path = cwd / plan_path
+    if not plan_path.exists():
+        sys.stderr.write(f"error: plan file not found: {plan_path}\n")
+        return 1
+
+    task_timeout = args.timeout
+    if task_timeout is None:
+        try:
+            task_timeout = float(os.environ.get("SDD_TIMEOUT", DEFAULT_TIMEOUT_SECONDS))
+        except ValueError:
+            task_timeout = DEFAULT_TIMEOUT_SECONDS
+
+    workspace, tasks = resolve_workspace(plan_path, cwd), parse_tasks_from_plan(plan_path)
+    if not tasks:
+        sys.stderr.write(f"error: no tasks found in plan: {plan_path}\n")
+        return 1
+
+    progress_file, current_head = workspace / "progress.md", git_rev("HEAD", cwd) or "HEAD"
+
+    try:
+        with file_lock(progress_file):
+            ledger = read_ledger(progress_file, str(plan_path), current_head)
+    except TimeoutError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+
+    def get_batch(t_id: int) -> Dict[str, Any]:
+        for b in ledger.get("batches", []):
+            if b.get("id") == t_id:
+                return b
+        new_b = {"id": t_id, "status": "pending", "head_sha": None, "round": 0, "blocker": None}
+        ledger.setdefault("batches", []).append(new_b)
+        return new_b
+
+    dispatch_worker_bin = os.environ.get("DISPATCH_WORKER_BIN") or "dispatch-worker"
+
+    for task_id in tasks:
+        batch = get_batch(task_id)
+        if batch.get("status") in ("complete", "approved"):
+            continue
+
+        base_sha = git_rev("HEAD", cwd) or "HEAD"
+        batch["round"], batch["blocker"] = 0, None
+
+        try:
+            set_working(progress_file, ledger, cwd, task_id, "implementing")
+        except TimeoutError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 1
+
+        brief_file = workspace / f"task-{task_id}-brief.md"
+        extract_brief(plan_path, task_id, brief_file)
+
+        verify_cmd = extract_verify_cmd(brief_file)
+        if not verify_cmd:
+            return set_blocked(progress_file, ledger, batch, cwd, task_id, "missing_verify_cmd",
+                               f"Task {task_id} stopped: missing explicit Verify-Cmd in brief\n", 3)
+
+        report_file = workspace / f"task-{task_id}-report.md"
+        worker_cmd = [
+            dispatch_worker_bin, "--agent", "agy", "--cwd", str(cwd),
+            "--task", f"Read brief: {brief_file} and implement Task {task_id}",
+            "--acceptance-file", str(brief_file), "--output-file", str(report_file),
+            "--verify-cmd", verify_cmd,
+        ]
+        err_code, err_status, err_msg = run_worker_step(worker_cmd, task_timeout, report_file, cwd, task_id)
+        if err_code is not None:
+            return set_blocked(progress_file, ledger, batch, cwd, task_id, err_status, err_msg, err_code)
+
+        head_sha = git_rev("HEAD", cwd) or base_sha
+        batch["head_sha"] = head_sha
+
+        set_working(progress_file, ledger, cwd, task_id, "reviewing")
+
+        diff_file = workspace / f"review-{base_sha[:7]}..{head_sha[:7]}.diff"
+        create_review_package(base_sha, head_sha, diff_file, cwd)
+        tier = triage_diff_with_jev(diff_file, base_sha, head_sha, cwd)
+        review_file = workspace / f"task-{task_id}-review.md"
+
+        verdict, rev_err = run_review(task_id, brief_file, diff_file, review_file, cwd, tier, task_timeout)
+        if rev_err == "timeout":
+            return set_blocked(progress_file, ledger, batch, cwd, task_id, "timeout",
+                               f"Task {task_id} review timed out after {task_timeout}s\n", 7)
+        if verdict is None:
+            rev_st = "review_failed" if "crashed" in (rev_err or "") else "review_unparsable"
+            return set_blocked(progress_file, ledger, batch, cwd, task_id, rev_st,
+                               f"Task {task_id} stopped: {rev_err}\n", 6)
+
+        if verdict == "Needs fixes":
+            batch["round"] = 1
+            set_working(progress_file, ledger, cwd, task_id, "fix round 1")
+
+            fix_report_file = workspace / f"task-{task_id}-report-fix1.md"
+            fix_cmd = [
+                dispatch_worker_bin, "--agent", "agy", "--cwd", str(cwd),
+                "--task", f"Fix issues identified in review {review_file} for Task {task_id}",
+                "--acceptance-file", str(brief_file), "--output-file", str(fix_report_file),
+                "--verify-cmd", verify_cmd,
+            ]
+            ferr_code, ferr_st, ferr_msg = run_worker_step(fix_cmd, task_timeout, fix_report_file, cwd, task_id)
+            if ferr_code is not None:
+                return set_blocked(progress_file, ledger, batch, cwd, task_id, "fix_failed",
+                                   f"Task {task_id} fix worker failed: {ferr_st}\n", 3)
+
+            fix_head = git_rev("HEAD", cwd) or head_sha
+            batch["head_sha"] = fix_head
+
+            fix_diff_file = workspace / f"review-{head_sha[:7]}..{fix_head[:7]}.diff"
+            create_review_package(head_sha, fix_head, fix_diff_file, cwd)
+            rereview_file = workspace / f"task-{task_id}-review-round1.md"
+
+            re_verdict, re_err = run_review(
+                task_id, brief_file, fix_diff_file, rereview_file, cwd, tier, task_timeout,
+                prior_review=review_file,
+            )
+            if re_err == "timeout":
+                return set_blocked(progress_file, ledger, batch, cwd, task_id, "timeout",
+                                   f"Task {task_id} re-review timed out\n", 7)
+            if re_verdict != "Approved":
+                return set_blocked(progress_file, ledger, batch, cwd, task_id, "needs_fixes",
+                                   f"Task {task_id} review unresolved after round 1; report path: {rereview_file}\n", 5)
+
+        batch["status"] = "complete"
+        set_working(progress_file, ledger, cwd, task_id, "approved")
+
+    done_label = f"done=All {len(tasks)} tasks approved"
+    write_ledger(progress_file, ledger, done_label)
+    notify_progress_sync(progress_file, done_label, cwd)
+
+    completed_count = sum(1 for b in ledger.get("batches", []) if b.get("status") == "complete")
+    summary = ["=== SDD DRIVE COMPLETE ===", f"Plan: {plan_path.name}", f"Tasks completed: {completed_count}/{len(tasks)}", "Batches:"]
+    for b in ledger.get("batches", []):
+        sha_str = f" (head: {str(b.get('head_sha', ''))[:7]})" if b.get("head_sha") else ""
+        summary.append(f"- Task {b.get('id')}: Approved{sha_str}")
+    summary.append("Status: ready for psrw ship")
+    print("\n".join(summary[:15]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
