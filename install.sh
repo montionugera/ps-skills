@@ -58,7 +58,7 @@ mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$GEMINI_HOME/skills" "$CURS
 replace_destination() {  # dest
   local dest="$1"
   case "$dest" in
-    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$GEMINI_HOME/hooks/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
+    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$GEMINI_HOME/hooks/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/jev-gate"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
     *) echo "refuse unsafe destination: $dest" >&2; return 1 ;;
   esac
   rm -rf -- "$dest"
@@ -143,6 +143,7 @@ link "$REPO/bin/dispatch-codex-worker" "$BIN_HOME/dispatch-codex-worker"
 link "$REPO/bin/dispatch-cursor-worker" "$BIN_HOME/dispatch-cursor-worker"
 link "$REPO/bin/dispatch-worker" "$BIN_HOME/dispatch-worker"
 link "$REPO/bin/dispatch-thinker" "$BIN_HOME/dispatch-thinker"
+link "$REPO/bin/jev-gate" "$BIN_HOME/jev-gate"
 link "$REPO/bin/ps-skills-doctor" "$BIN_HOME/ps-skills-doctor"
 link "$REPO/bin/ps-plugin-bridge" "$BIN_HOME/ps-plugin-bridge"
 link "$REPO/bin/sync-agent-rules" "$BIN_HOME/sync-agent-rules"
@@ -220,7 +221,7 @@ reconcile_parity() {
   # Link critical binaries to Antigravity CLI bin if present
   local agy_bin="$HOME/.gemini/antigravity-cli/bin"
   if [[ -d "$agy_bin" ]]; then
-    for b in dispatch-worker dispatch-thinker dispatch-agy-worker dispatch-codex-worker dispatch-cursor-worker ps-skills-sync ps-skills-doctor ps-plugin-bridge mesh mesh-run; do
+    for b in dispatch-worker dispatch-thinker dispatch-agy-worker dispatch-codex-worker dispatch-cursor-worker jev-gate ps-skills-sync ps-skills-doctor ps-plugin-bridge mesh mesh-run; do
       if [[ -f "$REPO/bin/$b" ]]; then
         link "$REPO/bin/$b" "$agy_bin/$b"
       fi
