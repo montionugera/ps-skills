@@ -24,6 +24,7 @@ from lib.backlog_paths import read_release_state, release_worktree_path
 from lib.git_ops import GitError
 from lib.main_sync import cached_main_ref, missing_main_commits
 from lib.owner import self_ids
+from lib.shipped_unmerged import unmerged_commits, unmerged_warning
 from lib.repo import RepoNotFoundError, find_repo_root, is_ps_release_workflow_repo
 from lib.state import read_state
 
@@ -211,6 +212,10 @@ def collect_status(repo: Path) -> dict:
                 drift = "claimed but worktree missing"
             elif registered is not None and str(wt.resolve()) not in registered:
                 drift = "worktree dir present but not registered with git"
+        elif status == "shipped" and in_progress and e.get("release_version") == version:
+            n = unmerged_commits(repo, version, e["id"])
+            if n:
+                drift = unmerged_warning(e["id"], version, n)
         enriched.append({
             "id": e["id"],
             "title": e.get("title", ""),
@@ -262,6 +267,11 @@ def collect_status(repo: Path) -> dict:
             except GitError:
                 behind_main = 0
 
+    next_hint = _next_hint(in_progress, pending_cleanup, cleanup_version, counts)
+    stale = [f["id"] for f in enriched if (f["drift"] or "").startswith("shipped but")]
+    if stale:
+        next_hint = f"merge unmerged commits of {', '.join(stale)} into release/{version}; then {next_hint}"
+
     return {
         "opted_in": True,
         "repo": str(repo),
@@ -287,7 +297,7 @@ def collect_status(repo: Path) -> dict:
         "leftover_worktrees": leftover_worktrees,
         "pending_cleanup": pending_cleanup,
         "reclaimable_count": _reclaimable_worktrees_count(repo),
-        "next": _next_hint(in_progress, pending_cleanup, cleanup_version, counts),
+        "next": next_hint,
     }
 
 

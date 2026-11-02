@@ -27,6 +27,38 @@ This skill enforces strict, ultra-deterministic interaction with the autonomous 
 
 ---
 
+## 📁 Folder Map (one layout for every vault)
+
+The agentic Obsidian vault and the Joy voice vault (per-user markdown files in S3, `joy-companion` F-077) use the same top-level folder names, so a note has the same path in either vault. The map follows `docs/superpowers/specs/2026-09-28-agentic-second-brain-design.md`, with `_context/` added for Joy. Rows marked *proposed* are in the spec but the engine does not create or route them yet.
+
+| Folder | Holds | Example |
+|---|---|---|
+| `_inbox/` | Unsorted captures, by source: `_inbox/human/`, `_inbox/agent/<name>/`; plus `_inbox/tasks/` (unassigned tasks) and `_inbox/private/` (quarantined, never synced). The default whenever the right home is unclear. Joy's voice captures go to `_inbox/agent/joy/` (new convention for Joy, not yet enforced). | `_inbox/agent/joy/2026-10-02-call-the-bank.md` |
+| `01_Ideas/` | Raw and candidate ideas | `01_Ideas/IDEA-2026-000123--dark-mode.md` |
+| `02_Projects/` | Work with an end. Its tasks and decisions live inside it (`<project>/tasks/`, `<project>/decisions/`). | `02_Projects/khao-yai-trip/README.md` |
+| `03_Areas/` | Ongoing responsibilities with no end date (home, health, finance). `tasks/` and `decisions/` sub-folders are *proposed*: the engine routes tasks and decisions only under `02_Projects/` today. | `03_Areas/home/grocery.md` |
+| `04_Knowledge/` | Durable, reusable facts and lessons; cross-cutting decisions in `04_Knowledge/decisions/` | `04_Knowledge/decisions/` |
+| `05_Daily/` | *Proposed.* One note per local calendar day; link to owned work rather than copy it | `05_Daily/2026/2026-10-02.md` |
+| `06_People/` | Person records. **Disabled** until its privacy policy is enforced: do not create it. | — |
+| `07_Research/` | Dated, source-bound investigations; promoted to `04_Knowledge/` by a reviewed distillation | `07_Research/sqlite-wal-scale.md` |
+| `_sources/` | Original evidence. **Disabled** until its storage policy is enforced: do not create it. | — |
+| `_archive/` | Retired notes, kept for history | `_archive/ideas/` |
+| `_meta/` | Engine-owned: `bin/`, `schemas/`, `indexes/`, `events/`, `locks/`, `snapshots/`, `ledger/`, `workflows/`, `agents/`, `instances/`, `guards/`. Never written by hand. Agentic vault only. | `_meta/indexes/ideas.jsonl` |
+| `_context/` | Joy voice vault only: `SOUL.md`, `MEMORY.md` and the pinned notes that go into the voice session's prompt | `_context/MEMORY.md` |
+
+**Filing rules (both vaults):**
+
+1. **Search before you create.** Add to an existing note before making a new one.
+2. **Unsure where it goes → `_inbox/`.** Never invent a new top-level folder.
+3. **File names you choose are lower-case kebab-case** with the `.md` extension (`khao-yai-trip.md`, not `Trip Notes.md`). Engine-assigned names (`IDEA-2026-000123--dark-mode.md`) and the fixed names `README.md`, `SOUL.md` and `MEMORY.md` are the exceptions.
+
+**Who writes where:**
+
+- **Agentic vault:** the invariants above apply. Canonical notes under `01_Ideas/`, `02_Projects/` and `03_Areas/` change only through `vault-engine commit`.
+- **Joy voice vault:** there is no `vault-engine`. Joy writes through its own vault tools (`vault_write`, `vault_edit`, `vault_append`), which use S3 conditional writes and S3 versioning for undo. The invariants above do not apply there; the folder map and the filing rules do. Those three tools refuse paths under `_context/`: soul and memory change only through `update_soul` and `update_memory`. Joy does not enforce this map yet (tracked as `joy-companion` idea I-090), so until then a note Joy creates may still land at the vault root.
+
+---
+
 ## 🛠️ CLI Command Reference (`vault-engine`)
 
 The engine binary is located at `_meta/bin/vault-engine` inside the vault root (or in `$PATH`):

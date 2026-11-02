@@ -457,6 +457,54 @@ def test_promote_cleanup_leaves_incomplete_non_split_epic_unarchived(
     assert epic_id in err
 
 
+def test_cleanup_commit_stages_only_bookkeeping_paths(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """Regression: --cleanup-only used `git add -A` on the main checkout and swept
+    59,444 untracked build-cache files into a commit that could not be pushed."""
+    repo = tmp_repo_with_release
+    _scaffold_gates(repo, integration=False)
+    new_release(repo, version="1.1")
+    promote_release(repo, run_gate2=False, run_deploy=False, push=False, keep=True, use_pr=False)
+
+    (repo / ".claude" / "cargo-target-shared").mkdir()
+    (repo / ".claude" / "cargo-target-shared" / "big.rlib").write_text("cache")
+    (repo / "wip-notes.md").write_text("someone else's work")
+    (repo / "README.md").write_text("edited by another session\n")
+    (repo / ".claude" / "refined_backlog" / "_catalog.json").write_text("[]\n")
+    before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                            capture_output=True, text=True).stdout.strip()
+
+    cleanup(repo, version="1.1", gh_runner=FakeGh({"view": (1, "", "no pull requests found")}))
+
+    changed = subprocess.run(["git", "diff", "--name-only", before, "HEAD"], cwd=repo, check=True,
+                             capture_output=True, text=True).stdout.split()
+    assert ".claude/refined_backlog/_catalog.json" in changed
+    assert [f for f in changed if f.startswith(".claude/cargo-target")] == []
+    assert "wip-notes.md" not in changed and "README.md" not in changed
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, check=True,
+                            capture_output=True, text=True).stdout
+    assert " M README.md" in status and "?? wip-notes.md" in status
+
+
+def test_cleanup_with_only_unrelated_dirt_makes_no_commit(
+    tmp_repo_with_release: Path, fixed_owner: str
+):
+    """Unrelated dirt alone must not reach `git commit` with nothing staged."""
+    repo = tmp_repo_with_release
+    _scaffold_gates(repo, integration=False)
+    new_release(repo, version="1.1")
+    promote_release(repo, run_gate2=False, run_deploy=False, push=False, keep=True, use_pr=False)
+    gh = FakeGh({"view": (1, "", "no pull requests found")})
+    cleanup(repo, version="1.1", gh_runner=gh)
+    (repo / "wip-notes.md").write_text("someone else's work")
+    head = lambda: subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                  capture_output=True, text=True).stdout
+    before = head()
+    cleanup(repo, version="1.1", gh_runner=gh)
+    assert head() == before
+
+
 def test_cli_has_allow_split_epic_flag():
     from scripts.promote_release import _build_parser
     p = _build_parser()
@@ -678,6 +726,69 @@ def test_promote_babysit_failing_checks_stops_before_merge(tmp_repo_with_release
     branches = subprocess.run(["git", "branch"], cwd=tmp_repo_with_release,
                               capture_output=True, text=True).stdout
     assert "release/1.1" in branches
+
+
+class _CheckRegistrationGh(FakeGh):
+    """`gh pr checks --watch` exits 1 with 'no checks reported' until GitHub has
+    registered the checks; `empty_polls` calls report that, later ones pass."""
+
+    def __init__(self, empty_polls: int, results: dict | None = None):
+        super().__init__(results)
+        self.empty_polls = empty_polls
+
+    def __call__(self, cmd, **kwargs):
+        if cmd[2] == "checks" and self.empty_polls > 0:
+            self.empty_polls -= 1
+            self.calls.append("checks")
+            self.commands.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="no checks reported on the 'release/1.1' branch\n")
+        return super().__call__(cmd, **kwargs)
+
+
+def test_promote_babysit_waits_for_checks_to_register_then_merges(
+        tmp_repo_with_release: Path, fixed_owner: str, monkeypatch):
+    """GitHub has not registered any check right after the PR opens, so
+    `gh pr checks --watch` exits 1 with 'no checks reported'. That is not a CI
+    failure: wait and watch again, then merge."""
+    import scripts.promote_release as pr_mod
+    monkeypatch.setattr(pr_mod.time, "sleep", lambda s: None)
+    feat = _setup_and_ship_feature(tmp_repo_with_release, fixed_owner)
+    gh = _CheckRegistrationGh(empty_polls=2)
+    _record_cleanup(monkeypatch, gh, delegate=False)
+    result = promote_release(tmp_repo_with_release, run_gate2=False, run_deploy=False,
+                             babysit=True, gh_runner=gh)
+    assert result["ok"] is True and result["merged"] is True
+    assert gh.calls == ["create", "checks", "checks", "checks", "merge", "cleanup"]
+
+
+def test_promote_babysit_checks_that_never_register_stop_before_merge(
+        tmp_repo_with_release: Path, fixed_owner: str, monkeypatch):
+    """If no check ever appears (CI misconfigured), do not merge unverified."""
+    import scripts.promote_release as pr_mod
+    now = [0.0]
+    monkeypatch.setattr(pr_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(pr_mod.time, "sleep", lambda s: now.__setitem__(0, now[0] + s))
+    feat = _setup_and_ship_feature(tmp_repo_with_release, fixed_owner)
+    gh = _CheckRegistrationGh(empty_polls=10_000)
+    with pytest.raises(Gate2FailedError, match="NOT merging"):
+        promote_release(tmp_repo_with_release, run_gate2=False, run_deploy=False,
+                        babysit=True, gh_runner=gh)
+    assert "merge" not in gh.calls
+    assert gh.calls.count("checks") > 1  # it did wait and retry
+    assert now[0] >= pr_mod._CHECKS_REGISTER_TIMEOUT_S
+
+
+def test_promote_babysit_real_check_failure_is_not_retried(
+        tmp_repo_with_release: Path, fixed_owner: str, monkeypatch):
+    import scripts.promote_release as pr_mod
+    monkeypatch.setattr(pr_mod.time, "sleep", lambda s: pytest.fail("must not wait on a real failure"))
+    feat = _setup_and_ship_feature(tmp_repo_with_release, fixed_owner)
+    gh = FakeGh({"checks": (1, "", "X some checks were not successful")})
+    with pytest.raises(Gate2FailedError, match="NOT merging"):
+        promote_release(tmp_repo_with_release, run_gate2=False, run_deploy=False,
+                        babysit=True, gh_runner=gh)
+    assert gh.calls.count("checks") == 1
 
 
 def test_promote_babysit_red_checks_leave_release_in_progress_and_rerunnable(
