@@ -69,6 +69,12 @@ class TestJevGate(unittest.TestCase):
         self.assertIsNotNone(res_risk)
         self.assertIn(res_risk.get("route"), ("agy_argon", "claude_opus"))
 
+        res_scout = dw.route_with_jev("Strictly read-only scouting: locate which file defines check_quota and list line numbers (make zero file edits)")
+        self.assertIsNotNone(res_scout)
+        self.assertEqual(res_scout.get("route"), "agy_flash")
+        self.assertIn("is_scouting_prob", res_scout)
+        self.assertIn(res_scout.get("recommended_effort"), ("low", "medium", "high"))
+
 
 if __name__ == "__main__":
     unittest.main()

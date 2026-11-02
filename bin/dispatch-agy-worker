@@ -90,6 +90,9 @@ CLAUDE_TO_AGY_MODEL_MAP = {
     "claude-opus-5-5": DEFAULT_AGY_THINK_MODEL,
     "sonnet": DEFAULT_AGY_WORKER_MODEL,
     "claude-sonnet-5-5": DEFAULT_AGY_WORKER_MODEL,
+    "haiku": DEFAULT_AGY_WORKER_MODEL,
+    "claude-haiku-4-5": DEFAULT_AGY_WORKER_MODEL,
+    "claude-haiku-4-5-20251001": DEFAULT_AGY_WORKER_MODEL,
 }
 
 
@@ -111,6 +114,7 @@ def map_claude_to_agy_model(claude_model=None):
 DISABLED_AGENTS = frozenset(x.strip() for x in os.environ.get("DISPATCH_DISABLED_AGENTS", "").split(",") if x.strip())
 THINK_DISABLED_AGENTS = frozenset({"codex"})
 DEFAULT_CLAUDE_THINK_MODEL = os.environ.get("CLAUDE_THINK_MODEL", "claude-opus-5-5")
+DEFAULT_CLAUDE_SCOUT_MODEL = os.environ.get("CLAUDE_SCOUT_MODEL", "haiku")
 DEFAULT_THINK_EFFORT = os.environ.get("THINK_EFFORT") or os.environ.get("DISPATCH_THINK_EFFORT") or "medium"
 DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "900")
 
@@ -639,8 +643,13 @@ def normalize_model_name(agent, model):
             return "gpt-5.6-terra"
         if clean.lower() in ("sol", "sol:5.6", "thinking"):
             return DEFAULT_CODEX_THINK_MODEL
-    if agent == "claude" and clean.lower() == "opus":
-        return DEFAULT_CLAUDE_THINK_MODEL
+    if agent == "claude":
+        if clean.lower() == "opus":
+            return DEFAULT_CLAUDE_THINK_MODEL
+        if clean.lower() in ("haiku", "claude-haiku-4-5", "claude-haiku-4-5-20251001"):
+            return DEFAULT_CLAUDE_SCOUT_MODEL
+        if clean.lower() in ("sonnet", "claude-sonnet-5-5"):
+            return "claude-sonnet-5-5"
     if agent == "agy":
         if clean.lower() in ("argon", "gemini-4-argon", "gemini-4-argon-medium", "gemini-4-argon-thinking"):
             return DEFAULT_AGY_THINK_MODEL
@@ -767,7 +776,8 @@ def fallback_classify_task(task_text):
     """
     Deterministic heuristic fallback when Jev System-1 is unavailable (no API key,
     missing SDK/binary, or offline). Identifies review, audit, security, and
-    architectural design tasks so they escalate to Argon/Opus and never route to Codex.
+    architectural design tasks so they escalate to Argon/Opus and never route to Codex,
+    and identifies read-only scouting tasks so they route to Flash/Haiku with low/medium effort.
     """
     if not task_text or not str(task_text).strip():
         return None
@@ -785,8 +795,39 @@ def fallback_classify_task(task_text):
             "route": "agy_argon",
             "route_confidence": 0.85,
             "is_reviewer_prob": 0.85,
+            "is_scouting_prob": 0.0,
+            "recommended_effort": "medium",
             "risky_surface_prob": 0.50,
             "complexity_score": 2.0,
+            "cloud_compatible_prob": 0.0,
+            "heuristic": True,
+        }
+    has_scout_intent = bool(re.search(
+        r"\b(scout(?:ing)?|read[- ]only\s+(?:research|exploration|search|scouting)|"
+        r"locate\s+(?:all\s+)?files|find\s+where\b|trace\s+the\s+call[- ]chain|"
+        r"grep\s+for\b|list\s+all\s+callers|do\s+not\s+(?:edit|modify)\s+any\s+files)\b",
+        txt, re.IGNORECASE
+    ))
+    has_write_intent = bool(re.search(
+        r"\b(implement|refactor|write\s+(?:code|tests|unit)|fix\s+the\s+bug|"
+        r"create\s+a\s+new\s+file|update\s+the\s+implementation|commit\s+and\s+push)\b",
+        txt, re.IGNORECASE
+    ))
+    if has_scout_intent and not has_write_intent:
+        is_multi_hop = bool(re.search(
+            r"\b(call[- ]chain|control[- ]flow|multi[- ]file|across\s+(?:services|modules|repos)|trace\b|data[- ]flow)\b",
+            txt, re.IGNORECASE
+        ))
+        comp = 1.6 if is_multi_hop else 1.1
+        return {
+            "raw_route": "agy_flash",
+            "route": "agy_flash",
+            "route_confidence": 0.85,
+            "is_reviewer_prob": 0.05,
+            "is_scouting_prob": 0.85,
+            "recommended_effort": "medium" if comp >= 1.5 else "low",
+            "risky_surface_prob": 0.05,
+            "complexity_score": comp,
             "cloud_compatible_prob": 0.0,
             "heuristic": True,
         }
@@ -795,6 +836,8 @@ def fallback_classify_task(task_text):
         "route": "agy_flash",
         "route_confidence": 0.80,
         "is_reviewer_prob": 0.05,
+        "is_scouting_prob": 0.05,
+        "recommended_effort": "high",
         "risky_surface_prob": 0.05,
         "complexity_score": 1.2,
         "cloud_compatible_prob": 0.0,
@@ -2737,6 +2780,8 @@ def main():
     parser.add_argument("--state-file", type=str, default=None, help="Explicit path to quota observation file")
     parser.add_argument("--job-dir", type=str, default=DEFAULT_JOB_DIR, help="Directory for background job state files")
     parser.add_argument("--dry-run", action="store_true", help="Verify quota and parameters without invoking agent")
+    parser.add_argument("--scout", action="store_true",
+                        help="Read-only scouting mode: routes to haiku (claude) or gemini-3.8-flash-high (agy) with effort low (or medium when complexity >= 1.5) and skips verify by default")
     parser.add_argument("--escalate", action="store_true",
                         help="Escalate implementation task from default 3.8-flash worker tier to frontier gemini-4-argon")
     parser.add_argument("--think", action="store_true", help="Heavy thinking mode: Frontier models (Claude Opus 5.5 or Gemini 4 Argon)")
@@ -2880,6 +2925,7 @@ def main():
     effective_on_demand = args.allow_on_demand or (args.mode == "on_demand")
     chosen_agent = args.agent
     chosen_model = args.model
+    user_model_explicit = args.model is not None
 
     if chosen_model and any(fb in chosen_model.lower() for fb in ("fable", "claude-fable")):
         print(f"FAILED: model '{chosen_model}' is strictly forbidden. Use 'claude-opus-5-5' (effort medium) instead.", file=sys.stderr)
@@ -2917,7 +2963,7 @@ def main():
         if chosen_agent == "codex":
             chosen_model = normalize_model_name("codex", chosen_model) if chosen_model else DEFAULT_CODEX_THINK_MODEL
     if chosen_agent == "claude":
-        chosen_model = normalize_model_name("claude", chosen_model) or DEFAULT_CLAUDE_THINK_MODEL
+        chosen_model = normalize_model_name("claude", chosen_model) or (DEFAULT_CLAUDE_SCOUT_MODEL if args.scout else DEFAULT_CLAUDE_THINK_MODEL)
 
     # Strict validation: thinking mode allows only frontier thinking models
     if args.think and chosen_model:
@@ -2971,8 +3017,9 @@ def main():
         else:
             chosen_effort = os.environ.get("DISPATCH_EFFORT")
 
-    # Jev System-1 complexity gate + Codex Terra auto-pick for normal coding work
+    # Jev System-1 complexity gate + Codex Terra auto-pick for normal coding work + Scouting (Haiku/Flash low/medium effort)
     jev_escalated = False
+    is_scouting = bool(args.scout)
     is_hermetic_test = bool(
         args.check_quota
         or args.state_file
@@ -2980,7 +3027,7 @@ def main():
         or "CODEX_QUOTA_STATE_FILE" in os.environ
         or "FAKE_AGY_PLAN" in os.environ
     )
-    if not (args.think or is_deep_design or args.escalate or chosen_model):
+    if not (args.think or is_deep_design or args.escalate or user_model_explicit):
         jev_env = os.environ.get("DISPATCH_JEV_GATE")
         jev_enabled = (jev_env == "1") or (jev_env != "0" and not args.dry_run and not is_hermetic_test)
         jev_res = route_with_jev(args.task) if (args.task and jev_enabled) else None
@@ -2991,18 +3038,39 @@ def main():
             raw_route = jev_res.get("raw_route") or jev_res.get("route")
             jev_comp = jev_res.get("complexity_score", 0.0)
             is_rev = jev_res.get("is_reviewer_prob", 0.0)
+            scout_prob = jev_res.get("is_scouting_prob", 0.0)
             router_label = "Jev Fallback" if jev_res.get("heuristic") else "Jev Router"
-            if raw_route in ("agy_argon", "claude_opus") or is_rev >= 0.50:
+            if not is_scouting and (raw_route in ("agy_argon", "claude_opus") or is_rev >= 0.50):
                 chosen_agent = "agy"
                 chosen_model = DEFAULT_AGY_THINK_MODEL
                 jev_escalated = True
                 print(f"[{router_label}] Task requires frontier review/design intelligence ({raw_route}, comp={jev_comp:.2f}, rev={is_rev:.2f}) -> switched to agy ({chosen_model})", file=sys.stderr)
+            elif is_scouting or scout_prob >= 0.65:
+                is_scouting = True
+                print(f"[{router_label}] Task is read-only scouting (comp={jev_comp:.2f}, scout={scout_prob:.2f}) -> using fast scout tier", file=sys.stderr)
             elif not jev_res.get("heuristic"):
                 print(f"[{router_label}] Task is normal coding work ({raw_route}, comp={jev_comp:.2f}, conf={jev_res.get('route_confidence', 0):.2f})", file=sys.stderr)
 
+        if is_scouting:
+            if not args.effort:
+                chosen_effort = "medium" if jev_comp >= 1.5 else "low"
+            if not args.verify_cmd:
+                args.no_verify = True
+            if chosen_agent == "claude":
+                el_cl, _r5_cl, rw_cl, _msg_cl = check_quota("claude", args.state_file if default_agent == "claude" else None, min_5h, min_weekly)
+                el_a, _r5_a, _rw_a, _msg_a = check_quota("agy", args.state_file if default_agent == "agy" else None, min_5h, min_weekly)
+                if (not el_cl or rw_cl < ALT_LOW_WEEKLY_QUOTA) and el_a:
+                    chosen_agent = "agy"
+                    chosen_model = DEFAULT_AGY_WORKER_MODEL
+                else:
+                    chosen_model = DEFAULT_CLAUDE_SCOUT_MODEL
+            else:
+                chosen_agent = "agy"
+                chosen_model = DEFAULT_AGY_WORKER_MODEL
+
         auto_terra_env = os.environ.get("DISPATCH_AUTO_TERRA_ON_HIGH_CODEX")
         auto_terra_enabled = (auto_terra_env == "1") or (auto_terra_env != "0" and not is_hermetic_test)
-        if not jev_escalated and chosen_agent in ("agy", "claude", "auto") and "--priority" not in sys.argv and "codex" not in DISABLED_AGENTS and auto_terra_enabled:
+        if not jev_escalated and not is_scouting and chosen_agent in ("agy", "claude", "auto") and "--priority" not in sys.argv and "codex" not in DISABLED_AGENTS and auto_terra_enabled:
             el_c, r5_c, rw_c, _msg_c = check_quota("codex", args.state_file if default_agent == "codex" else None, min_5h, min_weekly)
             el_a, r5_a, rw_a, _msg_a = check_quota("agy", args.state_file if default_agent == "agy" else None, min_5h, min_weekly)
             if chosen_agent == "claude":
@@ -3039,6 +3107,11 @@ def main():
                     if chosen_agent == "agy" and jev_comp >= 1.85:
                         chosen_model = DEFAULT_AGY_THINK_MODEL
                         print(f"[Jev Router] High-complexity coding task on AGY (comp={jev_comp:.2f}) -> switched to {chosen_model}", file=sys.stderr)
+    elif is_scouting:
+        if not args.effort:
+            chosen_effort = "low"
+        if not args.verify_cmd:
+            args.no_verify = True
 
     eligible = False
     rem_5h, rem_weekly = 0.0, 0.0

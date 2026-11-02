@@ -3072,6 +3072,71 @@ class ForegroundJobRegistrationTests(unittest.TestCase):
         self.assertIn("dw-1-aaaaaa", proc.stderr)
 
 
+class ScoutingRoutingTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.agy_state = self.tmp / "agy.json"
+        self.codex_state = self.tmp / "codex.json"
+        self.claude_state = self.tmp / "claude.json"
+        self.agy_state.write_text(json.dumps({
+            "windows": [{"kind": "five_hour", "remaining_percent": 90.0},
+                        {"kind": "weekly", "remaining_percent": 20.0}]
+        }))
+        self.codex_state.write_text(json.dumps({
+            "windows": [{"kind": "five_hour", "remaining_percent": 95.0},
+                        {"kind": "weekly", "remaining_percent": 80.0}]
+        }))
+        self.claude_state.write_text(json.dumps({
+            "windows": [{"kind": "five_hour", "remaining_percent": 95.0},
+                        {"kind": "weekly", "remaining_percent": 85.0}]
+        }))
+
+    def _env(self, **extra):
+        env = os.environ.copy()
+        env.update({
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "CLAUDE_QUOTA_STATE_FILE": str(self.claude_state),
+            "DISPATCH_AUTO_TERRA_ON_HIGH_CODEX": "1",
+            "JEV_GATE_BIN": str(self.tmp / "missing-jev-gate"),
+        })
+        env.update(extra)
+        return env
+
+    def test_scout_flag_routes_agy_to_flash_with_low_effort_and_skips_codex_and_verify(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--agent", "agy", "--scout", "--dry-run",
+             "--task", "Locate all files referencing check_quota"],
+            env=self._env(), capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high (effort: low)", proc.stdout)
+        self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
+        self.assertNotIn("codex", proc.stdout.lower())
+
+    def test_scout_flag_routes_claude_to_haiku_with_low_effort(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--agent", "claude", "--scout", "--dry-run",
+             "--task", "Find where route_with_jev is defined"],
+            env=self._env(), capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to claude with haiku (effort: low)", proc.stdout)
+        self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
+
+    def test_multi_hop_scouting_uses_medium_effort(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--agent", "agy", "--dry-run",
+             "--task", "Read-only research: trace the call-chain and control-flow across modules from main() to check_quota()"],
+            env=self._env(), capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high (effort: medium)", proc.stdout)
+        self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
 

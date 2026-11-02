@@ -69,6 +69,9 @@ def cmd_classify_task(args: argparse.Namespace) -> int:
                 "is_reviewer": Noul(
                     instructions="Is this task asking the agent to review, audit, critique, or verify existing work rather than write implementation code?"
                 ),
+                "is_scouting": Noul(
+                    instructions="Is this task strictly read-only codebase scouting, file/symbol lookup, architecture/flow tracing, or log/screenshot inspection (making ZERO file edits or commits)?"
+                ),
                 "cloud_compatible": Noul(
                     instructions="Is this task strictly read-only analysis, code/spec/lore/quest review, or research on committed git files (requiring ZERO local Mac paths like /Users/..., ZERO /tmp or .superpowers files, ZERO kubectl/orbstack/docker/local-server access, and ZERO git commits/pushes to local worktrees)?"
                 ),
@@ -91,6 +94,7 @@ def cmd_classify_task(args: argparse.Namespace) -> int:
         route_conf = float(ans["route"].confidence)
         risky_prob = float(ans["touches_risky_surface"].noul)
         is_rev_prob = float(ans["is_reviewer"].noul)
+        is_scout_prob = float(ans["is_scouting"].noul) if "is_scouting" in ans else 0.0
         cloud_prob = float(ans["cloud_compatible"].noul)
         comp_score = float(ans["complexity"].score)
 
@@ -103,10 +107,23 @@ def cmd_classify_task(args: argparse.Namespace) -> int:
         # High-confidence safety rule: if risky surface >= 0.35 or confidence < min_conf,
         # escalate to frontier thinker/reviewer (Argon Medium or Opus).
         high_confidence = route_conf >= args.min_conf and risky_prob < 0.35
-        effective_route = route_choice if high_confidence else ("agy_argon" if is_rev_prob >= 0.5 else "claude_opus")
+        if is_scout_prob >= 0.65 and is_rev_prob < 0.50 and risky_prob < 0.35:
+            effective_route = "agy_flash"
+        else:
+            effective_route = route_choice if high_confidence else ("agy_argon" if is_rev_prob >= 0.5 else "claude_opus")
+
+        recommended_effort = (
+            ("medium" if comp_score >= 1.5 else "low")
+            if (is_scout_prob >= 0.65 and is_rev_prob < 0.50 and risky_prob < 0.35)
+            else ("medium" if effective_route in ("agy_argon", "claude_opus") else "high")
+        )
 
         cli_map = {
-            "agy_flash": "dispatch-agy-worker --agent agy --model gemini-3.8-flash-high",
+            "agy_flash": (
+                f"dispatch-worker --scout --effort {recommended_effort} --agent agy --model gemini-3.8-flash-high"
+                if (is_scout_prob >= 0.65 and is_rev_prob < 0.50 and risky_prob < 0.35)
+                else "dispatch-worker --agent agy --model gemini-3.8-flash-high"
+            ),
             "agy_argon": "dispatch-thinker --agent agy --model gemini-4-argon-medium",
             "claude_opus": "dispatch-thinker --agent agy --model gemini-4-argon-medium (or native claude-opus-5-5 if quota >50%)",
         }
@@ -120,7 +137,9 @@ def cmd_classify_task(args: argparse.Namespace) -> int:
             "route_confidence": round(route_conf, 4),
             "high_confidence_gate": high_confidence,
             "recommended_cli": cli_map.get(effective_route, ""),
+            "recommended_effort": recommended_effort,
             "is_reviewer_prob": round(is_rev_prob, 4),
+            "is_scouting_prob": round(is_scout_prob, 4),
             "cloud_compatible_prob": round(cloud_prob, 4),
             "risky_surface_prob": round(risky_prob, 4),
             "complexity_score": round(comp_score, 3),
