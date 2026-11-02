@@ -43,7 +43,7 @@ Options:
   --mode <code|plan>          Handoff type (claude: code->sonnet, plan->default; agy: code->gemini-3.8-flash-high, plan->gemini-4-argon-medium)
   --model <name>              Explicit model for claude, codex, or agy; overrides --mode
   --effort <level>            Reasoning effort for codex (low, medium, high; default: medium)
-  --cloud / --no-cloud        Force or disable claude --cloud (default: false; cloud containers cannot access Mac /tmp, local k8s/orbstack, or push without a remote)
+  --cloud / --no-cloud        Force or disable claude --cloud (default: auto; checks free credit > $0 first, then requires Jev cloud_compatible >= 0.85 & read-only review/research)
   --jev / --no-jev            Enable or disable TypeSafe Jev System-1 task routing assist (default: auto)
   --no-quota-switch           Do not auto-switch low-quota claude handoffs to cloud/codex/agy
   --no-agent                  Only open a shell tab without starting an agent
@@ -85,7 +85,7 @@ CUSTOM_PROMPT=""
 HANDOFF_MODE=""
 CLAUDE_MODEL=""
 CODEX_EFFORT="${HERDR_HANDOFF_EFFORT:-medium}"
-CLAUDE_CLOUD="${HERDR_HANDOFF_CLOUD:-false}"
+CLAUDE_CLOUD="${HERDR_HANDOFF_CLOUD:-auto}"
 JEV_ASSIST="${HERDR_HANDOFF_JEV:-auto}"
 CLOUD_CREDIT_DOLLARS=""
 CLOUD_CREDIT_BUCKET=""
@@ -497,11 +497,15 @@ if run_jev:
                         rev_p = float(jdata.get("is_reviewer_prob") or 0.0)
                         risk_p = float(jdata.get("risky_surface_prob") or 0.0)
                         comp = float(jdata.get("complexity_score") or 0.0)
+                        cloud_p = float(jdata.get("cloud_compatible_prob") or 0.0)
+                        import re
+                        if re.search(r"(\.superpowers/|orbstack|kubectl|deploy-local|shoot\.mjs|psrw\s+ship|dispatch-worker|\.claude/worktrees/)", full_text):
+                            cloud_p = min(cloud_p, 0.05)
                         if raw_r in ("agy_argon", "claude_opus") or rev_p >= 0.50 or risk_p >= 0.35:
                             jtier = "plan"
                         else:
                             jtier = "code"
-                        jev_str = f"{jtier}:{raw_r}:{conf:.2f}:{rev_p:.2f}:{risk_p:.2f}:{comp:.2f}"
+                        jev_str = f"{jtier}:{raw_r}:{conf:.2f}:{rev_p:.2f}:{risk_p:.2f}:{comp:.2f}:{cloud_p:.2f}"
             except Exception:
                 pass
 
@@ -514,21 +518,25 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}")
     CLOUD_CREDIT_BUCKET="${CLOUD_CREDIT_INFO#*:}"
   fi
 
+  JEV_CLOUD_OK="false"
   if [[ -n "$JEV_INFO" ]]; then
-    IFS=':' read -r JEV_TIER JEV_RAW_ROUTE JEV_CONF JEV_REV JEV_RISK JEV_COMP <<<"$JEV_INFO"
+    IFS=':' read -r JEV_TIER JEV_RAW_ROUTE JEV_CONF JEV_REV JEV_RISK JEV_COMP JEV_CLOUD <<<"$JEV_INFO"
+    if python3 -c "import sys; rev=float(sys.argv[1] or 0); cld=float(sys.argv[2] or 0); sys.exit(0 if (cld >= 0.85 and rev >= 0.50) else 1)" "${JEV_REV:-0}" "${JEV_CLOUD:-0}" 2>/dev/null; then
+      JEV_CLOUD_OK="true"
+    fi
     if [[ "$JEV_TIER" == "plan" && "$HANDOFF_MODE" != "plan" ]]; then
       HANDOFF_MODE="plan"
-      echo "🧭 Jev System-1 assist: route=$JEV_RAW_ROUTE (conf=$JEV_CONF, rev=$JEV_REV, risk=$JEV_RISK, complexity=$JEV_COMP) -> escalating mode to plan"
+      echo "🧭 Jev System-1 assist: route=$JEV_RAW_ROUTE (conf=$JEV_CONF, rev=$JEV_REV, risk=$JEV_RISK, complexity=$JEV_COMP, cloud=${JEV_CLOUD:-0.00}) -> escalating mode to plan"
     elif [[ "$JEV_TIER" == "code" && -z "$HANDOFF_MODE" ]]; then
       HANDOFF_MODE="code"
-      echo "🧭 Jev System-1 assist: route=$JEV_RAW_ROUTE (conf=$JEV_CONF, rev=$JEV_REV, risk=$JEV_RISK, complexity=$JEV_COMP) -> auto-selecting mode=code"
+      echo "🧭 Jev System-1 assist: route=$JEV_RAW_ROUTE (conf=$JEV_CONF, rev=$JEV_REV, risk=$JEV_RISK, complexity=$JEV_COMP, cloud=${JEV_CLOUD:-0.00}) -> auto-selecting mode=code"
     else
-      echo "🧭 Jev System-1 assist: route=$JEV_RAW_ROUTE (conf=$JEV_CONF, rev=$JEV_REV, risk=$JEV_RISK, complexity=$JEV_COMP) -> confirmed mode=${HANDOFF_MODE:-$JEV_TIER}"
+      echo "🧭 Jev System-1 assist: route=$JEV_RAW_ROUTE (conf=$JEV_CONF, rev=$JEV_REV, risk=$JEV_RISK, complexity=$JEV_COMP, cloud=${JEV_CLOUD:-0.00}) -> confirmed mode=${HANDOFF_MODE:-$JEV_TIER}"
     fi
   fi
 
   if [[ "$AGENT_KIND" == "claude" ]]; then
-    if [[ "$CLAUDE_CLOUD" == "true" || ( "$CLAUDE_CLOUD" == "auto" && -n "$CLOUD_CREDIT_DOLLARS" ) ]]; then
+    if [[ "$CLAUDE_CLOUD" == "true" || ( "$CLAUDE_CLOUD" == "auto" && -n "$CLOUD_CREDIT_DOLLARS" && "$JEV_CLOUD_OK" == "true" ) ]]; then
       CLAUDE_CLOUD="true"
       if [[ "$HANDOFF_MODE" == "plan" && -z "$CLAUDE_MODEL" && -n "$JEV_INFO" ]]; then
         CLAUDE_MODEL="opus"
@@ -1023,7 +1031,9 @@ elif [[ "$AGENT_KIND" == "claude" ]]; then
     else
       FALLBACK_CMD="agy ${YOLO_FLAG}--model ${FALLBACK_MODEL:-gemini-4-argon-medium} -i \"\$(cat $QUOTED_PROMPT_FILE)\""
     fi
-    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $(printf '%q' "$TAB_LABEL") --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\"; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-argon-medium})...\" >&2; $FALLBACK_CMD; fi"
+    CLOUD_LOG="${HANDOFF_PATH%.md}.cloud.log"
+    QUOTED_CLOUD_LOG=$(printf '%q' "$CLOUD_LOG")
+    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $(printf '%q' "$TAB_LABEL") --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\" 2>&1 | tee $QUOTED_CLOUD_LOG; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; _sid=\$(grep -Eo 'session_[A-Za-z0-9]+' $QUOTED_CLOUD_LOG | head -n 1); if [[ -n \"\$_sid\" ]]; then claude --teleport \"\$_sid\"; fi; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-argon-medium})...\" >&2; $FALLBACK_CMD; fi"
   else
     echo "🧠 Claude model: ${CLAUDE_MODEL:-default}"
     LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $(printf '%q' "$TAB_LABEL") \"\$(cat $QUOTED_PROMPT_FILE)\""

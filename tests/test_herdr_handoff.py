@@ -326,7 +326,7 @@ class HerdrHandoffTest(unittest.TestCase):
         fake_jev = Path(self.tmp.name) / "bin" / "fake-jev"
         fake_jev.write_text(
             "#!/usr/bin/env bash\n"
-            'printf \'{\\n  "raw_route": "agy_argon",\\n  "route": "agy_argon",\\n  "route_confidence": 0.95,\\n  "is_reviewer_prob": 0.92,\\n  "risky_surface_prob": 0.60,\\n  "complexity_score": 2.4\\n}\\n\'\n'
+            'printf \'{\\n  "raw_route": "agy_argon",\\n  "route": "agy_argon",\\n  "route_confidence": 0.95,\\n  "is_reviewer_prob": 0.92,\\n  "cloud_compatible_prob": 0.94,\\n  "risky_surface_prob": 0.60,\\n  "complexity_score": 2.4\\n}\\n\'\n'
         )
         fake_jev.chmod(fake_jev.stat().st_mode | stat.S_IXUSR)
         env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
@@ -343,7 +343,7 @@ class HerdrHandoffTest(unittest.TestCase):
             "JEV_GATE_BIN": str(fake_jev),
         })
         r = subprocess.run(
-            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "code", "--cloud",
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "code",
              "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
             capture_output=True, text=True, env=env, timeout=60,
         )
@@ -353,6 +353,56 @@ class HerdrHandoffTest(unittest.TestCase):
         self.assertIn("Auto-switching handoff to claude --cloud (fallback: agy/gemini-4-argon-medium)", r.stdout)
         log_text = self.log.read_text()
         self.assertIn("CCR_ENABLE_BUNDLE=1 claude --dangerously-skip-permissions --model opus", log_text)
+
+    def test_jev_assist_blocks_cloud_when_not_cloud_compatible_even_with_free_credit(self):
+        quota_dir = Path(self.tmp.name) / "quota_jev_local"
+        quota_dir.mkdir(parents=True, exist_ok=True)
+        (quota_dir / "claude-statusline.json").write_text(json.dumps({
+            "provider": "claude",
+            "windows": [{"kind": "weekly", "remaining_percent": 5.0, "resets_at": 9999999999}],
+        }))
+        claude_cfg = Path(self.tmp.name) / "claude_jev_local.json"
+        claude_cfg.write_text(json.dumps({
+            "cachedUsageUtilization": {
+                "utilization": {
+                    "iguana_necktie": {
+                        "utilization": 0,
+                        "resets_at": "2099-11-05T07:59:00+00:00",
+                        "limit_dollars": 250,
+                        "used_dollars": 0,
+                        "remaining_dollars": 250,
+                        "locked_reason": None,
+                    },
+                }
+            }
+        }))
+        fake_jev = Path(self.tmp.name) / "bin" / "fake-jev-local"
+        fake_jev.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'{\\n  "raw_route": "agy_argon",\\n  "route": "agy_argon",\\n  "route_confidence": 0.95,\\n  "is_reviewer_prob": 0.20,\\n  "cloud_compatible_prob": 0.10,\\n  "risky_surface_prob": 0.60,\\n  "complexity_score": 2.4\\n}\\n\'\n'
+        )
+        fake_jev.chmod(fake_jev.stat().st_mode | stat.S_IXUSR)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}",
+            "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working",
+            "HERDR_TAB_ID": "t1",
+            "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2",
+            "FAKE_CLAIM_DIR": f"{self.doc}.claim",
+            "HERDR_PLUGIN_STATE_DIR": str(quota_dir),
+            "CLAUDE_CONFIG_FILE": str(claude_cfg),
+            "JEV_GATE_BIN": str(fake_jev),
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "plan",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("claude --cloud", r.stdout)
+        self.assertIn("Auto-switching handoff to agy (yolo, model: gemini-4-argon-medium)", r.stdout)
 
     def test_jev_assist_switches_agy_coding_handoff_to_codex_terra_when_codex_quota_high(self):
         quota_dir = Path(self.tmp.name) / "quota_jev_code"
