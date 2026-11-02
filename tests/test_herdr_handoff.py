@@ -443,6 +443,68 @@ class HerdrHandoffTest(unittest.TestCase):
         log_text = self.log.read_text()
         self.assertIn('codex --dangerously-bypass-approvals-and-sandbox -c model="gpt-6.1-terra" -c model_reasoning_effort="medium"', log_text)
 
+    def test_no_jev_and_no_quota_visible_supports_default_routing(self):
+        empty_quota_dir = Path(self.tmp.name) / "empty_quota"
+        empty_quota_dir.mkdir(parents=True, exist_ok=True)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}",
+            "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working",
+            "HERDR_TAB_ID": "t1",
+            "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2",
+            "FAKE_CLAIM_DIR": f"{self.doc}.claim",
+            "HERDR_PLUGIN_STATE_DIR": str(empty_quota_dir),
+            "CLAUDE_CONFIG_FILE": str(empty_quota_dir / "missing-claude.json"),
+            "JEV_GATE_BIN": str(empty_quota_dir / "missing-jev-gate"),
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "agy", "--no-jev",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log_text = self.log.read_text()
+        self.assertIn("agy --dangerously-skip-permissions --model gemini-3.8-flash-high -i", log_text)
+
+    def test_no_jev_available_still_switches_agy_to_codex_when_agy_low_and_codex_high(self):
+        quota_dir = Path(self.tmp.name) / "quota_no_jev"
+        quota_dir.mkdir(parents=True, exist_ok=True)
+        (quota_dir / "agy-statusline.observation.json").write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 80.0, "resets_at": 9999999999},
+                {"kind": "weekly", "remaining_percent": 15.0, "resets_at": 9999999999},
+            ],
+        }))
+        (quota_dir / "codex-app-server.json").write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 90.0, "resets_at": 9999999999},
+                {"kind": "weekly", "remaining_percent": 75.0, "resets_at": 9999999999},
+            ],
+        }))
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}",
+            "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working",
+            "HERDR_TAB_ID": "t1",
+            "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2",
+            "FAKE_CLAIM_DIR": f"{self.doc}.claim",
+            "HERDR_PLUGIN_STATE_DIR": str(quota_dir),
+            "JEV_GATE_BIN": str(quota_dir / "missing-jev-gate"),
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "agy", "--no-jev",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Auto-switching handoff to codex (yolo, model: gpt-6.1-terra, effort: medium)", r.stdout)
+        log_text = self.log.read_text()
+        self.assertIn('codex --dangerously-bypass-approvals-and-sandbox -c model="gpt-6.1-terra" -c model_reasoning_effort="medium"', log_text)
+
     # --- workspace pinning -------------------------------------------------
 
     def create_args(self):

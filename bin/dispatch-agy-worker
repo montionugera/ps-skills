@@ -18,6 +18,7 @@ Exit Codes:
   2: Invalid arguments / missing required task prompt / a disabled agent was named
   12: deep-design-v1 thinker unavailable (Claude Opus 5.5 / Gemini 4 Argon) or forbidden model
   13: Worker exited 0 but the verify command failed (twice); nothing was merged
+  14: DISK_LOW: filesystem free space < 40 GB (run ~/bin/dsk-clean; override with DISPATCH_IGNORE_DISK=1)
 
 Agy runs stream (`--output-format stream-json`): the final `response` is the job's output, the conversation id is
 saved in the job state as soon as agy reports it, and the job log gets a throttled one-line heartbeat.
@@ -37,7 +38,6 @@ whose folder was also used by another job, where the count cannot be attributed.
 import argparse
 import atexit
 import collections
-import contextlib
 import concurrent.futures
 import contextlib
 from contextlib import nullcontext
@@ -74,10 +74,15 @@ DEFAULT_THINK_MIN_5H = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_5H_QUOTA"
 DEFAULT_THINK_MIN_WEEKLY = float(os.environ.get("EXTERNAL_WORKER_THINK_MIN_WEEKLY_QUOTA", "20.0"))
 # A quota observation older than this may hide quota spent since; it is not trusted for routing.
 STALE_OBSERVATION_MINUTES = 60
-DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-5.6-terra")
+DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-6.1-terra")
+DEFAULT_CODEX_EFFORT = os.environ.get("CODEX_WORKER_EFFORT", "medium")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
 DEFAULT_AGY_WORKER_MODEL = os.environ.get("AGY_WORKER_MODEL", "gemini-3.8-flash-high")
 DEFAULT_AGY_THINK_MODEL = os.environ.get("AGY_THINK_MODEL", "gemini-4-argon-medium")
+CODEX_HIGH_5H_QUOTA = float(os.environ.get("CODEX_HIGH_5H_QUOTA", "80.0"))
+CODEX_HIGH_WEEKLY_QUOTA = float(os.environ.get("CODEX_HIGH_WEEKLY_QUOTA", "60.0"))
+CODEX_MIN_AUTO_QUOTA = float(os.environ.get("CODEX_MIN_AUTO_QUOTA", "60.0"))
+ALT_LOW_WEEKLY_QUOTA = float(os.environ.get("ALT_LOW_WEEKLY_QUOTA", "30.0"))
 AGY_THINK_MODEL_NAMES = ("gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon", "argon", "gemini-4-argon-thinking")
 
 CLAUDE_TO_AGY_MODEL_MAP = {
@@ -101,9 +106,10 @@ def map_claude_to_agy_model(claude_model=None):
         return DEFAULT_AGY_WORKER_MODEL
     return DEFAULT_AGY_WORKER_MODEL
 
-# Agents the dispatcher refuses to route to, in every mode (auto, priority chain, thinker, batch,
-# runtime fallback). The single switch: remove a name here to route to that agent again.
-DISABLED_AGENTS = frozenset({"codex"})
+# Agents the dispatcher refuses to route to (configurable via DISPATCH_DISABLED_AGENTS).
+# Codex is enabled for normal coding work (gpt-6.1-terra medium) and remains disabled in thinking mode.
+DISABLED_AGENTS = frozenset(x.strip() for x in os.environ.get("DISPATCH_DISABLED_AGENTS", "").split(",") if x.strip())
+THINK_DISABLED_AGENTS = frozenset({"codex"})
 DEFAULT_CLAUDE_THINK_MODEL = os.environ.get("CLAUDE_THINK_MODEL", "claude-opus-5-5")
 DEFAULT_THINK_EFFORT = os.environ.get("THINK_EFFORT") or os.environ.get("DISPATCH_THINK_EFFORT") or "medium"
 DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.environ.get("DISPATCH_TIMEOUT") or "900")
@@ -111,6 +117,7 @@ DEFAULT_TIMEOUT = int(os.environ.get("AI_AGENT_AUTO_DISPATCH_TIMEOUT") or os.env
 DEFAULT_VERIFY_TIMEOUT = int(os.environ.get("DISPATCH_VERIFY_TIMEOUT") or "600")
 DEFAULT_VERIFY_SCRIPT = "scripts/precheck.sh"
 VERIFY_FAILED_EXIT_CODE = 13
+DISK_LOW_EXIT_CODE = 14
 # Worker exited 0, changed no files, and nothing verified the result: reported under its own name, still exit 0.
 NO_CHANGES_UNVERIFIED_STATUS = "NO_CHANGES_UNVERIFIED"
 # `--wait` stopped at its own limit while the job is still running (EX_TEMPFAIL: not a failure, wait again).
@@ -133,6 +140,76 @@ PROTECTED_CONFIG_PATTERNS = [
     "working-feature.json",
     "claims.json",
 ]
+
+
+def check_disk_preflight(cwd):
+    """
+    Refuses if free bytes on the cwd filesystem (shutil.disk_usage) < 40 GB,
+    unless overridden with DISPATCH_IGNORE_DISK=1.
+    """
+    if os.environ.get("DISPATCH_IGNORE_DISK") == "1":
+        return
+    try:
+        usage = shutil.disk_usage(cwd)
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < 40.0:
+            n_gb = int(free_gb) if int(free_gb) == round(free_gb, 1) else round(free_gb, 1)
+            print(f"DISK_LOW: {n_gb} GB free < 40 GB; run ~/bin/dsk-clean", file=sys.stderr)
+            sys.exit(DISK_LOW_EXIT_CODE)
+    except OSError:
+        pass
+
+
+def configure_cargo_target_dir(cwd):
+    """
+    Exports CARGO_TARGET_DIR=<git toplevel of --cwd>/.claude/cargo-target-shared
+    into the worker's environment when the cwd is inside a git repo containing
+    a Cargo.toml and the caller has not set CARGO_TARGET_DIR.
+    """
+    if "CARGO_TARGET_DIR" in os.environ:
+        return
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode != 0 or not res.stdout.strip():
+            return
+        toplevel = res.stdout.strip()
+    except Exception:
+        return
+
+    has_cargo = (Path(toplevel) / "Cargo.toml").is_file()
+    if not has_cargo:
+        try:
+            ls_res = subprocess.run(
+                ["git", "ls-files", "*Cargo.toml"],
+                cwd=toplevel,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if ls_res.returncode == 0 and ls_res.stdout.strip():
+                has_cargo = True
+        except Exception:
+            pass
+
+    if not has_cargo:
+        for _ in Path(toplevel).glob("*/Cargo.toml"):
+            has_cargo = True
+            break
+
+    if has_cargo:
+        target_dir = os.path.join(toplevel, ".claude", "cargo-target-shared")
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except OSError:
+            pass
+        os.environ["CARGO_TARGET_DIR"] = target_dir
+
 
 
 def new_run_id():
@@ -335,6 +412,21 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
                     if rst is not None and current_time > rst:
                         val = 100.0
                     c_rem_5h = val
+                util = ((cdata.get("cachedUsageUtilization") or {}).get("utilization") or {}) if isinstance(cdata, dict) else {}
+                if c_rem_weekly is None and isinstance(util.get("seven_day"), dict) and util["seven_day"].get("utilization") is not None:
+                    sd = util["seven_day"]
+                    val = max(0.0, 100.0 - float(sd.get("utilization", 0.0)))
+                    rst = _parse_resets_at(sd.get("resets_at"))
+                    if rst is not None and current_time > rst:
+                        val = 100.0
+                    c_rem_weekly = val
+                if c_rem_5h is None and isinstance(util.get("five_hour"), dict) and util["five_hour"].get("utilization") is not None:
+                    fh = util["five_hour"]
+                    val = max(0.0, 100.0 - float(fh.get("utilization", 0.0)))
+                    rst = _parse_resets_at(fh.get("resets_at"))
+                    if rst is not None and current_time > rst:
+                        val = 100.0
+                    c_rem_5h = val
                 if c_rem_weekly is not None or c_rem_5h is not None:
                     if c_rem_5h is None:
                         c_rem_5h = 100.0
@@ -363,7 +455,17 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
             return False, 0.0, 0.0, f"Failed checking cursor-agent status: {err}"
 
     target_file = state_file or get_state_file(agent)
+    # Headless agy never fires the statusLine hook, so long runs go stale with healthy quota.
+    if agent == "agy" and target_file == DEFAULT_AGY_STATE and shutil.which("agy-quota-refresh"):
+        try:
+            if time.time() - os.path.getmtime(target_file) > STALE_OBSERVATION_MINUTES * 60:
+                subprocess.run(["agy-quota-refresh"], timeout=60, check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            pass
     if not os.path.exists(target_file):
+        if agent == "agy" and state_file is None and not os.environ.get("AGY_QUOTA_STATE_FILE") and "--state-file" not in sys.argv and shutil.which("agy"):
+            return True, 100.0, 100.0, "[AGY] available (no quota telemetry)"
         return False, 0.0, 0.0, f"Quota state file not found at {target_file}"
 
     refresh_note = ""
@@ -448,11 +550,34 @@ def calculate_runway(rem_5h, rem_weekly, min_5h=DEFAULT_MIN_5H, min_weekly=DEFAU
     return min(rem_5h - min_5h, rem_weekly - min_weekly)
 
 
+def should_prioritize_codex(r5_c, rw_c, el_c, rw_alt, el_alt=True,
+                            high_5h=CODEX_HIGH_5H_QUOTA,
+                            high_7d=CODEX_HIGH_WEEKLY_QUOTA,
+                            min_codex=CODEX_MIN_AUTO_QUOTA,
+                            alt_low_7d=ALT_LOW_WEEKLY_QUOTA):
+    """
+    Returns True when Codex should be prioritized over the alternative agent
+    under the Claude > AGY > Codex waterfall:
+    - Codex is eligible with 5h > 80% and 7d >= 60% (never use Codex if < 60%), AND
+    - The higher-priority alternative agent's 7d (weekly) quota is < 30% (or ineligible).
+    """
+    if not el_c or r5_c is None or rw_c is None:
+        return False
+    if r5_c < min_codex or rw_c < min_codex:
+        return False
+    if not (r5_c > high_5h and rw_c >= high_7d):
+        return False
+    if not el_alt or rw_alt is None:
+        return True
+    return rw_alt < alt_low_7d
+
+
 def route_best_agent(min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, agy_state_file=None, codex_state_file=None, current_time=None):
     """
     Evaluates both agy and codex runway scores.
+    Prioritizes codex when codex 5h > 80% and 7d > 50% and alternative (agy) 7d < 30%.
+    Otherwise picks the agent with the higher runway score:
     runway = min(5h_remaining - min_5h, weekly_remaining - min_weekly)
-    Picks the agent with the higher runway score.
     Returns: (chosen_agent, eligible, rem_5h, rem_weekly, msg)
     An agent check_quota marks ineligible (low quota, stale or missing observation) is never chosen.
     If neither is eligible, eligible is False.
@@ -472,6 +597,13 @@ def route_best_agent(min_5h=DEFAULT_MIN_5H, min_weekly=DEFAULT_MIN_WEEKLY, agy_s
         if runway_c > runway_a:
             return "codex", False, r5_c, rw_c, msg
         return "agy", False, r5_a, rw_a, msg
+
+    if should_prioritize_codex(r5_c, rw_c, el_c, rw_a, el_a):
+        msg = (
+            f"{msg_c} (prioritized: codex 5h>{CODEX_HIGH_5H_QUOTA:g}% & 7d>{CODEX_HIGH_WEEKLY_QUOTA:g}%, "
+            f"agy 7d {rw_a:.1f}%<{ALT_LOW_WEEKLY_QUOTA:g}%, runway: {runway_c:.1f} vs agy {runway_a:.1f})"
+        )
+        return "codex", True, r5_c, rw_c, msg
 
     if el_a and (not el_c or runway_a >= runway_c):
         msg = f"{msg_a} (runway: {runway_a:.1f} vs codex {runway_c:.1f})"
@@ -501,7 +633,9 @@ def normalize_model_name(agent, model):
         return None
     clean = model.strip()
     if agent == "codex":
-        if clean.lower() in ("terra", "terra:5.6", "5.6"):
+        if clean.lower() in ("terra", "terra:6.1", "6.1", "gpt-6.1-terra"):
+            return "gpt-6.1-terra"
+        if clean.lower() in ("terra:5.6", "5.6", "gpt-5.6-terra"):
             return "gpt-5.6-terra"
         if clean.lower() in ("sol", "sol:5.6", "thinking"):
             return DEFAULT_CODEX_THINK_MODEL
@@ -605,6 +739,15 @@ def route_priority_chain(chain, allow_on_demand=False, min_5h=DEFAULT_MIN_5H, mi
         elif agent in ("agy", "codex", "claude"):
             state_file = agy_state_file if agent == "agy" else codex_state_file
             el, r5, rw, msg = check_quota(agent, state_file, min_5h, min_weekly, current_time=current_time)
+            if agent in ("agy", "claude") and el and rw < ALT_LOW_WEEKLY_QUOTA and "codex" not in DISABLED_AGENTS:
+                codex_entries = [m for a, m in chain if a == "codex"]
+                if codex_entries:
+                    el_c, r5_c, rw_c, msg_c = check_quota("codex", codex_state_file, min_5h, min_weekly, current_time=current_time)
+                    if should_prioritize_codex(r5_c, rw_c, el_c, rw, el):
+                        c_model = codex_entries[0] or DEFAULT_CODEX_MODEL
+                        model_str = f" with {c_model}" if c_model else ""
+                        traces.append(f"codex: prioritized over {agent} (7d {rw:.1f}%<{ALT_LOW_WEEKLY_QUOTA:g}%){model_str}")
+                        return "codex", c_model, True, r5_c, rw_c, f"{msg_c}{model_str} (prioritized over {agent} 7d {rw:.1f}%<{ALT_LOW_WEEKLY_QUOTA:g}%)"
             if el:
                 model_str = f" with {model}" if model else ""
                 traces.append(f"{agent}: selected{model_str}")
@@ -620,12 +763,81 @@ def route_priority_chain(chain, allow_on_demand=False, min_5h=DEFAULT_MIN_5H, mi
     return fb_agent, fb_model, False, 0.0, 0.0, f"Chain exhausted: {summary}"
 
 
+def fallback_classify_task(task_text):
+    """
+    Deterministic heuristic fallback when Jev System-1 is unavailable (no API key,
+    missing SDK/binary, or offline). Identifies review, audit, security, and
+    architectural design tasks so they escalate to Argon/Opus and never route to Codex.
+    """
+    if not task_text or not str(task_text).strip():
+        return None
+    import re
+    txt = str(task_text)
+    is_rev = bool(re.search(
+        r"\b(code[- ]review|spec[- ]review|spec[- ]audit|self-grill-audit|security[- ]audit|"
+        r"review[- ]chain|aios[- ]review|falsif(?:y|ier|ication)|audit\b.*\bvulnerabilit|"
+        r"root[- ]cause\s+analysis|architectural\s+(?:design|review|audit))\b",
+        txt, re.IGNORECASE
+    ))
+    if is_rev:
+        return {
+            "raw_route": "agy_argon",
+            "route": "agy_argon",
+            "route_confidence": 0.85,
+            "is_reviewer_prob": 0.85,
+            "risky_surface_prob": 0.50,
+            "complexity_score": 2.0,
+            "cloud_compatible_prob": 0.0,
+            "heuristic": True,
+        }
+    return {
+        "raw_route": "agy_flash",
+        "route": "agy_flash",
+        "route_confidence": 0.80,
+        "is_reviewer_prob": 0.05,
+        "risky_surface_prob": 0.05,
+        "complexity_score": 1.2,
+        "cloud_compatible_prob": 0.0,
+        "heuristic": True,
+    }
+
+
+def route_with_jev(task_text, timeout=3.0):
+    """
+    Query Jev System-1 gate to classify if task is mechanical (Flash) or complex/intelligent (Argon/Opus).
+    Returns classification dict, or None if unavailable.
+    """
+    if not task_text or not str(task_text).strip():
+        return None
+    if os.environ.get("JEV_GATE_BIN"):
+        candidates = [os.path.expanduser(os.environ["JEV_GATE_BIN"])]
+    else:
+        candidates = [
+            str(Path(__file__).resolve().parent / "jev-gate"),
+            os.path.expanduser("~/ps-skills/bin/jev-gate"),
+        ]
+    jev_gate_bin = next((c for c in candidates if os.path.isfile(c) and os.access(c, os.X_OK)), None)
+    if not jev_gate_bin:
+        return None
+    py_bin = "/opt/homebrew/bin/python3" if os.path.exists("/opt/homebrew/bin/python3") else sys.executable
+    cmd = [jev_gate_bin, "classify-task", "--prompt", task_text[:12000]] if os.environ.get("JEV_GATE_BIN") else [py_bin, jev_gate_bin, "classify-task", "--prompt", task_text[:12000]]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True, text=True, timeout=timeout
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            res = json.loads(proc.stdout)
+            if not res.get("fallback") and "route" in res:
+                return res
+    except Exception:
+        pass
+    return None
+
+
 def route_execution_fallback(chosen_agent, chain=None, allow_on_demand=False, min_5h=DEFAULT_MIN_5H,
                              min_weekly=DEFAULT_MIN_WEEKLY, agy_state_file=None, codex_state_file=None, current_time=None):
-    """
-    Runtime fallback for a routed (non-think) task: the next eligible (agent, model) other than chosen_agent,
-    drawn from the priority chain, or from agy/codex for --agent auto. None when no other candidate is eligible.
-    """
+    """Runtime fallback for a routed (non-think) task: next eligible (agent, model) from chain."""
     candidates = [c for c in (chain or [("agy", None), ("codex", None)])
                   if c[0] != chosen_agent and c[0] not in DISABLED_AGENTS]
     if not candidates:
@@ -650,12 +862,13 @@ def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H
     Returns: (agent, model, eligible, rem_5h, rem_weekly, msg, runtime_fallback), where runtime_fallback is the
     next eligible (agent, model) to retry once if the chosen agent's run fails, else None.
     """
+    think_disabled = DISABLED_AGENTS | THINK_DISABLED_AGENTS
     chain_pref = priority or os.environ.get("DISPATCH_THINK_PREFERENCE")
     candidates = []
     if chain_pref and model is None:
         parsed_chain = parse_priority_chain(chain_pref)
         for cand_agent, cand_model in parsed_chain:
-            if cand_agent in DISABLED_AGENTS:
+            if cand_agent in think_disabled:
                 continue
             if cand_agent == "claude":
                 m = normalize_model_name("claude", cand_model) or DEFAULT_CLAUDE_THINK_MODEL
@@ -669,7 +882,7 @@ def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H
                     candidates.append(("agy", m))
                 elif cand_model:
                     return "agy", cand_model, False, 0.0, 0.0, f"model '{cand_model}' is not an allowed thinking model for agy", None
-            elif cand_agent == "codex" and "codex" not in DISABLED_AGENTS:
+            elif cand_agent == "codex" and "codex" not in think_disabled:
                 m = normalize_model_name("codex", cand_model) or DEFAULT_CODEX_THINK_MODEL
                 if m.lower() in ("gpt-5.6-sol", "sol"):
                     candidates.append(("codex", m))
@@ -680,14 +893,14 @@ def route_thinker(model=None, codex_state_file=None, min_5h=DEFAULT_THINK_MIN_5H
             candidates.append(("claude", normalize_model_name("claude", model) or DEFAULT_CLAUDE_THINK_MODEL))
         elif model.lower() in AGY_THINK_MODEL_NAMES:
             candidates.append(("agy", normalize_model_name("agy", model) or DEFAULT_AGY_THINK_MODEL))
-        elif "codex" not in DISABLED_AGENTS and model.lower() in ("gpt-5.6-sol", "sol"):
+        elif "codex" not in think_disabled and model.lower() in ("gpt-5.6-sol", "sol"):
             candidates.append(("codex", normalize_model_name("codex", model) or DEFAULT_CODEX_THINK_MODEL))
         else:
             return "claude", model, False, 0.0, 0.0, f"model '{model}' is not an allowed thinking model", None
     else:
         # Default thinker candidate when no chain preference is given: Claude Opus 5.5
         candidates.append(("claude", DEFAULT_CLAUDE_THINK_MODEL))
-        if "codex" not in DISABLED_AGENTS:
+        if "codex" not in think_disabled:
             candidates.append(("codex", DEFAULT_CODEX_THINK_MODEL))
 
     if not candidates:
@@ -854,6 +1067,18 @@ def build_context_block(context_paths, max_lines_per_file=300):
     return "\n".join(blocks) + "\n"
 
 
+WORKER_BUDGET_RULES = (
+    "Worker budget (token economy):\n"
+    "- Never poll: no `sleep`, `until`/`while` wait loops, log tailing or status re-checks. If you must wait on a "
+    "background job, run ONE blocking wait command and continue when it returns.\n"
+    "- Read excerpts, not whole documents: `grep -n` first, then bounded line ranges (<=250 lines). At most 2 screenshots per task.\n"
+    "- Budget: finish within about 120 tool calls. If the task is not done by then, stop, commit what is green, and hand back "
+    "a partial report with the exact next step instead of continuing.\n"
+    "- If you spawn a reviewer, its brief must say `RISK: R0|R1|R2`; R2 work gets one consolidated reviewer.\n"
+    "- Report in <=15 lines: status, files changed, verification command + its final lines, remaining risks. No transcripts.\n"
+)
+
+
 def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_thinking=False,
                          verify_cmd=None, acceptance=None):
     """
@@ -882,6 +1107,7 @@ def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_t
             "2. Preserve protected config files: Do NOT overwrite or delete protected configuration files "
             "(.release.json, working-feature.json, claims.json, or git internal state).\n"
             "3. Structured Deliverables: Provide actionable, unambiguous recommendations, task breakdowns, or code diffs.\n"
+            + WORKER_BUDGET_RULES
         )
     else:
         contract_header = (
@@ -896,6 +1122,7 @@ def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_t
             "5. NO CSS/Class Invention (Visual Integrity): When writing HTML, JSX, Svelte, or Vue markup, NEVER invent class "
             "names or Tailwind utilities that do not exist in the project's CSS/tokens. Always verify defined classes directly in the "
             "theme or component source before applying them.\n"
+            + WORKER_BUDGET_RULES
         )
 
     context_section = build_context_block(context_files) if context_files else ""
@@ -1713,12 +1940,13 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, ou
         raise ValueError(f"{chosen_agent} is disabled")
     if chosen_agent == "codex":
         model = chosen_model or DEFAULT_CODEX_MODEL
+        eff = effort or DEFAULT_CODEX_EFFORT
         cmd = [
             "codex", "exec",
             "-c", f"model=\"{model}\"",
         ]
-        if effort:
-            cmd.extend(["-c", f"model_reasoning_effort=\"{effort}\""])
+        if eff:
+            cmd.extend(["-c", f"model_reasoning_effort=\"{eff}\""])
         cmd.extend([
             "--dangerously-bypass-approvals-and-sandbox",
             wrapped_task
@@ -1756,8 +1984,9 @@ def build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, ou
                "--output-format", "stream-json"]
         if conversation_id:
             cmd.extend(["--conversation", conversation_id])
-        if chosen_model:
-            cmd.extend(["--model", chosen_model])
+        model_to_use = chosen_model or DEFAULT_AGY_WORKER_MODEL
+        if model_to_use:
+            cmd.extend(["--model", model_to_use])
         if effort:
             cmd.extend(["--effort", effort])
         return cmd
@@ -2284,6 +2513,8 @@ def run_internal_job(job_id, job_dir=DEFAULT_JOB_DIR):
         sys.exit(1)
 
     cwd = state.get("cwd", os.getcwd())
+    check_disk_preflight(cwd)
+    configure_cargo_target_dir(cwd)
     task = state.get("task", "")
     agent = state.get("agent", "auto")
     model = state.get("model", None)
@@ -2448,7 +2679,20 @@ def main():
     default_mode_str, default_on_demand = get_config_mode(cfg)
     default_timeout = get_config_timeout(cfg)
 
-    parser = argparse.ArgumentParser(description="Dispatch task to Antigravity CLI, Cursor, or claude -p with quota check.")
+    parser = argparse.ArgumentParser(
+        description="Dispatch task to Antigravity CLI, Cursor, or claude -p with quota check.",
+        epilog="""Exit Codes:
+  0: Task executed successfully by external agent
+  1: Task execution failed (or error in execution)
+  2: Invalid arguments / missing required task prompt / a disabled agent was named
+  10: Insufficient quota (signals orchestrator to fall back to internal Claude subagent)
+  12: deep-design-v1 thinker unavailable (Claude Opus 5.5 / Gemini 4 Argon) or forbidden model
+  13: Worker exited 0 but the verify command failed (twice); nothing was merged
+  14: DISK_LOW: filesystem free space < 40 GB (run ~/bin/dsk-clean; override with DISPATCH_IGNORE_DISK=1)
+  75: Stop a --wait after SECONDS and exit if the job is still running
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     # A disabled agent stays a parseable choice so it gets the "is disabled" refusal below, not an argparse error.
     agent_choices = ["agy", "codex", "cursor", "claude", "auto"]
     parser.add_argument("--agent", choices=agent_choices, default=None,
@@ -2627,9 +2871,10 @@ def main():
 
     # 4. Quota check / evaluation
     # (the job-inspection commands above stay usable under a disabled agent's program name)
-    if args.agent in DISABLED_AGENTS:
+    effective_disabled = (DISABLED_AGENTS | THINK_DISABLED_AGENTS) if (args.think or args.capability == "deep-design-v1") else DISABLED_AGENTS
+    if args.agent in effective_disabled:
         print(f"FAILED: {args.agent} is disabled: dispatch-worker no longer routes to it. "
-              f"Use --agent auto, or one of: {', '.join(a for a in agent_choices if a not in DISABLED_AGENTS and a != 'auto')}.",
+              f"Use --agent auto, or one of: {', '.join(a for a in agent_choices if a not in effective_disabled and a != 'auto')}.",
               file=sys.stderr)
         sys.exit(2)
     effective_on_demand = args.allow_on_demand or (args.mode == "on_demand")
@@ -2650,11 +2895,12 @@ def main():
 
     # If --capability deep-design-v1 or --think is set, adjust thresholds and models
     is_deep_design = (args.capability == "deep-design-v1")
+    think_disabled = DISABLED_AGENTS | THINK_DISABLED_AGENTS
     if is_deep_design:
         args.think = True
         # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 and Gemini 4 Argon
         ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "gemini-4-argon-medium", "gemini-4-argon", "argon", "gemini-4-argon-thinking"]
-        if "codex" not in DISABLED_AGENTS:
+        if "codex" not in think_disabled:
             ALLOWED_DEEP_DESIGN_MODELS += ["gpt-5.6-sol", "sol"]
         if chosen_model and chosen_model.lower() not in ALLOWED_DEEP_DESIGN_MODELS:
             print(f"FAILED: capability 'deep-design-v1' strictly forbids model '{chosen_model}'. Allowed models: {ALLOWED_DEEP_DESIGN_MODELS}", file=sys.stderr)
@@ -2672,12 +2918,11 @@ def main():
             chosen_model = normalize_model_name("codex", chosen_model) if chosen_model else DEFAULT_CODEX_THINK_MODEL
     if chosen_agent == "claude":
         chosen_model = normalize_model_name("claude", chosen_model) or DEFAULT_CLAUDE_THINK_MODEL
-    if chosen_agent == "agy" and (args.think or is_deep_design):
-        chosen_model = normalize_model_name("agy", chosen_model) or DEFAULT_AGY_THINK_MODEL
+
     # Strict validation: thinking mode allows only frontier thinking models
     if args.think and chosen_model:
         allowed_think_models = list(CLAUDE_THINK_MODEL_NAMES) + list(AGY_THINK_MODEL_NAMES)
-        if "codex" not in DISABLED_AGENTS:
+        if "codex" not in think_disabled:
             allowed_think_models += ["gpt-5.6-sol", "sol"]
         if chosen_model.lower() not in allowed_think_models:
             print(f"FAILED: thinking mode strictly forbids model '{chosen_model}'. "
@@ -2696,7 +2941,7 @@ def main():
     think_priority = args.priority if "--priority" in sys.argv else os.environ.get("DISPATCH_THINK_PREFERENCE")
     if (args.think or is_deep_design) and think_priority:
         for cand_agent, cand_model in parse_priority_chain(think_priority):
-            if cand_agent in DISABLED_AGENTS:
+            if cand_agent in think_disabled:
                 continue
             if cand_agent == "claude" and cand_model:
                 m = normalize_model_name("claude", cand_model)
@@ -2710,7 +2955,7 @@ def main():
                     print(f"FAILED: thinking mode for agent 'agy' strictly forbids model '{cand_model}'. "
                           f"Allowed models: {list(AGY_THINK_MODEL_NAMES)}", file=sys.stderr)
                     sys.exit(12)
-            elif cand_agent == "codex" and cand_model and "codex" not in DISABLED_AGENTS:
+            elif cand_agent == "codex" and cand_model and "codex" not in think_disabled:
                 m = normalize_model_name("codex", cand_model)
                 if not m or m.lower() not in ("gpt-5.6-sol", "sol"):
                     print(f"FAILED: thinking mode for agent 'codex' strictly forbids model '{cand_model}'.", file=sys.stderr)
@@ -2725,6 +2970,75 @@ def main():
             chosen_effort = DEFAULT_THINK_EFFORT
         else:
             chosen_effort = os.environ.get("DISPATCH_EFFORT")
+
+    # Jev System-1 complexity gate + Codex Terra auto-pick for normal coding work
+    jev_escalated = False
+    is_hermetic_test = bool(
+        args.check_quota
+        or args.state_file
+        or "AGY_QUOTA_STATE_FILE" in os.environ
+        or "CODEX_QUOTA_STATE_FILE" in os.environ
+        or "FAKE_AGY_PLAN" in os.environ
+    )
+    if not (args.think or is_deep_design or args.escalate or chosen_model):
+        jev_env = os.environ.get("DISPATCH_JEV_GATE")
+        jev_enabled = (jev_env == "1") or (jev_env != "0" and not args.dry_run and not is_hermetic_test)
+        jev_res = route_with_jev(args.task) if (args.task and jev_enabled) else None
+        if jev_res is None and args.task and jev_env != "0":
+            jev_res = fallback_classify_task(args.task)
+        jev_comp = 0.0
+        if jev_res:
+            raw_route = jev_res.get("raw_route") or jev_res.get("route")
+            jev_comp = jev_res.get("complexity_score", 0.0)
+            is_rev = jev_res.get("is_reviewer_prob", 0.0)
+            router_label = "Jev Fallback" if jev_res.get("heuristic") else "Jev Router"
+            if raw_route in ("agy_argon", "claude_opus") or is_rev >= 0.50:
+                chosen_agent = "agy"
+                chosen_model = DEFAULT_AGY_THINK_MODEL
+                jev_escalated = True
+                print(f"[{router_label}] Task requires frontier review/design intelligence ({raw_route}, comp={jev_comp:.2f}, rev={is_rev:.2f}) -> switched to agy ({chosen_model})", file=sys.stderr)
+            elif not jev_res.get("heuristic"):
+                print(f"[{router_label}] Task is normal coding work ({raw_route}, comp={jev_comp:.2f}, conf={jev_res.get('route_confidence', 0):.2f})", file=sys.stderr)
+
+        auto_terra_env = os.environ.get("DISPATCH_AUTO_TERRA_ON_HIGH_CODEX")
+        auto_terra_enabled = (auto_terra_env == "1") or (auto_terra_env != "0" and not is_hermetic_test)
+        if not jev_escalated and chosen_agent in ("agy", "claude", "auto") and "--priority" not in sys.argv and "codex" not in DISABLED_AGENTS and auto_terra_enabled:
+            el_c, r5_c, rw_c, _msg_c = check_quota("codex", args.state_file if default_agent == "codex" else None, min_5h, min_weekly)
+            el_a, r5_a, rw_a, _msg_a = check_quota("agy", args.state_file if default_agent == "agy" else None, min_5h, min_weekly)
+            if chosen_agent == "claude":
+                el_cl, r5_cl, rw_cl, _msg_cl = check_quota("claude", args.state_file if default_agent == "claude" else None, min_5h, min_weekly)
+                if not el_cl or rw_cl < ALT_LOW_WEEKLY_QUOTA:
+                    # Waterfall: Claude (<30%) -> AGY (>=30%) -> Codex (5h>80%, 7d>=60%)
+                    if el_a and rw_a >= ALT_LOW_WEEKLY_QUOTA:
+                        chosen_agent = "agy"
+                        chosen_model = DEFAULT_AGY_WORKER_MODEL
+                        print(f"[Waterfall Claude>AGY>Codex] Claude 7d low ({rw_cl:.1f}% < {ALT_LOW_WEEKLY_QUOTA:g}%), AGY healthy ({rw_a:.1f}% 7d) -> switched to agy ({chosen_model})", file=sys.stderr)
+                    elif should_prioritize_codex(r5_c, rw_c, el_c, rw_a, el_a):
+                        chosen_agent = "codex"
+                        chosen_model = DEFAULT_CODEX_MODEL
+                        chosen_effort = chosen_effort or DEFAULT_CODEX_EFFORT
+                        print(f"[Waterfall Claude>AGY>Codex] Claude & AGY 7d < {ALT_LOW_WEEKLY_QUOTA:g}%, Codex high ({r5_c:.1f}% 5h, {rw_c:.1f}% 7d >= {CODEX_MIN_AUTO_QUOTA:g}%) -> switched to codex ({chosen_model}, effort: {chosen_effort})", file=sys.stderr)
+            else:
+                if should_prioritize_codex(r5_c, rw_c, el_c, rw_a, el_a):
+                    chosen_agent = "codex"
+                    chosen_model = DEFAULT_CODEX_MODEL
+                    chosen_effort = chosen_effort or DEFAULT_CODEX_EFFORT
+                    print(
+                        f"[Auto-Terra] Codex quota is high ({r5_c:.1f}% 5h > {CODEX_HIGH_5H_QUOTA:g}%, {rw_c:.1f}% 7d >= {CODEX_HIGH_WEEKLY_QUOTA:g}%) "
+                        f"and agy 7d quota is low ({rw_a:.1f}% < {ALT_LOW_WEEKLY_QUOTA:g}%) -> prioritizing codex ({chosen_model}, effort: {chosen_effort})",
+                        file=sys.stderr,
+                    )
+                else:
+                    if chosen_agent == "auto":
+                        if el_a:
+                            chosen_agent = "agy"
+                        elif el_c and r5_c >= CODEX_MIN_AUTO_QUOTA and rw_c >= CODEX_MIN_AUTO_QUOTA:
+                            chosen_agent = "codex"
+                        else:
+                            chosen_agent = "agy"
+                    if chosen_agent == "agy" and jev_comp >= 1.85:
+                        chosen_model = DEFAULT_AGY_THINK_MODEL
+                        print(f"[Jev Router] High-complexity coding task on AGY (comp={jev_comp:.2f}) -> switched to {chosen_model}", file=sys.stderr)
 
     eligible = False
     rem_5h, rem_weekly = 0.0, 0.0
@@ -2784,6 +3098,16 @@ def main():
                 eligible, rem_5h, rem_weekly = el_a, r5_a, rw_a
                 msg = f"[AUTO-SWITCH claude->agy ({mapped_model})] {msg_a} (from {msg})"
 
+    # Finalize default model & effort for the chosen execution agent
+    if chosen_agent == "codex" and not (args.think or is_deep_design):
+        chosen_model = normalize_model_name("codex", chosen_model) or DEFAULT_CODEX_MODEL
+        chosen_effort = chosen_effort or DEFAULT_CODEX_EFFORT
+    elif chosen_agent == "agy":
+        if args.think or is_deep_design:
+            chosen_model = normalize_model_name("agy", chosen_model) or DEFAULT_AGY_THINK_MODEL
+        elif not chosen_model:
+            chosen_model = DEFAULT_AGY_WORKER_MODEL
+
     if args.check_quota:
         if eligible:
             print(f"OK: {msg}")
@@ -2828,6 +3152,8 @@ def main():
         sys.exit(10)  # exit code 10 signals fallback to Claude internal subagent
 
     cwd = os.path.abspath(args.cwd)
+    check_disk_preflight(cwd)
+    configure_cargo_target_dir(cwd)
 
     acceptance_text = args.acceptance
     if args.acceptance_file:

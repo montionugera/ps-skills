@@ -116,6 +116,37 @@ class TestQuotaLogic(unittest.TestCase):
         self.assertFalse(eligible)
         self.assertIn("Failed to parse", msg)
 
+    def test_no_quota_visible_defaults_claude_and_agy_available_never_codex(self):
+        missing_default = str(Path(self.temp_dir.name) / "no-telemetry.json")
+        env_clean = {k: v for k, v in os.environ.items() if k not in ("AGY_QUOTA_STATE_FILE", "CODEX_QUOTA_STATE_FILE", "CLAUDE_QUOTA_STATE_FILE")}
+        with mock.patch.dict(os.environ, env_clean, clear=True), \
+             mock.patch.object(dispatch_mod, "DEFAULT_AGY_STATE", missing_default), \
+             mock.patch.object(dispatch_mod, "DEFAULT_CLAUDE_STATE", missing_default), \
+             mock.patch.object(dispatch_mod, "DEFAULT_CODEX_STATE", missing_default), \
+             mock.patch.object(sys, "argv", ["dispatch-agy-worker"]), \
+             mock.patch("shutil.which", return_value="/usr/local/bin/agent"):
+            el_cl, r5_cl, rw_cl, msg_cl = dispatch_mod.check_quota("claude")
+            self.assertEqual((el_cl, r5_cl, rw_cl), (True, 100.0, 100.0))
+            self.assertIn("no quota telemetry", msg_cl)
+
+            el_a, r5_a, rw_a, msg_a = dispatch_mod.check_quota("agy")
+            self.assertEqual((el_a, r5_a, rw_a), (True, 100.0, 100.0))
+            self.assertIn("no quota telemetry", msg_a)
+
+            el_c, r5_c, rw_c, _msg_c = dispatch_mod.check_quota("codex")
+            self.assertFalse(el_c)
+            self.assertFalse(dispatch_mod.should_prioritize_codex(r5_c, rw_c, el_c, rw_a, el_a))
+
+    def test_no_jev_available_fallback_classifier_handles_review_and_coding(self):
+        with mock.patch.dict(os.environ, {"JEV_GATE_BIN": "/nonexistent/jev-gate"}):
+            self.assertIsNone(dispatch_mod.route_with_jev("implement feature X"))
+        rev = dispatch_mod.fallback_classify_task("Run security-audit and code-review on auth module")
+        self.assertEqual(rev["route"], "agy_argon")
+        self.assertGreaterEqual(rev["is_reviewer_prob"], 0.50)
+        code = dispatch_mod.fallback_classify_task("Add unit test for parser helper")
+        self.assertEqual(code["route"], "agy_flash")
+        self.assertLess(code["is_reviewer_prob"], 0.50)
+
 
 class TestWindowRollover(unittest.TestCase):
     def setUp(self):
@@ -361,6 +392,29 @@ class TestBestRunwayAutoRouting(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertEqual(r5, 90.0)
         self.assertIn("runway: 60.0", msg)
+
+    def test_prioritizes_codex_when_5h_gt_80_7d_ge_60_and_alt_7d_lt_30(self):
+        # Even if min_5h=65 makes agy's calculated runway (min(95-65=30, 28-10=18) = 18)
+        # slightly higher than codex's (min(82-65=17, 65-10=55) = 17),
+        # codex 5h > 80% and 7d >= 60% with agy 7d < 30% prioritizes codex.
+        self._write_quota(self.agy_file, 95.0, 28.0)
+        self._write_quota(self.codex_file, 82.0, 65.0)
+
+        agent, eligible, r5, rw, msg = dispatch_mod.route_best_agent(
+            min_5h=65.0, min_weekly=10.0,
+            agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file)
+        )
+        self.assertEqual(agent, "codex")
+        self.assertTrue(eligible)
+        self.assertEqual((r5, rw), (82.0, 65.0))
+        self.assertIn("prioritized", msg)
+
+    def test_avoids_codex_priority_when_codex_7d_below_60(self):
+        # Codex 5h=85% (>80%) but 7d=55% (<60%) -> do not prioritize codex over agy
+        self._write_quota(self.agy_file, 95.0, 28.0)
+        self._write_quota(self.codex_file, 85.0, 55.0)
+        self.assertFalse(dispatch_mod.should_prioritize_codex(85.0, 55.0, True, 28.0, True))
 
     def test_auto_fails_when_both_have_negative_runway(self):
         # agy: 5h=20 (surplus -10), weekly=50 -> runway = -10
@@ -849,6 +903,33 @@ class TestPriorityChainRouting(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertEqual(agent, "codex")
         self.assertEqual(model, "gpt-5.6-terra")
+
+    @codex_enabled()
+    def test_waterfall_prioritizes_codex_when_agy_7d_below_30_and_codex_high(self):
+        # agy is technically above min_weekly=10 (7d=22% < 30%), codex has 5h=85% (>80%) and 7d=60% (>50%)
+        self.agy_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 90.0},
+                {"kind": "weekly", "remaining_percent": 22.0}
+            ]
+        }))
+        self.codex_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 85.0},
+                {"kind": "weekly", "remaining_percent": 60.0}
+            ]
+        }))
+        chain = dispatch_mod.parse_priority_chain("agy > codex")
+        agent, model, eligible, r5, rw, msg = dispatch_mod.route_priority_chain(
+            chain,
+            allow_on_demand=False,
+            agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file)
+        )
+        self.assertTrue(eligible)
+        self.assertEqual(agent, "codex")
+        self.assertEqual(model, "gpt-6.1-terra")
+        self.assertIn("prioritized over agy", msg)
 
     def test_waterfall_all_exhausted_returns_not_eligible(self):
         self.agy_file.write_text(json.dumps({
@@ -1847,7 +1928,8 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
         self._quota(self.codex_state, 60.0, 60.0)
         self._fake("agy", exit_code=1, output="agy-boom")
         self._fake("codex", output="codex-ok")
-        proc = self._run("--agent", "auto", "--no-verify")
+        with mock.patch.dict(os.environ, {"DISPATCH_DISABLED_AGENTS": "codex"}):
+            proc = self._run("--agent", "auto", "--no-verify")
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(self._calls(), ["agy"])
 
@@ -2086,7 +2168,7 @@ class TestStats(unittest.TestCase):
 
 
 class TestCodexDisabled(unittest.TestCase):
-    """Codex is switched off in DISABLED_AGENTS: no route, mode or fallback may pick it."""
+    """When codex is switched off in DISPATCH_DISABLED_AGENTS: no route, mode or fallback may pick it."""
 
     WORKER_BIN = BIN_DIR / "dispatch-worker"
 
@@ -2099,8 +2181,11 @@ class TestCodexDisabled(unittest.TestCase):
         self.fake_bin.mkdir()
         self._quota(self.agy_state, 40.0, 80.0)
         self._quota(self.codex_state, 100.0, 100.0)
+        self._disabled_patch = mock.patch.object(dispatch_mod, "DISABLED_AGENTS", frozenset({"codex"}))
+        self._disabled_patch.start()
 
     def tearDown(self):
+        self._disabled_patch.stop()
         self.temp_dir.cleanup()
 
     def _quota(self, path, five_hour, weekly):
@@ -2116,6 +2201,7 @@ class TestCodexDisabled(unittest.TestCase):
         env.update({
             "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
             "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
+            "DISPATCH_DISABLED_AGENTS": "codex",
             "AGY_QUOTA_STATE_FILE": str(self.agy_state),
             "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
             "PATH": f"{self.fake_bin}:/usr/bin:/bin",
@@ -2131,6 +2217,75 @@ class TestCodexDisabled(unittest.TestCase):
 
     def test_codex_is_in_disabled_agents(self):
         self.assertIn("codex", dispatch_mod.DISABLED_AGENTS)
+        self.assertIn("codex", dispatch_mod.THINK_DISABLED_AGENTS)
+        self.assertEqual(dispatch_mod.DEFAULT_CODEX_MODEL, "gpt-6.1-terra")
+        self.assertEqual(dispatch_mod.DEFAULT_CODEX_EFFORT, "medium")
+
+    def test_auto_picks_codex_terra_medium_when_codex_quota_high(self):
+        # Codex 5h=93% (>80%), 7d=95% (>50%) and alternative (agy) 7d=20% (<30%) -> prioritize codex
+        self._quota(self.agy_state, 90.0, 20.0)
+        self._quota(self.codex_state, 93.0, 95.0)
+        env = {k: v for k, v in os.environ.items()
+               if "DISPATCH" not in k and k not in ("CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL")}
+        env.update({
+            "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
+            "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
+            "DISPATCH_AUTO_TERRA_ON_HIGH_CODEX": "1",
+            "DISPATCH_JEV_GATE": "0",
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "PATH": f"{self.fake_bin}:/usr/bin:/bin",
+        })
+        proc = subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--cwd", str(self.root), "--dry-run", "--task", "implement unit test"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Would dispatch to codex with gpt-6.1-terra (effort: medium)", proc.stdout)
+        self.assertIn("[Auto-Terra]", proc.stderr)
+
+    def test_keeps_agy_flash_when_alternative_7d_quota_is_at_least_30(self):
+        # Codex 5h=93% (>80%), 7d=95% (>50%) but alternative (agy) 7d=80% (>=30%) -> stay on agy flash
+        self._quota(self.agy_state, 90.0, 80.0)
+        self._quota(self.codex_state, 93.0, 95.0)
+        env = {k: v for k, v in os.environ.items()
+               if "DISPATCH" not in k and k not in ("CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL")}
+        env.update({
+            "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
+            "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
+            "DISPATCH_AUTO_TERRA_ON_HIGH_CODEX": "1",
+            "DISPATCH_JEV_GATE": "0",
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "PATH": f"{self.fake_bin}:/usr/bin:/bin",
+        })
+        proc = subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--cwd", str(self.root), "--dry-run", "--task", "implement unit test"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high", proc.stdout)
+
+    def test_falls_back_to_agy_flash_when_codex_quota_low(self):
+        self._quota(self.agy_state, 90.0, 20.0)
+        self._quota(self.codex_state, 75.0, 80.0)  # 5h <= 80% -> do not prioritize codex
+        env = {k: v for k, v in os.environ.items()
+               if "DISPATCH" not in k and k not in ("CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL")}
+        env.update({
+            "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
+            "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
+            "DISPATCH_AUTO_TERRA_ON_HIGH_CODEX": "1",
+            "DISPATCH_JEV_GATE": "0",
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "PATH": f"{self.fake_bin}:/usr/bin:/bin",
+        })
+        proc = subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--cwd", str(self.root), "--dry-run", "--task", "implement unit test"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high", proc.stdout)
 
     # 1. auto and the default chain never pick codex
     def test_auto_route_ignores_codex_with_higher_runway(self):

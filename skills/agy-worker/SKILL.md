@@ -28,6 +28,9 @@ When executing inside Antigravity (`agy`), orchestrators MUST prioritize native 
 - **`send_message`**: Multi-turn warm fix loops. In Round 2 fixes, send feedback directly to the idle implementer subagent's `conversationID`. Zero cold-start token penalty; preserves context from Round 1.
 - **`define_subagent`**: Declare specialized session-scoped subagents (e.g. `code-reviewer`, `self-grill-auditor`) with tailored system prompts and tool restrictions.
 - **`manage_subagents`**: Inspect running subagents (`Action: "list"`), kill stalled agents (`Action: "kill"`), or clean up.
+- **Liveness Watchdog for Long Subagents (Anti-502 Stall Rule)**:
+  - Pair long-running `invoke_subagent` calls with `schedule(DurationSeconds=240, TimerCondition="<conversationId>", Prompt="Check subagent status")`.
+  - When woken by the timer, inspect `manage_subagents(Action="list")`: only respawn/recover if `state == "errored"` (such as `502 Bad Gateway`) or `state == "idle"` without a final report; never kill a subagent whose `state == "running"`.
 
 #### The 80/20 Flash-First Model Tiering in AGY:
 - **80% Fast Worker Tier (`Model: "flash"` / `gemini-3.8-flash-high`)**:

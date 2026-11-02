@@ -459,10 +459,49 @@ for d in dirs:
                 elif k in ("weekly", "7d", "seven_day"):
                     rw = float(rem)
         if r5 is not None and rw is not None:
-            if r5 >= 50.0 and rw >= 30.0:
+            if r5 > 80.0 and rw >= 60.0:
                 codex_high_info = f"5h={r5:g}%,wk={rw:g}%"
             break
     if codex_high_info:
+        break
+
+agy_status = "unknown"
+for d in dirs:
+    for name in ("agy-statusline.observation.json", "agy.json", "agy-statusline.json"):
+        p = d / name
+        try:
+            data = json.loads(p.read_text())
+        except Exception:
+            continue
+        snap = data.get("snapshot") if isinstance(data, dict) and isinstance(data.get("snapshot"), dict) else data
+        windows = snap.get("windows") if isinstance(snap, dict) else None
+        r5_a, rw_a = None, None
+        if isinstance(windows, list):
+            for w in windows:
+                if not isinstance(w, dict):
+                    continue
+                rem = w.get("remaining_percent")
+                if rem is None and isinstance(w.get("used_percent"), (int, float)):
+                    rem = max(0.0, 100.0 - float(w["used_percent"]))
+                if isinstance(rem, (int, float)):
+                    k = str(w.get("kind") or "")
+                    if k in ("five_hour", "5h"):
+                        r5_a = float(rem)
+                    elif k in ("weekly", "7d", "seven_day"):
+                        rw_a = float(rem)
+        elif isinstance(snap, dict) and isinstance(snap.get("quota"), dict):
+            q = snap["quota"]
+            if "gemini-5h" in q:
+                r5_a = float(q["gemini-5h"].get("remaining_fraction", 0.0)) * 100.0
+            if "gemini-weekly" in q:
+                rw_a = float(q["gemini-weekly"].get("remaining_fraction", 0.0)) * 100.0
+        if rw_a is not None:
+            if (r5_a is None or r5_a >= 30.0) and rw_a >= 30.0:
+                agy_status = "high"
+            else:
+                agy_status = "low"
+            break
+    if agy_status != "unknown":
         break
 
 jev_str = ""
@@ -470,49 +509,59 @@ jev_mode = os.environ.get("JEV_ASSIST_MODE", "auto").strip().lower()
 jev_bin_env = os.environ.get("JEV_GATE_BIN", "").strip()
 run_jev = (jev_mode == "true") or (jev_mode == "auto" and (bool(jev_bin_env) or not os.environ.get("FAKE_LOG")))
 if run_jev:
+    doc_path = os.environ.get("HANDOFF_DOC_FILE", "")
+    custom_p = os.environ.get("HANDOFF_CUSTOM_PROMPT", "")
+    text_parts = []
+    if custom_p:
+        text_parts.append(custom_p)
+    if doc_path and Path(doc_path).is_file():
+        try:
+            text_parts.append(Path(doc_path).read_text(errors="ignore")[:8000])
+        except Exception:
+            pass
+    full_text = "\n\n".join(text_parts).strip()
     jev_bin = Path(jev_bin_env) if jev_bin_env else (Path.home() / "ps-skills" / "bin" / "jev-gate")
-    if jev_bin.is_file():
-        doc_path = os.environ.get("HANDOFF_DOC_FILE", "")
-        custom_p = os.environ.get("HANDOFF_CUSTOM_PROMPT", "")
-        text_parts = []
-        if custom_p:
-            text_parts.append(custom_p)
-        if doc_path and Path(doc_path).is_file():
-            try:
-                text_parts.append(Path(doc_path).read_text(errors="ignore")[:8000])
-            except Exception:
-                pass
-        full_text = "\n\n".join(text_parts).strip()
-        if full_text:
-            py_exe = "/opt/homebrew/bin/python3" if Path("/opt/homebrew/bin/python3").is_file() else sys.executable
-            cmd = [str(jev_bin), "classify-task", "--prompt", full_text] if jev_bin_env else [py_exe, str(jev_bin), "classify-task", "--prompt", full_text]
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
-                if proc.returncode == 0 and proc.stdout.strip():
-                    jdata = json.loads(proc.stdout.strip())
-                    if isinstance(jdata, dict) and "raw_route" in jdata and not jdata.get("fallback"):
-                        raw_r = str(jdata.get("raw_route") or "")
-                        eff_r = str(jdata.get("route") or raw_r)
-                        conf = float(jdata.get("route_confidence") or 0.0)
-                        rev_p = float(jdata.get("is_reviewer_prob") or 0.0)
-                        risk_p = float(jdata.get("risky_surface_prob") or 0.0)
-                        comp = float(jdata.get("complexity_score") or 0.0)
-                        cloud_p = float(jdata.get("cloud_compatible_prob") or 0.0)
-                        import re
-                        if re.search(r"(\.superpowers/|orbstack|kubectl|deploy-local|shoot\.mjs|psrw\s+ship|dispatch-worker|\.claude/worktrees/)", full_text):
-                            cloud_p = min(cloud_p, 0.05)
-                        if raw_r in ("agy_argon", "claude_opus") or rev_p >= 0.50 or risk_p >= 0.35:
-                            jtier = "plan"
-                        else:
-                            jtier = "code"
-                        jev_str = f"{jtier}:{raw_r}:{conf:.2f}:{rev_p:.2f}:{risk_p:.2f}:{comp:.2f}:{cloud_p:.2f}"
-            except Exception:
-                pass
+    if full_text and jev_bin.is_file():
+        py_exe = "/opt/homebrew/bin/python3" if Path("/opt/homebrew/bin/python3").is_file() else sys.executable
+        cmd = [str(jev_bin), "classify-task", "--prompt", full_text] if jev_bin_env else [py_exe, str(jev_bin), "classify-task", "--prompt", full_text]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+            if proc.returncode == 0 and proc.stdout.strip():
+                jdata = json.loads(proc.stdout.strip())
+                if isinstance(jdata, dict) and "raw_route" in jdata and not jdata.get("fallback"):
+                    raw_r = str(jdata.get("raw_route") or "")
+                    eff_r = str(jdata.get("route") or raw_r)
+                    conf = float(jdata.get("route_confidence") or 0.0)
+                    rev_p = float(jdata.get("is_reviewer_prob") or 0.0)
+                    risk_p = float(jdata.get("risky_surface_prob") or 0.0)
+                    comp = float(jdata.get("complexity_score") or 0.0)
+                    cloud_p = float(jdata.get("cloud_compatible_prob") or 0.0)
+                    import re
+                    if re.search(r"(\.superpowers/|orbstack|kubectl|deploy-local|shoot\.mjs|psrw\s+ship|dispatch-worker|\.claude/worktrees/)", full_text):
+                        cloud_p = min(cloud_p, 0.05)
+                    if raw_r in ("agy_argon", "claude_opus") or rev_p >= 0.50 or risk_p >= 0.35:
+                        jtier = "plan"
+                    else:
+                        jtier = "code"
+                    jev_str = f"{jtier}:{raw_r}:{conf:.2f}:{rev_p:.2f}:{risk_p:.2f}:{comp:.2f}:{cloud_p:.2f}"
+        except Exception:
+            pass
+    if not jev_str and full_text:
+        import re
+        if re.search(
+            r"\b(code[- ]review|spec[- ]review|spec[- ]audit|self-grill-audit|security[- ]audit|"
+            r"review[- ]chain|aios[- ]review|falsif(?:y|ier|ication)|audit\b.*\bvulnerabilit|"
+            r"root[- ]cause\s+analysis|architectural\s+(?:design|review|audit))\b",
+            full_text, re.IGNORECASE
+        ):
+            jev_str = "plan:agy_argon:0.85:0.85:0.50:2.00:0.00"
+        else:
+            jev_str = "code:agy_flash:0.80:0.05:0.05:1.20:0.00"
 
-print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}")
+print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}|{agy_status}")
 ' 2>/dev/null || true)
 
-  IFS='|' read -r LOW_QUOTA_INFO CLOUD_CREDIT_INFO CODEX_HIGH_INFO JEV_INFO <<<"$QUOTA_PROBE_OUT"
+  IFS='|' read -r LOW_QUOTA_INFO CLOUD_CREDIT_INFO CODEX_HIGH_INFO JEV_INFO AGY_STATUS <<<"$QUOTA_PROBE_OUT"
   if [[ -n "$CLOUD_CREDIT_INFO" ]]; then
     CLOUD_CREDIT_DOLLARS="${CLOUD_CREDIT_INFO%%:*}"
     CLOUD_CREDIT_BUCKET="${CLOUD_CREDIT_INFO#*:}"
@@ -541,10 +590,10 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}")
       if [[ "$HANDOFF_MODE" == "plan" && -z "$CLAUDE_MODEL" && -n "$JEV_INFO" ]]; then
         CLAUDE_MODEL="opus"
       fi
-      if [[ "$HANDOFF_MODE" == "code" && -n "$CODEX_HIGH_INFO" ]]; then
+      if [[ "$HANDOFF_MODE" != "plan" && "$AGY_STATUS" != "high" && -n "$CODEX_HIGH_INFO" ]]; then
         FALLBACK_KIND="codex"
         FALLBACK_MODEL="gpt-6.1-terra"
-      elif [[ "$HANDOFF_MODE" == "code" ]]; then
+      elif [[ "$HANDOFF_MODE" != "plan" ]]; then
         FALLBACK_KIND="agy"
         FALLBACK_MODEL="gemini-3.8-flash-high"
       else
@@ -559,11 +608,12 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}")
         echo "☁️  Routing handoff to claude --cloud (fallback: $FALLBACK_KIND/$FALLBACK_MODEL)"
       fi
     elif [[ -n "$LOW_QUOTA_INFO" && "$QUOTA_SWITCH" != "false" && "$QUOTA_SWITCH" != "0" ]]; then
-      if [[ "$HANDOFF_MODE" == "code" && -n "$CODEX_HIGH_INFO" && ( -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-* ) ]]; then
+      # Priority waterfall: Claude > AGY (if 7d >= 30%) > Codex (if code & AGY 7d < 30% & Codex 5h > 80%, 7d >= 60%)
+      if [[ "$HANDOFF_MODE" != "plan" && "$AGY_STATUS" != "high" && -n "$CODEX_HIGH_INFO" && "$CLAUDE_MODEL" != "opus" && "$CLAUDE_MODEL" != claude-opus* && "$CLAUDE_MODEL" != "argon" && "$CLAUDE_MODEL" != gemini-4-argon* && ( -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-* ) ]]; then
         AGENT_KIND="codex"
         YOLO=true
         CLAUDE_MODEL="gpt-6.1-terra"
-        echo "⚡ Claude quota low ($LOW_QUOTA_INFO) & Codex quota high ($CODEX_HIGH_INFO) — Auto-switching code handoff to codex (yolo, model: $CLAUDE_MODEL, effort: $CODEX_EFFORT)"
+        echo "⚡ Claude quota low ($LOW_QUOTA_INFO), AGY low/unavailable & Codex quota high ($CODEX_HIGH_INFO) — Auto-switching code handoff to codex (yolo, model: $CLAUDE_MODEL, effort: $CODEX_EFFORT)"
       else
         AGENT_KIND="agy"
         YOLO=true
@@ -572,21 +622,21 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}")
         elif [[ "$CLAUDE_MODEL" == "opus" || "$CLAUDE_MODEL" == claude-opus* ]]; then
           CLAUDE_MODEL="gemini-4-argon-medium"
         elif [[ -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == claude-* ]]; then
-          if [[ "$HANDOFF_MODE" == "code" ]]; then
-            CLAUDE_MODEL="gemini-3.8-flash-high"
-          else
+          if [[ "$HANDOFF_MODE" == "plan" ]]; then
             CLAUDE_MODEL="gemini-4-argon-medium"
+          else
+            CLAUDE_MODEL="gemini-3.8-flash-high"
           fi
         fi
         echo "⚡ Claude quota low ($LOW_QUOTA_INFO) — Auto-switching handoff to agy (yolo, model: $CLAUDE_MODEL)"
       fi
     fi
   elif [[ ( "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ) && "$QUOTA_SWITCH" != "false" && "$QUOTA_SWITCH" != "0" ]]; then
-    if [[ "$HANDOFF_MODE" == "code" && -n "$CODEX_HIGH_INFO" && -n "$JEV_INFO" && -z "$CLAUDE_MODEL" ]]; then
+    if [[ "$HANDOFF_MODE" != "plan" && "$AGY_STATUS" != "high" && -n "$CODEX_HIGH_INFO" && -z "$CLAUDE_MODEL" ]]; then
       AGENT_KIND="codex"
       YOLO=true
       CLAUDE_MODEL="gpt-6.1-terra"
-      echo "⚡ Jev classified as coding & Codex quota high ($CODEX_HIGH_INFO) — Auto-switching handoff to codex (yolo, model: $CLAUDE_MODEL, effort: $CODEX_EFFORT)"
+      echo "⚡ Jev classified as coding, AGY 7d low & Codex quota high ($CODEX_HIGH_INFO) — Auto-switching handoff to codex (yolo, model: $CLAUDE_MODEL, effort: $CODEX_EFFORT)"
     fi
   fi
 fi
@@ -594,7 +644,7 @@ fi
 # Model routing for claude, codex, and agy handoffs:
 # - claude: code -> sonnet, plan -> default
 # - codex: default -> gpt-6.1-terra (effort: medium)
-# - agy/gemini: code -> gemini-3.8-flash-high, plan -> gemini-4-argon-medium, --model argon -> gemini-4-argon-medium
+# - agy/gemini: code/default -> gemini-3.8-flash-high, plan -> gemini-4-argon-medium, --model argon -> gemini-4-argon-medium
 # An explicit --model always wins.
 if [[ "$AGENT_KIND" == "claude" ]]; then
   case "$HANDOFF_MODE" in
@@ -615,9 +665,8 @@ elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
     CLAUDE_MODEL="gemini-3.8-flash-high"
   elif [[ -z "$CLAUDE_MODEL" ]]; then
     case "$HANDOFF_MODE" in
-      code) CLAUDE_MODEL="gemini-3.8-flash-high" ;;
       plan) CLAUDE_MODEL="gemini-4-argon-medium" ;;
-      "") ;;
+      code|"") CLAUDE_MODEL="gemini-3.8-flash-high" ;;
     esac
   fi
 fi
