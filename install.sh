@@ -277,15 +277,10 @@ import json, os, shutil, subprocess
 data = {"agy": None, "codex": None, "cursor": None}
 
 if shutil.which("agy"):
-    try:
-        res = subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=3)
-        models = [line.split()[0] for line in res.stdout.splitlines() if line.strip() and not line.startswith("⠋") and not line.startswith("Fetching")]
-        data["agy"] = models[:4] if models else ["gemini-3.8-flash-high", "gemini-3.1-pro-high"]
-    except Exception:
-        data["agy"] = ["gemini-3.8-flash-high", "gemini-3.1-pro-high"]
+    data["agy"] = ["gemini-3.8-flash-high", "gemini-4-argon-medium"]
 
 if shutil.which("codex"):
-    data["codex"] = ["gpt-5.6-terra"]
+    data["codex"] = ["gpt-6.1-terra"]
 
 cursor_bin = shutil.which("cursor-agent") or os.path.expanduser("~/.local/bin/cursor-agent")
 if os.path.exists(cursor_bin):
@@ -304,7 +299,7 @@ PY
 )
 
   local agy_model=""
-  local codex_model="gpt-5.6-terra"
+  local codex_model="gpt-6.1-terra"
   local cursor_info=""
 
   if [[ $(echo "$discovery_json" | python3 -c 'import sys, json; print(bool(json.load(sys.stdin).get("agy")))') == "True" ]]; then
