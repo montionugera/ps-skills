@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""Auto-closes idle Herdr Claude agent panes and logs reaped panes.
+
+Python 3.9+ compatible.
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
+
+_git_common_cache: dict[str, Optional[str]] = {}
+
+
+def get_env_paths() -> dict[str, Path]:
+    state_dir = Path(os.environ.get("HERDR_STATE_DIR", Path.home() / ".local" / "state" / "herdr"))
+    idle_panes_path = Path(os.environ.get("HERDR_IDLE_PANES_PATH", state_dir / "idle-panes.json"))
+    reaped_log_path = Path(os.environ.get("HERDR_REAPED_LOG_PATH", state_dir / "reaped-panes.jsonl"))
+    claude_projects_dir = Path(os.environ.get("CLAUDE_PROJECTS_DIR", Path.home() / ".claude" / "projects"))
+    dispatch_jobs_dir = Path(os.environ.get("DISPATCH_JOBS_DIR", Path.home() / ".local" / "state" / "dispatch" / "jobs"))
+    return {
+        "state_dir": state_dir,
+        "idle_panes_path": idle_panes_path,
+        "reaped_log_path": reaped_log_path,
+        "claude_projects_dir": claude_projects_dir,
+        "dispatch_jobs_dir": dispatch_jobs_dir,
+    }
+
+
+def load_idle_panes(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_idle_panes(path: Path, data: dict[str, dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dir_path = path.parent
+    tmp = tempfile.NamedTemporaryFile("w", dir=dir_path, delete=False, encoding="utf-8")
+    try:
+        json.dump(data, tmp, indent=2)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp.close()
+        os.replace(tmp.name, path)
+    except Exception:
+        if os.path.exists(tmp.name):
+            os.unlink(tmp.name)
+        raise
+
+
+def get_git_common_dir(path: Path | str) -> Optional[str]:
+    try:
+        p = str(Path(path).resolve())
+    except Exception:
+        return None
+    if p in _git_common_cache:
+        return _git_common_cache[p]
+    try:
+        if not os.path.isdir(p):
+            _git_common_cache[p] = None
+            return None
+        res = subprocess.run(
+            ["git", "-C", p, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0:
+            out = res.stdout.strip()
+            if out:
+                if not os.path.isabs(out):
+                    out = os.path.join(p, out)
+                common_dir = os.path.realpath(os.path.abspath(out))
+                _git_common_cache[p] = common_dir
+                return common_dir
+    except Exception:
+        pass
+    _git_common_cache[p] = None
+    return None
+
+
+def get_active_dispatch_jobs(jobs_dir: Path) -> list[dict[str, Any]]:
+    active_jobs: list[dict[str, Any]] = []
+    if not jobs_dir.is_dir():
+        return active_jobs
+    for jf in jobs_dir.glob("*.json"):
+        try:
+            with open(jf, "r", encoding="utf-8") as f:
+                job = json.load(f)
+            if not isinstance(job, dict):
+                raise ValueError(f"Job file {jf} is not a JSON object")
+            if job.get("status") in ("RUNNING", "PENDING"):
+                active_jobs.append(job)
+        except Exception as e:
+            raise RuntimeError(f"Unreadable or unparsable dispatch job file {jf}: {e}") from e
+    return active_jobs
+
+
+def is_pane_blocked_by_dispatch(pane_cwd: str, active_jobs: list[dict[str, Any]]) -> bool:
+    if not pane_cwd:
+        return False
+    try:
+        pane_path = Path(pane_cwd).resolve()
+    except Exception:
+        return False
+
+    pane_git_common = get_git_common_dir(pane_path)
+
+    for job in active_jobs:
+        job_cwd = job.get("cwd")
+        if not job_cwd:
+            continue
+        try:
+            job_path = Path(job_cwd).resolve()
+        except Exception:
+            continue
+
+        # 1. equals the pane cwd
+        if job_path == pane_path:
+            return True
+
+        # 2. is inside it
+        try:
+            job_path.relative_to(pane_path)
+            return True
+        except ValueError:
+            pass
+
+        # 3. shares the same git common dir
+        if pane_git_common:
+            job_git_common = get_git_common_dir(job_path)
+            if job_git_common and job_git_common == pane_git_common:
+                return True
+
+    return False
+
+
+def get_latest_transcript_mtime(projects_dir: Path, session_id: str) -> float:
+    pattern = str(projects_dir / "*" / f"{session_id}.jsonl")
+    latest = 0.0
+    for match in glob.glob(pattern):
+        try:
+            mtime = os.stat(match).st_mtime
+            if mtime > latest:
+                latest = mtime
+        except OSError:
+            continue
+    return latest
+
+
+def has_active_subagent(projects_dir: Path, session_id: str, now: float) -> bool:
+    pattern = str(projects_dir / "*" / session_id / "subagents" / "*.meta.json")
+    for match in glob.glob(pattern):
+        try:
+            with open(match, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if not isinstance(meta, dict) or meta.get("finished", False):
+                continue
+            log_path = match[:-10] + ".jsonl"
+            try:
+                log_st = os.stat(log_path)
+                if (now - log_st.st_mtime) < 1800:
+                    return True
+            except OSError:
+                continue
+        except Exception:
+            continue
+    return False
+
+
+def is_claude_process(p: dict[str, Any]) -> bool:
+    argv0 = p.get("argv0") or ""
+    if Path(argv0).name == "claude" or argv0 == "claude":
+        return True
+    argv = p.get("argv")
+    if isinstance(argv, list) and argv:
+        if Path(argv[0]).name == "claude" or argv[0] == "claude":
+            return True
+    name = p.get("name") or ""
+    if name == "claude":
+        return True
+    cmdline = p.get("cmdline") or ""
+    tokens = cmdline.split()
+    if tokens and (Path(tokens[0]).name == "claude" or tokens[0] == "claude"):
+        return True
+    return False
+
+
+def is_mcp_sidecar_command(cmd: str) -> bool:
+    cmd_lower = cmd.lower()
+    return "graft" in cmd_lower or "nimble-sidecar" in cmd_lower or "mcp" in cmd_lower
+
+
+def get_system_processes() -> list[tuple[int, int, str]]:
+    fake_ps_file = os.environ.get("HERDR_PS_OUTPUT_FILE")
+    if fake_ps_file:
+        if not os.path.isfile(fake_ps_file):
+            raise RuntimeError(f"HERDR_PS_OUTPUT_FILE not found: {fake_ps_file}")
+        with open(fake_ps_file, "r", encoding="utf-8") as f:
+            output = f.read()
+    else:
+        ps_cmd = os.environ.get("HERDR_PS_CMD", "ps")
+        res = subprocess.run([ps_cmd, "-axo", "pid,ppid,command"], capture_output=True, text=True)
+        if res.returncode != 0:
+            raise RuntimeError(f"ps command failed: {res.stderr}")
+        output = res.stdout
+
+    procs: list[tuple[int, int, str]] = []
+    lines = output.strip().splitlines()
+    if not lines:
+        return procs
+    start_idx = 0
+    if "PID" in lines[0] and "PPID" in lines[0]:
+        start_idx = 1
+    for line in lines[start_idx:]:
+        parts = line.strip().split(None, 2)
+        if len(parts) >= 2:
+            try:
+                pid = int(parts[0])
+                ppid = int(parts[1])
+                cmd = parts[2] if len(parts) > 2 else ""
+                procs.append((pid, ppid, cmd))
+            except ValueError:
+                continue
+    return procs
+
+
+def can_reap_pane_process(herdr_cmd: str, sess_name: str, pane_id: str) -> bool:
+    """Returns True if process info can be read, foreground process is claude, and claude has no non-MCP descendants."""
+    proc = subprocess.run(
+        [herdr_cmd, "--session", sess_name, "pane", "process-info", "--pane", pane_id],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return False
+    try:
+        data = json.loads(proc.stdout)
+        pinfo = data.get("result", {}).get("process_info", {})
+    except Exception:
+        return False
+
+    if not isinstance(pinfo, dict):
+        return False
+
+    fg_procs = pinfo.get("foreground_processes")
+    if not isinstance(fg_procs, list) or not fg_procs:
+        return False
+
+    claude_procs = [p for p in fg_procs if isinstance(p, dict) and is_claude_process(p)]
+    if not claude_procs:
+        # Foreground process is not claude
+        return False
+
+    claude_pid = claude_procs[0].get("pid")
+    if not isinstance(claude_pid, int):
+        return False
+
+    try:
+        sys_procs = get_system_processes()
+    except Exception:
+        # Cannot read process info
+        return False
+
+    # Check descendants of claude_pid
+    children_by_ppid: dict[int, list[tuple[int, str]]] = {}
+    for pid, ppid, cmd in sys_procs:
+        children_by_ppid.setdefault(ppid, []).append((pid, cmd))
+
+    queue = [claude_pid]
+    mcp_pids: set[int] = set()
+
+    while queue:
+        curr = queue.pop(0)
+        for child_pid, child_cmd in children_by_ppid.get(curr, []):
+            if curr in mcp_pids or is_mcp_sidecar_command(child_cmd):
+                mcp_pids.add(child_pid)
+            else:
+                # Descendant is not an MCP sidecar!
+                return False
+            queue.append(child_pid)
+
+    return True
+
+
+def main(argv: list[str] | None = None) -> int:
+    if os.environ.get("HERDR_REAP_IDLE", "").strip().lower() in ("off", "false", "0"):
+        return 0
+
+    parser = argparse.ArgumentParser(description="Reap idle Herdr Claude agent panes.")
+    parser.add_argument("--max-idle-seconds", type=float, default=3600.0, help="Max idle seconds (default 3600)")
+    parser.add_argument("--dry-run", action="store_true", help="Print what would be closed without closing")
+    args = parser.parse_args(argv)
+
+    herdr_cmd = os.environ.get("HERDR_CMD", "herdr")
+    paths = get_env_paths()
+
+    # 1. List running Herdr sessions
+    proc = subprocess.run([herdr_cmd, "session", "list", "--json"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(f"herdr session list failed (code {proc.returncode}): {proc.stderr}\n")
+        return 1
+
+    try:
+        session_list_data = json.loads(proc.stdout)
+        sessions = session_list_data.get("sessions")
+        if not isinstance(sessions, list):
+            sys.stderr.write("unparsable session list: missing 'sessions' list\n")
+            return 1
+    except Exception as e:
+        sys.stderr.write(f"unparsable session list: {e}\n")
+        return 1
+
+    running_sessions = [s["name"] for s in sessions if isinstance(s, dict) and s.get("running") is True and "name" in s]
+
+    # 2. Collect snapshots for all running sessions
+    # (If ANY fails or is unparsable, close nothing and exit non-zero)
+    session_agents: dict[str, list[dict[str, Any]]] = {}
+    for sess_name in running_sessions:
+        snap_proc = subprocess.run([herdr_cmd, "--session", sess_name, "api", "snapshot"], capture_output=True, text=True)
+        if snap_proc.returncode != 0:
+            sys.stderr.write(f"herdr snapshot failed for session {sess_name}: {snap_proc.stderr}\n")
+            return 1
+        try:
+            snap_data = json.loads(snap_proc.stdout)
+            result = snap_data.get("result", {})
+            snapshot = result.get("snapshot", {})
+            agents = snapshot.get("agents")
+            if not isinstance(agents, list):
+                sys.stderr.write(f"unparsable snapshot for session {sess_name}: missing agents list\n")
+                return 1
+            session_agents[sess_name] = agents
+        except Exception as e:
+            sys.stderr.write(f"unparsable snapshot for session {sess_name}: {e}\n")
+            return 1
+
+    # Load active dispatch jobs (Criterion 6: any error exits non-zero, closes nothing)
+    try:
+        active_dispatch_jobs = get_active_dispatch_jobs(paths["dispatch_jobs_dir"])
+    except Exception as e:
+        sys.stderr.write(f"error reading dispatch jobs: {e}\n")
+        return 1
+
+    now = time.time()
+    existing_state = load_idle_panes(paths["idle_panes_path"])
+    new_state: dict[str, dict[str, Any]] = {}
+
+    # State for sessions no longer running is dropped, not retained (Criterion 2)
+
+    # 3. Evaluate each agent pane across all running sessions
+    for sess_name, agents in session_agents.items():
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+
+            # Skip any pane whose agent is not claude or whose session id is missing
+            if agent.get("agent") != "claude":
+                continue
+
+            agent_session = agent.get("agent_session")
+            if not isinstance(agent_session, dict):
+                continue
+            session_id = agent_session.get("value")
+            if not session_id or not isinstance(session_id, str):
+                continue
+
+            pane_id = agent.get("pane_id")
+            if not pane_id or not isinstance(pane_id, str):
+                continue
+
+            terminal_id = agent.get("terminal_id") or ""
+            key = f"{sess_name}:{pane_id}:{terminal_id}:{session_id}"
+            agent_status = agent.get("agent_status")
+            seq = agent.get("state_change_seq")
+            rev = agent.get("revision")
+            focused = bool(agent.get("focused", False))
+            title = agent.get("terminal_title_stripped") or agent.get("terminal_title") or ""
+            cwd = agent.get("cwd") or agent.get("foreground_cwd") or ""
+
+            # Check previous state
+            prev = existing_state.get(key)
+            if prev is None:
+                # First seen pane has idle_since=now and is never closed on this run
+                new_state[key] = {"seq": seq, "rev": rev, "idle_since": now}
+                continue
+
+            # Never close working, blocked or unknown agent
+            if agent_status not in ("idle", "done"):
+                new_state[key] = {"seq": seq, "rev": rev, "idle_since": now}
+                continue
+
+            # If state_change_seq or revision changed, reset idle_since to now
+            if prev.get("seq") != seq or prev.get("rev") != rev:
+                new_state[key] = {"seq": seq, "rev": rev, "idle_since": now}
+                continue
+
+            # Unchanged seq/rev and idle/done status
+            idle_since = float(prev.get("idle_since", now))
+
+            # Never close focused pane
+            if focused:
+                new_state[key] = {"seq": seq, "rev": rev, "idle_since": idle_since}
+                continue
+
+            # Idle age = now - max(idle_since, mtime(~/.claude/projects/*/<agent_session.value>.jsonl))
+            trans_mtime = get_latest_transcript_mtime(paths["claude_projects_dir"], session_id)
+            idle_age = now - max(idle_since, trans_mtime)
+
+            if idle_age < args.max_idle_seconds:
+                new_state[key] = {"seq": seq, "rev": rev, "idle_since": idle_since}
+                continue
+
+            # Never close if unfinished subagent updated under 30m ago (Criterion 3)
+            if has_active_subagent(paths["claude_projects_dir"], session_id, now):
+                new_state[key] = {"seq": seq, "rev": rev, "idle_since": idle_since}
+                continue
+
+            # Never close if cwd matches RUNNING or PENDING dispatch job (Criterion 5)
+            if is_pane_blocked_by_dispatch(cwd, active_dispatch_jobs):
+                new_state[key] = {"seq": seq, "rev": rev, "idle_since": idle_since}
+                continue
+
+            # Skip pane if process info cannot be read, foreground process is not claude,
+            # or claude has non-MCP descendants (Criterion 4)
+            if not can_reap_pane_process(herdr_cmd, sess_name, pane_id):
+                new_state[key] = {"seq": seq, "rev": rev, "idle_since": idle_since}
+                continue
+
+            # Candidate for close!
+            resume_cmd = f"claude --resume {session_id}"
+            if args.dry_run:
+                # --dry-run closes nothing and prints what it would close
+                print(f"[dry-run] Would close session {sess_name} pane {pane_id} (title: {title}, resume: {resume_cmd})")
+                new_state[key] = {"seq": seq, "rev": rev, "idle_since": idle_since}
+            else:
+                # Closes with 'herdr --session NAME pane close PANE'
+                close_cmd = [herdr_cmd, "--session", sess_name, "pane", "close", pane_id]
+                close_proc = subprocess.run(close_cmd, capture_output=True, text=True)
+                if close_proc.returncode == 0:
+                    # Appends line to reaped-panes.jsonl
+                    entry = {
+                        "ts": now,
+                        "session": sess_name,
+                        "pane_id": pane_id,
+                        "cwd": cwd,
+                        "title": title,
+                        "resume": resume_cmd,
+                    }
+                    paths["reaped_log_path"].parent.mkdir(parents=True, exist_ok=True)
+                    with open(paths["reaped_log_path"], "a", encoding="utf-8") as rf:
+                        rf.write(json.dumps(entry) + "\n")
+                    # Pane is reaped, so omit from new_state
+                else:
+                    # Close failure leaves pane out of reaped log and retains in idle state
+                    sys.stderr.write(f"Failed to close pane {pane_id} in session {sess_name}: {close_proc.stderr}\n")
+                    new_state[key] = {"seq": seq, "rev": rev, "idle_since": idle_since}
+
+    # Save state always (including in dry-run mode, Criterion 7)
+    save_idle_panes(paths["idle_panes_path"], new_state)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
