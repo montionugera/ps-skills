@@ -211,6 +211,188 @@ class HerdrHandoffTest(unittest.TestCase):
         log_text = self.log.read_text()
         self.assertIn("agy --dangerously-skip-permissions --model gemini-3.8-flash-high -i", log_text)
 
+    def test_auto_uses_free_cloud_session_credits_from_claude_config(self):
+        quota_dir = Path(self.tmp.name) / "quota_cloud"
+        quota_dir.mkdir(parents=True, exist_ok=True)
+        (quota_dir / "claude-statusline.json").write_text(json.dumps({
+            "provider": "claude",
+            "windows": [{"kind": "weekly", "remaining_percent": 5.0, "resets_at": 9999999999}],
+        }))
+        (quota_dir / "codex-app-server.json").write_text(json.dumps({
+            "provider": "codex",
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 93.0, "resets_at": 9999999999},
+                {"kind": "weekly", "remaining_percent": 99.0, "resets_at": 9999999999},
+            ],
+        }))
+        claude_cfg = Path(self.tmp.name) / "claude.json"
+        claude_cfg.write_text(json.dumps({
+            "cachedUsageUtilization": {
+                "utilization": {
+                    "seven_day": {"utilization": 95, "resets_at": "2099-01-01T00:00:00+00:00"},
+                    "iguana_necktie": {
+                        "utilization": 0,
+                        "resets_at": "2099-11-05T07:59:00+00:00",
+                        "limit_dollars": 250,
+                        "used_dollars": 0,
+                        "remaining_dollars": 250,
+                        "locked_reason": None,
+                    },
+                }
+            }
+        }))
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}",
+            "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working",
+            "HERDR_TAB_ID": "t1",
+            "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2",
+            "FAKE_CLAIM_DIR": f"{self.doc}.claim",
+            "HERDR_PLUGIN_STATE_DIR": str(quota_dir),
+            "CLAUDE_CONFIG_FILE": str(claude_cfg),
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "code", "--cloud",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("free Cloud Session Credit available ($250 left in iguana_necktie)", r.stdout)
+        self.assertIn("Auto-switching handoff to claude --cloud (fallback: codex/gpt-6.1-terra)", r.stdout)
+        log_text = self.log.read_text()
+        self.assertIn("CCR_ENABLE_BUNDLE=1 claude --dangerously-skip-permissions --model sonnet", log_text)
+        self.assertIn("--forward-home-settings true --cloud", log_text)
+        self.assertIn('codex --dangerously-bypass-approvals-and-sandbox -c model="gpt-6.1-terra" -c model_reasoning_effort="medium"', log_text)
+
+    def test_auto_switches_claude_code_mode_to_codex_terra_when_quota_low_and_codex_high(self):
+        quota_dir = Path(self.tmp.name) / "quota_codex"
+        quota_dir.mkdir(parents=True, exist_ok=True)
+        (quota_dir / "claude-statusline.json").write_text(json.dumps({
+            "provider": "claude",
+            "windows": [{"kind": "weekly", "remaining_percent": 5.0, "resets_at": 9999999999}],
+        }))
+        (quota_dir / "codex-app-server.json").write_text(json.dumps({
+            "provider": "codex",
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 93.0, "resets_at": 9999999999},
+                {"kind": "weekly", "remaining_percent": 99.0, "resets_at": 9999999999},
+            ],
+        }))
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}",
+            "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working",
+            "HERDR_TAB_ID": "t1",
+            "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2",
+            "FAKE_CLAIM_DIR": f"{self.doc}.claim",
+            "HERDR_PLUGIN_STATE_DIR": str(quota_dir),
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "code",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Auto-switching code handoff to codex (yolo, model: gpt-6.1-terra, effort: medium)", r.stdout)
+        log_text = self.log.read_text()
+        self.assertIn('codex --dangerously-bypass-approvals-and-sandbox -c model="gpt-6.1-terra" -c model_reasoning_effort="medium"', log_text)
+
+    def test_jev_assist_escalates_complex_review_and_picks_opus_on_cloud_credit(self):
+        quota_dir = Path(self.tmp.name) / "quota_jev_plan"
+        quota_dir.mkdir(parents=True, exist_ok=True)
+        (quota_dir / "claude-statusline.json").write_text(json.dumps({
+            "provider": "claude",
+            "windows": [{"kind": "weekly", "remaining_percent": 5.0, "resets_at": 9999999999}],
+        }))
+        claude_cfg = Path(self.tmp.name) / "claude_jev.json"
+        claude_cfg.write_text(json.dumps({
+            "cachedUsageUtilization": {
+                "utilization": {
+                    "iguana_necktie": {
+                        "utilization": 0,
+                        "resets_at": "2099-11-05T07:59:00+00:00",
+                        "limit_dollars": 250,
+                        "used_dollars": 0,
+                        "remaining_dollars": 250,
+                        "locked_reason": None,
+                    },
+                }
+            }
+        }))
+        fake_jev = Path(self.tmp.name) / "bin" / "fake-jev"
+        fake_jev.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'{\\n  "raw_route": "agy_argon",\\n  "route": "agy_argon",\\n  "route_confidence": 0.95,\\n  "is_reviewer_prob": 0.92,\\n  "risky_surface_prob": 0.60,\\n  "complexity_score": 2.4\\n}\\n\'\n'
+        )
+        fake_jev.chmod(fake_jev.stat().st_mode | stat.S_IXUSR)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}",
+            "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working",
+            "HERDR_TAB_ID": "t1",
+            "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2",
+            "FAKE_CLAIM_DIR": f"{self.doc}.claim",
+            "HERDR_PLUGIN_STATE_DIR": str(quota_dir),
+            "CLAUDE_CONFIG_FILE": str(claude_cfg),
+            "JEV_GATE_BIN": str(fake_jev),
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "code", "--cloud",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Jev System-1 assist: route=agy_argon", r.stdout)
+        self.assertIn("escalating mode to plan", r.stdout)
+        self.assertIn("Auto-switching handoff to claude --cloud (fallback: agy/gemini-4-argon-medium)", r.stdout)
+        log_text = self.log.read_text()
+        self.assertIn("CCR_ENABLE_BUNDLE=1 claude --dangerously-skip-permissions --model opus", log_text)
+
+    def test_jev_assist_switches_agy_coding_handoff_to_codex_terra_when_codex_quota_high(self):
+        quota_dir = Path(self.tmp.name) / "quota_jev_code"
+        quota_dir.mkdir(parents=True, exist_ok=True)
+        (quota_dir / "codex-app-server.json").write_text(json.dumps({
+            "provider": "codex",
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 93.0, "resets_at": 9999999999},
+                {"kind": "weekly", "remaining_percent": 99.0, "resets_at": 9999999999},
+            ],
+        }))
+        fake_jev = Path(self.tmp.name) / "bin" / "fake-jev-code"
+        fake_jev.write_text(
+            "#!/usr/bin/env bash\n"
+            'echo \'{"raw_route":"agy_flash","route":"agy_flash","route_confidence":0.97,"is_reviewer_prob":0.02,"risky_surface_prob":0.05,"complexity_score":1.4}\'\n'
+        )
+        fake_jev.chmod(fake_jev.stat().st_mode | stat.S_IXUSR)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}",
+            "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working",
+            "HERDR_TAB_ID": "t1",
+            "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2",
+            "FAKE_CLAIM_DIR": f"{self.doc}.claim",
+            "HERDR_PLUGIN_STATE_DIR": str(quota_dir),
+            "JEV_GATE_BIN": str(fake_jev),
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "agy",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Jev System-1 assist: route=agy_flash", r.stdout)
+        self.assertIn("Auto-switching handoff to codex (yolo, model: gpt-6.1-terra, effort: medium)", r.stdout)
+        log_text = self.log.read_text()
+        self.assertIn('codex --dangerously-bypass-approvals-and-sandbox -c model="gpt-6.1-terra" -c model_reasoning_effort="medium"', log_text)
+
     # --- workspace pinning -------------------------------------------------
 
     def create_args(self):

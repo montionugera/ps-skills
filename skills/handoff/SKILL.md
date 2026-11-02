@@ -153,9 +153,10 @@ Each handoff appends one line to `~/.local/state/handoff/ledger.jsonl` (parent a
 All handoffs launch with permission-skipping enabled by default (`--dangerously-skip-permissions` for `claude`, `agy`, and `gemini`), ensuring the incoming agent never gets stalled on interactive permission prompts. Pass `--no-yolo` to disable.
 
 ### Choosing `--mode` (always pass it for `--kind claude`):
-- `code` → new session starts on **Sonnet**. Use when the Immediate Next Action is implementation: editing code, running/fixing tests, executing tasks of an already-approved plan.
-- `plan` → new session starts on the **default model**. Use for brainstorming, specs, plans, research, review/audit, or debugging with an unknown root cause.
+- `code` → new session starts on **Sonnet** locally (or auto-switches to local `codex` `gpt-6.1-terra` `medium` when local Claude quota is low and Codex quota is high). Use when the Immediate Next Action is implementation: editing code, running/fixing tests, executing tasks of an already-approved plan.
+- `plan` → new session starts on the **default model** locally (or auto-switches to local `agy` `gemini-4-argon-medium` when local Claude quota is low). Use for brainstorming, specs, plans, research, review/audit, or debugging with an unknown root cause.
 - Unsure → `plan`. `--model <name>` overrides both.
+- **Local Quota Routing (`--cloud` Disabled by Default)**: `herdr-handoff.sh` inspects `~/.local/state/herdr/plugins/herdr-agent-quota/` and `~/.claude.json`. `claude --cloud` is **disabled by default** (`CLAUDE_CLOUD=false`) because remote cloud containers cannot access Mac `/tmp` claims, gitignored `.superpowers/` state, local `orbstack` / `kubectl`, or push local worktree commits. Pass `--cloud` only if explicitly targeting a remote cloud container.
 
 ### Supported Agent Kinds (`--kind`):
 - **Auto-detected by default** from the current session's environment (`agy`/`gemini` when in Antigravity, `codex` when in Codex, `claude` when in Claude Code, `opencode` when in OpenCode, `cursor` when in Cursor, `t3code` when targeting T3Code). Can be explicitly overridden with `--kind <name>` or `$HERDR_HANDOFF_AGENT_KIND`.

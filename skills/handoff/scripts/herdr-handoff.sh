@@ -40,9 +40,12 @@ Options:
   --topic <text>              2-5 words on what the new session does next
   --cwd <dir>                 Working directory (default: the doc's Worktree/Repo, else $PWD)
   --prompt <text>             Custom prompt override
-  --mode <code|plan>          Handoff type (claude: code->sonnet, plan->default; agy: code->gemini-4-argon-medium, plan->gemini-4-argon-high)
-  --model <name>              Explicit model for claude or agy; overrides --mode
-  --no-quota-switch           Do not auto-switch low-quota claude handoffs to agy yolo with argon
+  --mode <code|plan>          Handoff type (claude: code->sonnet, plan->default; agy: code->gemini-3.8-flash-high, plan->gemini-4-argon-medium)
+  --model <name>              Explicit model for claude, codex, or agy; overrides --mode
+  --effort <level>            Reasoning effort for codex (low, medium, high; default: medium)
+  --cloud / --no-cloud        Force or disable claude --cloud (default: false; cloud containers cannot access Mac /tmp, local k8s/orbstack, or push without a remote)
+  --jev / --no-jev            Enable or disable TypeSafe Jev System-1 task routing assist (default: auto)
+  --no-quota-switch           Do not auto-switch low-quota claude handoffs to cloud/codex/agy
   --no-agent                  Only open a shell tab without starting an agent
   --no-focus                  Never switch focus (default: follow only if you are on this tab)
   --use-agent-manager         Try `herdr agent start` first
@@ -81,6 +84,14 @@ CWD_EXPLICIT=false
 CUSTOM_PROMPT=""
 HANDOFF_MODE=""
 CLAUDE_MODEL=""
+CODEX_EFFORT="${HERDR_HANDOFF_EFFORT:-medium}"
+CLAUDE_CLOUD="${HERDR_HANDOFF_CLOUD:-false}"
+JEV_ASSIST="${HERDR_HANDOFF_JEV:-auto}"
+CLOUD_CREDIT_DOLLARS=""
+CLOUD_CREDIT_BUCKET=""
+JEV_INFO=""
+FALLBACK_KIND=""
+FALLBACK_MODEL=""
 START_AGENT=true
 FOCUS_FLAG="--focus"
 USE_AGENT_MANAGER=false
@@ -132,6 +143,26 @@ while [[ $# -gt 0 ]]; do
     --model)
       CLAUDE_MODEL="$2"
       shift 2
+      ;;
+    --effort)
+      CODEX_EFFORT="$2"
+      shift 2
+      ;;
+    --cloud)
+      CLAUDE_CLOUD="true"
+      shift
+      ;;
+    --no-cloud)
+      CLAUDE_CLOUD="false"
+      shift
+      ;;
+    --jev)
+      JEV_ASSIST="true"
+      shift
+      ;;
+    --no-jev)
+      JEV_ASSIST="false"
+      shift
       ;;
     --no-agent)
       START_AGENT=false
@@ -239,14 +270,48 @@ case "$HANDOFF_MODE" in
 esac
 
 # --------------------------------------------------------------------------
-# Low-quota auto-switch: when handing off to Claude and Claude's quota is low
-# (<= CLAUDE_LOW_QUOTA_THRESHOLD or herdr-agent-quota low-quota-alert, default 10%),
-# automatically switch to agy in YOLO mode with the Argon model.
+# Free-credit, low-quota & Jev System-1 auto-routing:
+# 1. Uses TypeSafe Jev System-1 (`jev-gate classify-task`) on the handoff doc
+#    and prompt to classify whether the work is normal coding (`agy_flash`,
+#    low reviewer/risk probability -> mode=code) or complex/review/architecture
+#    (`agy_argon` / `claude_opus` or reviewer/risky -> mode=plan).
+# 2. Automatically inspects ~/.claude.json (or $CLAUDE_CONFIG_FILE) for free
+#    Anthropic Cloud Session Credits (iguana_necktie / cinder_cove / wattle_ember /
+#    promo_credits with remaining_dollars > 0 and unexpired resets_at).
+# 3. Inspects herdr-agent-quota state for local Claude weekly/5h quota and
+#    Codex 5h/weekly quota.
+# 4. Routing priority:
+#    - Tier 1 (Free Cloud Session Credit > $0 on Claude, or --cloud): route to
+#      `claude --cloud` (`CCR_ENABLE_BUNDLE=1`), with Jev picking `sonnet` (for
+#      coding, fallback `codex/gpt-6.1-terra`) vs `opus` (for complex/review,
+#      fallback `agy/gemini-4-argon-medium`).
+#    - Tier 2 (Coding task + High Codex quota 5h >= 50%, wk >= 30% when local
+#      Claude quota is low or handing off from AGY without --model): auto-switch
+#      to `codex` (`gpt-6.1-terra`, effort: medium).
+#    - Tier 3 (Local Claude quota low <= 10%): auto-switch to `agy`
+#      (`gemini-3.8-flash-high` for code, `gemini-4-argon-medium` for plan).
 # --------------------------------------------------------------------------
-if [[ "$AGENT_KIND" == "claude" && "$QUOTA_SWITCH" != "false" && "$QUOTA_SWITCH" != "0" ]]; then
-  LOW_QUOTA_INFO=$(python3 -c '
-import json, os, sys, time
+if [[ ( "$AGENT_KIND" == "claude" || "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ) && ( "$QUOTA_SWITCH" != "false" && "$QUOTA_SWITCH" != "0" || "$CLAUDE_CLOUD" == "true" || "$JEV_ASSIST" == "true" ) ]]; then
+  QUOTA_PROBE_OUT=$(HANDOFF_DOC_FILE="$HANDOFF_PATH" HANDOFF_CUSTOM_PROMPT="$CUSTOM_PROMPT" JEV_ASSIST_MODE="$JEV_ASSIST" python3 -c '
+import json, os, subprocess, sys, time
+from datetime import datetime, timezone
 from pathlib import Path
+
+def is_future_reset(ra, now_ts):
+    if ra is None:
+        return True
+    if isinstance(ra, (int, float)):
+        return ra <= 0 or ra > now_ts
+    if isinstance(ra, str) and ra.strip():
+        try:
+            dt = datetime.fromisoformat(ra.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp() > now_ts
+        except Exception:
+            return True
+    return True
+
 custom = os.environ.get("HERDR_PLUGIN_STATE_DIR", "").strip()
 if custom:
     dirs = [Path(custom).expanduser()]
@@ -258,15 +323,26 @@ else:
         h / ".local/state/herdr/plugins/herdr-agent-quota",
         h / "Library/Application Support/dev.herdr.herdr-agent-quota",
     ]
+
+cfg_env = os.environ.get("CLAUDE_CONFIG_FILE", "").strip()
+if cfg_env:
+    claude_cfg = Path(cfg_env).expanduser()
+elif os.environ.get("FAKE_LOG"):
+    claude_cfg = None
+else:
+    claude_cfg = Path.home() / ".claude.json"
+
 thr = 10.0
+quota_disabled = False
 env_thr = os.environ.get("CLAUDE_LOW_QUOTA_THRESHOLD", "").strip()
 if env_thr:
     if env_thr.lower() in ("off", "false", "0", "none"):
-        sys.exit(0)
-    try:
-        thr = float(env_thr)
-    except ValueError:
-        pass
+        quota_disabled = True
+    else:
+        try:
+            thr = float(env_thr)
+        except ValueError:
+            pass
 else:
     for d in dirs:
         p = d / "low-quota-alert"
@@ -274,18 +350,89 @@ else:
             raw = p.read_text().strip()
         except OSError:
             continue
-        if not raw:
+        if not raw or raw.lower() in ("off", "false", "0", "none"):
+            # "off" in low-quota-alert only mutes the Herdr UI banner; keep thr=10.0
             continue
-        if raw.lower() in ("off", "false", "0", "none"):
-            sys.exit(0)
         try:
             thr = float(raw)
             break
         except ValueError:
             pass
+
 now_ts = int(time.time())
+low_quota_info = ""
+if not quota_disabled:
+    for d in dirs:
+        for name in ("claude-statusline.json", "claude.json", "claude-statusline.observation.json"):
+            p = d / name
+            try:
+                data = json.loads(p.read_text())
+            except Exception:
+                continue
+            snap = data.get("snapshot") if isinstance(data, dict) and isinstance(data.get("snapshot"), dict) else data
+            windows = snap.get("windows") if isinstance(snap, dict) else None
+            if not isinstance(windows, list) or not windows:
+                continue
+            rems = []
+            for w in windows:
+                if not isinstance(w, dict):
+                    continue
+                ra = w.get("resets_at")
+                if isinstance(ra, (int, float)) and 0 < ra <= now_ts:
+                    continue
+                rem = w.get("remaining_percent")
+                if rem is None and isinstance(w.get("used_percent"), (int, float)):
+                    rem = max(0.0, 100.0 - float(w["used_percent"]))
+                if isinstance(rem, (int, float)):
+                    rems.append((float(rem), str(w.get("kind") or "quota")))
+            if rems:
+                min_rem, kind = min(rems, key=lambda x: x[0])
+                if min_rem <= thr:
+                    low_quota_info = f"{min_rem:g}:{thr:g}:{kind}"
+                break
+        if low_quota_info:
+            break
+
+cloud_credit_str = ""
+if claude_cfg and claude_cfg.is_file():
+    try:
+        cdata = json.loads(claude_cfg.read_text())
+        util = (cdata.get("cachedUsageUtilization") or {}).get("utilization") or {}
+        if isinstance(util, dict):
+            credit_keys = ["iguana_necktie", "cinder_cove", "wattle_ember", "promo_credits", "omelette_promotional"]
+            best_d = 0.0
+            best_k = ""
+            for k in list(credit_keys) + [k for k in util.keys() if k not in credit_keys]:
+                v = util.get(k)
+                if not isinstance(v, dict) or "remaining_dollars" not in v:
+                    continue
+                if v.get("locked_reason"):
+                    continue
+                if not is_future_reset(v.get("resets_at"), now_ts):
+                    continue
+                rem_d = float(v.get("remaining_dollars") or 0.0)
+                if rem_d > best_d:
+                    best_d = rem_d
+                    best_k = k
+            if best_d > 0:
+                cloud_credit_str = f"{best_d:g}:{best_k}"
+            if not low_quota_info and not quota_disabled:
+                rems = []
+                for k, kind_name in (("five_hour", "5h"), ("seven_day", "weekly")):
+                    w = util.get(k)
+                    if isinstance(w, dict) and isinstance(w.get("utilization"), (int, float)):
+                        if is_future_reset(w.get("resets_at"), now_ts):
+                            rems.append((max(0.0, 100.0 - float(w["utilization"])), kind_name))
+                if rems:
+                    min_rem, kind = min(rems, key=lambda x: x[0])
+                    if min_rem <= thr:
+                        low_quota_info = f"{min_rem:g}:{thr:g}:{kind}"
+    except Exception:
+        pass
+
+codex_high_info = ""
 for d in dirs:
-    for name in ("claude-statusline.json", "claude.json", "claude-statusline.observation.json"):
+    for name in ("codex-app-server.json", "codex.json"):
         p = d / name
         try:
             data = json.loads(p.read_text())
@@ -295,7 +442,7 @@ for d in dirs:
         windows = snap.get("windows") if isinstance(snap, dict) else None
         if not isinstance(windows, list) or not windows:
             continue
-        rems = []
+        r5, rw = None, None
         for w in windows:
             if not isinstance(w, dict):
                 continue
@@ -306,34 +453,140 @@ for d in dirs:
             if rem is None and isinstance(w.get("used_percent"), (int, float)):
                 rem = max(0.0, 100.0 - float(w["used_percent"]))
             if isinstance(rem, (int, float)):
-                rems.append((float(rem), str(w.get("kind") or "quota")))
-        if rems:
-            min_rem, kind = min(rems, key=lambda x: x[0])
-            if min_rem <= thr:
-                print(f"{min_rem:g}:{thr:g}:{kind}")
-            sys.exit(0)
+                k = str(w.get("kind") or "")
+                if k in ("five_hour", "5h"):
+                    r5 = float(rem)
+                elif k in ("weekly", "7d", "seven_day"):
+                    rw = float(rem)
+        if r5 is not None and rw is not None:
+            if r5 >= 50.0 and rw >= 30.0:
+                codex_high_info = f"5h={r5:g}%,wk={rw:g}%"
+            break
+    if codex_high_info:
+        break
+
+jev_str = ""
+jev_mode = os.environ.get("JEV_ASSIST_MODE", "auto").strip().lower()
+jev_bin_env = os.environ.get("JEV_GATE_BIN", "").strip()
+run_jev = (jev_mode == "true") or (jev_mode == "auto" and (bool(jev_bin_env) or not os.environ.get("FAKE_LOG")))
+if run_jev:
+    jev_bin = Path(jev_bin_env) if jev_bin_env else (Path.home() / "ps-skills" / "bin" / "jev-gate")
+    if jev_bin.is_file():
+        doc_path = os.environ.get("HANDOFF_DOC_FILE", "")
+        custom_p = os.environ.get("HANDOFF_CUSTOM_PROMPT", "")
+        text_parts = []
+        if custom_p:
+            text_parts.append(custom_p)
+        if doc_path and Path(doc_path).is_file():
+            try:
+                text_parts.append(Path(doc_path).read_text(errors="ignore")[:8000])
+            except Exception:
+                pass
+        full_text = "\n\n".join(text_parts).strip()
+        if full_text:
+            py_exe = "/opt/homebrew/bin/python3" if Path("/opt/homebrew/bin/python3").is_file() else sys.executable
+            cmd = [str(jev_bin), "classify-task", "--prompt", full_text] if jev_bin_env else [py_exe, str(jev_bin), "classify-task", "--prompt", full_text]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    jdata = json.loads(proc.stdout.strip())
+                    if isinstance(jdata, dict) and "raw_route" in jdata and not jdata.get("fallback"):
+                        raw_r = str(jdata.get("raw_route") or "")
+                        eff_r = str(jdata.get("route") or raw_r)
+                        conf = float(jdata.get("route_confidence") or 0.0)
+                        rev_p = float(jdata.get("is_reviewer_prob") or 0.0)
+                        risk_p = float(jdata.get("risky_surface_prob") or 0.0)
+                        comp = float(jdata.get("complexity_score") or 0.0)
+                        if raw_r in ("agy_argon", "claude_opus") or rev_p >= 0.50 or risk_p >= 0.35:
+                            jtier = "plan"
+                        else:
+                            jtier = "code"
+                        jev_str = f"{jtier}:{raw_r}:{conf:.2f}:{rev_p:.2f}:{risk_p:.2f}:{comp:.2f}"
+            except Exception:
+                pass
+
+print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}")
 ' 2>/dev/null || true)
-  if [[ -n "$LOW_QUOTA_INFO" ]]; then
-    AGENT_KIND="agy"
-    YOLO=true
-    if [[ "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-sonnet* ]]; then
-      CLAUDE_MODEL="gemini-3.8-flash-high"
-    elif [[ "$CLAUDE_MODEL" == "opus" || "$CLAUDE_MODEL" == claude-opus* ]]; then
-      CLAUDE_MODEL="gemini-4-argon-medium"
-    elif [[ -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == claude-* ]]; then
-      if [[ "$HANDOFF_MODE" == "code" ]]; then
-        CLAUDE_MODEL="gemini-3.8-flash-high"
+
+  IFS='|' read -r LOW_QUOTA_INFO CLOUD_CREDIT_INFO CODEX_HIGH_INFO JEV_INFO <<<"$QUOTA_PROBE_OUT"
+  if [[ -n "$CLOUD_CREDIT_INFO" ]]; then
+    CLOUD_CREDIT_DOLLARS="${CLOUD_CREDIT_INFO%%:*}"
+    CLOUD_CREDIT_BUCKET="${CLOUD_CREDIT_INFO#*:}"
+  fi
+
+  if [[ -n "$JEV_INFO" ]]; then
+    IFS=':' read -r JEV_TIER JEV_RAW_ROUTE JEV_CONF JEV_REV JEV_RISK JEV_COMP <<<"$JEV_INFO"
+    if [[ "$JEV_TIER" == "plan" && "$HANDOFF_MODE" != "plan" ]]; then
+      HANDOFF_MODE="plan"
+      echo "🧭 Jev System-1 assist: route=$JEV_RAW_ROUTE (conf=$JEV_CONF, rev=$JEV_REV, risk=$JEV_RISK, complexity=$JEV_COMP) -> escalating mode to plan"
+    elif [[ "$JEV_TIER" == "code" && -z "$HANDOFF_MODE" ]]; then
+      HANDOFF_MODE="code"
+      echo "🧭 Jev System-1 assist: route=$JEV_RAW_ROUTE (conf=$JEV_CONF, rev=$JEV_REV, risk=$JEV_RISK, complexity=$JEV_COMP) -> auto-selecting mode=code"
+    else
+      echo "🧭 Jev System-1 assist: route=$JEV_RAW_ROUTE (conf=$JEV_CONF, rev=$JEV_REV, risk=$JEV_RISK, complexity=$JEV_COMP) -> confirmed mode=${HANDOFF_MODE:-$JEV_TIER}"
+    fi
+  fi
+
+  if [[ "$AGENT_KIND" == "claude" ]]; then
+    if [[ "$CLAUDE_CLOUD" == "true" || ( "$CLAUDE_CLOUD" == "auto" && -n "$CLOUD_CREDIT_DOLLARS" ) ]]; then
+      CLAUDE_CLOUD="true"
+      if [[ "$HANDOFF_MODE" == "plan" && -z "$CLAUDE_MODEL" && -n "$JEV_INFO" ]]; then
+        CLAUDE_MODEL="opus"
+      fi
+      if [[ "$HANDOFF_MODE" == "code" && -n "$CODEX_HIGH_INFO" ]]; then
+        FALLBACK_KIND="codex"
+        FALLBACK_MODEL="gpt-6.1-terra"
+      elif [[ "$HANDOFF_MODE" == "code" ]]; then
+        FALLBACK_KIND="agy"
+        FALLBACK_MODEL="gemini-3.8-flash-high"
       else
-        CLAUDE_MODEL="gemini-4-argon-medium"
+        FALLBACK_KIND="agy"
+        FALLBACK_MODEL="gemini-4-argon-medium"
+      fi
+      if [[ -n "$LOW_QUOTA_INFO" && -n "$CLOUD_CREDIT_DOLLARS" ]]; then
+        echo "☁️  Claude quota low ($LOW_QUOTA_INFO), free Cloud Session Credit available (\$$CLOUD_CREDIT_DOLLARS left in $CLOUD_CREDIT_BUCKET) — Auto-switching handoff to claude --cloud (fallback: $FALLBACK_KIND/$FALLBACK_MODEL)"
+      elif [[ -n "$CLOUD_CREDIT_DOLLARS" ]]; then
+        echo "☁️  Free Claude Cloud Session Credit available (\$$CLOUD_CREDIT_DOLLARS left in $CLOUD_CREDIT_BUCKET) — Auto-routing handoff to claude --cloud (fallback: $FALLBACK_KIND/$FALLBACK_MODEL)"
+      else
+        echo "☁️  Routing handoff to claude --cloud (fallback: $FALLBACK_KIND/$FALLBACK_MODEL)"
+      fi
+    elif [[ -n "$LOW_QUOTA_INFO" && "$QUOTA_SWITCH" != "false" && "$QUOTA_SWITCH" != "0" ]]; then
+      if [[ "$HANDOFF_MODE" == "code" && -n "$CODEX_HIGH_INFO" && ( -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-* ) ]]; then
+        AGENT_KIND="codex"
+        YOLO=true
+        CLAUDE_MODEL="gpt-6.1-terra"
+        echo "⚡ Claude quota low ($LOW_QUOTA_INFO) & Codex quota high ($CODEX_HIGH_INFO) — Auto-switching code handoff to codex (yolo, model: $CLAUDE_MODEL, effort: $CODEX_EFFORT)"
+      else
+        AGENT_KIND="agy"
+        YOLO=true
+        if [[ "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-sonnet* ]]; then
+          CLAUDE_MODEL="gemini-3.8-flash-high"
+        elif [[ "$CLAUDE_MODEL" == "opus" || "$CLAUDE_MODEL" == claude-opus* ]]; then
+          CLAUDE_MODEL="gemini-4-argon-medium"
+        elif [[ -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == claude-* ]]; then
+          if [[ "$HANDOFF_MODE" == "code" ]]; then
+            CLAUDE_MODEL="gemini-3.8-flash-high"
+          else
+            CLAUDE_MODEL="gemini-4-argon-medium"
+          fi
+        fi
+        echo "⚡ Claude quota low ($LOW_QUOTA_INFO) — Auto-switching handoff to agy (yolo, model: $CLAUDE_MODEL)"
       fi
     fi
-    echo "⚡ Claude quota low ($LOW_QUOTA_INFO) — Auto-switching handoff to agy (yolo, model: $CLAUDE_MODEL)"
+  elif [[ ( "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ) && "$QUOTA_SWITCH" != "false" && "$QUOTA_SWITCH" != "0" ]]; then
+    if [[ "$HANDOFF_MODE" == "code" && -n "$CODEX_HIGH_INFO" && -n "$JEV_INFO" && -z "$CLAUDE_MODEL" ]]; then
+      AGENT_KIND="codex"
+      YOLO=true
+      CLAUDE_MODEL="gpt-6.1-terra"
+      echo "⚡ Jev classified as coding & Codex quota high ($CODEX_HIGH_INFO) — Auto-switching handoff to codex (yolo, model: $CLAUDE_MODEL, effort: $CODEX_EFFORT)"
+    fi
   fi
 fi
 
-# Model routing for claude and agy handoffs:
+# Model routing for claude, codex, and agy handoffs:
 # - claude: code -> sonnet, plan -> default
-# - agy/gemini: code -> gemini-4-argon-medium, plan -> gemini-4-argon-high, --model argon -> gemini-4-argon-high
+# - codex: default -> gpt-6.1-terra (effort: medium)
+# - agy/gemini: code -> gemini-3.8-flash-high, plan -> gemini-4-argon-medium, --model argon -> gemini-4-argon-medium
 # An explicit --model always wins.
 if [[ "$AGENT_KIND" == "claude" ]]; then
   case "$HANDOFF_MODE" in
@@ -342,6 +595,10 @@ if [[ "$AGENT_KIND" == "claude" ]]; then
   esac
   if [[ -z "$HANDOFF_MODE" && -z "$CLAUDE_MODEL" ]]; then
     echo "⚠️  No --mode given; claude will start on the default model. Pass --mode code for Sonnet." >&2
+  fi
+elif [[ "$AGENT_KIND" == "codex" ]]; then
+  if [[ -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-* ]]; then
+    CLAUDE_MODEL="gpt-6.1-terra"
   fi
 elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
   if [[ "$CLAUDE_MODEL" == "argon" || "$CLAUDE_MODEL" == "opus" || "$CLAUDE_MODEL" == claude-opus* ]]; then
@@ -528,6 +785,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
   echo "DRY_RUN=true"
   echo "RESOLVED_MUX=$RESOLVED_MUX"
   echo "AGENT_KIND=$AGENT_KIND"
+  echo "CLAUDE_CLOUD=$CLAUDE_CLOUD"
+  echo "CLOUD_CREDIT_DOLLARS=${CLOUD_CREDIT_DOLLARS:-0}"
+  echo "RESOLVED_MODEL=${CLAUDE_MODEL:-default}"
   echo "TARGET_CWD=$TARGET_CWD"
   echo "HANDOFF_PATH=$HANDOFF_PATH"
   echo "PROMPT_FILE=$PROMPT_FILE"
@@ -755,8 +1015,26 @@ QUOTED_PROMPT_FILE=$(printf '%q' "$PROMPT_FILE")
 if [[ "$AGENT_KIND" == "opencode" ]]; then
   LAUNCH_CMD="opencode --prompt \"\$(cat $QUOTED_PROMPT_FILE)\""
 elif [[ "$AGENT_KIND" == "claude" ]]; then
-  echo "🧠 Claude model: ${CLAUDE_MODEL:-default}"
-  LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $(printf '%q' "$TAB_LABEL") \"\$(cat $QUOTED_PROMPT_FILE)\""
+  if [[ "$CLAUDE_CLOUD" == "true" ]]; then
+    echo "☁️  Claude Cloud model: ${CLAUDE_MODEL:-default} (credit: \$${CLOUD_CREDIT_DOLLARS:-auto})"
+    QUOTED_CLAIM_DIR=$(printf '%q' "$CLAIM_DIR")
+    if [[ "${FALLBACK_KIND:-agy}" == "codex" ]]; then
+      FALLBACK_CMD="codex --dangerously-bypass-approvals-and-sandbox -c model=\"${FALLBACK_MODEL:-gpt-6.1-terra}\" -c model_reasoning_effort=\"${CODEX_EFFORT:-medium}\" \"\$(cat $QUOTED_PROMPT_FILE)\""
+    else
+      FALLBACK_CMD="agy ${YOLO_FLAG}--model ${FALLBACK_MODEL:-gemini-4-argon-medium} -i \"\$(cat $QUOTED_PROMPT_FILE)\""
+    fi
+    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $(printf '%q' "$TAB_LABEL") --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\"; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-argon-medium})...\" >&2; $FALLBACK_CMD; fi"
+  else
+    echo "🧠 Claude model: ${CLAUDE_MODEL:-default}"
+    LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $(printf '%q' "$TAB_LABEL") \"\$(cat $QUOTED_PROMPT_FILE)\""
+  fi
+elif [[ "$AGENT_KIND" == "codex" ]]; then
+  CODEX_YOLO_FLAG=""
+  if [[ "$YOLO" == "true" ]]; then
+    CODEX_YOLO_FLAG="--dangerously-bypass-approvals-and-sandbox "
+  fi
+  echo "🧠 Codex model: ${CLAUDE_MODEL:-gpt-6.1-terra} (effort: ${CODEX_EFFORT:-medium})"
+  LAUNCH_CMD="codex ${CODEX_YOLO_FLAG}-c model=\"${CLAUDE_MODEL:-gpt-6.1-terra}\" -c model_reasoning_effort=\"${CODEX_EFFORT:-medium}\" \"\$(cat $QUOTED_PROMPT_FILE)\""
 elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
   echo "🧠 AGY model: ${CLAUDE_MODEL:-default}"
   LAUNCH_CMD="agy ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}-i \"\$(cat $QUOTED_PROMPT_FILE)\""
@@ -769,7 +1047,7 @@ if ! herdr pane run "$ROOT_PANE" "$LAUNCH_CMD"; then
   exit 1
 fi
 echo "✨ Agent launched INTERACTIVELY in Herdr tab $TAB_ID with handoff context."
-if [[ "$AGENT_KIND" == "claude" || "$AGENT_KIND" == "opencode" || "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
+if [[ "$AGENT_KIND" == "claude" || "$AGENT_KIND" == "codex" || "$AGENT_KIND" == "opencode" || "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
   finish_handoff
   exit $?
 fi
