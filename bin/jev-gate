@@ -21,6 +21,13 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    import typesafe_sdk as _ts_probe  # noqa: F401
+except ImportError:
+    _hb_py = "/opt/homebrew/bin/python3"
+    if os.path.exists(_hb_py) and os.path.realpath(sys.executable) != os.path.realpath(_hb_py):
+        os.execv(_hb_py, [_hb_py, __file__, *sys.argv[1:]])
+
 
 def _load_api_key() -> str:
     key = os.environ.get("TYPESAFE_API_KEY", "").strip()

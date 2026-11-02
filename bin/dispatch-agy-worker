@@ -1114,6 +1114,7 @@ WORKER_BUDGET_RULES = (
     "Worker budget (token economy):\n"
     "- Never poll: no `sleep`, `until`/`while` wait loops, log tailing or status re-checks. If you must wait on a "
     "background job, run ONE blocking wait command and continue when it returns.\n"
+    "- If the repo has a `graft/` directory, run `graft ask \"<query>\" --source` or `graft skeleton <file>` before grepping or reading whole files.\n"
     "- Read excerpts, not whole documents: `grep -n` first, then bounded line ranges (<=250 lines). At most 2 screenshots per task.\n"
     "- Budget: finish within about 120 tool calls. If the task is not done by then, stop, commit what is green, and hand back "
     "a partial report with the exact next step instead of continuing.\n"
@@ -1122,25 +1123,64 @@ WORKER_BUDGET_RULES = (
 )
 
 
+def prefetch_graft_context(target_dir, task_prompt, timeout=2.0, max_lines=60):
+    """
+    When target_dir has a graft/ index and `graft` CLI is installed, pre-fetches top ranked
+    code spans in ~50ms ($0, 0 LLM turns) so the worker starts Turn 1 with exact file:line context.
+    """
+    if not target_dir or not task_prompt or os.environ.get("DISPATCH_GRAFT_PREFETCH", "1") == "0":
+        return ""
+    if "FAKE_AGY_PLAN" in os.environ:
+        return ""
+    try:
+        graft_dir = Path(target_dir) / "graft"
+        if not graft_dir.is_dir():
+            return ""
+        graft_bin = shutil.which("graft")
+        if not graft_bin:
+            return ""
+        first_line = next((ln.strip() for ln in str(task_prompt).splitlines() if ln.strip()), "")
+        query = first_line[:200]
+        if not query:
+            return ""
+        res = subprocess.run(
+            [graft_bin, "ask", query, "--source"],
+            cwd=str(target_dir),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if res.returncode != 0 or not res.stdout.strip():
+            return ""
+        lines = res.stdout.strip().splitlines()
+        snippet = "\n".join(lines[:max_lines])
+        if len(lines) > max_lines:
+            snippet += f"\n... [+{len(lines) - max_lines} more lines; run `graft ask` for more]"
+        return f"\nPre-fetched Graft Context (`graft ask` top spans):\n{snippet}\n"
+    except Exception:
+        return ""
+
+
 def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_thinking=False,
-                         verify_cmd=None, acceptance=None):
+                         verify_cmd=None, acceptance=None, target_dir=None):
     """
     Wraps task prompt with standard standing rules:
     - Test-Driven Development (TDD) (for implementation) or Rigorous Reasoning (for thinking)
     - Make new commits only (never git commit --amend)
     - Preserve protected config files
-    - Scoped Verification (targeted tests only)
-    - Context bundling and output file destination
+    - Scoped Verification (targeted tests only; dispatcher runs verify_cmd outside the LLM)
+    - Context bundling, optional graft pre-seed, and output file destination
     """
     if verify_cmd:
         gate_rule = (
-            f"Before declaring completion, run the repo's gate command `{verify_cmd}` from the repo root and paste its final "
-            "lines in your reply. The dispatcher re-runs this exact command after you exit and will NOT merge your work if it fails."
+            f"Run fast targeted tests for your touched files and paste its final lines in your reply. "
+            f"The dispatcher automatically runs `{verify_cmd}` from the repo root after you exit and will NOT merge your work "
+            f"if it fails (only run the full `{verify_cmd}` yourself when verifying cross-cutting changes)."
         )
     else:
         gate_rule = (
-            "Before declaring completion, run the repo's full gate or test command (including end-to-end / UI suites when "
-            "your change touches them) and paste its final lines in your reply."
+            "Before declaring completion, run the repo's targeted test command for your touched files "
+            "and paste its final lines in your reply."
         )
 
     if is_thinking:
@@ -1185,7 +1225,9 @@ def wrap_prompt_contract(task_prompt, context_files=None, output_file=None, is_t
             f"{acceptance.strip()}\n"
         )
 
-    return f"{contract_header}{context_section}{output_section}{acceptance_section}\nTask Brief:\n{task_prompt.strip()}"
+    graft_section = prefetch_graft_context(target_dir, task_prompt) if target_dir else ""
+
+    return f"{contract_header}{context_section}{graft_section}{output_section}{acceptance_section}\nTask Brief:\n{task_prompt.strip()}"
 
 
 def inspect_git_changes(target_dir, initial_head=None, baseline=None):
@@ -2188,7 +2230,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
                 code, err = 1, f"{err}\nFAILED: {chosen_agent} result status {result.get('status')}.".strip()
         return (code, out, err, timed_out), stream
 
-    def _invoke_worker(prompt_text):
+    def _invoke_worker(prompt_text, conversation_id=None):
         wrapped_task = wrap_prompt_contract(
             prompt_text,
             context_files=context_files,
@@ -2196,13 +2238,15 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
             is_thinking=is_thinking,
             verify_cmd=verify_cmd,
             acceptance=opts.get("acceptance"),
+            target_dir=target_dir,
         )
         resolved_effort = resolve_agent_effort(chosen_agent, effort, is_thinking=is_thinking)
-        cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=output_file, effort=resolved_effort)
+        cmd = build_agent_command(chosen_agent, chosen_model, wrapped_task, target_dir, output_file=output_file,
+                                  effort=resolved_effort, conversation_id=conversation_id)
         result, stream = _run_agent(cmd, timeout_seconds)
         if stream is None:
             return result
-        cid = stream.get("conversation_id")
+        cid = stream.get("conversation_id") or conversation_id
         if not (result[3] and cid and not resume_used and os.environ.get("DISPATCH_AGY_RESUME", "1") != "0"):
             return result
         # One automatic resume per job, however many times the worker is re-invoked (verify retry included).
@@ -2249,7 +2293,9 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
             if ok:
                 break
             if attempt == 1:
-                print(f"[Verify] `{verify_cmd}` failed; re-invoking {chosen_agent} once with the failure output.", file=sys.stderr)
+                warm_cid = info.get("conversation_id") if (chosen_agent == "agy" and os.environ.get("DISPATCH_AGY_RESUME", "1") != "0") else None
+                print(f"[Verify] `{verify_cmd}` failed; re-invoking {chosen_agent} once with the failure output"
+                      f"{f' (warm conversation {warm_cid})' if warm_cid else ''}.", file=sys.stderr)
                 retry_prompt = (
                     f"{task_text.strip()}\n\n"
                     f"VERIFY FAILED: your previous attempt at the task above exited cleanly, but the dispatcher's verify "
@@ -2257,7 +2303,7 @@ def run_single_task(task_text, target_dir, chosen_agent, chosen_model, timeout_s
                     f"(do not weaken, skip, or delete the check), re-run `{verify_cmd}` yourself, and only then finish.\n"
                     f"Last lines of the verify output:\n{verify_tail}"
                 )
-                exit_code, stdout, stderr, is_timeout = _invoke_worker(retry_prompt)
+                exit_code, stdout, stderr, is_timeout = _invoke_worker(retry_prompt, conversation_id=warm_cid)
                 exit_code = _own_exit(exit_code)
                 if exit_code != 0:
                     break
@@ -2648,6 +2694,7 @@ def spawn_detached_process(job_id, cwd, log_file, job_dir=DEFAULT_JOB_DIR, scrip
         proc = subprocess.Popen(
             [sys.executable, sp, "--internal-run-job", job_id, "--job-dir", job_dir],
             cwd=cwd,
+            stdin=subprocess.DEVNULL,
             stdout=lf,
             stderr=subprocess.STDOUT,
             start_new_session=True,

@@ -3136,6 +3136,85 @@ class ScoutingRoutingTests(unittest.TestCase):
         self.assertIn("Would dispatch to agy with gemini-3.8-flash-high (effort: medium)", proc.stdout)
         self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
 
+    def test_graft_prefetch_injects_context_when_graft_dir_exists(self):
+        repo = self.tmp / "graft-repo"
+        (repo / "graft").mkdir(parents=True)
+        fake_bin = self.tmp / "fakebin"
+        fake_bin.mkdir(exist_ok=True)
+        fake_graft = fake_bin / "graft"
+        fake_graft.write_text("#!/bin/sh\necho 'node: bin/dispatch-agy-worker.md (lines 362-442)'\n")
+        fake_graft.chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}" }, clear=False):
+            os.environ.pop("FAKE_AGY_PLAN", None)
+            wrapped = dispatch_mod.wrap_prompt_contract(
+                "Update check_quota logic",
+                verify_cmd="./scripts/precheck.sh",
+                target_dir=str(repo),
+            )
+        self.assertIn("Pre-fetched Graft Context", wrapped)
+        self.assertIn("node: bin/dispatch-agy-worker.md (lines 362-442)", wrapped)
+        self.assertIn("graft ask", wrapped)
+
+    def test_agent_dispatch_reminder_hook_scouting_and_codex_waterfall(self):
+        hook = REPO_ROOT / "skills" / "agy-worker" / "hooks" / "agent-dispatch-reminder.sh"
+        # 1. Scouting subagent brief -> recommends Haiku / --scout with low/medium effort
+        scout_payload = json.dumps({
+            "tool_name": "Agent",
+            "tool_input": {
+                "subagent_type": "general-purpose",
+                "description": "Scout quota files",
+                "prompt": "Read-only scouting: locate all files referencing check_quota and do not edit any files"
+            }
+        })
+        res_scout = subprocess.run(
+            ["bash", str(hook)],
+            input=scout_payload,
+            env=self._env(JEV_DISPATCH_GATE="off"),
+            capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(res_scout.returncode, 0)
+        self.assertIn("dispatch-worker --scout", res_scout.stdout)
+        self.assertIn("graft ask", res_scout.stdout)
+
+        # 2. Bulk mechanical work when AGY 7d < 30% (20%) and Codex 5h=95%, 7d=80% (>=60%) -> recommends Codex gpt-6.1-terra medium
+        bulk_payload = json.dumps({
+            "tool_name": "Agent",
+            "tool_input": {
+                "subagent_type": "general-purpose",
+                "description": "Implement task 1",
+                "prompt": "Implement task 1 across all 6 files in the package and run the full test suite"
+            }
+        })
+        res_bulk = subprocess.run(
+            ["bash", str(hook)],
+            input=bulk_payload,
+            env=self._env(JEV_DISPATCH_GATE="off"),
+            capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(res_bulk.returncode, 0)
+        self.assertIn("dispatch-worker --agent codex --model gpt-6.1-terra --effort medium", res_bulk.stdout)
+
+
+class WarmVerifyRetryTests(FakeAgyBase):
+    def test_verify_failure_reinvokes_agy_with_warm_conversation_id(self):
+        marker = self.repo / "ok"
+        self._plan(
+            [INIT, ["write", "first.txt", "1"], RESULT("first pass")],
+            [INIT, ["write", "ok", "1"], RESULT("fixed on warm retry")],
+        )
+        (code, out, _err, _files, _diff), info = self._run(
+            timeout=60,
+            verify_opts={"verify_cmd": f"test -f '{marker}'"},
+        )
+        self.assertEqual(code, 0)
+        self.assertIs(info["verified"], True)
+        self.assertEqual(info["verify_attempts"], 2)
+        calls = self._calls()
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("--conversation", calls[0])
+        self.assertIn("--conversation", calls[1])
+        self.assertEqual(calls[1][calls[1].index("--conversation") + 1], "c-1")
+
 
 if __name__ == "__main__":
     unittest.main()
