@@ -300,11 +300,126 @@ def _parse_resets_at(val):
 
 AGY_REFRESH_TIMEOUT_SECONDS = 20
 AGY_REFRESH_HINT = "to refresh by hand, run `agy` in a terminal for a few seconds, quit it, and retry"
+CODEX_REFRESH_TIMEOUT_SECONDS = 10
+CODEX_REFRESH_HINT = "to refresh by hand, run `codex` in a terminal or check `codex app-server`"
 
 
 def _is_live_agy_observation(path):
     """True only for the real herdr observation file, so test state files never spawn agy."""
     return os.path.realpath(path) == os.path.realpath(DEFAULT_AGY_STATE)
+
+
+def _is_live_codex_observation(path):
+    """True only for the real herdr codex-app-server.json file, so test state files never spawn codex."""
+    return os.path.realpath(path) == os.path.realpath(DEFAULT_CODEX_STATE)
+
+
+def refresh_codex_observation(target_file, timeout=CODEX_REFRESH_TIMEOUT_SECONDS):
+    """Queries `codex app-server` via JSON-RPC `account/rateLimits/read` (0 tokens spent)
+    and atomically updates `codex-app-server.json` in place. Returns (refreshed, detail).
+    """
+    codex_bin = shutil.which("codex") or "/usr/local/bin/codex"
+    if not os.path.exists(codex_bin):
+        return False, "codex executable not found"
+    try:
+        proc = subprocess.Popen(
+            [codex_bin, "app-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as e:
+        return False, f"could not start codex app-server: {e}"
+
+    reqs = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "dispatch-worker-quota", "version": "1.0.0"}, "capabilities": {}}},
+        {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": {}},
+    ]
+    rate_limits = None
+    deadline = time.monotonic() + timeout
+    try:
+        for r in reqs:
+            proc.stdin.write(json.dumps(r) + "\n")
+        proc.stdin.flush()
+        while time.monotonic() < deadline and proc.poll() is None:
+            ready, _, _ = select.select([proc.stdout], [], [], 0.5)
+            if not ready:
+                continue
+            line = proc.stdout.readline()
+            if not line:
+                break
+            try:
+                msg = json.loads(line)
+            except Exception:
+                continue
+            if msg.get("id") == 2 and isinstance(msg.get("result"), dict):
+                rl = (msg["result"].get("rateLimitsByLimitId") or {}).get("codex") or msg["result"].get("rateLimits")
+                if isinstance(rl, dict) and isinstance(rl.get("primary"), dict) and isinstance(rl.get("secondary"), dict):
+                    rate_limits = rl
+                    break
+    except OSError:
+        pass
+    finally:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if proc.poll() is not None:
+                break
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, sig)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=2)
+
+    if not rate_limits:
+        emit_event("quota_refresh", agent="codex", ok=False)
+        return False, f"no rateLimits response from codex app-server within {timeout}s"
+
+    p_used = float(rate_limits["primary"].get("usedPercent", 0.0))
+    s_used = float(rate_limits["secondary"].get("usedPercent", 0.0))
+    p_resets = rate_limits["primary"].get("resetsAt")
+    s_resets = rate_limits["secondary"].get("resetsAt")
+    now_unix = int(time.time())
+
+    existing = {}
+    try:
+        if os.path.exists(target_file):
+            with open(target_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+    except Exception:
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+
+    existing["provider"] = "codex"
+    existing["source"] = "codex-app-server"
+    existing["fetched_at_unix"] = now_unix
+    existing["windows"] = [
+        {
+            "kind": "five_hour",
+            "used_percent": p_used,
+            "remaining_percent": max(0.0, 100.0 - p_used),
+            "resets_at": p_resets,
+        },
+        {
+            "kind": "weekly",
+            "used_percent": s_used,
+            "remaining_percent": max(0.0, 100.0 - s_used),
+            "resets_at": s_resets,
+        },
+    ]
+    try:
+        Path(target_file).parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = f"{target_file}.tmp.{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2)
+        os.replace(tmp_path, target_file)
+    except OSError as e:
+        emit_event("quota_refresh", agent="codex", ok=False)
+        return False, f"failed writing {target_file}: {e}"
+
+    emit_event("quota_refresh", agent="codex", ok=True)
+    return True, "refreshed"
 
 
 def refresh_agy_observation(target_file, timeout=AGY_REFRESH_TIMEOUT_SECONDS):
@@ -482,6 +597,15 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
             refreshed, detail = refresh_agy_observation(target_file)
             if not refreshed:
                 refresh_note = f" [auto-refresh failed: {detail}; {AGY_REFRESH_HINT}]"
+    elif agent == "codex" and current_time is None and _is_live_codex_observation(target_file):
+        try:
+            age_minutes = int((time.time() - os.path.getmtime(target_file)) / 60)
+        except OSError:
+            age_minutes = 0
+        if age_minutes > STALE_OBSERVATION_MINUTES:
+            refreshed, detail = refresh_codex_observation(target_file)
+            if not refreshed:
+                refresh_note = f" [auto-refresh failed: {detail}; {CODEX_REFRESH_HINT}]"
 
     try:
         with open(target_file, "r", encoding="utf-8") as f:
