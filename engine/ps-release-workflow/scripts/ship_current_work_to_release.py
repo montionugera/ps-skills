@@ -24,6 +24,7 @@ from lib.backlog_paths import (
 from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped, update_entry
 from lib.epic import epic_children, epic_completeness, epic_folder_path, try_begin_verification
 from lib.epic_gate import run_and_record
+from lib.design_gate import check_design_artifacts, ui_files_changed
 from lib import gate_cache
 from lib.git_ops import GitError, _run as git_run, branch_exists, commit_all, is_dirty
 from lib.gate_lock import gate_slot
@@ -140,6 +141,7 @@ def ship_current_work(
     worktree: Path,
     *,
     skip_readiness: bool = False,
+    skip_design_gate: bool = False,
     no_sync_main: bool = False,
     teardown: bool = False,
 ) -> dict:
@@ -197,6 +199,27 @@ def ship_current_work(
                 raise FeatureNotReadyError(
                     f"Feature {feature_id} cannot be shipped: spec is not ready:\n"
                     + "\n".join(f"  - {r}" for r in res.reasons)
+                )
+
+    if skip_design_gate:
+        print("⚠️ Design gate SKIPPED (--skip-design-gate)", file=sys.stderr)
+    elif state.get("design_gate") is not False:
+        feat_entry = find_entry(get_backlog_catalog_path(repo, "refined"), feature_id)
+        if not feat_entry:
+            print(f"⚠️ Design gate skipped: {feature_id} missing from catalog", file=sys.stderr)
+        else:
+            ui_files = ui_files_changed(worktree, release_branch)
+            feature_dir = (worktree / ".claude" / "refined_backlog" /
+                           f"{feature_id}-{slugify(feat_entry['title'])}")
+            missing = check_design_artifacts(feature_dir, ui_files)
+            if missing:
+                raise FeatureNotReadyError(
+                    f"Feature {feature_id} cannot be shipped: UI files changed: "
+                    + ", ".join(ui_files[:10])
+                    + (f" (and {len(ui_files) - 10} more)" if len(ui_files) > 10 else "")
+                    + "\nMissing design artifacts: " + ", ".join(missing)
+                    + "\nrun the impeccable skill (shape -> design-brief.md, critique -> critique.md) "
+                      "or pass --skip-design-gate with a reason"
                 )
 
     feat_branch = f"feat/{feature_id}"
@@ -378,6 +401,8 @@ def main() -> int:
                         "deploy once after the burst instead of racing rebuilds)")
     p.add_argument("--skip-readiness", action="store_true",
                    help="skip spec readiness check (for legacy migrations only)")
+    p.add_argument("--skip-design-gate", action="store_true",
+                   help="skip the design gate (provide a reason)")
     p.add_argument("--no-sync-main", action="store_true", dest="no_sync_main",
                    help="EMERGENCY BYPASS: do not absorb main (hotfixes) into release/<v> "
                         "before merging; the release may then lag main until psrw sync-main")
@@ -393,6 +418,7 @@ def main() -> int:
     cwd = Path.cwd()
     try:
         result = ship_current_work(cwd, skip_readiness=args.skip_readiness,
+                                   skip_design_gate=args.skip_design_gate,
                                    no_sync_main=args.no_sync_main)
     except (DirtyTreeError, GateFailedError, NotInFeatureWorktreeError,
             NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,

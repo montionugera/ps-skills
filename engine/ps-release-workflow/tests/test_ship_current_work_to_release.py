@@ -843,3 +843,38 @@ def test_ship_refuses_a_missing_feature_branch_before_gate1(
         ship_current_work(wt)
     assert f"feat/{feat['id']} does not exist" in str(ei.value)
     assert not sentinel.exists()
+
+
+@pytest.mark.parametrize("mode", ["refuse", "artifacts", "skip", "config"])
+def test_design_gate_ship(tmp_repo_with_release: Path, fixed_owner: str, mode: str, capsys):
+    from scripts.ship_current_work_to_release import FeatureNotReadyError
+    from lib.slug import slugify
+
+    feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
+    wt = Path(claim["worktree"])
+    (wt / "screen.tsx").write_text("export default 1\n")
+    if mode == "artifacts":
+        folder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-{slugify(feat['title'])}"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "design-brief.md").write_text("brief")
+        (folder / "critique.md").write_text("critique")
+    if mode == "config":
+        config = tmp_repo_with_release / ".claude" / "worktrees" / "_release" / ".release.json"
+        state = json.loads(config.read_text())
+        state["design_gate"] = False
+        config.write_text(json.dumps(state, indent=2) + "\n")
+        subprocess.run(["git", "add", ".release.json"], cwd=config.parent, check=True)
+        subprocess.run(["git", "commit", "-m", "disable design gate"], cwd=config.parent, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-f", "screen.tsx"], cwd=wt, check=True)
+    if mode == "artifacts":
+        subprocess.run(["git", "add", "-f", str(folder.relative_to(wt))], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-m", "UI change"], cwd=wt, check=True, capture_output=True)
+    if mode == "refuse":
+        with pytest.raises(FeatureNotReadyError, match="screen.tsx") as error:
+            ship_current_work(wt)
+        assert "design-brief.md" in str(error.value) and "critique.md" in str(error.value)
+    else:
+        ship_current_work(wt, skip_design_gate=(mode == "skip"))
+        assert (tmp_repo_with_release / ".claude" / "worktrees" / "_release" / "screen.tsx").exists()
+        if mode == "skip":
+            assert "Design gate SKIPPED (--skip-design-gate)" in capsys.readouterr().err
