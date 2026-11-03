@@ -284,6 +284,29 @@ class TestWindowRollover(unittest.TestCase):
         self.assertFalse(eligible)
         refresh.assert_not_called()
 
+    def test_stale_live_codex_observation_is_refreshed_before_deciding(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+
+        def refresh(path):
+            self._write_healthy_state(0, time.time())
+            return True, "refreshed"
+
+        with mock.patch.object(dispatch_mod, "DEFAULT_CODEX_STATE", str(self.state_file)), \
+                mock.patch.object(dispatch_mod, "refresh_codex_observation", refresh):
+            eligible, _r5, _rw, msg = dispatch_mod.check_quota("codex", str(self.state_file), min_5h=30.0, min_weekly=10.0)
+        self.assertTrue(eligible)
+        self.assertNotIn("stale", msg)
+
+    def test_failed_codex_refresh_fails_closed_and_names_hint(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+        with mock.patch.object(dispatch_mod, "DEFAULT_CODEX_STATE", str(self.state_file)), \
+                mock.patch.object(dispatch_mod, "refresh_codex_observation", mock.Mock(return_value=(False, "rpc timeout"))):
+            eligible, _r5, _rw, msg = dispatch_mod.check_quota("codex", str(self.state_file), min_5h=30.0, min_weekly=10.0)
+        self.assertFalse(eligible)
+        self.assertIn("[stale: observation", msg)
+        self.assertIn("rpc timeout", msg)
+        self.assertIn("codex", msg)
+
 
 class TestAgyObservationRefresh(unittest.TestCase):
     """Runs refresh_agy_observation against a fake agy, never the real one."""

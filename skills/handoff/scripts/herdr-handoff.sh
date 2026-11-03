@@ -447,11 +447,11 @@ for d in dirs:
             if not isinstance(w, dict):
                 continue
             ra = w.get("resets_at")
-            if isinstance(ra, (int, float)) and 0 < ra <= now_ts:
-                continue
             rem = w.get("remaining_percent")
             if rem is None and isinstance(w.get("used_percent"), (int, float)):
                 rem = max(0.0, 100.0 - float(w["used_percent"]))
+            if isinstance(ra, (int, float)) and 0 < ra <= now_ts:
+                rem = 100.0
             if isinstance(rem, (int, float)):
                 k = str(w.get("kind") or "")
                 if k in ("five_hour", "5h"):
