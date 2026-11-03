@@ -82,6 +82,7 @@ DEFAULT_AGY_THINK_MODEL = os.environ.get("AGY_THINK_MODEL", "gemini-4-argon-medi
 CODEX_HIGH_5H_QUOTA = float(os.environ.get("CODEX_HIGH_5H_QUOTA", "80.0"))
 CODEX_HIGH_WEEKLY_QUOTA = float(os.environ.get("CODEX_HIGH_WEEKLY_QUOTA", "60.0"))
 CODEX_MIN_AUTO_QUOTA = float(os.environ.get("CODEX_MIN_AUTO_QUOTA", "60.0"))
+CODEX_MIN_5H_QUOTA = float(os.environ.get("CODEX_MIN_5H_QUOTA", "60.0"))
 ALT_LOW_WEEKLY_QUOTA = float(os.environ.get("ALT_LOW_WEEKLY_QUOTA", "30.0"))
 AGY_THINK_MODEL_NAMES = ("gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon", "argon", "gemini-4-argon-thinking")
 
@@ -483,6 +484,9 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
     if isinstance(agent, str) and ("/" in agent or "\\" in agent or agent.endswith(".json")) and state_file is None:
         state_file = agent
         agent = "agy"
+    if agent == "codex":
+        # Owner, 2026-11-03: Codex needs >=60% of its 5h window for any job, named or auto-routed.
+        min_5h = max(min_5h, CODEX_MIN_5H_QUOTA)
 
     if agent == "claude":
         if os.environ.get("DISPATCH_THINKER_SKIP_CLAUDE") == "1":
