@@ -99,7 +99,14 @@ for h in "$REPO"/skills/*/hooks/*; do
     link "$h" "$GEMINI_HOME/hooks/$(basename "$h")"
   fi
 done
-# Ensure T3 Code Antigravity provider configs have hooks symlink + auto-handoff hooks.json
+# T3 Code Antigravity provider configs: hooks symlink, but NO hooks.json.
+# AGY ACP harness bug (agy_acp_server 7cd97045, 2026-11-07): with ANY hook registered
+# (even a no-op `echo {}`), killing a background task (manage_task kill) makes the harness
+# fail "no pending hook for ID hook_request_N" in ~50% of runs: the turn ends with no reply,
+# and the next turn's in-place rebuild always fails "Failed to rebuild agent: received 1000
+# (OK); then sent 1000 (OK)", so the T3 thread stays dead until the ACP server restarts.
+# Repro: 0/8 failures without hooks.json, 5/8 with it. Re-enable once a newer harness
+# passes the same repro (background `sleep 90`, kill it, send a second turn).
 if [[ -d "$HOME/.t3/userdata/providers/antigravity" ]]; then
   for t3_cfg in "$HOME"/.t3/userdata/providers/antigravity/*/config; do
     [[ -d "$t3_cfg" ]] || continue
@@ -107,28 +114,9 @@ if [[ -d "$HOME/.t3/userdata/providers/antigravity" ]]; then
       ln -s "$GEMINI_HOME/hooks" "$t3_cfg/hooks"
       echo "symlink: $t3_cfg/hooks -> $GEMINI_HOME/hooks"
     fi
-    if [[ ! -f "$t3_cfg/hooks.json" ]]; then
-      cat > "$t3_cfg/hooks.json" <<EOF_HOOKS
-{
-  "auto-handoff": {
-    "PreInvocation": [
-      {
-        "command": "python3 $GEMINI_HOME/hooks/auto-handoff-midturn.py",
-        "timeout": 10,
-        "type": "command"
-      }
-    ],
-    "Stop": [
-      {
-        "command": "python3 $GEMINI_HOME/hooks/auto-handoff-stop.py",
-        "timeout": 10,
-        "type": "command"
-      }
-    ]
-  }
-}
-EOF_HOOKS
-      echo "wrote: $t3_cfg/hooks.json"
+    if [[ -f "$t3_cfg/hooks.json" ]]; then
+      mv "$t3_cfg/hooks.json" "$t3_cfg/hooks.json.disabled-agy-cancel-race"
+      echo "disabled: $t3_cfg/hooks.json (AGY hook/cancel race kills T3 sessions)"
     fi
   done
 fi
