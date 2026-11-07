@@ -1034,7 +1034,7 @@ class HerdrReapIdleTest(unittest.TestCase):
         # Create an initial commit so worktrees can be added
         (main_repo / "README.md").write_text("init\\n")
         subprocess.run(["git", "-C", str(main_repo), "add", "."], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(main_repo), "commit", "-m", "init"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(main_repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init"], check=True, capture_output=True)
 
         sibling_wt = self.tmp_path / "sibling_wt"
         subprocess.run(["git", "-C", str(main_repo), "worktree", "add", str(sibling_wt)], check=True, capture_output=True)

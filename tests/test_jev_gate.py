@@ -5,9 +5,14 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
-JEV_GATE = Path("/Users/pasitnusso/ps-skills/bin/jev-gate")
+BIN_DIR = Path(__file__).resolve().parent.parent / "bin"
+JEV_GATE = BIN_DIR / "jev-gate"
+STUB_DIR = str(Path(__file__).resolve().parent / "fixtures" / "typesafe_stub")
+# Hermetic env: stub typesafe_sdk + dummy key (no network, no host ~/.zshrc dependence).
+STUB_ENV = {**os.environ, "PYTHONPATH": STUB_DIR + os.pathsep + os.environ.get("PYTHONPATH", ""), "TYPESAFE_API_KEY": "stub"}
 PY_BIN = "/opt/homebrew/bin/python3" if os.path.exists("/opt/homebrew/bin/python3") else sys.executable
 
 
@@ -31,6 +36,7 @@ class TestJevGate(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
+            env=STUB_ENV,
         )
         self.assertEqual(res1.returncode, 0)
         data1 = json.loads(res1.stdout)
@@ -50,17 +56,22 @@ class TestJevGate(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
+            env=STUB_ENV,
         )
         self.assertEqual(res2.returncode, 0)
         data2 = json.loads(res2.stdout)
         self.assertIn(data2["route"], ("agy_argon", "claude_opus"))
 
     def test_dispatch_worker_route_with_jev(self):
-        loader = importlib.machinery.SourceFileLoader("dispatch_worker", "/Users/pasitnusso/ps-skills/bin/dispatch-agy-worker")
+        loader = importlib.machinery.SourceFileLoader("dispatch_worker", str(BIN_DIR / "dispatch-agy-worker"))
         spec = importlib.util.spec_from_loader("dispatch_worker", loader)
         dw = importlib.util.module_from_spec(spec)
         loader.exec_module(dw)
 
+        with mock.patch.dict(os.environ, STUB_ENV):
+            self._assert_routes(dw)
+
+    def _assert_routes(self, dw):
         res_mech = dw.route_with_jev("Run pytest tests/test_simple.py and fix typo")
         self.assertIsNotNone(res_mech)
         self.assertEqual(res_mech.get("route"), "agy_flash")
