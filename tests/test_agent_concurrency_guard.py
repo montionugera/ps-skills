@@ -94,8 +94,17 @@ class R2ReviewCapTest(unittest.TestCase):
             self.assertEqual(sum("permissionDecision" not in o for o in out), 1, f"trial {trial}")
     def test_abandoned_lock_fails_open_and_clears(self):
         lock = self.subagents / ".r2-review-lock"; lock.mkdir(parents=True)
+        os.utime(lock, (time.time() - 60, time.time() - 60))
         self.assertNotIn("permissionDecision", self.dispatch())
         self.assertFalse(lock.exists())
+    def test_slow_lock_holder_is_waited_for_not_overrun(self):
+        # A live holder that needs 2.5 s (slow CI) must not be treated as abandoned.
+        import threading
+        lock = self.subagents / ".r2-review-lock"; lock.mkdir(parents=True)
+        (self.subagents / ".r2-review-stamp").write_text("1000")
+        holder = threading.Timer(2.5, lock.rmdir); holder.start()
+        out = self.dispatch(AGENT_GUARD_NOW="1010"); holder.join()
+        self.assertIn("permissionDecision", out)
     def test_crashed_reviewer_stops_blocking_once_its_log_goes_stale(self):
         self.agent("a", "code-reviewer", age_minutes=45)
         self.assertNotIn("permissionDecision", self.dispatch())

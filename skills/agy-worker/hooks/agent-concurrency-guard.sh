@@ -57,11 +57,16 @@ review_cap(){
     deny "R2 review cap: reviewer '$(sed -nE 's/.*"description":"([^"\\]*).*/\1/p' "$m")' is still running. Rule 7 gives R2 work ONE consolidated reviewer: put this concern in that review or wait for it. If the change is R1 or higher, label the brief RISK: R1."
   done
   lock="$dir/.r2-review-lock"; stamp="$dir/.r2-review-stamp"; got=""
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  # A lock is abandoned only when it is 5 s+ old (real clock), never because we waited: clearing a live holder's lock
+  # let two reviewers through on a slow CI runner. A lock still busy after ~5 s of waiting fails open and is left alone.
+  i=0
+  while [ "$i" -lt 100 ]; do
     mkdir "$lock" 2>/dev/null && { got=1; break; }
-    sleep 0.05
+    m="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)"
+    case "$m" in ''|*[!0-9]*) ;; *) [ $(( $(date +%s) - m )) -ge 5 ] && rmdir "$lock" 2>/dev/null && continue ;; esac
+    sleep 0.05; i=$((i + 1))
   done
-  [ -n "$got" ] || { rmdir "$lock" 2>/dev/null; return 0; }
+  [ -n "$got" ] || return 0
   now="${AGENT_GUARD_NOW:-$(date +%s)}"; last="$(cat "$stamp" 2>/dev/null)"
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
   if [ $((now - last)) -lt 60 ]; then rmdir "$lock"; deny "$msg"; fi
