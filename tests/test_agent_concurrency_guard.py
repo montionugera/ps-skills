@@ -92,19 +92,20 @@ class R2ReviewCapTest(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=4) as ex:
                 out = list(ex.map(lambda i: self.dispatch(AGENT_GUARD_NOW=str(first + i % 2)), range(4)))
             self.assertEqual(sum("permissionDecision" not in o for o in out), 1, f"trial {trial}")
-    def test_abandoned_lock_fails_open_and_clears(self):
-        lock = self.subagents / ".r2-review-lock"; lock.mkdir(parents=True)
-        os.utime(lock, (time.time() - 60, time.time() - 60))
+    def test_lock_file_left_by_a_dead_holder_never_blocks(self):
+        self.subagents.mkdir(parents=True); (self.subagents / ".r2-review-stamp.lock").write_text("")
         self.assertNotIn("permissionDecision", self.dispatch())
-        self.assertFalse(lock.exists())
     def test_slow_lock_holder_is_waited_for_not_overrun(self):
-        # A live holder that needs 2.5 s (slow CI) must not be treated as abandoned.
-        import threading
-        lock = self.subagents / ".r2-review-lock"; lock.mkdir(parents=True)
-        (self.subagents / ".r2-review-stamp").write_text("1000")
-        holder = threading.Timer(2.5, lock.rmdir); holder.start()
-        out = self.dispatch(AGENT_GUARD_NOW="1010"); holder.join()
-        self.assertIn("permissionDecision", out)
+        import fcntl
+        self.subagents.mkdir(parents=True); (self.subagents / ".r2-review-stamp").write_text("1000")
+        with open(self.subagents / ".r2-review-stamp.lock", "a") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                pending = ex.submit(self.dispatch, AGENT_GUARD_NOW="1010")
+                time.sleep(1.5)
+                self.assertFalse(pending.done())
+                fcntl.flock(lk, fcntl.LOCK_UN)
+                self.assertIn("permissionDecision", pending.result())
     def test_crashed_reviewer_stops_blocking_once_its_log_goes_stale(self):
         self.agent("a", "code-reviewer", age_minutes=45)
         self.assertNotIn("permissionDecision", self.dispatch())

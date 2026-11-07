@@ -33,12 +33,13 @@ awk -v r="$SWAPR" -v d="$DENY" 'BEGIN{exit !(r+0>=d+0)}' && deny "Agent budget: 
 case "$TOOL" in delegate_task|mcp__t3-code__t3_thread_launch) [ "$T3COUNT" -ge "$MAXT3" ] && deny "T3 concurrency cap: ${T3COUNT} T3 Code agent threads already run (limit ${MAXT3}, T3_MAX_THREADS). Block once on t3_thread_wait, then launch." ;; esac
 # subagents/*.meta.json gains "finished":true when an agent ends; a crashed agent never does, so a log idle for
 # 30 min no longer counts. Reviewers fanned out in one message race the meta files, so a stamp of the last allowed reviewer
-# catches them. A short mkdir lock serializes the read and write; only an allowed dispatch moves the stamp, so denied
-# retries never extend the block. A lock that outlives 1 s is abandoned: clear it and fail open.
+# catches them. A kernel flock (python3 fcntl) serializes the read and write: a mkdir lock let two reviewers through on
+# the CI runner, and flock is released by the kernel if a holder dies. Only an allowed dispatch moves the stamp, so
+# denied retries never extend the block. No python3: fail open.
 review_cap(){
   [ "${AGENT_R2_REVIEW_GUARD:-on}" = "off" ] && return 0
   case "$TOOL" in Agent|Task) ;; *) return 0 ;; esac
-  local re='reviewer|aios-(verifier|falsifier|silent-failures)' sub tp dir m lock stamp now last i got label
+  local re='reviewer|aios-(verifier|falsifier|silent-failures)' sub tp dir m stamp now label
   local msg="R2 review cap: another reviewer was dispatched in this session under a minute ago. Rule 7 gives R2 work ONE consolidated reviewer: merge the briefs into one agent. If the change is R1 or higher, label the briefs RISK: R1."
   sub="$(printf '%s' "$INPUT" | sed -nE 's/.*"subagent_type"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)"
   printf '%s' "$sub" | grep -Eq "$re" || return 0
@@ -56,21 +57,22 @@ review_cap(){
     [ -n "$(find "${m%.meta.json}.jsonl" -mmin -30 2>/dev/null)" ] || continue
     deny "R2 review cap: reviewer '$(sed -nE 's/.*"description":"([^"\\]*).*/\1/p' "$m")' is still running. Rule 7 gives R2 work ONE consolidated reviewer: put this concern in that review or wait for it. If the change is R1 or higher, label the brief RISK: R1."
   done
-  lock="$dir/.r2-review-lock"; stamp="$dir/.r2-review-stamp"; got=""
-  # A lock is abandoned only when it is 5 s+ old (real clock), never because we waited: clearing a live holder's lock
-  # let two reviewers through on a slow CI runner. A lock still busy after ~5 s of waiting fails open and is left alone.
-  i=0
-  while [ "$i" -lt 100 ]; do
-    mkdir "$lock" 2>/dev/null && { got=1; break; }
-    m="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)"
-    case "$m" in ''|*[!0-9]*) ;; *) [ $(( $(date +%s) - m )) -ge 5 ] && rmdir "$lock" 2>/dev/null && continue ;; esac
-    sleep 0.05; i=$((i + 1))
-  done
-  [ -n "$got" ] || return 0
-  now="${AGENT_GUARD_NOW:-$(date +%s)}"; last="$(cat "$stamp" 2>/dev/null)"
-  case "$last" in ''|*[!0-9]*) last=0 ;; esac
-  if [ $((now - last)) -lt 60 ]; then rmdir "$lock"; deny "$msg"; fi
-  printf '%s' "$now" > "$stamp"; rmdir "$lock"
+  stamp="$dir/.r2-review-stamp"; now="${AGENT_GUARD_NOW:-$(date +%s)}"
+  [ "$(STAMP="$stamp" NOW="$now" python3 -c '
+import fcntl, os
+p, now = os.environ["STAMP"], int(os.environ["NOW"])
+with open(p + ".lock", "a") as lk:
+    fcntl.flock(lk, fcntl.LOCK_EX)
+    try:
+        last = int(open(p).read().strip() or 0)
+    except (OSError, ValueError):
+        last = 0
+    if now - last < 60:
+        print("deny")
+    else:
+        with open(p, "w") as f:
+            f.write(str(now))
+' 2>/dev/null)" = "deny" ] && deny "$msg"
   return 0
 }
 review_cap
