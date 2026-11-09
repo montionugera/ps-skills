@@ -75,6 +75,70 @@ class TestJevGate(unittest.TestCase):
         self.assertIn("is_scouting_prob", res_scout)
         self.assertIn(res_scout.get("recommended_effort"), ("low", "medium", "high"))
 
+    def test_triage_diff_atlas_rust_and_godot_lenses(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as tf:
+            tf.write(
+                "diff --git a/server-rs/src/ecs/combat.rs b/server-rs/src/ecs/combat.rs\n"
+                "--- a/server-rs/src/ecs/combat.rs\n"
+                "+++ b/server-rs/src/ecs/combat.rs\n"
+                "@@ -10,2 +10,3 @@\n"
+                "+pub fn apply_damage(hp: &mut i32, dmg: i32) { *hp = (*hp - dmg).max(0); }\n"
+                "diff --git a/game-client/src/World/EntityView.cs b/game-client/src/World/EntityView.cs\n"
+                "--- a/game-client/src/World/EntityView.cs\n"
+                "+++ b/game-client/src/World/EntityView.cs\n"
+                "@@ -42,1 +42,2 @@\n"
+                "+OutlineThickness = 0.004f;\n"
+            )
+            diff_path = tf.name
+        try:
+            res = subprocess.run(
+                [PY_BIN, str(JEV_GATE), "triage-diff", "--diff-file", diff_path],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 0)
+            data = json.loads(res.stdout)
+            self.assertIn("probabilities", data)
+            self.assertIn("rust", data["probabilities"])
+            self.assertIn("godot", data["probabilities"])
+            self.assertIn("svelte", data["probabilities"])
+            self.assertIn("db_migrations", data["probabilities"])
+            self.assertIn("lore_spine", data["probabilities"])
+            self.assertIn("rust-reviewer", data["lenses_to_run"])
+            self.assertIn("godot-csharp-reviewer", data["lenses_to_run"])
+        finally:
+            os.unlink(diff_path)
+
+    def test_triage_diff_svelte_and_db_migration_lenses(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as tf:
+            tf.write(
+                "diff --git a/web/src/routes/Room.svelte b/web/src/routes/Room.svelte\n"
+                "--- a/web/src/routes/Room.svelte\n"
+                "+++ b/web/src/routes/Room.svelte\n"
+                "@@ -5,1 +5,2 @@\n"
+                "+let count = $state(0);\n"
+                "diff --git a/server/migrations/0012_add_idx.sql b/server/migrations/0012_add_idx.sql\n"
+                "--- a/server/migrations/0012_add_idx.sql\n"
+                "+++ b/server/migrations/0012_add_idx.sql\n"
+                "@@ -1,1 +1,2 @@\n"
+                "+CREATE INDEX CONCURRENTLY idx_users_email ON users(email);\n"
+            )
+            diff_path = tf.name
+        try:
+            res = subprocess.run(
+                [PY_BIN, str(JEV_GATE), "triage-diff", "--diff-file", diff_path],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 0)
+            data = json.loads(res.stdout)
+            self.assertIn("svelte-5-runes", data["lenses_to_run"])
+            self.assertIn("db-migrations", data["lenses_to_run"])
+        finally:
+            os.unlink(diff_path)
+
 
 if __name__ == "__main__":
     unittest.main()

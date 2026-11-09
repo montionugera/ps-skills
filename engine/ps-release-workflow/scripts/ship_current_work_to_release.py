@@ -47,7 +47,7 @@ class NotInFeatureWorktreeError(Exception): pass
 class FeatureNotReadyError(Exception): pass
 
 
-def _run_precheck(tree: Path) -> int | None:
+def _run_precheck(tree: Path, *, gate_base: str | None = None) -> int | None:
     """Run the Gate 1 script with cwd=tree; return its exit code.
 
     Gate 1 must resolve its script from the tree whose code it is verifying
@@ -70,8 +70,11 @@ def _run_precheck(tree: Path) -> int | None:
         print(f"⚠️ Gate 1 SKIPPED — {precheck} not found in {tree}", file=sys.stderr)
         return None
     def run() -> int:
+        env = None
+        if gate_base and not os.environ.get("PSRW_GATE_BASE"):
+            env = {**os.environ, "PSRW_GATE_BASE": gate_base}
         with gate_slot(f"gate1 {tree.name}"):
-            return subprocess.run([str(precheck)], cwd=tree).returncode
+            return subprocess.run([str(precheck)], cwd=tree, env=env).returncode
     # Opt-in (.release.json gate_cache): skips the run on a recent PASS for this
     # exact tree. A no-op unless enabled — see lib/gate_cache.py for the risks.
     return gate_cache.run_cached(tree, precheck, run)
@@ -298,8 +301,11 @@ def ship_current_work(
 
         # Re-verify Gate 1 on the MERGED result — precheck resolved from the
         # _release worktree itself, so it checks the combined release code.
+        # Pass pre_sha as gate_base so selective precheck gates diff the exact
+        # delta introduced onto release/<v> (sync + feature) rather than
+        # re-scanning earlier already-verified features on the release branch.
         try:
-            rc = _run_precheck(rel_wt)
+            rc = _run_precheck(rel_wt, gate_base=pre_sha)
         except BaseException:
             # Any failure (bad hooks.precheck path, gate-slot timeout, Ctrl-C) must not
             # leave the merge standing: the
@@ -538,6 +544,22 @@ def main() -> int:
             print(f"👉 Change directory: cd {rel_wt}")
         else:
             print(f"\nℹ️  Worktree {cwd.name} kept: {reason}")
+        # Opportunistically sweep any earlier shipped worktrees that are now idle and removable
+        wt_root = repo / ".claude" / "worktrees"
+        if wt_root.is_dir():
+            for other_wt in sorted(wt_root.iterdir()):
+                if not other_wt.is_dir() or other_wt.name == "_release" or other_wt.resolve() == cwd.resolve():
+                    continue
+                ok_other, _ = removable(repo, other_wt, idle_window_hours=1.0, skip_liveness=False)
+                if ok_other:
+                    try:
+                        m = _find_marker(other_wt)
+                        fid_other = m.get("feature", "")
+                    except Exception:
+                        fid_other = ""
+                    ok_rm, _ = teardown_worktree(repo, other_wt, fid_other)
+                    if ok_rm:
+                        print(f"🧹 Opportunistically removed previously-shipped worktree: {other_wt.name}")
     else:
         print(f"\nℹ️  Worktree {cwd.name} kept (--keep-worktree).")
 
