@@ -834,7 +834,7 @@ if [[ -z "$TAB_LABEL" ]]; then
   fi
   TAB_LABEL=$(python3 "$SCRIPT_DIR/handoff_label.py" --cwd-project "$PROJECT" --topic "$TAB_TOPIC" \
     --title "$DOC_TITLE" --slug "$SLUG" --source-label "$SOURCE_LABEL" \
-    --max "${HERDR_HANDOFF_LABEL_MAX:-36}" 2>/dev/null || true)
+    --max "${HERDR_HANDOFF_LABEL_MAX:-16}" 2>/dev/null || true)
   TAB_LABEL="${TAB_LABEL:-$PROJECT}"
 fi
 
@@ -941,6 +941,32 @@ elif [[ -n "$ACTUAL_WORKSPACE" ]]; then
   echo "📍 Workspace: $ACTUAL_WORKSPACE"
 fi
 echo "✅ Created tab: $TAB_ID (Pane: $ROOT_PANE, Label: '$TAB_LABEL')"
+
+# Herdr appends new tabs at the end. Put this one right after its parent, so it
+# takes the parent's place when the parent closes. Same workspace only.
+place_next_to_source() {
+  [[ -n "$SOURCE_TAB" && "$SOURCE_TAB" != "$TAB_ID" ]] || return 0
+  local ws="${ACTUAL_WORKSPACE:-$CALLER_WORKSPACE}" list src_idx new_idx target err
+  [[ -n "$ws" ]] || return 0
+  list=$(herdr tab list --workspace "$ws" 2>/dev/null || true)
+  src_idx=$(jq -r --arg t "$SOURCE_TAB" '[.result.tabs[]?.tab_id] | index($t) // empty' <<<"$list" 2>/dev/null || true)
+  new_idx=$(jq -r --arg t "$TAB_ID" '[.result.tabs[]?.tab_id] | index($t) // empty' <<<"$list" 2>/dev/null || true)
+  [[ "$src_idx" =~ ^[0-9]+$ && "$new_idx" =~ ^[0-9]+$ ]] || return 0  # parent is in another workspace
+  (( new_idx == src_idx + 1 )) && return 0
+  # insert_index is the tab's final slot: coming from in front, the parent shifts left by one.
+  target=$((src_idx + 1))
+  (( new_idx < src_idx )) && target=$src_idx
+  if [[ -z "${HERDR_SOCKET_PATH:-}" ]]; then
+    echo "⚠️  Tab left at the end: HERDR_SOCKET_PATH is not set."
+    return 0
+  fi
+  if err=$(python3 "$SCRIPT_DIR/herdr_tab_move.py" --socket "$HERDR_SOCKET_PATH" --tab "$TAB_ID" --index "$target" 2>&1); then
+    echo "↔️  Placed next to the parent tab ($SOURCE_TAB)."
+  else
+    echo "⚠️  Tab left at the end: tab.move failed (${err:-no reply})."
+  fi
+}
+place_next_to_source
 
 if [[ "$START_AGENT" == "false" ]]; then
   echo "ℹ️  Shell ready in Herdr tab $TAB_ID. Handoff file: $HANDOFF_PATH"
@@ -1068,6 +1094,9 @@ if [[ "$YOLO" == "true" ]]; then
   YOLO_FLAG="--dangerously-skip-permissions "
 fi
 QUOTED_PROMPT_FILE=$(printf '%q' "$PROMPT_FILE")
+# Quote TAB_LABEL with shlex, not printf %q: macOS bash 3.2 %q splits multibyte
+# characters such as "…" into invalid UTF-8, and herdr then rejects the command.
+QUOTED_TAB_LABEL=$(python3 -I -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$TAB_LABEL")
 
 if [[ "$AGENT_KIND" == "opencode" ]]; then
   LAUNCH_CMD="opencode --prompt \"\$(cat $QUOTED_PROMPT_FILE)\""
@@ -1082,10 +1111,10 @@ elif [[ "$AGENT_KIND" == "claude" ]]; then
     fi
     CLOUD_LOG="${HANDOFF_PATH%.md}.cloud.log"
     QUOTED_CLOUD_LOG=$(printf '%q' "$CLOUD_LOG")
-    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $(printf '%q' "$TAB_LABEL") --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\" 2>&1 | tee $QUOTED_CLOUD_LOG; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; _sid=\$(grep -Eo 'session_[A-Za-z0-9]+' $QUOTED_CLOUD_LOG | head -n 1); if [[ -n \"\$_sid\" ]]; then claude --teleport \"\$_sid\"; fi; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-argon-medium})...\" >&2; $FALLBACK_CMD; fi"
+    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $QUOTED_TAB_LABEL --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\" 2>&1 | tee $QUOTED_CLOUD_LOG; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; _sid=\$(grep -Eo 'session_[A-Za-z0-9]+' $QUOTED_CLOUD_LOG | head -n 1); if [[ -n \"\$_sid\" ]]; then claude --teleport \"\$_sid\"; fi; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-argon-medium})...\" >&2; $FALLBACK_CMD; fi"
   else
     echo "🧠 Claude model: ${CLAUDE_MODEL:-default}"
-    LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $(printf '%q' "$TAB_LABEL") \"\$(cat $QUOTED_PROMPT_FILE)\""
+    LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $QUOTED_TAB_LABEL \"\$(cat $QUOTED_PROMPT_FILE)\""
   fi
 elif [[ "$AGENT_KIND" == "codex" ]]; then
   CODEX_YOLO_FLAG=""
