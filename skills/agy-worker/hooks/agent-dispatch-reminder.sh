@@ -23,7 +23,7 @@
 command -v jq >/dev/null 2>&1 || exit 0
 
 # Prints "<remaining_percent> <age_seconds>" from the first source with a usable weekly window,
-# or nothing. $1 = max data age in seconds; windows whose resets_at has passed are ignored
+# or nothing. $1 = max data age in seconds (0 = no freshness checks, the AGY/Codex behaviour before this fix); windows whose resets_at has passed are ignored
 # (2026-11-10: a stale ~/.claude.json cache from the previous week read as "2% remaining").
 _read_weekly_rem() {
   local max_age="$1" now qf val; shift
@@ -31,7 +31,7 @@ _read_weekly_rem() {
   for qf in "$@"; do
     [ -n "$qf" ] && [ -f "$qf" ] || continue
     val="$(jq -r --argjson now "$now" --argjson max "$max_age" '
-      def live: (.resets_at == null) or ((.resets_at | tonumber? // 0) > $now);
+      def live: ($max == 0) or (.resets_at == null) or ((.resets_at | tonumber? // 0) > $now);
       def epoch: if type == "string" then (.[0:19] + "Z" | fromdateiso8601) else . end;
       def rem: .remaining_percent // (if .used_percent != null then (100 - .used_percent) else empty end);
       (.snapshot // .) as $s
@@ -48,8 +48,8 @@ _read_weekly_rem() {
            | if (($c.utilization.seven_day.resets_at // null | epoch) // 0) > $now
              then [100 - $c.utilization.seven_day.utilization, (($c.fetchedAtMs // 0) / 1000 | floor)] else empty end
          else empty end)
-      | select(.[1] != null and ($now - .[1]) <= $max)
-      | "\(.[0]) \($now - .[1])"
+      | select($max == 0 or (.[1] != null and ($now - .[1]) <= $max))
+      | "\(.[0]) \($now - (.[1] // $now))"
     ' "$qf" 2>/dev/null)"
     if [ -n "$val" ]; then
       printf '%s' "$val"
@@ -82,12 +82,12 @@ CLAUDE_WEEKLY_REM="$(_read_weekly_rem "${CLAUDE_QUOTA_MAX_AGE_S:-21600}" \
   "$HOME/.local/state/herdr/plugins/herdr-agent-quota/claude.json" \
   "$HOME/.claude.json")"
 
-AGY_WEEKLY_REM="$(_read_weekly_rem 999999999 \
+AGY_WEEKLY_REM="$(_read_weekly_rem 0 \
   "${AGY_QUOTA_STATE_FILE:-}" \
   "$HOME/.local/state/herdr/plugins/herdr-agent-quota/agy-statusline.observation.json" \
   "$HOME/.local/state/herdr/plugins/herdr-agent-quota/agy-statusline.json")"
 
-CODEX_WEEKLY_REM="$(_read_weekly_rem 999999999 \
+CODEX_WEEKLY_REM="$(_read_weekly_rem 0 \
   "${CODEX_QUOTA_STATE_FILE:-}" \
   "$HOME/.local/state/herdr/plugins/herdr-agent-quota/codex-app-server.json" \
   "$HOME/.local/state/herdr/plugins/herdr-agent-quota/codex.json")"
