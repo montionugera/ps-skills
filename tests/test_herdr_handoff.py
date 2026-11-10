@@ -6,13 +6,33 @@ FAKE_STATUS. Nothing here starts an agent or a real Herdr tab."""
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "skills" / "handoff" / "scripts" / "herdr-handoff.sh"
+
+# Every test env drops HERDR_* variables, so a test that does not set HERDR_HANDOFF_LEDGER
+# would write to the real ~/.local/state/handoff/ledger.jsonl. XDG_STATE_HOME survives that
+# filter, so pointing it at a temp folder keeps every run out of the user's real ledger.
+_STATE = tempfile.TemporaryDirectory()
+_SAVED_XDG = os.environ.get("XDG_STATE_HOME")
+
+
+def setUpModule():
+    os.environ["XDG_STATE_HOME"] = _STATE.name
+
+
+def tearDownModule():
+    if _SAVED_XDG is None:
+        os.environ.pop("XDG_STATE_HOME", None)
+    else:
+        os.environ["XDG_STATE_HOME"] = _SAVED_XDG
+    _STATE.cleanup()
 
 FAKE_HERDR = """#!/usr/bin/env bash
 echo "$*" >> "$FAKE_LOG"
@@ -31,6 +51,7 @@ case "$1 $2" in
     fi
     echo '{"result":{"tab":{"tab_id":"t9","workspace_id":"'"${FAKE_ACTUAL_WS:-$ws}"'"},"root_pane":{"pane_id":"p9"}}}'
     ;;
+  "tab list") if [ -n "${FAKE_TAB_LIST:-}" ]; then echo "$FAKE_TAB_LIST"; else echo '{"result":{"tabs":[]}}'; fi ;;
   "pane list") echo '{"result":{"panes":[{"pane_id":"p9"}]}}' ;;
   "pane run")
     [ -n "${FAKE_RUN_FAIL:-}" ] && exit 1
@@ -556,16 +577,31 @@ class HerdrHandoffTest(unittest.TestCase):
 
     # --- naming ------------------------------------------------------------
 
-    def test_label_comes_from_the_doc_title_and_project(self):
+    def test_a_shell_parent_takes_the_doc_title_without_the_project(self):
         self.doc.write_text("# Handoff: repair the commit, then plan\n## 1\n## 4\n")
-        r = self.run_script("--running", "1")
-        self.assertIn(f"{Path(self.tmp.name).name} · repair the commit", self.create_args()[0])
+        self.run_script("--running", "1", extra_env={"HERDR_HANDOFF_LABEL_MAX": "80"})
+        create = self.create_args()[0]
+        self.assertIn("--label repair the commit ", create)
+        self.assertNotIn(Path(self.tmp.name).name + " ·", create)
 
-    def test_topic_flag_and_generation(self):
+    def test_a_shell_parent_takes_the_topic(self):
+        self.run_script("--running", "1", "--topic", "ship it")
+        self.assertIn("--label ship it ", self.create_args()[0])
+
+    def test_a_named_parent_keeps_its_name_over_the_topic(self):
+        self.run_script("--running", "1", "--topic", "ship it", extra_env={"FAKE_SOURCE_LABEL": "Improve handoff tab names"})
+        self.assertIn("--label Improve hand… #2 ", self.create_args()[0])
+
+    def test_legacy_project_label_keeps_only_its_topic_and_counts_on(self):
         project = Path(self.tmp.name).name
-        self.run_script("--running", "1", "--topic", "ship it", extra_env={
-            "FAKE_SOURCE_LABEL": f"{project} · old #2", "HERDR_HANDOFF_LABEL_MAX": "80"})
-        self.assertIn(f"--label {project} · ship it #3", self.create_args()[0])
+        self.run_script("--running", "1", "--topic", "ship it", extra_env={"FAKE_SOURCE_LABEL": f"{project} · old #2"})
+        self.assertIn("--label old #3 ", self.create_args()[0])
+
+    def test_default_label_is_at_most_16_characters(self):
+        self.run_script("--running", "1", extra_env={"FAKE_SOURCE_LABEL": "ABC123 T1 await MR reviews #4"})
+        label = self.create_args()[0].split("--label ", 1)[1].rsplit(" --", 1)[0]
+        self.assertLessEqual(len(label), 16, label)
+        self.assertTrue(label.startswith("ABC123") and label.endswith(" #5"), label)
 
     def test_explicit_label_is_verbatim(self):
         self.run_script("--running", "1", "--label", "Exact Name")
@@ -574,7 +610,12 @@ class HerdrHandoffTest(unittest.TestCase):
     def test_claude_session_gets_the_same_name(self):
         self.run_script("--running", "1", "--label", "Exact Name")
         run = [l for l in self.log.read_text().splitlines() if l.startswith("pane run")][0]
-        self.assertIn("--name Exact\\ Name", run)
+        self.assertIn("--name 'Exact Name'", run)
+
+    def test_an_ellipsis_label_reaches_the_launch_command_as_valid_utf8(self):
+        self.run_script("--running", "1", extra_env={"FAKE_SOURCE_LABEL": "Improve handoff tab names"})
+        run = [l for l in self.log.read_bytes().splitlines() if l.startswith(b"pane run")][0]
+        self.assertIn("--name 'Improve hand… #2'", run.decode("utf-8"))
 
     def test_a_tab_kept_open_says_it_is_relaying(self):
         self.run_script("--running", "1", "--label", "Next")
@@ -750,6 +791,97 @@ class HerdrHandoffTest(unittest.TestCase):
                            capture_output=True, text=True, env=env, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("origin/main", r.stdout + r.stderr)
+
+    # --- placement next to the parent -------------------------------------
+
+    def fake_socket(self, reply=None):
+        """A Unix socket that records each request line and answers with `reply`."""
+        d = tempfile.mkdtemp(prefix="hs", dir="/tmp")  # macOS caps socket paths at 104 bytes
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "s")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(4)
+        server.settimeout(10)
+        self.addCleanup(server.close)
+        requests = []
+
+        def serve():
+            try:
+                while True:
+                    conn, _ = server.accept()
+                    with conn:
+                        data = b""
+                        while b"\n" not in data:
+                            chunk = conn.recv(65536)
+                            if not chunk:
+                                break
+                            data += chunk
+                        requests.append(json.loads(data.split(b"\n", 1)[0]))
+                        answer = reply or {"id": requests[-1]["id"], "result": {"type": "tab_list", "tabs": []}}
+                        conn.sendall((json.dumps(answer) + "\n").encode())
+            except OSError:
+                pass
+
+        threading.Thread(target=serve, daemon=True).start()
+        return path, requests
+
+    def tabs(self, *ids):
+        return json.dumps({"result": {"tabs": [{"tab_id": t} for t in ids]}})
+
+    def test_new_tab_moves_to_the_slot_after_its_parent(self):
+        path, requests = self.fake_socket()
+        r = self.run_script("--running", "1", extra_env={
+            "HERDR_WORKSPACE_ID": "wP", "HERDR_SOCKET_PATH": path, "FAKE_TAB_LIST": self.tabs("t0", "t1", "t5", "t9")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(requests, [{"id": "handoff-tab-move", "method": "tab.move",
+                                     "params": {"tab_id": "t9", "insert_index": 2}}])
+        self.assertIn("Placed next to the parent", r.stdout)
+        self.assertIn("tab list --workspace wP", self.log.read_text())
+
+    def test_no_move_when_already_next_to_the_parent(self):
+        path, requests = self.fake_socket()
+        self.run_script("--running", "1", extra_env={
+            "HERDR_WORKSPACE_ID": "wP", "HERDR_SOCKET_PATH": path, "FAKE_TAB_LIST": self.tabs("t0", "t1", "t9")})
+        self.assertEqual(requests, [])
+
+    def test_no_move_when_the_parent_is_in_another_workspace(self):
+        path, requests = self.fake_socket()
+        self.run_script("--running", "1", extra_env={
+            "HERDR_WORKSPACE_ID": "wP", "HERDR_SOCKET_PATH": path, "FAKE_TAB_LIST": self.tabs("t0", "t9")})
+        self.assertEqual(requests, [])
+
+    def test_a_failed_move_warns_and_the_handoff_still_confirms(self):
+        path, requests = self.fake_socket(reply={"id": "x", "error": {"code": "tab_move_failed", "message": "no"}})
+        r = self.run_script("--running", "1", extra_env={
+            "HERDR_WORKSPACE_ID": "wP", "HERDR_SOCKET_PATH": path, "FAKE_TAB_LIST": self.tabs("t1", "t5", "t9")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(requests), 1)
+        self.assertIn("Tab left at the end: tab.move failed", r.stdout)
+        self.assertIn("tab_move_failed", r.stdout)
+        self.assertIn("HANDOFF CONFIRMED", r.stdout)
+
+    def test_a_new_tab_in_front_of_its_parent_lands_right_after_it(self):
+        path, requests = self.fake_socket()
+        self.run_script("--running", "1", extra_env={
+            "HERDR_WORKSPACE_ID": "wP", "HERDR_SOCKET_PATH": path, "FAKE_TAB_LIST": self.tabs("t9", "t0", "t1", "t5")})
+        # Removing t9 from slot 0 shifts t1 to slot 1, so "right after t1" is slot 2.
+        self.assertEqual([r["params"] for r in requests], [{"tab_id": "t9", "insert_index": 2}])
+
+    def test_an_unset_socket_path_warns_without_trying_to_move(self):
+        r = self.run_script("--running", "1", extra_env={
+            "HERDR_WORKSPACE_ID": "wP", "FAKE_TAB_LIST": self.tabs("t1", "t5", "t9")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("HERDR_SOCKET_PATH is not set", r.stdout)
+        self.assertIn("HANDOFF CONFIRMED", r.stdout)
+
+    def test_a_missing_socket_warns_and_the_handoff_still_confirms(self):
+        r = self.run_script("--running", "1", extra_env={
+            "HERDR_WORKSPACE_ID": "wP", "HERDR_SOCKET_PATH": "/tmp/no-such-herdr.sock",
+            "FAKE_TAB_LIST": self.tabs("t1", "t5", "t9")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Tab left at the end", r.stdout)
+        self.assertIn("HANDOFF CONFIRMED", r.stdout)
 
     # --- ledger ------------------------------------------------------------
 

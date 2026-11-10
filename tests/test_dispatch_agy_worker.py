@@ -3108,9 +3108,13 @@ class ForegroundJobRegistrationTests(unittest.TestCase):
 
     def test_cli_refuses_a_second_run_in_a_busy_folder(self):
         self._register("dw-1-aaaaaa")  # pid is this test process, so it counts as alive
+        # Healthy quota fixture: without it a host with no quota file exits 10 (FALLBACK_INTERNAL) before the busy check.
+        state = Path(self._tmp.name) / "agy.json"
+        state.write_text(json.dumps({"windows": [{"kind": "five_hour", "remaining_percent": 90.0},
+                                                 {"kind": "weekly", "remaining_percent": 90.0}]}))
         proc = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "--agent", "agy", "--cwd", self.cwd, "--job-dir", self.jobs,
-             "--task", "noop"], capture_output=True, text=True, timeout=60)
+             "--state-file", str(state), "--task", "noop"], capture_output=True, text=True, timeout=60)
         self.assertEqual(proc.returncode, dispatch_mod.BUSY_FOLDER_EXIT_CODE, proc.stderr)
         self.assertIn("REFUSED", proc.stderr)
         self.assertIn("dw-1-aaaaaa", proc.stderr)
@@ -3139,6 +3143,13 @@ class ScoutingRoutingTests(unittest.TestCase):
 
     def _env(self, **extra):
         env = os.environ.copy()
+        # check_quota("claude") needs a `claude` binary on PATH; CI runners have none.
+        fake_bin = self.tmp / "fake-claude-bin"
+        fake_bin.mkdir(exist_ok=True)
+        fake_claude = fake_bin / "claude"
+        fake_claude.write_text("#!/bin/sh\nexit 0\n")
+        fake_claude.chmod(0o755)
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
         env.update({
             "AGY_QUOTA_STATE_FILE": str(self.agy_state),
             "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
