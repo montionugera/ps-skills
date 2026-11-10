@@ -137,15 +137,16 @@ The script ends with a banner — `✅ HANDOFF CONFIRMED` followed by `⛔ KEEP 
 
 ### Tab Names
 
-`<project> · <topic> #N`, e.g. `play-joymify · real audio shipped #3`, capped at `HERDR_HANDOFF_LABEL_MAX` (default 36, the sidebar's maximum width) characters.
-- **project:** the main repo's folder name, also from inside a worktree.
-- **topic:** `--topic`, else the first clause of the doc title, else the filename slug. Pass `--topic`: it is the only source written for a narrow sidebar.
-- **#N:** the handoff number in this chain, read from the parent tab's label, so a chain can be followed after its parents close.
+`<parent name> #N`, e.g. `ABC123 C1 MR… #2` from a parent named `ABC123 C1 MR gate`, capped at `HERDR_HANDOFF_LABEL_MAX` (default 16) characters.
+- **too long:** first drop filler words (`and`, `the`, `-`, `·` …) and the project name, then join ticket keys (`ABC-123` → `ABC123`), then shorten long words (never below 5 letters) if that alone makes it fit, and only then cut with `…`: at a word end when that keeps most of the room, otherwise inside the word.
+- **parent name:** the tab replaces its parent, so it keeps the name the user gave it. `⏳ relay → `, `[N] ` and an old `#N` are dropped; an older `<project> · <topic>` label keeps only the topic.
+- **topic:** used only when the parent has a default name (a shell such as `zsh`, `Handoff: …`, or the bare project name): `--topic`, else the first clause of the doc title, else the filename slug. Still pass `--topic`.
+- **#N:** the handoff number in this chain: the parent's `#N` plus one, or `#2` after a named parent.
 - `--label` overrides all of it. A Claude session gets the same name (`--name`), so `/resume` matches the tab. A parent kept open to relay agents is renamed `⏳ relay → <label>`.
 
 ### Where the Tab Opens
 
-In the caller's own workspace, resolved live from `herdr pane current`, then verified against the created tab; a mismatch prints a ⚠️ line. Focus follows only if the user is on the parent tab, so a handoff never pulls them off other work. `--no-focus` forces it off. Without `--cwd`, the tab starts in the doc's `**Worktree:**` or `**Repo:**` directory.
+In the caller's own workspace, resolved live from `herdr pane current`, then verified against the created tab; a mismatch prints a ⚠️ line. Right after the parent tab: Herdr appends new tabs at the end, so the script moves it with the socket call `tab.move` (`scripts/herdr_tab_move.py`; `herdr tab` has no move subcommand). When the parent closes, the new tab sits in its place. If the move fails, a ⚠️ line says so and the tab stays at the end. Focus follows only if the user is on the parent tab, so a handoff never pulls them off other work. `--no-focus` forces it off. Without `--cwd`, the tab starts in the doc's `**Worktree:**` or `**Repo:**` directory.
 
 Each handoff appends one line to `~/.local/state/handoff/ledger.jsonl` (parent and child tab, workspaces, seconds to claim, outcome). If the script warns that the skill is behind `origin/main`, merged fixes are not active in this checkout.
 
@@ -169,7 +170,7 @@ All handoffs launch with permission-skipping enabled by default (`--dangerously-
 
 ### Multiplexer Support (`--multiplexer {herdr,t3,auto}`):
 - **Herdr (`--multiplexer herdr`)**:
-  - Creates a new tab in the caller's workspace: `herdr tab create --workspace <caller> --cwd <target> --label "<project> · <topic> #N"` (`--workspace` is omitted only outside Herdr)
+  - Creates a new tab in the caller's workspace: `herdr tab create --workspace <caller> --cwd <target> --label "<parent name> #N"`, then moves the tab next to its parent (`--workspace` is omitted only outside Herdr)
   - Starts the chosen agent in the pane via `herdr agent start`
   - Delivers the execution-first prompt to execute the immediate action without forensic delay.
 - **T3Code (`--multiplexer t3` / `--kind t3code`)**:
