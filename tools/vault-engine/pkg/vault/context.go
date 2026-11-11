@@ -224,9 +224,12 @@ func FormatContext(hits []ContextHit, maxBytes int) string {
 	var b strings.Builder
 	b.WriteString(open)
 	lines := 0
+	clean := func(s string) string {
+		return strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " ")
+	}
 	for _, h := range hits {
 		line := fmt.Sprintf("- %s | %s | %s | matched: %s | %s\n",
-			h.Entry.ID, h.Entry.Title, h.Entry.Path, strings.Join(h.Matched, ", "), h.Entry.Summary)
+			h.Entry.ID, clean(h.Entry.Title), clean(h.Entry.Path), strings.Join(h.Matched, ", "), clean(h.Entry.Summary))
 		if b.Len()+len(line)+len(closeTag) > maxBytes {
 			break
 		}

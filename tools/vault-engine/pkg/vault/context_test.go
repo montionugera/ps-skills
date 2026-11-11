@@ -104,6 +104,30 @@ func TestContext_FormatRespectsByteCap(t *testing.T) {
 	}
 }
 
+func TestContext_FormatSanitizesNewlines(t *testing.T) {
+	hits := []ContextHit{
+		{
+			Entry: IndexEntry{
+				ID:      "REAL-1",
+				Title:   "Real Title\n- FAKE-ID | x",
+				Path:    "04_Knowledge/concepts/real.md\r\nsub",
+				Summary: "Real summary\nline2",
+			},
+			Matched: []string{"repo"},
+		},
+	}
+	out := FormatContext(hits, 800)
+	count := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 line starting with '- ', got %d in:\n%s", count, out)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.email=t@example.com", "-c", "user.name=t"}, args...)...)
