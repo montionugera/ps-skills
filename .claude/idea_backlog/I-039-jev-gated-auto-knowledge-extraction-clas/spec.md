@@ -105,7 +105,7 @@ The owner, working through Claude Code sessions across many repos. They want a s
 - R10. When candidates are ready for review, one Argon-low review call shall return publish or reject with a reason for each.
 - R10f. If the review call fails, then nothing shall be published or merged and all drafts shall stay in the inbox.
 - R11. When a digest or draft matches `vault-distill`'s own copy of the credential patterns from `bin/ps-skills-sync` `SECRET_RE` (every pattern except `/Users/[a-z]+/`), it shall be written to `_inbox/private/` and not sent to any model.
-- R11a. Where a session's repo is not listed in `VAULT_DISTILL_ALLOW_REPOS`, `vault-distill` shall mark it seen with reason `not-allowed` and send nothing.
+- R11a. Where a session's repo is listed in `VAULT_DISTILL_SKIP_REPOS` (comma-separated repo root basenames), `vault-distill` shall mark it seen with reason `not-allowed` and send nothing. Every other repo is sent after the credential scan.
 - R12. When `vault-distill` finishes, it shall write `_inbox/agent/distill/report-<date>.md` and make the same numbers available through `vault-distill --report`: sessions seen, not-allowed, dropped, unsure, no-lesson, extracted, no-evidence, junk, candidates waiting, published, merged, rejected, collisions, archived, bytes sent per stage, and used-rate per note.
 - R13. `vault-distill` shall append a session id, its transcript offset and its final state to the seen-file immediately after that session reaches a final state, before the next session starts, and shall delete the dated work file when the run finishes.
 - R16. When more than 50% of the night's sessions are unsure, or any stage fails for every session, `vault-distill` shall exit non-zero. Where `VAULT_DISTILL=0` is set it shall do nothing.
@@ -136,7 +136,7 @@ The owner, working through Claude Code sessions across many repos. They want a s
 - [ ] Given a transcript touched 5 minutes before the run, when `vault-distill --dry-run` runs, then that session is not in the seen-file and its line is in the live inbox.
 - [ ] Given `TYPESAFE_API_KEY` unset and `HOME` pointed at a temp dir with no `.zshrc`, when `vault-distill` runs, then every session is reported unsure, no worker is dispatched, and the exit code is non-zero.
 - [ ] Given a digest that contains `/Users/x/repo` and no credential, when `vault-distill --dry-run` runs, then it is sent; given a digest containing `ghp_` plus 20 characters, then it is in `_inbox/private/` with 0 bytes sent.
-- [ ] Given a session in a repo not listed in `VAULT_DISTILL_ALLOW_REPOS`, when `vault-distill` runs, then the report shows it as not-allowed with 0 bytes sent.
+- [ ] Given a session in a repo listed in `VAULT_DISTILL_SKIP_REPOS`, when `vault-distill` runs, then the report shows it as not-allowed with 0 bytes sent.
 - [ ] Given a draft whose `Evidence` quote does not appear in the digest, when `vault-distill` runs, then it is marked `no-evidence` and no Jev call is made for it.
 - [ ] Given Jev stubbed to `specific` 0.3 for a draft, when `vault-distill` runs, then the draft is marked `junk` and is not a candidate.
 - [ ] Given one candidate from session S1 and no match, when `vault-distill` runs, then nothing is sent to review; given a second candidate from session S2 with same-lesson stubbed to 0.9, then one merged candidate citing S1 and S2 is sent to review.
@@ -164,7 +164,7 @@ The owner, working through Claude Code sessions across many repos. They want a s
 - `bin/ps-skills-doctor`: vault section.
 - Cron: one new line for `vault-distill` at 23:40.
 - `tests/test_vault_recall.py`, `tests/test_vault_distill.py`, additions to `tests/test_jev_gate.py`, `tests/fixtures/vault_recall_set.jsonl`.
-- `README.md` and `skills/agentic-vault/SKILL.md`: the commands, the hook, and the env vars `VAULT_RECALL`, `VAULT_DISTILL`, `VAULT_DISTILL_PUBLISH`, `VAULT_DISTILL_MAX`, `VAULT_DISTILL_UNSURE_MAX`, `VAULT_DISTILL_PUBLISH_MAX`, `VAULT_DISTILL_ALLOW_REPOS`.
+- `README.md` and `skills/agentic-vault/SKILL.md`: the commands, the hook, and the env vars `VAULT_RECALL`, `VAULT_DISTILL`, `VAULT_DISTILL_PUBLISH`, `VAULT_DISTILL_MAX`, `VAULT_DISTILL_UNSURE_MAX`, `VAULT_DISTILL_PUBLISH_MAX`, `VAULT_DISTILL_SKIP_REPOS`.
 
 ## Alternatives considered
 
@@ -188,7 +188,7 @@ The owner, working through Claude Code sessions across many repos. They want a s
 - ASSUMED: the extractor is a single model call if AGY allows it, otherwise a `dispatch-worker` agent run — reversible: Y
 - ASSUMED: integration appends a dated section and never rewrites existing text — reversible: Y
 - ASSUMED: auto-published and auto-merged changes are undone by archiving the note or reverting the commit event — reversible: Y
-- ASSUMED: session digests go to TypeSafe (Jev) and Gemini only for repos in `VAULT_DISTILL_ALLOW_REPOS` (opt-in), after the credential scan — reversible: N (sent data cannot be recalled) — raised by product
+- DECIDED (owner, 2026-11-11): session digests from every repo go to TypeSafe (Jev) and Gemini after the credential scan, except repos named in `VAULT_DISTILL_SKIP_REPOS` — reversible: N (sent data cannot be recalled). The product lens recommended an opt-in list; the owner chose the skip list.
 
 ## Appendix — spec review
 
@@ -197,3 +197,4 @@ The owner, working through Claude Code sessions across many repos. They want a s
   Answered from disk: 0. Asked at gate: 1 (which repos may send digests to external models). Assumed: 1 (session cap counting).
 - 2026-11-11 owner additions after the review started: quality attributes table (speed, session result, reusability, scale, robustness, production grade, visibility, readiness) and automatic integrate and publish on pass (R10a, R10b, R18). These were not seen by the lenses.
 - 2026-11-11 owner additions on junk and cost: evidence check, Jev draft score, recurrence before publish, probation with automatic archive, publish cap of 5, and Jev used for every screening step because TypeSafe tokens are cheap (R7s, R9c, R9d, R19, R20, R21). Not seen by the lenses.
+- 2026-11-11 gate: owner approved the spec as recommended and chose the skip list for external sends.
