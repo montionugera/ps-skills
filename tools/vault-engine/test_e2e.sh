@@ -201,6 +201,41 @@ if [ -n "$("$ENGINE_BIN" context --query "zzzz qqqq")" ]; then
 fi
 echo "✅ Context stays silent on no match."
 
+# vault-distill shadow run (I-040): stubbed Jev, extractor and reviewer; the real engine validates the draft
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+FIX="${REPO_ROOT}/tests/fixtures/vault_distill"
+DISTILL_HOME="$(mktemp -d /tmp/vault-distill-home-XXXXXX)"
+mkdir -p "${VAULT_ROOT}/_inbox/agent" "${DISTILL_HOME}/.claude"
+TRANSCRIPT="${DISTILL_HOME}/e2e.jsonl"
+python3 - "$TRANSCRIPT" << 'PY'
+import json, sys
+lines = [{"type": "user", "message": {"content": "the release gate failed: make check exit 2 JEV_LESSON=0.95 JEV_HIGH_STAKES=0.9"}},
+         {"type": "assistant", "message": {"content": [{"type": "text", "text": "Fixed it. " + "x" * 5000}]}}]
+open(sys.argv[1], "w").write("".join(json.dumps(l) + "\n" for l in lines))
+PY
+touch -t 202601010000 "$TRANSCRIPT"
+echo "- **2026-11-10 10:00** — repo: \`e2e-repo\` — cwd: \`/tmp/e2e-repo\` — session: \`e2e\` — transcript: \`${TRANSCRIPT}\`" \
+  > "${VAULT_ROOT}/_inbox/agent/session-summaries.md"
+KNOW_BEFORE=$(find "${VAULT_ROOT}/04_Knowledge" -type f | sort | xargs shasum | shasum)
+HOME="$DISTILL_HOME" VAULT_ENGINE="$ENGINE_BIN" \
+  VAULT_DISTILL_JEV_CMD="python3 ${FIX}/jev_stub.py" \
+  VAULT_DISTILL_EXTRACT_CMD="python3 ${FIX}/extract_stub.py" \
+  VAULT_DISTILL_REVIEW_CMD="python3 ${FIX}/review_stub.py" \
+  python3 "${REPO_ROOT}/bin/vault-distill"
+REPORT=$(ls "${VAULT_ROOT}"/_inbox/agent/distill/report-*.md)
+CANDIDATE=$(ls "${VAULT_ROOT}"/_inbox/agent/distill/candidates/*.md)
+"$ENGINE_BIN" validate "$CANDIDATE" > /dev/null
+for row in "seen | 1" "extracted | 1" "candidates_waiting | 1" "would_publish | 1" "published | 0"; do
+    grep -qF "| ${row} |" "$REPORT" || { echo "❌ ERROR: report row '${row}' missing"; cat "$REPORT"; exit 1; }
+done
+if [ "$(find "${VAULT_ROOT}/04_Knowledge" -type f | sort | xargs shasum | shasum)" != "$KNOW_BEFORE" ]; then
+    echo "❌ ERROR: shadow run changed 04_Knowledge/"
+    exit 1
+fi
+HOME="$DISTILL_HOME" python3 "${REPO_ROOT}/bin/vault-distill" --report | grep -qF "would publish: candidates/"
+rm -rf "$DISTILL_HOME"
+echo "✅ vault-distill shadow run verified."
+
 # Clean up temp test vault
 rm -rf "$VAULT_ROOT"
 

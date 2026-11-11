@@ -1,0 +1,419 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 960" width="1480" height="960" style="background-color: #0b0f17; font-family: IBM Plex Mono, ui-monospace, Menlo, sans-serif;" content="&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;
+&lt;mxfile host=&quot;drawio&quot; version=&quot;26.0.0&quot;&gt;
+  &lt;diagram name=&quot;Vault-Distill Nightly Pipeline&quot; id=&quot;vault-distill-pipeline&quot;&gt;
+    &lt;mxGraphModel dx=&quot;1440&quot; dy=&quot;960&quot; grid=&quot;1&quot; gridSize=&quot;10&quot; guides=&quot;1&quot; tooltips=&quot;1&quot; connect=&quot;1&quot; arrows=&quot;1&quot; fold=&quot;1&quot; page=&quot;1&quot; pageScale=&quot;1&quot; pageWidth=&quot;1480&quot; pageHeight=&quot;960&quot; background=&quot;#0b0f17&quot; math=&quot;0&quot; shadow=&quot;0&quot;&gt;
+      &lt;root&gt;
+        &lt;mxCell id=&quot;0&quot; /&gt;
+        &lt;mxCell id=&quot;1&quot; parent=&quot;0&quot; /&gt;
+
+        &lt;!-- Title Banner --&gt;
+        &lt;mxCell id=&quot;title&quot; value=&quot;Vault-Distill Nightly Knowledge Compounding Pipeline (Fast Path Batch &amp;amp;amp; State Loop)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#4ee39b;fontColor=#f6f8fb;fontStyle=1;fontSize=15;align=left;spacingLeft=16;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;20&quot; width=&quot;1400&quot; height=&quot;50&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Swimlane 1: Fast Path Batch Execution --&gt;
+        &lt;mxCell id=&quot;lane-fast&quot; value=&quot;1. Fast Path Execution (Nightly Cron Batch: 40 23 * * *)&quot; style=&quot;swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#4ee39b;fontColor=#4ee39b;fontStyle=1;fontSize=12;pointerEvents=0;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;90&quot; width=&quot;1400&quot; height=&quot;430&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Fast Path Row 1 (Ingest &amp; Triage) --&gt;
+        &lt;mxCell id=&quot;node-hook&quot; value=&quot;Stop Hook&amp;#xa;Agent Finishes Session&amp;#xa;Records cwd, sid, transcript&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;30&quot; y=&quot;60&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;node-inbox&quot; value=&quot;Live Inbox&amp;#xa;_inbox/agent/&amp;#xa;session-summaries.md&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;260&quot; y=&quot;60&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;node-rotate&quot; value=&quot;Nightly Rotate&amp;#xa;Atomic Rename to&amp;#xa;session-summaries.*.work.md&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;490&quot; y=&quot;60&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;node-digest&quot; value=&quot;Digest Builder&amp;#xa;User prompt + assistant end&amp;#xa;Cut to ≤12KB (Head/Tail)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;720&quot; y=&quot;60&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;node-gate&quot; value=&quot;Security &amp;amp;amp; Skip Gate&amp;#xa;SECRET_RE Credential Scan&amp;#xa;VAULT_DISTILL_SKIP_REPOS&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#2b1619;strokeColor=#ff6b6b;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;950&quot; y=&quot;60&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;node-classify&quot; value=&quot;Jev Classify Gate&amp;#xa;jev-gate classify-lesson&amp;#xa;Filters out ~80% no-lesson&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;1180&quot; y=&quot;60&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Fast Path Row 2 (Draft, Verification &amp; Review) --&gt;
+        &lt;mxCell id=&quot;node-extract&quot; value=&quot;Flash Extract&amp;#xa;gemini-3.8-flash-high (plan)&amp;#xa;Renders Draft (≤1500 B)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;1180&quot; y=&quot;240&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;node-evidence&quot; value=&quot;Evidence Gate&amp;#xa;Exact substring match in digest&amp;#xa;Must be ≥8 characters&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;950&quot; y=&quot;240&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;node-score&quot; value=&quot;Jev Score Gate&amp;#xa;jev-gate score-draft&amp;#xa;Specific &amp;amp;amp; Novel ≥ 0.5&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;720&quot; y=&quot;240&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;node-recurrence&quot; value=&quot;Jev Same-Lesson&amp;#xa;Recurrence Match (≥0.85)&amp;#xa;or High-Stakes (≥0.85)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;490&quot; y=&quot;240&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;node-review&quot; value=&quot;Argon-Low Review&amp;#xa;gemini-4-argon-low&amp;#xa;Final verdict: publish / reject&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;260&quot; y=&quot;240&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;node-report&quot; value=&quot;Morning Report&amp;#xa;_inbox/agent/distill/report-*.md&amp;#xa;Shadow Mode: would-publish&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-fast&quot;&gt;
+          &lt;mxGeometry x=&quot;30&quot; y=&quot;240&quot; width=&quot;190&quot; height=&quot;80&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Swimlane 2: State Persistence Loop --&gt;
+        &lt;mxCell id=&quot;lane-state&quot; value=&quot;2. State Persistence Loop &amp;amp;amp; Telemetry Audits (~/.claude/state/vault-distill/)&quot; style=&quot;swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#ffc746;fontColor=#ffc746;fontStyle=1;fontSize=12;pointerEvents=0;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;550&quot; width=&quot;1400&quot; height=&quot;280&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;state-seen&quot; value=&quot;seen.jsonl&amp;#xa;Deduplication &amp;amp;amp; Offsets&amp;#xa;Tracks state per session&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-state&quot;&gt;
+          &lt;mxGeometry x=&quot;30&quot; y=&quot;60&quot; width=&quot;220&quot; height=&quot;90&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;state-drafts&quot; value=&quot;drafts.json&amp;#xa;Candidate Lifecycle Ledger&amp;#xa;candidate / ready / would-publish&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-state&quot;&gt;
+          &lt;mxGeometry x=&quot;290&quot; y=&quot;60&quot; width=&quot;220&quot; height=&quot;90&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;state-digests&quot; value=&quot;digests/*.txt&amp;#xa;Persisted Raw Session Digests&amp;#xa;Audit &amp;amp;amp; Quarantine Cache&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-state&quot;&gt;
+          &lt;mxGeometry x=&quot;550&quot; y=&quot;60&quot; width=&quot;220&quot; height=&quot;90&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;state-lastrun&quot; value=&quot;last-run.json&amp;#xa;Exit code, bytes, counts&amp;#xa;Last run timestamp&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-state&quot;&gt;
+          &lt;mxGeometry x=&quot;810&quot; y=&quot;60&quot; width=&quot;220&quot; height=&quot;90&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;tool-doctor&quot; value=&quot;ps-skills-doctor&amp;#xa;Save-side readiness check&amp;#xa;TYPESAFE_API_KEY &amp;amp;amp; cron audit&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-state&quot;&gt;
+          &lt;mxGeometry x=&quot;1110&quot; y=&quot;60&quot; width=&quot;250&quot; height=&quot;90&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Edges: Fast Path Row 1 --&gt;
+        &lt;mxCell id=&quot;e1&quot; value=&quot;Append Summary&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-hook&quot; target=&quot;node-inbox&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e2&quot; value=&quot;Cron Rotation&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-inbox&quot; target=&quot;node-rotate&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e3&quot; value=&quot;Extract Turns&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-rotate&quot; target=&quot;node-digest&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e4&quot; value=&quot;Pre-Flight Scan&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-digest&quot; target=&quot;node-gate&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e5&quot; value=&quot;Allowed Repos&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-gate&quot; target=&quot;node-classify&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Fast Path Vertical Step --&gt;
+        &lt;mxCell id=&quot;e6&quot; value=&quot;Lesson Candidate (p≥0.85)&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-classify&quot; target=&quot;node-extract&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Fast Path Row 2 --&gt;
+        &lt;mxCell id=&quot;e7&quot; value=&quot;Draft Markdown&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-extract&quot; target=&quot;node-evidence&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e8&quot; value=&quot;Verified Quotes&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-evidence&quot; target=&quot;node-score&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e9&quot; value=&quot;Candidate Note&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-score&quot; target=&quot;node-recurrence&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e10&quot; value=&quot;Ready Candidate&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-recurrence&quot; target=&quot;node-review&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e11&quot; value=&quot;Review Verdicts&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-review&quot; target=&quot;node-report&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Fast Path to State Loop Connectors (Direct Vertical Downwards) --&gt;
+        &lt;mxCell id=&quot;e12&quot; value=&quot;Updates Session State&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-report&quot; target=&quot;state-seen&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e13&quot; value=&quot;Updates Ledger&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-review&quot; target=&quot;state-drafts&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e14&quot; value=&quot;Caches Digest&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-score&quot; target=&quot;state-digests&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e15&quot; value=&quot;Writes Last Run&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;node-evidence&quot; target=&quot;state-lastrun&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- State Loop Internal Edge --&gt;
+        &lt;mxCell id=&quot;e16&quot; value=&quot;Audits Last Run (&amp;lt;36h)&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;state-lastrun&quot; target=&quot;tool-doctor&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+      &lt;/root&gt;
+    &lt;/mxGraphModel&gt;
+  &lt;/diagram&gt;
+&lt;/mxfile&gt;
+">
+<defs>
+  <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#4ee39b"/></marker>
+  <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#74b0ff"/></marker>
+  <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#b288ff"/></marker>
+  <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#ffc746"/></marker>
+  <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#ff6b6b"/></marker>
+</defs>
+<rect width="1480" height="960" fill="#0b0f17" rx="12"/>
+
+<!-- Title -->
+<g id="cell-title">
+  <rect x="40.0" y="20.0" width="1400.0" height="50.0" rx="8" fill="#10141b" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="56.0" y="50.0" fill="#f6f8fb" font-size="15" font-weight="700" text-anchor="start">Vault-Distill Nightly Knowledge Compounding Pipeline (Fast Path Batch &amp; State Loop)</text>
+</g>
+
+<!-- Fast Path Swimlane -->
+<g id="cell-lane-fast">
+  <rect x="40.0" y="90.0" width="1400.0" height="430.0" rx="8" fill="#10141b" stroke="#4ee39b" stroke-width="1.5"/>
+  <rect x="40.0" y="90.0" width="1400.0" height="32.0" rx="8" fill="#161b24" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="54.0" y="110.0" fill="#4ee39b" font-size="12" font-weight="700">1. Fast Path Execution (Nightly Cron Batch: 40 23 * * *)</text>
+</g>
+
+<!-- Row 1 Nodes (Parent offset: x=40, y=90) -->
+<g id="cell-node-hook">
+  <rect x="70.0" y="150.0" width="190.0" height="80.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="165.0" y="176.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Stop Hook</text>
+  <text x="165.0" y="194.0" fill="#f6f8fb" font-size="11" text-anchor="middle">Agent Finishes Session</text>
+  <text x="165.0" y="212.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Records cwd, sid, transcript</text>
+</g>
+
+<g id="cell-node-inbox">
+  <rect x="300.0" y="150.0" width="190.0" height="80.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="395.0" y="176.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Live Inbox</text>
+  <text x="395.0" y="194.0" fill="#f6f8fb" font-size="11" text-anchor="middle">_inbox/agent/</text>
+  <text x="395.0" y="212.0" fill="#f6f8fb" font-size="10" text-anchor="middle">session-summaries.md</text>
+</g>
+
+<g id="cell-node-rotate">
+  <rect x="530.0" y="150.0" width="190.0" height="80.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="625.0" y="176.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Nightly Rotate</text>
+  <text x="625.0" y="194.0" fill="#f6f8fb" font-size="11" text-anchor="middle">Atomic Rename to</text>
+  <text x="625.0" y="212.0" fill="#f6f8fb" font-size="10" text-anchor="middle">session-summaries.*.work.md</text>
+</g>
+
+<g id="cell-node-digest">
+  <rect x="760.0" y="150.0" width="190.0" height="80.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="855.0" y="176.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Digest Builder</text>
+  <text x="855.0" y="194.0" fill="#f6f8fb" font-size="11" text-anchor="middle">User prompt + assistant end</text>
+  <text x="855.0" y="212.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Cut to ≤12KB (Head/Tail)</text>
+</g>
+
+<g id="cell-node-gate">
+  <rect x="990.0" y="150.0" width="190.0" height="80.0" rx="8" fill="#2b1619" stroke="#ff6b6b" stroke-width="1.5"/>
+  <text x="1085.0" y="176.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Security &amp; Skip Gate</text>
+  <text x="1085.0" y="194.0" fill="#f6f8fb" font-size="11" text-anchor="middle">SECRET_RE Credential Scan</text>
+  <text x="1085.0" y="212.0" fill="#f6f8fb" font-size="10" text-anchor="middle">VAULT_DISTILL_SKIP_REPOS</text>
+</g>
+
+<g id="cell-node-classify">
+  <rect x="1220.0" y="150.0" width="190.0" height="80.0" rx="8" fill="#292112" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="1315.0" y="176.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Jev Classify Gate</text>
+  <text x="1315.0" y="194.0" fill="#f6f8fb" font-size="11" text-anchor="middle">jev-gate classify-lesson</text>
+  <text x="1315.0" y="212.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Filters out ~80% no-lesson</text>
+</g>
+
+<!-- Row 2 Nodes (Draft, Verify, Review) -->
+<g id="cell-node-extract">
+  <rect x="1220.0" y="330.0" width="190.0" height="80.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="1315.0" y="356.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Flash Extract</text>
+  <text x="1315.0" y="374.0" fill="#f6f8fb" font-size="11" text-anchor="middle">gemini-3.8-flash-high (plan)</text>
+  <text x="1315.0" y="392.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Renders Draft (≤1500 B)</text>
+</g>
+
+<g id="cell-node-evidence">
+  <rect x="990.0" y="330.0" width="190.0" height="80.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="1085.0" y="356.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Evidence Gate</text>
+  <text x="1085.0" y="374.0" fill="#f6f8fb" font-size="11" text-anchor="middle">Exact substring match</text>
+  <text x="1085.0" y="392.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Must be ≥8 characters</text>
+</g>
+
+<g id="cell-node-score">
+  <rect x="760.0" y="330.0" width="190.0" height="80.0" rx="8" fill="#292112" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="855.0" y="356.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Jev Score Gate</text>
+  <text x="855.0" y="374.0" fill="#f6f8fb" font-size="11" text-anchor="middle">jev-gate score-draft</text>
+  <text x="855.0" y="392.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Specific &amp; Novel ≥ 0.5</text>
+</g>
+
+<g id="cell-node-recurrence">
+  <rect x="530.0" y="330.0" width="190.0" height="80.0" rx="8" fill="#292112" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="625.0" y="356.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Jev Same-Lesson</text>
+  <text x="625.0" y="374.0" fill="#f6f8fb" font-size="11" text-anchor="middle">Recurrence Match (≥0.85)</text>
+  <text x="625.0" y="392.0" fill="#f6f8fb" font-size="10" text-anchor="middle">or High-Stakes (≥0.85)</text>
+</g>
+
+<g id="cell-node-review">
+  <rect x="300.0" y="330.0" width="190.0" height="80.0" rx="8" fill="#1d1829" stroke="#b288ff" stroke-width="1.5"/>
+  <text x="395.0" y="356.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Argon-Low Review</text>
+  <text x="395.0" y="374.0" fill="#f6f8fb" font-size="11" text-anchor="middle">gemini-4-argon-low</text>
+  <text x="395.0" y="392.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Verdict: publish / reject</text>
+</g>
+
+<g id="cell-node-report">
+  <rect x="70.0" y="330.0" width="190.0" height="80.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="165.0" y="356.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Morning Report</text>
+  <text x="165.0" y="374.0" fill="#f6f8fb" font-size="11" text-anchor="middle">_inbox/agent/distill/</text>
+  <text x="165.0" y="392.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Shadow: would-publish</text>
+</g>
+
+<!-- State Swimlane -->
+<g id="cell-lane-state">
+  <rect x="40.0" y="550.0" width="1400.0" height="280.0" rx="8" fill="#10141b" stroke="#ffc746" stroke-width="1.5"/>
+  <rect x="40.0" y="550.0" width="1400.0" height="32.0" rx="8" fill="#161b24" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="54.0" y="570.0" fill="#ffc746" font-size="12" font-weight="700">2. State Persistence Loop &amp; Telemetry Audits (~/.claude/state/vault-distill/)</text>
+</g>
+
+<!-- State Nodes -->
+<g id="cell-state-seen">
+  <rect x="70.0" y="610.0" width="220.0" height="90.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="180.0" y="638.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">seen.jsonl</text>
+  <text x="180.0" y="658.0" fill="#f6f8fb" font-size="11" text-anchor="middle">Deduplication &amp; Offsets</text>
+  <text x="180.0" y="678.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Tracks state per session</text>
+</g>
+
+<g id="cell-state-drafts">
+  <rect x="330.0" y="610.0" width="220.0" height="90.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="440.0" y="638.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">drafts.json</text>
+  <text x="440.0" y="658.0" fill="#f6f8fb" font-size="11" text-anchor="middle">Candidate Lifecycle Ledger</text>
+  <text x="440.0" y="678.0" fill="#f6f8fb" font-size="10" text-anchor="middle">candidate / ready / would-publish</text>
+</g>
+
+<g id="cell-state-digests">
+  <rect x="590.0" y="610.0" width="220.0" height="90.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="700.0" y="638.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">digests/*.txt</text>
+  <text x="700.0" y="658.0" fill="#f6f8fb" font-size="11" text-anchor="middle">Persisted Raw Session Digests</text>
+  <text x="700.0" y="678.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Audit &amp; Quarantine Cache</text>
+</g>
+
+<g id="cell-state-lastrun">
+  <rect x="850.0" y="610.0" width="220.0" height="90.0" rx="8" fill="#292112" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="960.0" y="638.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">last-run.json</text>
+  <text x="960.0" y="658.0" fill="#f6f8fb" font-size="11" text-anchor="middle">Exit code, bytes, counts</text>
+  <text x="960.0" y="678.0" fill="#f6f8fb" font-size="10" text-anchor="middle">Last run timestamp</text>
+</g>
+
+<g id="cell-tool-doctor">
+  <rect x="1150.0" y="610.0" width="250.0" height="90.0" rx="8" fill="#1d1829" stroke="#b288ff" stroke-width="1.5"/>
+  <text x="1275.0" y="638.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">ps-skills-doctor</text>
+  <text x="1275.0" y="658.0" fill="#f6f8fb" font-size="11" text-anchor="middle">Save-side readiness check</text>
+  <text x="1275.0" y="678.0" fill="#f6f8fb" font-size="10" text-anchor="middle">TYPESAFE_API_KEY &amp; cron audit</text>
+</g>
+
+<!-- Fast Path Edges -->
+<g id="edge-e1">
+  <path d="M 260.0 190.0 L 300.0 190.0" fill="none" stroke="#4ee39b" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <rect x="235.0" y="180.0" width="90.0" height="18.0" rx="4" fill="#10141b" stroke="#4ee39b" stroke-width="1"/>
+  <text x="280.0" y="193.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Append</text>
+</g>
+
+<g id="edge-e2">
+  <path d="M 490.0 190.0 L 530.0 190.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="470.0" y="180.0" width="80.0" height="18.0" rx="4" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="510.0" y="193.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Rotate</text>
+</g>
+
+<g id="edge-e3">
+  <path d="M 720.0 190.0 L 760.0 190.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="700.0" y="180.0" width="80.0" height="18.0" rx="4" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="740.0" y="193.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Digest</text>
+</g>
+
+<g id="edge-e4">
+  <path d="M 950.0 190.0 L 990.0 190.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="930.0" y="180.0" width="80.0" height="18.0" rx="4" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="970.0" y="193.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Scan</text>
+</g>
+
+<g id="edge-e5">
+  <path d="M 1180.0 190.0 L 1220.0 190.0" fill="none" stroke="#ffc746" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <rect x="1165.0" y="180.0" width="70.0" height="18.0" rx="4" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="1200.0" y="193.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Pass</text>
+</g>
+
+<g id="edge-e6">
+  <path d="M 1315.0 230.0 L 1315.0 330.0" fill="none" stroke="#ffc746" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <rect x="1255.0" y="271.0" width="120.0" height="18.0" rx="4" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="1315.0" y="284.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Lesson p≥0.85</text>
+</g>
+
+<g id="edge-e7">
+  <path d="M 1220.0 370.0 L 1180.0 370.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="1165.0" y="361.0" width="70.0" height="18.0" rx="4" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="1200.0" y="374.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Draft</text>
+</g>
+
+<g id="edge-e8">
+  <path d="M 990.0 370.0 L 950.0 370.0" fill="none" stroke="#4ee39b" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <rect x="935.0" y="361.0" width="70.0" height="18.0" rx="4" fill="#10141b" stroke="#4ee39b" stroke-width="1"/>
+  <text x="970.0" y="374.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Quotes</text>
+</g>
+
+<g id="edge-e9">
+  <path d="M 760.0 370.0 L 720.0 370.0" fill="none" stroke="#ffc746" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <rect x="705.0" y="361.0" width="70.0" height="18.0" rx="4" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="740.0" y="374.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Scores</text>
+</g>
+
+<g id="edge-e10">
+  <path d="M 490.0 370.0 L 450.0 370.0" fill="none" stroke="#ffc746" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <rect x="435.0" y="361.0" width="70.0" height="18.0" rx="4" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="470.0" y="374.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Ready</text>
+</g>
+
+<g id="edge-e11">
+  <path d="M 300.0 370.0 L 260.0 370.0" fill="none" stroke="#b288ff" stroke-width="2" marker-end="url(#arrow-purple)"/>
+  <rect x="245.0" y="361.0" width="70.0" height="18.0" rx="4" fill="#10141b" stroke="#b288ff" stroke-width="1"/>
+  <text x="280.0" y="374.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Judge</text>
+</g>
+
+<!-- Fast Path to State Loop Connectors -->
+<g id="edge-e12">
+  <path d="M 165.0 410.0 L 165.0 610.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="100.0" y="501.0" width="130.0" height="18.0" rx="4" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="165.0" y="514.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Updates Session State</text>
+</g>
+
+<g id="edge-e13">
+  <path d="M 395.0 410.0 L 395.0 610.0" fill="none" stroke="#4ee39b" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <rect x="345.0" y="501.0" width="100.0" height="18.0" rx="4" fill="#10141b" stroke="#4ee39b" stroke-width="1"/>
+  <text x="395.0" y="514.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Updates Ledger</text>
+</g>
+
+<g id="edge-e14">
+  <path d="M 700.0 410.0 L 700.0 610.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="650.0" y="501.0" width="100.0" height="18.0" rx="4" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="700.0" y="514.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Caches Digest</text>
+</g>
+
+<g id="edge-e15">
+  <path d="M 960.0 410.0 L 960.0 610.0" fill="none" stroke="#ffc746" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <rect x="910.0" y="501.0" width="100.0" height="18.0" rx="4" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="960.0" y="514.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Writes Last Run</text>
+</g>
+
+<!-- State Loop Edge -->
+<g id="edge-e16">
+  <path d="M 1070.0 655.0 L 1150.0 655.0" fill="none" stroke="#b288ff" stroke-width="2" marker-end="url(#arrow-purple)"/>
+  <rect x="1065.0" y="646.0" width="90.0" height="18.0" rx="4" fill="#10141b" stroke="#b288ff" stroke-width="1"/>
+  <text x="1110.0" y="659.0" fill="#f6f8fb" font-size="9" text-anchor="middle">Audits &lt;36h</text>
+</g>
+
+</svg>

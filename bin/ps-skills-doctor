@@ -13,6 +13,7 @@ import json
 import re
 import subprocess
 import argparse
+import time
 from pathlib import Path
 
 
@@ -82,6 +83,36 @@ def check_vault_recall(home, issues, warnings):
         proc = run_context(primary, known)
         if proc is not None and proc.returncode == 0 and not proc.stdout.strip():
             warnings.append(f"vault-engine context returned nothing for a known note title: {known!r}")
+
+
+def check_vault_distill(home, issues, warnings, crontab=None):
+    """Knowledge save readiness (I-040): Jev key, cron line, age and exit code of the last nightly run."""
+    vault = Path(os.environ.get("VAULT_ROOT") or home / "workspace" / "agentic-vault")
+    if not (vault / "_meta").is_dir():
+        return
+    zshrc = home / ".zshrc"
+    rc = zshrc.read_text(errors="ignore") if zshrc.exists() else ""
+    if not (os.environ.get("TYPESAFE_API_KEY", "").strip()
+            or re.search(r"^\s*(export\s+)?TYPESAFE_API_KEY=[\"']?[^$\s\"']", rc, re.M)):
+        warnings.append("vault-distill: no Jev key (TYPESAFE_API_KEY or ~/.zshrc): every session will be unsure")
+    if crontab is None:
+        try:
+            crontab = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            crontab = ""
+    if "vault-distill" not in crontab:
+        warnings.append("vault-distill: no cron line (expected `40 23 * * *`, see README)")
+        return
+    try:
+        last = json.loads((home / ".claude" / "state" / "vault-distill" / "last-run.json").read_text())
+        age_hours = (time.time() - float(last["ts"])) / 3600
+    except (OSError, ValueError, KeyError, TypeError):
+        warnings.append("vault-distill: cron line exists but no run is recorded yet")
+        return
+    if age_hours > 36:
+        issues.append(f"vault-distill: last run was {age_hours:.0f} hours ago (limit 36)")
+    elif last.get("exit"):
+        warnings.append(f"vault-distill: last run exited {last['exit']} (see {last.get('report')})")
 
 
 def main():
@@ -279,6 +310,7 @@ def main():
                     warnings.append(f"T3 Antigravity provider missing hooks.json: {t3_hooks_json} (run with --fix)")
 
     check_vault_recall(home, issues, warnings)
+    check_vault_distill(home, issues, warnings)
 
     # Report
     print("=== ps-skills-doctor ===")

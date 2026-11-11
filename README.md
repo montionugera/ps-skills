@@ -223,6 +223,16 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
 - Env: `VAULT_RECALL=0` turns the hook off; `VAULT_ENGINE` and `VAULT_RECALL_STATE` override the binary and the state directory. It is also off when `VAULT_CONTEXT_BOOTSTRAP=0` or `CLAUDE_VAULT_SUMMARY=0` (dispatch workers).
 - `ps-skills-doctor` reports when the hook is missing or unregistered, or the index lacks retrieval fields.
 
+### Automatic knowledge save, shadow mode (I-039 slice 2)
+
+- `vault-distill` (nightly, cron `40 23 * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin VAULT_DISTILL_SKIP_REPOS= $HOME/.local/bin/vault-distill >> $HOME/.claude/logs/vault-distill.log 2>&1`): rotates `_inbox/agent/session-summaries.md`, builds a digest of at most 12,000 bytes per finished session (user prompts and the last assistant text of each turn, no tool output, plus a signals line), and asks Jev `jev-gate classify-lesson` whether it holds a lesson. At most 20 sessions a night go to one `gemini-3.8-flash-high` call (`agy -p`, no tools) that writes a draft note. A draft must quote evidence from the digest, pass `jev-gate score-draft`, and recur in a second session (`jev-gate same-lesson`) or score high-stakes before one `gemini-4-argon-low` review call judges it. Shadow mode: nothing is published; a publish verdict is reported as "would publish".
+- Output: drafts in `_inbox/agent/distill/` (`candidates/`, `merged/`, `expired/`), credential hits in `_inbox/private/`, and the nightly report `_inbox/agent/distill/report-<date>.md`. Machine state lives in `~/.claude/state/vault-distill/` (`seen.jsonl`, `drafts.json`, `digests/`, `last-run.json`).
+- `vault-distill --report` prints the last report. `vault-distill --dry-run` calls Jev only (still writes digest files under the state directory, without extracting or reviewing).
+- Exit code 2 means the run was degraded: more than half the classified sessions were unsure (for example, no Jev key), or a stage failed on every call.
+- External sends: digests from every repo go to TypeSafe (Jev) and Gemini after the credential scan, except repos named in `VAULT_DISTILL_SKIP_REPOS`. The skip list for the nightly run is the `VAULT_DISTILL_SKIP_REPOS=` assignment on the cron line (cron does not read `~/.zshrc`).
+- Env: `VAULT_DISTILL=0` turns it off; `VAULT_DISTILL_MAX` (default 20 extractions a night); `VAULT_DISTILL_UNSURE_MAX` (default 3); `VAULT_DISTILL_SKIP_REPOS` (comma-separated repo root basenames, set on the cron line); `VAULT_ROOT` and `VAULT_ENGINE` as for the hook. Test seams: `VAULT_DISTILL_JEV_CMD`, `VAULT_DISTILL_EXTRACT_CMD`, `VAULT_DISTILL_REVIEW_CMD`. `VAULT_DISTILL_PUBLISH` and `VAULT_DISTILL_PUBLISH_MAX` arrive with slice 3.
+- `ps-skills-doctor` warns when no Jev key or cron line is found, and reports an issue when the last run is more than 36 hours old.
+
 ## Development
 
 ```bash

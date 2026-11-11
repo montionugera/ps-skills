@@ -335,6 +335,14 @@ git commit -m "feat(jev-gate): classify-lesson, score-draft and same-lesson for 
 - Create: `bin/vault-distill` (mode 755)
 - Create: `tests/fixtures/vault_distill/jev_stub.py`, `engine_stub.py`, `extract_stub.py`, `review_stub.py`
 - Test: `tests/test_vault_distill.py` (new; also holds the `DistillCase` base class that Task 3's tests import)
+- Test: `tests/test_vault_distill_audit.py` (new, written by you; imports `DistillCase` from `tests/test_vault_distill.py`)
+
+**Audit amendments A1, A2 and A3 apply to this task** (full text under "Audit amendments" near the top of this plan; they override the code below where they differ). After the steps below are green, implement each one test first in `tests/test_vault_distill_audit.py`, without editing `tests/test_vault_distill.py`:
+- A1: `repo_root` asks git (`git -C <cwd> rev-parse --path-format=absolute --git-common-dir`, parent directory) and falls back to the string split. Test: a temp repo with `git worktree add ../demo-hotfix-x`; a session whose cwd is that worktree is `not-allowed` when the skip list names the main repo's basename.
+- A2: in `run_batch` the first branch is `if p >= EXTRACT_AT or prior_state == "extract-pending":`. Test: a session marked `extract-pending` with p 0.5 is queued on the next run and is not counted as unsure.
+- A3: in `build_digest` a user record's typed text is its string content, or the joined `text` blocks of a list content; a typed text that starts with `<` after stripping is left out of the digest and of the correction count. Tests: a list-form text prompt appears in the digest; a `<task-notification>` prompt does not.
+If an amendment makes a test in `tests/test_vault_distill.py` fail, stop and report BLOCKED with the test name; do not edit that file.
+
 
 **Interfaces:**
 - Consumes: Task 1's `classify-lesson` output shape. The Stop hook's inbox line format (`agent-harness/scripts/vault-session-summary.sh:85-88`, not edited): ``- **YYYY-MM-DD HH:MM** — repo: `<repo>` — cwd: `<cwd>` — session: `<id>` — transcript: `<path>` ``. Claude Code transcript JSONL: `type` is `user` or `assistant`; `message.content` is a string (a user prompt) or a list of blocks (`text`, `tool_use`, `thinking`, `tool_result` with optional `is_error`); `isMeta: true` lines are skipped.
@@ -831,7 +839,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-Verify-Cmd: python3 -m unittest tests.test_vault_distill -v
+Verify-Cmd: python3 -m unittest tests.test_vault_distill tests.test_vault_distill_audit -v
 
 - [ ] **Step 3: Run the test to verify it fails**
 
@@ -1329,6 +1337,9 @@ git commit -m "feat(vault-distill): nightly session stage (rotate, digest, Jev s
 - Modify: `bin/vault-distill` (constants after `PENDING = {...}`; replace the interim `run_extractions`; two hidden flags in `main()`)
 - Test: `tests/test_vault_distill_drafts.py` (new; imports `DistillCase` from `tests/test_vault_distill.py`)
 
+**Audit amendment A4 applies to this task:** add `"--sandbox"` to the `ask_agy` command list (after `"--disable-slash-commands"`). Keep `tests/test_vault_distill_audit.py` from Task 2 green.
+
+
 **Interfaces:**
 - Consumes: from Task 2, `Run`, `run.call`, `run.jev`, `run.mark`, `atomic_write`, `quarantine`, `repo_root`, `size_or_zero`, `env_int`, `engine_bin`, `SECRET_RE`, and the session dict keys. From Task 1, the `score-draft` and `same-lesson` shapes. `vault-engine context --query <q> --limit 3`, which prints `<vault-context>` lines `- <id> | <title> | <path> | matched: ... | <summary>`. `vault-engine validate <path>`, which exits 0 on pass. `_meta/indexes/projects.jsonl` entries with `id` and `release_repo`.
 - Seams:
@@ -1613,7 +1624,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-Verify-Cmd: python3 -m unittest tests.test_vault_distill_drafts tests.test_vault_distill -v
+Verify-Cmd: python3 -m unittest tests.test_vault_distill_drafts tests.test_vault_distill tests.test_vault_distill_audit -v
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -2069,6 +2080,9 @@ git commit -m "feat(vault-distill): draft stage (single-call extract, evidence a
 - Create: `docs/superpowers/specs/assets/vault-distill-pipeline.drawio` and `.drawio.svg`
 - Test: `tests/test_ps_skills_doctor_distill.py` (new)
 
+**Audit amendment A5 applies to this task:** in the README subsection, state that the skip list for the nightly run is the `VAULT_DISTILL_SKIP_REPOS=` assignment on the cron line (cron does not read `~/.zshrc`), and that `--dry-run` still writes digest files under the state directory (do not say it records nothing).
+
+
 **Interfaces:**
 - Consumes: `last-run.json` (`ts`, `exit`, `report`) from Task 2. The `crontab -l` text.
 - Produces: `check_vault_distill(home, issues, warnings, crontab=None)`. Tests pass `crontab` as text; in production it reads `crontab -l`.
@@ -2436,3 +2450,8 @@ Expected:
   - Parked (Medium): cron skips a night when the Mac sleeps (launchd would catch up); the first run has no cap on classify calls (one serial call per session).
   - Parked (Low): an oversized draft is rejected before the credential scan, so one holding a secret stays in the inbox; extract bytes are counted twice in the report; `digests/` and `related/` are never pruned; Batch `3,4` puts about 900 lines on one worker.
   - Still unverified until G4 and G7: that the `agy` print call makes no tool calls and prints bare JSON; that `agy` is logged in under cron; that Jev accepts a 35 KB `score-draft` input.
+- 2026-11-11 implementation through `sdd-drive`: 4 of 4 tasks, both batch gates approved (`fe48923`..`3122f31`). Amendments A1 to A5 implemented, with their tests in `tests/test_vault_distill_audit.py`.
+- 2026-11-11 final whole-branch review (code-reviewer, Opus): fix first, 2 High, 1 Medium, 3 Low. One fix round (`00b870c`..`9156d4d`); scoped re-review: all seven addressed, one new Important (a night where every session errors exited 0, against R16).
+  - Ruling: a second, small fix was dispatched (`461eab7`) instead of parking it, past the one-fix-round rule, because shipping a batch that reports success when every session failed breaks R16. The controller read that diff and ran the six covering test modules (OK); it had no third review. Cost if wrong: an unreviewed 30-line change in the error path.
+  - Ruling: the run exits 2 when more than half of the night's sessions errored (the same share R16 uses for unsure). The spec says "fails for every session"; this is stricter.
+  - Parked (Low, backlog): `score-draft` sends the first 20,000 bytes of `~/.claude/CLAUDE.md` and the related notes without a credential scan (the spec asks for that input); `quarantine` writes into the vault under `--dry-run`; the hotfix-name strip would rename a real repo called `<x>-hotfix-<y>` once its path is gone; `free_path` is tested at the extractor site only; there is no test that `related_notes` cannot raise.

@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="Vault-Distill Nightly Pipeline" id="vault-distill-pipeline">
+    <mxGraphModel dx="1440" dy="960" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1480" pageHeight="960" background="#0b0f17" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title Banner -->
+        <mxCell id="title" value="Vault-Distill Nightly Knowledge Compounding Pipeline (Fast Path Batch &amp;amp; State Loop)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#4ee39b;fontColor=#f6f8fb;fontStyle=1;fontSize=15;align=left;spacingLeft=16;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1400" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Swimlane 1: Fast Path Batch Execution -->
+        <mxCell id="lane-fast" value="1. Fast Path Execution (Nightly Cron Batch: 40 23 * * *)" style="swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#4ee39b;fontColor=#4ee39b;fontStyle=1;fontSize=12;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="1400" height="430" as="geometry" />
+        </mxCell>
+
+        <!-- Fast Path Row 1 (Ingest & Triage) -->
+        <mxCell id="node-hook" value="Stop Hook&#xa;Agent Finishes Session&#xa;Records cwd, sid, transcript" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-fast">
+          <mxGeometry x="30" y="60" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node-inbox" value="Live Inbox&#xa;_inbox/agent/&#xa;session-summaries.md" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-fast">
+          <mxGeometry x="260" y="60" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node-rotate" value="Nightly Rotate&#xa;Atomic Rename to&#xa;session-summaries.*.work.md" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-fast">
+          <mxGeometry x="490" y="60" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node-digest" value="Digest Builder&#xa;User prompt + assistant end&#xa;Cut to ≤12KB (Head/Tail)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-fast">
+          <mxGeometry x="720" y="60" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node-gate" value="Security &amp;amp; Skip Gate&#xa;SECRET_RE Credential Scan&#xa;VAULT_DISTILL_SKIP_REPOS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2b1619;strokeColor=#ff6b6b;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-fast">
+          <mxGeometry x="950" y="60" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node-classify" value="Jev Classify Gate&#xa;jev-gate classify-lesson&#xa;Filters out ~80% no-lesson" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-fast">
+          <mxGeometry x="1180" y="60" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Fast Path Row 2 (Draft, Verification & Review) -->
+        <mxCell id="node-extract" value="Flash Extract&#xa;gemini-3.8-flash-high (plan)&#xa;Renders Draft (≤1500 B)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-fast">
+          <mxGeometry x="1180" y="240" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node-evidence" value="Evidence Gate&#xa;Exact substring match in digest&#xa;Must be ≥8 characters" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-fast">
+          <mxGeometry x="950" y="240" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node-score" value="Jev Score Gate&#xa;jev-gate score-draft&#xa;Specific &amp;amp; Novel ≥ 0.5" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-fast">
+          <mxGeometry x="720" y="240" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node-recurrence" value="Jev Same-Lesson&#xa;Recurrence Match (≥0.85)&#xa;or High-Stakes (≥0.85)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-fast">
+          <mxGeometry x="490" y="240" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node-review" value="Argon-Low Review&#xa;gemini-4-argon-low&#xa;Final verdict: publish / reject" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-fast">
+          <mxGeometry x="260" y="240" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node-report" value="Morning Report&#xa;_inbox/agent/distill/report-*.md&#xa;Shadow Mode: would-publish" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-fast">
+          <mxGeometry x="30" y="240" width="190" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Swimlane 2: State Persistence Loop -->
+        <mxCell id="lane-state" value="2. State Persistence Loop &amp;amp; Telemetry Audits (~/.claude/state/vault-distill/)" style="swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#ffc746;fontColor=#ffc746;fontStyle=1;fontSize=12;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="550" width="1400" height="280" as="geometry" />
+        </mxCell>
+
+        <mxCell id="state-seen" value="seen.jsonl&#xa;Deduplication &amp;amp; Offsets&#xa;Tracks state per session" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-state">
+          <mxGeometry x="30" y="60" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="state-drafts" value="drafts.json&#xa;Candidate Lifecycle Ledger&#xa;candidate / ready / would-publish" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-state">
+          <mxGeometry x="290" y="60" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="state-digests" value="digests/*.txt&#xa;Persisted Raw Session Digests&#xa;Audit &amp;amp; Quarantine Cache" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-state">
+          <mxGeometry x="550" y="60" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="state-lastrun" value="last-run.json&#xa;Exit code, bytes, counts&#xa;Last run timestamp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-state">
+          <mxGeometry x="810" y="60" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="tool-doctor" value="ps-skills-doctor&#xa;Save-side readiness check&#xa;TYPESAFE_API_KEY &amp;amp; cron audit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-state">
+          <mxGeometry x="1110" y="60" width="250" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Edges: Fast Path Row 1 -->
+        <mxCell id="e1" value="Append Summary" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-hook" target="node-inbox">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" value="Cron Rotation" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-inbox" target="node-rotate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" value="Extract Turns" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-rotate" target="node-digest">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" value="Pre-Flight Scan" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-digest" target="node-gate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e5" value="Allowed Repos" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-gate" target="node-classify">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Fast Path Vertical Step -->
+        <mxCell id="e6" value="Lesson Candidate (p≥0.85)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-classify" target="node-extract">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Fast Path Row 2 -->
+        <mxCell id="e7" value="Draft Markdown" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-extract" target="node-evidence">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" value="Verified Quotes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-evidence" target="node-score">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" value="Candidate Note" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-score" target="node-recurrence">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e10" value="Ready Candidate" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-recurrence" target="node-review">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e11" value="Review Verdicts" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-review" target="node-report">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Fast Path to State Loop Connectors (Direct Vertical Downwards) -->
+        <mxCell id="e12" value="Updates Session State" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-report" target="state-seen">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e13" value="Updates Ledger" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-review" target="state-drafts">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e14" value="Caches Digest" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-score" target="state-digests">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e15" value="Writes Last Run" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="node-evidence" target="state-lastrun">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- State Loop Internal Edge -->
+        <mxCell id="e16" value="Audits Last Run (&lt;36h)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="state-lastrun" target="tool-doctor">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
