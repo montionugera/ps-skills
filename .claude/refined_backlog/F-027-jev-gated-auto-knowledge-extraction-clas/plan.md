@@ -1289,7 +1289,13 @@ git commit -m "feat(doctor): check vault recall hook and index; document automat
 
 - [ ] **Step 7: Phase gate for Tasks 2 and 3** (rule 7): verify (`python3 -m unittest discover -s tests -v` is green) → independent review with `code-reviewer` and `python-reviewer`, RISK: R1 → one fix round → `/simplify` → re-run the suite.
 
-- [ ] **Step 8: Go live on this machine (R1: state it, then do it)**
+---
+
+## Go-live (controller only, after the final review; not a worker task)
+
+Workers must not run this section: it changes the live install outside the worktree.
+
+- [ ] **Go-live 1: Go live on this machine (R1: state it, then do it)**
 
 These steps change the live install, so run them from the feature worktree only after the phase gates pass.
 
@@ -1320,7 +1326,7 @@ Add to `~/.claude/settings.json`, inside `hooks.UserPromptSubmit`, a new group a
 }
 ```
 
-- [ ] **Step 9: Live verification on the user's surface (Tier 4)**
+- [ ] **Go-live 2: Live verification on the user's surface (Tier 4)**
 
 Write the private recall set: pick 20 notes from `~/workspace/agentic-vault/_meta/indexes/knowledge.jsonl` and, for each, write one prompt a user would plausibly type about that topic without copying the title word for word. Add 5 more lines with `"expected_id": ""` and an everyday prompt unrelated to any note (for example "update the readme and run the tests"); these must inject nothing. Save as `~/.claude/state/vault-recall/recall_set.jsonl`, one `{"prompt": "...", "expected_id": "..."}` per line.
 
@@ -1354,3 +1360,12 @@ Then remove the live-check state: `rm -f ~/.claude/state/vault-recall/live-check
   - LOW: `rm -f bin/vault-engine` before the e2e; oversized notes are skipped instead of ending the loop; corrupt state resets; doctor tests clear `VAULT_ROOT`.
   - Not applied (backlog): notes injected before a `/compact` are not re-injected afterwards; the seed uses the payload `cwd` while `vault-bootstrap.py` uses `CLAUDE_PROJECT_DIR`; no test for the 150 ms hook latency.
   - Not verified by the audit: the new `test_e2e.sh` case (its run hung in the existing `pkg/vaultsync` step).
+- 2026-11-11 final whole-branch review (code-reviewer, Opus): fix first, 1 Important and 6 Minor. One fix round (`18de4e8`..`07a417b`), one scoped re-review: SHIP.
+  - Ruling: `context --limit` applies to both modes; default 5 for `--query`, 3 for `--cwd`, so SessionStart leaves half of the 6-note session budget for per-prompt recall. The spec does not set this split.
+  - Parked (Minor, backlog):
+    - the doctor crashes on a nested wrong type in settings.json (`{"hooks": []}`);
+    - the doctor's known-title probe ignores the engine's stop words and can warn falsely;
+    - a 0-byte `knowledge.jsonl` beside existing notes now passes `--strict` silently;
+    - the session byte count leaves out the 33-byte wrapper per block (worst case 2,598 bytes against 2,400);
+    - `FormatContext` does not clean the id and matched fields;
+    - the first prompt of a session makes two engine calls (worst case about 4 s against the 5 s hook timeout).

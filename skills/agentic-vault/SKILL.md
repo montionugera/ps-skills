@@ -66,6 +66,7 @@ The engine binary is located at `_meta/bin/vault-engine` inside the vault root (
 | Command | Usage | Description |
 |---|---|---|
 | `search` | `vault-engine search <query>` | Instant keyword search across knowledge, projects, and ideas |
+| `context` | `vault-engine context --cwd <dir>` or `--query "<prompt>"` | Notes relevant to a session, from the index only; prints nothing on no match |
 | `read-record` | `vault-engine read-record <id>` | Universal record reader (Ideas, Projects, Areas, Knowledge) returning JSON + SHA-256 |
 | `commit` | `vault-engine commit <id> <sha> <actor> '<json>' [key] [reason]` | Atomic OCC commit with OS process flock + fsync |
 | `publish-knowledge` | `vault-engine publish-knowledge <file> [cat] [by]` | Transactionally validates & publishes a knowledge note with audit event |
@@ -102,9 +103,9 @@ flowchart LR
 ```
 
 ### 1. Pre-Flight Knowledge Discovery (Before Coding)
-Any agent starting work in any repository queries the vault for durable rules and theses:
+Retrieval is automatic in Claude Code: the SessionStart hook injects notes tied to the repo, and the `vault-recall.py` prompt hook injects up to 3 notes per prompt as a `<vault-context>` block. Each line gives the note id, path and the terms that matched. Read the note with `vault-engine read-record "<ID>"` when a line looks relevant. In harnesses without hooks, query by hand:
 ```bash
-vault-engine search "<topic>"
+vault-engine context --query "<topic>"
 vault-engine read-record "<ID>"
 ```
 

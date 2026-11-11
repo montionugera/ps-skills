@@ -126,10 +126,23 @@ def test_non_allowlisted_ignored_file_is_kept(tmp_repo_with_release: Path, fixed
     # Allowlisted ignored file (node_modules) should pass S5
     (wt / "node_modules").mkdir()
     (wt / "node_modules" / "dummy.js").write_text("console.log(1)")
-    # Nested allowlisted directory should also pass S5
+    # Nested allowlisted directory and agent/graft/obsidian artifacts should also pass S5
     nested_cache = wt / "packages" / "sub" / ".pytest_cache"
     nested_cache.mkdir(parents=True)
     (nested_cache / "cache.json").write_text("{}")
+    for rel in [".obsidian/workspace.json", ".adal/skills/graft/SKILL.md", "docs/spec.html"]:
+        p = wt / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("generated")
+    (wt / ".gitignore").write_text(".env.local\nnode_modules/\n.pytest_cache/\n.obsidian/\n.adal/\ndocs/*.html\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-m", "chore: gitignore"], cwd=wt, check=True)
+    head_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=wt).decode().strip()
+    entries = json.loads(cat_path.read_text())
+    for e in entries:
+        if e["id"] == feat["id"]:
+            e["shipped_sha"] = head_sha
+    cat_path.write_text(json.dumps(entries, indent=2))
     ok, reason = removable(tmp_repo_with_release, wt, skip_liveness=True)
     assert ok, reason
 

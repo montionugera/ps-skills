@@ -90,6 +90,27 @@ class TestQuotaLogic(unittest.TestCase):
         self.assertEqual(rem_5h, 20.0)
         self.assertIn("20.0%", msg)
 
+    def test_codex_named_job_needs_60_percent_5h(self):
+        # Owner, 2026-11-03: a named Codex job starts only with >=60% of its 5h window,
+        # the same bar auto-routing uses, even when the caller passes the generic 30% floor.
+        self._write_state(self.codex_file, {
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 45.0},
+                {"kind": "weekly", "remaining_percent": 95.0}
+            ]
+        })
+        eligible, _r5, _rw, msg = dispatch_mod.check_quota("codex", str(self.codex_file), min_5h=30.0, min_weekly=10.0)
+        self.assertFalse(eligible)
+        self.assertIn("min 60.0%", msg)
+        self._write_state(self.codex_file, {
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 61.0},
+                {"kind": "weekly", "remaining_percent": 95.0}
+            ]
+        })
+        eligible, _r5, _rw, _msg = dispatch_mod.check_quota("codex", str(self.codex_file), min_5h=30.0, min_weekly=10.0)
+        self.assertTrue(eligible)
+
     def test_quota_payload_fallback(self):
         self._write_state(self.agy_file, {
             "payload": {
@@ -284,6 +305,29 @@ class TestWindowRollover(unittest.TestCase):
         self.assertFalse(eligible)
         refresh.assert_not_called()
 
+    def test_stale_live_codex_observation_is_refreshed_before_deciding(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+
+        def refresh(path):
+            self._write_healthy_state(0, time.time())
+            return True, "refreshed"
+
+        with mock.patch.object(dispatch_mod, "DEFAULT_CODEX_STATE", str(self.state_file)), \
+                mock.patch.object(dispatch_mod, "refresh_codex_observation", refresh):
+            eligible, _r5, _rw, msg = dispatch_mod.check_quota("codex", str(self.state_file), min_5h=30.0, min_weekly=10.0)
+        self.assertTrue(eligible)
+        self.assertNotIn("stale", msg)
+
+    def test_failed_codex_refresh_fails_closed_and_names_hint(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+        with mock.patch.object(dispatch_mod, "DEFAULT_CODEX_STATE", str(self.state_file)), \
+                mock.patch.object(dispatch_mod, "refresh_codex_observation", mock.Mock(return_value=(False, "rpc timeout"))):
+            eligible, _r5, _rw, msg = dispatch_mod.check_quota("codex", str(self.state_file), min_5h=30.0, min_weekly=10.0)
+        self.assertFalse(eligible)
+        self.assertIn("[stale: observation", msg)
+        self.assertIn("rpc timeout", msg)
+        self.assertIn("codex", msg)
+
 
 class TestAgyObservationRefresh(unittest.TestCase):
     """Runs refresh_agy_observation against a fake agy, never the real one."""
@@ -437,7 +481,7 @@ class TestBestRunwayAutoRouting(unittest.TestCase):
     def test_auto_skips_stale_agent_even_with_higher_runway(self):
         now = time.time()
         self._write_quota(self.agy_file, 95.0, 95.0)  # best runway, but the observation is stale
-        self._write_quota(self.codex_file, 50.0, 90.0)
+        self._write_quota(self.codex_file, 70.0, 90.0)  # above the 60% Codex 5h floor
         self._age(self.agy_file, now)
 
         agent, eligible, r5, _rw, _msg = dispatch_mod.route_best_agent(
@@ -446,7 +490,7 @@ class TestBestRunwayAutoRouting(unittest.TestCase):
         )
         self.assertEqual(agent, "codex")
         self.assertTrue(eligible)
-        self.assertEqual(r5, 50.0)
+        self.assertEqual(r5, 70.0)
 
     def test_auto_fails_when_both_observations_are_stale(self):
         now = time.time()

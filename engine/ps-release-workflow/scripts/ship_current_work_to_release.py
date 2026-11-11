@@ -24,6 +24,7 @@ from lib.backlog_paths import (
 from lib.catalog import CatalogEntryNotFoundError, find_entry, mark_shipped, update_entry
 from lib.epic import epic_children, epic_completeness, epic_folder_path, try_begin_verification
 from lib.epic_gate import run_and_record
+from lib.design_gate import check_design_artifacts, ui_files_changed
 from lib import gate_cache
 from lib.git_ops import GitError, _run as git_run, branch_exists, commit_all, is_dirty
 from lib.gate_lock import gate_slot
@@ -46,7 +47,7 @@ class NotInFeatureWorktreeError(Exception): pass
 class FeatureNotReadyError(Exception): pass
 
 
-def _run_precheck(tree: Path) -> int | None:
+def _run_precheck(tree: Path, *, gate_base: str | None = None) -> int | None:
     """Run the Gate 1 script with cwd=tree; return its exit code.
 
     Gate 1 must resolve its script from the tree whose code it is verifying
@@ -69,8 +70,11 @@ def _run_precheck(tree: Path) -> int | None:
         print(f"⚠️ Gate 1 SKIPPED — {precheck} not found in {tree}", file=sys.stderr)
         return None
     def run() -> int:
+        env = None
+        if gate_base and not os.environ.get("PSRW_GATE_BASE"):
+            env = {**os.environ, "PSRW_GATE_BASE": gate_base}
         with gate_slot(f"gate1 {tree.name}"):
-            return subprocess.run([str(precheck)], cwd=tree).returncode
+            return subprocess.run([str(precheck)], cwd=tree, env=env).returncode
     # Opt-in (.release.json gate_cache): skips the run on a recent PASS for this
     # exact tree. A no-op unless enabled — see lib/gate_cache.py for the risks.
     return gate_cache.run_cached(tree, precheck, run)
@@ -140,6 +144,7 @@ def ship_current_work(
     worktree: Path,
     *,
     skip_readiness: bool = False,
+    skip_design_gate: bool = False,
     no_sync_main: bool = False,
     teardown: bool = False,
 ) -> dict:
@@ -197,6 +202,27 @@ def ship_current_work(
                 raise FeatureNotReadyError(
                     f"Feature {feature_id} cannot be shipped: spec is not ready:\n"
                     + "\n".join(f"  - {r}" for r in res.reasons)
+                )
+
+    if skip_design_gate:
+        print("⚠️ Design gate SKIPPED (--skip-design-gate)", file=sys.stderr)
+    elif state.get("design_gate") is not False:
+        feat_entry = find_entry(get_backlog_catalog_path(repo, "refined"), feature_id)
+        if not feat_entry:
+            print(f"⚠️ Design gate skipped: {feature_id} missing from catalog", file=sys.stderr)
+        else:
+            ui_files = ui_files_changed(worktree, release_branch)
+            feature_dir = (worktree / ".claude" / "refined_backlog" /
+                           f"{feature_id}-{slugify(feat_entry['title'])}")
+            missing = check_design_artifacts(feature_dir, ui_files)
+            if missing:
+                raise FeatureNotReadyError(
+                    f"Feature {feature_id} cannot be shipped: UI files changed: "
+                    + ", ".join(ui_files[:10])
+                    + (f" (and {len(ui_files) - 10} more)" if len(ui_files) > 10 else "")
+                    + "\nMissing design artifacts: " + ", ".join(missing)
+                    + "\nrun the impeccable skill (shape -> design-brief.md, critique -> critique.md) "
+                      "or pass --skip-design-gate with a reason"
                 )
 
     feat_branch = f"feat/{feature_id}"
@@ -275,8 +301,11 @@ def ship_current_work(
 
         # Re-verify Gate 1 on the MERGED result — precheck resolved from the
         # _release worktree itself, so it checks the combined release code.
+        # Pass pre_sha as gate_base so selective precheck gates diff the exact
+        # delta introduced onto release/<v> (sync + feature) rather than
+        # re-scanning earlier already-verified features on the release branch.
         try:
-            rc = _run_precheck(rel_wt)
+            rc = _run_precheck(rel_wt, gate_base=pre_sha)
         except BaseException:
             # Any failure (bad hooks.precheck path, gate-slot timeout, Ctrl-C) must not
             # leave the merge standing: the
@@ -378,6 +407,8 @@ def main() -> int:
                         "deploy once after the burst instead of racing rebuilds)")
     p.add_argument("--skip-readiness", action="store_true",
                    help="skip spec readiness check (for legacy migrations only)")
+    p.add_argument("--skip-design-gate", action="store_true",
+                   help="skip the design gate (provide a reason)")
     p.add_argument("--no-sync-main", action="store_true", dest="no_sync_main",
                    help="EMERGENCY BYPASS: do not absorb main (hotfixes) into release/<v> "
                         "before merging; the release may then lag main until psrw sync-main")
@@ -393,6 +424,7 @@ def main() -> int:
     cwd = Path.cwd()
     try:
         result = ship_current_work(cwd, skip_readiness=args.skip_readiness,
+                                   skip_design_gate=args.skip_design_gate,
                                    no_sync_main=args.no_sync_main)
     except (DirtyTreeError, GateFailedError, NotInFeatureWorktreeError,
             NoReleaseInProgressError, CatalogEntryNotFoundError, GitError,
@@ -512,6 +544,22 @@ def main() -> int:
             print(f"👉 Change directory: cd {rel_wt}")
         else:
             print(f"\nℹ️  Worktree {cwd.name} kept: {reason}")
+        # Opportunistically sweep any earlier shipped worktrees that are now idle and removable
+        wt_root = repo / ".claude" / "worktrees"
+        if wt_root.is_dir():
+            for other_wt in sorted(wt_root.iterdir()):
+                if not other_wt.is_dir() or other_wt.name == "_release" or other_wt.resolve() == cwd.resolve():
+                    continue
+                ok_other, _ = removable(repo, other_wt, idle_window_hours=1.0, skip_liveness=False)
+                if ok_other:
+                    try:
+                        m = _find_marker(other_wt)
+                        fid_other = m.get("feature", "")
+                    except Exception:
+                        fid_other = ""
+                    ok_rm, _ = teardown_worktree(repo, other_wt, fid_other)
+                    if ok_rm:
+                        print(f"🧹 Opportunistically removed previously-shipped worktree: {other_wt.name}")
     else:
         print(f"\nℹ️  Worktree {cwd.name} kept (--keep-worktree).")
 

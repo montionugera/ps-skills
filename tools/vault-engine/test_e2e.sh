@@ -172,6 +172,35 @@ EOF
 "$ENGINE_BIN" check-privacy
 echo "✅ Git privacy quarantine rules verified."
 
+# Context retrieval check
+mkdir -p "${VAULT_ROOT}/04_Knowledge/concepts"
+cat << 'EOF' > "${VAULT_ROOT}/04_Knowledge/concepts/e2e-context.md"
+---
+id: CONCEPT-e2e-context
+title: Flaky gate retries
+schema: knowledge/v1
+status: active
+kind: concept
+tags: [gate]
+updated: "2026-11-01T00:00:00Z"
+---
+
+Retry a flaky gate once before failing the ship.
+EOF
+"$ENGINE_BIN" rebuild-index > /dev/null
+CTX_OUT=$("$ENGINE_BIN" context --query "why does the flaky gate keep failing retries")
+if echo "$CTX_OUT" | grep -qF -- "- CONCEPT-e2e-context | Flaky gate retries |"; then
+    echo "✅ Context retrieval verified."
+else
+    echo "❌ ERROR: context output missing the note: $CTX_OUT"
+    exit 1
+fi
+if [ -n "$("$ENGINE_BIN" context --query "zzzz qqqq")" ]; then
+    echo "❌ ERROR: context printed output for a non-matching query"
+    exit 1
+fi
+echo "✅ Context stays silent on no match."
+
 # Clean up temp test vault
 rm -rf "$VAULT_ROOT"
 

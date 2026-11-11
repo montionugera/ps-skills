@@ -23,6 +23,13 @@ bin/vault-engine version                   # prints "vault-engine dev" for a pla
 
 Nothing changes: every command prints and exits as before.
 
+### `context`: knowledge for a session
+
+`vault-engine context --cwd <dir>` prints notes tied to the repository that owns `<dir>` (through a project's `release_repo`, or a `repo:<name>` tag), up to 3 notes and 800 bytes.
+`vault-engine context --query "<prompt>"` scores notes by distinct prompt terms: title 3, tag 2, body 1, threshold 4, up to 5 notes.
+Both read only `_meta/indexes/`, print nothing when nothing matches, and always exit 0. Run `rebuild-index` once after upgrading so the index carries tags, summaries and terms.
+`recall_eval.sh <set.jsonl> [min]` scores retrieval against a private prompt set.
+
 ## Shared folder
 
 A folder is shared when `_meta/bin/sync.json` exists. That file is local to the place and is never synced.

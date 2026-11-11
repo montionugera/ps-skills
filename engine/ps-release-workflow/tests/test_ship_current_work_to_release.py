@@ -843,3 +843,68 @@ def test_ship_refuses_a_missing_feature_branch_before_gate1(
         ship_current_work(wt)
     assert f"feat/{feat['id']} does not exist" in str(ei.value)
     assert not sentinel.exists()
+
+
+@pytest.mark.parametrize("mode", ["refuse", "artifacts", "skip", "config"])
+def test_design_gate_ship(tmp_repo_with_release: Path, fixed_owner: str, mode: str, capsys):
+    from scripts.ship_current_work_to_release import FeatureNotReadyError
+    from lib.slug import slugify
+
+    feat, claim = _make_repo_with_open_release_and_claim(tmp_repo_with_release, fixed_owner)
+    wt = Path(claim["worktree"])
+    (wt / "screen.tsx").write_text("export default 1\n")
+    if mode == "artifacts":
+        folder = wt / ".claude" / "refined_backlog" / f"{feat['id']}-{slugify(feat['title'])}"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "design-brief.md").write_text("brief")
+        (folder / "critique.md").write_text("critique")
+    if mode == "config":
+        config = tmp_repo_with_release / ".claude" / "worktrees" / "_release" / ".release.json"
+        state = json.loads(config.read_text())
+        state["design_gate"] = False
+        config.write_text(json.dumps(state, indent=2) + "\n")
+        subprocess.run(["git", "add", ".release.json"], cwd=config.parent, check=True)
+        subprocess.run(["git", "commit", "-m", "disable design gate"], cwd=config.parent, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-f", "screen.tsx"], cwd=wt, check=True)
+    if mode == "artifacts":
+        subprocess.run(["git", "add", "-f", str(folder.relative_to(wt))], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-m", "UI change"], cwd=wt, check=True, capture_output=True)
+    if mode == "refuse":
+        with pytest.raises(FeatureNotReadyError, match="screen.tsx") as error:
+            ship_current_work(wt)
+        assert "design-brief.md" in str(error.value) and "critique.md" in str(error.value)
+    else:
+        ship_current_work(wt, skip_design_gate=(mode == "skip"))
+        assert (tmp_repo_with_release / ".claude" / "worktrees" / "_release" / "screen.tsx").exists()
+        if mode == "skip":
+            assert "Design gate SKIPPED (--skip-design-gate)" in capsys.readouterr().err
+
+
+def test_ship_passes_pre_sha_as_psrw_gate_base_on_release_reverify(
+    tmp_repo_with_release: Path, fixed_owner: str, tmp_path: Path, monkeypatch
+):
+    monkeypatch.delenv("PSRW_GATE_BASE", raising=False)
+    bases_log = tmp_path / "gate-bases.txt"
+    _scaffold_precheck(
+        tmp_repo_with_release,
+        f'#!/bin/sh\necho "$(basename "$PWD"):${{PSRW_GATE_BASE:-unset}}" >> "{bases_log}"\nexit 0\n',
+    )
+    new_release(tmp_repo_with_release, version="1.1")
+    idea = new_idea(tmp_repo_with_release, title="Check gate base")
+    feat = promote_idea_to_refined(tmp_repo_with_release, idea["id"], allow_empty_spec=True)
+    claim = claim_feature(tmp_repo_with_release, feat["id"], owner=fixed_owner)
+    wt = Path(claim["worktree"])
+    (wt / "docs.md").write_text("hi\n")
+    subprocess.run(["git", "add", "."], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-m", "docs: add hi"], cwd=wt, check=True, capture_output=True)
+
+    rel_wt = tmp_repo_with_release / ".claude" / "worktrees" / "_release"
+    pre_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=rel_wt, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    ship_current_work(wt)
+    lines = bases_log.read_text().strip().splitlines()
+    assert len(lines) == 2
+    assert lines[0].endswith(":unset")
+    assert lines[1] == f"_release:{pre_sha}"

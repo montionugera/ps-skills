@@ -12,7 +12,9 @@ from typing import Optional
 from lib.backlog_paths import read_release_state
 from lib.git_ops import add_worktree_new_branch, commit_all, fetch_and_ff_main
 from lib.owner import resolve_owner_id
+from lib.release_freeze import _freeze_file
 from lib.repo import find_repo_root, is_ps_release_workflow_repo
+from lib.state import mutate_state
 
 
 class ReleaseAlreadyInProgressError(Exception): pass
@@ -73,6 +75,11 @@ def new_release(repo: Path, version: Optional[str] = None, owner: Optional[str] 
     rel_rj["started_by"] = owner or resolve_owner_id()
     rel_rj_path.write_text(json.dumps(rel_rj, indent=2) + "\n")
     commit_all(worktree, f"chore(release): start {new_v}")
+
+    # Clear any stale freeze records left over from earlier promoted releases
+    # so `psrw gc` is never blocked by a historical release-freeze.json entry.
+    if _freeze_file(repo).exists():
+        mutate_state(_freeze_file(repo), lambda _d: {}, default={})
 
     return {"version": new_v, "branch": branch, "worktree": str(worktree)}
 

@@ -9,8 +9,80 @@ Checks:
 """
 import os
 import sys
+import json
+import re
+import subprocess
 import argparse
 from pathlib import Path
+
+
+def check_vault_recall(home, issues, warnings):
+    """Knowledge retrieval health: hook linked and registered, index carries retrieval fields."""
+    vault = Path(os.environ.get("VAULT_ROOT") or home / "workspace" / "agentic-vault")
+    if not (vault / "_meta").is_dir():
+        return  # no vault on this machine: nothing to check
+    hook = home / ".claude" / "hooks" / "vault-recall.py"
+    if not hook.exists():
+        issues.append(f"Vault recall hook missing: {hook} (run install.sh)")
+    try:
+        settings = json.loads((home / ".claude" / "settings.json").read_text())
+    except (OSError, ValueError):
+        settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
+    registered = any(
+        "vault-recall.py" in h.get("command", "")
+        for group in settings.get("hooks", {}).get("UserPromptSubmit", [])
+        for h in group.get("hooks", [])
+    )
+    if not registered:
+        issues.append("Vault recall hook not registered under UserPromptSubmit in ~/.claude/settings.json")
+    index = vault / "_meta" / "indexes" / "knowledge.jsonl"
+    try:
+        lines = index.read_text().splitlines()
+    except OSError:
+        lines = []
+    if any(line.strip() for line in lines) and not any('"terms"' in line for line in lines):
+        issues.append(f"Vault index has no retrieval fields: run `vault-engine rebuild-index` ({index})")
+    notes = list((vault / "04_Knowledge").rglob("*.md"))
+    if lines and notes and max(n.stat().st_mtime for n in notes) > index.stat().st_mtime:
+        warnings.append("Vault index is older than the newest knowledge note: run `vault-engine rebuild-index`")
+
+    def run_context(binary, query):
+        try:
+            return subprocess.run([str(binary), "context", "--query", query], capture_output=True, text=True,
+                                  timeout=5, env={**os.environ, "VAULT_ROOT": str(vault)})
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    # Every installed copy must know `context`: an old copy that rebuilds the index strips the retrieval fields.
+    primary = home / ".local" / "bin" / "vault-engine"
+    copies = [primary, home / ".gemini" / "antigravity-cli" / "bin" / "vault-engine", vault / "_meta" / "bin" / "vault-engine"]
+    for binary in copies:
+        if not binary.exists():
+            continue
+        proc = run_context(binary, "x")
+        if proc is None or proc.returncode != 0:
+            issues.append(f"vault-engine copy has no `context` command: {binary} (rebuild it from tools/vault-engine)")
+    # A title with three real terms scores 9, so the engine must return its own note for it.
+    titles = []
+    for line in lines:
+        if '"terms"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") == "active" and entry.get("title"):
+            titles.append(entry["title"])
+    known = next((t for t in titles if len([w for w in re.split(r"[^a-z0-9]+", t.lower()) if len(w) >= 4]) >= 3), "")
+    if primary.exists() and known:
+        proc = run_context(primary, known)
+        if proc is not None and proc.returncode == 0 and not proc.stdout.strip():
+            warnings.append(f"vault-engine context returned nothing for a known note title: {known!r}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Audit ps-skills runtime installation, parity, and Antigravity context health.")
@@ -205,6 +277,8 @@ def main():
                         issues.append(f"Failed to create {t3_hooks_json}: {e}")
                 else:
                     warnings.append(f"T3 Antigravity provider missing hooks.json: {t3_hooks_json} (run with --fix)")
+
+    check_vault_recall(home, issues, warnings)
 
     # Report
     print("=== ps-skills-doctor ===")

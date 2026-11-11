@@ -212,11 +212,26 @@ def cmd_triage_diff(args: argparse.Namespace) -> int:
                 "needs_go_reviewer": Noul(
                     instructions="Does this diff contain non-trivial Go (.go) code changes?"
                 ),
+                "needs_rust_reviewer": Noul(
+                    instructions="Does this diff contain non-trivial Rust (.rs, Cargo.toml) code, ECS simulation, physics, or network protocol changes?"
+                ),
+                "needs_godot_reviewer": Noul(
+                    instructions="Does this diff contain Godot engine or C# game-client (.cs, .tscn, .tres, .gdshader, .godot) changes?"
+                ),
                 "needs_ts_reviewer": Noul(
-                    instructions="Does this diff contain non-trivial TypeScript/JavaScript/Svelte (.ts, .tsx, .js, .svelte) code changes?"
+                    instructions="Does this diff contain non-trivial TypeScript/JavaScript/Svelte (.ts, .tsx, .js, .mjs, .svelte) code changes?"
                 ),
                 "needs_py_reviewer": Noul(
                     instructions="Does this diff contain non-trivial Python (.py) code changes?"
+                ),
+                "needs_svelte_reviewer": Noul(
+                    instructions="Does this diff modify Svelte 5 (.svelte, .svelte.ts, .svelte.js) components, runes ($state, $derived, $effect, $props), or SvelteKit routes?"
+                ),
+                "needs_db_migration_reviewer": Noul(
+                    instructions="Does this diff add or modify SQL schema migrations, Prisma schema/migrations, TypeORM migrations, or database DDL/indexes?"
+                ),
+                "needs_lore_spine_audit": Noul(
+                    instructions="Does this diff modify world spine geometry, map sheets, quest/story canon, or asset taxonomy JSONs under content/?"
                 ),
                 "has_tests_included": Noul(
                     instructions="Does this diff include unit, integration, or E2E test additions/updates?"
@@ -245,8 +260,13 @@ def cmd_triage_diff(args: argparse.Namespace) -> int:
         ux_p = float(ans["needs_ux_review"].noul)
         sec_p = float(ans["needs_security_review"].noul)
         go_p = float(ans["needs_go_reviewer"].noul)
+        rust_p = float(ans["needs_rust_reviewer"].noul) if "needs_rust_reviewer" in ans else 0.0
+        godot_p = float(ans["needs_godot_reviewer"].noul) if "needs_godot_reviewer" in ans else 0.0
         ts_p = float(ans["needs_ts_reviewer"].noul)
         py_p = float(ans["needs_py_reviewer"].noul)
+        svelte_p = float(ans["needs_svelte_reviewer"].noul) if "needs_svelte_reviewer" in ans else 0.0
+        db_mig_p = float(ans["needs_db_migration_reviewer"].noul) if "needs_db_migration_reviewer" in ans else 0.0
+        lore_p = float(ans["needs_lore_spine_audit"].noul) if "needs_lore_spine_audit" in ans else 0.0
         tests_p = float(ans["has_tests_included"].noul)
         tier_choice = ans["review_tier"].choice
         tier_conf = float(ans["review_tier"].confidence)
@@ -259,8 +279,13 @@ def cmd_triage_diff(args: argparse.Namespace) -> int:
             ("ux-impeccable", ux_p),
             ("security-reviewer", sec_p),
             ("go-reviewer", go_p),
+            ("rust-reviewer", rust_p),
+            ("godot-csharp-reviewer", godot_p),
             ("typescript-reviewer", ts_p),
             ("python-reviewer", py_p),
+            ("svelte-5-runes", svelte_p),
+            ("db-migrations", db_mig_p),
+            ("lore-spine-reviewer", lore_p),
         ]:
             if prob >= 0.20:
                 lenses_to_run.append(name)
@@ -290,8 +315,13 @@ def cmd_triage_diff(args: argparse.Namespace) -> int:
                 "ux": round(ux_p, 4),
                 "security": round(sec_p, 4),
                 "go": round(go_p, 4),
+                "rust": round(rust_p, 4),
+                "godot": round(godot_p, 4),
                 "typescript": round(ts_p, 4),
                 "python": round(py_p, 4),
+                "svelte": round(svelte_p, 4),
+                "db_migrations": round(db_mig_p, 4),
+                "lore_spine": round(lore_p, 4),
             },
         }
         if args.hook_line:

@@ -46,6 +46,8 @@ own edit tools; see [`docs/lifecycle.md#guard-guarantees`](docs/lifecycle.md#gua
 | `cleanup_legacy_worktrees.py` | Interactive GC of marker-less ("legacy") worktrees, showing merged-to-main status. |
 | `guard_check.py` | PreToolUse hook: blocks edits on `main` of an opted-in repo, or in a worktree owned by another session. See *Guard guarantees* in `docs/lifecycle.md`. |
 
+**Design gate:** Before shipping UI changes, `psrw ship` requires a non-empty `design-brief.md` and either `critique.md` or `design-critique.md` in the feature's refined backlog folder. Run the impeccable skill to create them. To bypass the gate, use `--skip-design-gate` with a reason, or set `design_gate` to `false` in `.release.json` to opt out for the release.
+
 ## Promote lifecycle
 
 See [`docs/lifecycle.md#promote-sequence`](docs/lifecycle.md#promote-sequence) for the full

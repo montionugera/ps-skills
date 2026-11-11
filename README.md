@@ -215,6 +215,13 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
   bypasses: `--no-sync-main` (ship) and `--allow-stale-main` (promote). Each skill's
   `SKILL.md` documents its preconditions.
 
+### Automatic knowledge retrieval (I-039 slice 1)
+
+- `vault-engine context --cwd <dir>` / `--query "<prompt>"`: print the vault notes relevant to a session, from the index only, no LLM.
+- `skills/agentic-vault/hooks/vault-recall.py`: UserPromptSubmit hook. Injects up to 3 notes (1,200 bytes) per prompt, each note once per session, at most 6 notes and 2,400 bytes per session. Register it once in `~/.claude/settings.json` under `hooks.UserPromptSubmit`: `{"type": "command", "command": "python3 ~/.claude/hooks/vault-recall.py", "timeout": 5}`.
+- Env: `VAULT_RECALL=0` turns the hook off; `VAULT_ENGINE` and `VAULT_RECALL_STATE` override the binary and the state directory. It is also off when `VAULT_CONTEXT_BOOTSTRAP=0` or `CLAUDE_VAULT_SUMMARY=0` (dispatch workers).
+- `ps-skills-doctor` reports when the hook is missing or unregistered, or the index lacks retrieval fields.
+
 ## Development
 
 ```bash
