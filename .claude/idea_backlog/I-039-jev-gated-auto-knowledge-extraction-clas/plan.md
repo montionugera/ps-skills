@@ -18,9 +18,9 @@
 - Per-prompt injection: at most 3 notes and 1,200 bytes, and nothing below score 4.
 - Per-session total including the SessionStart block: at most 6 distinct notes and 2,400 bytes; a note is injected once per session.
 - Injected form per note: id, title, path, matched terms, summary of at most 120 bytes. Never more of the body.
-- Scoring: for each distinct query term (lower-case, 4 or more characters, stop words removed), add the highest weight among the fields containing it: title 3, any tag 2, body terms 1. Threshold 4. Ties broken by newest `updated`.
+- Scoring: for each distinct query term (lower-case, 4 or more characters, stop words removed), add the highest weight among the fields containing it: title 3, any tag 2, body terms 1. A note is returned only if its score is at least 4, at least one term matched its title or a tag, and its status is `active`. Ties broken by newest `updated`.
 - Fail open everywhere: a missing engine, vault, index or state file produces no output and exit 0. The hook's hard timeout on the engine is 2 seconds.
-- Speed: `ContextByQuery` over a 2,000-note index completes in at most 50 ms at p95.
+- Speed: `ContextByQuery` over a 2,000-note index completes in at most 50 ms at p95, measured with `BenchmarkContextByQuery` at go-live. The unit test asserts 200 ms so a slow CI runner does not flake.
 - The hook does nothing when the prompt is shorter than 12 characters, starts with `/`, or any of `VAULT_RECALL=0`, `VAULT_CONTEXT_BOOTSTRAP=0`, `CLAUDE_VAULT_SUMMARY=0` is set.
 - The repo is public: no real vault note ids, titles or prompts in committed fixtures. The 20-prompt recall set lives at `~/.claude/state/vault-recall/recall_set.jsonl`, outside the repo. (The spec named `tests/fixtures/vault_recall_set.jsonl`; this plan moves it for that reason.)
 - Before Task 1: run `psrw sync-main`, then `psrw refine I-039` and `psrw claim F-NNN`. All edits happen in the claimed feature worktree, never in the main checkout.
@@ -207,13 +207,30 @@ func TestContext_CwdResolvesWorktreeToProjectAndRepoTag(t *testing.T) {
 	if strings.Join(ids, ",") != "CONCEPT-r,CONCEPT-p" {
 		t.Fatalf("want CONCEPT-r,CONCEPT-p (newest first), got %v", ids)
 	}
+	if out := FormatContext(hits, 800); !strings.Contains(out, "| matched: repo |") {
+		t.Fatalf("cwd mode must print matched: repo, got:\n%s", out)
+	}
 	if hits := e.ContextByCwd(t.TempDir()); len(hits) != 0 {
 		t.Fatalf("unrelated dir must give no hits, got %+v", hits)
 	}
 }
 
-func TestContext_QueryP95Under50msAt2000Notes(t *testing.T) {
+func TestContext_NeedsTitleOrTagMatchAndActiveStatus(t *testing.T) {
 	e := contextVault(t)
+	writeFixture(t, e.Root, "04_Knowledge/concepts/body.md",
+		knowledgeNote("CONCEPT-body", "unrelated", "", "", "2026-11-01T00:00:00Z", "update readme file tests"))
+	draft := strings.Replace(
+		knowledgeNote("CONCEPT-draft", "update readme", "", "", "2026-11-01T00:00:00Z", "file tests"),
+		"status: active", "status: draft", 1)
+	writeFixture(t, e.Root, "04_Knowledge/concepts/draft.md", draft)
+	_ = e.RebuildIndexes()
+	if hits := e.ContextByQuery("update readme file tests", 5); len(hits) != 0 {
+		t.Fatalf("body-only and non-active notes must not be returned, got %+v", hits)
+	}
+}
+
+func writeBigIndex(tb testing.TB, e *VaultEngine) {
+	tb.Helper()
 	var lines []string
 	for i := 0; i < 2000; i++ {
 		var terms []string
@@ -223,7 +240,18 @@ func TestContext_QueryP95Under50msAt2000Notes(t *testing.T) {
 		lines = append(lines, fmt.Sprintf(`{"id":"CONCEPT-%04d","path":"04_Knowledge/concepts/n%04d.md","title":"note number %04d","status":"active","area_ids":null,"updated":"2026-11-01T00:00:00Z","sha256":"x","terms":["%s"]}`,
 			i, i, i, strings.Join(terms, `","`)))
 	}
-	writeFixture(t, e.Root, "_meta/indexes/knowledge.jsonl", strings.Join(lines, "\n")+"\n")
+	p := filepath.Join(e.Root, "_meta", "indexes", "knowledge.jsonl")
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		tb.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		tb.Fatal(err)
+	}
+}
+
+func TestContext_QueryStaysFastAt2000Notes(t *testing.T) {
+	e := contextVault(t)
+	writeBigIndex(t, e)
 	var runs []time.Duration
 	for i := 0; i < 20; i++ {
 		start := time.Now()
@@ -231,8 +259,18 @@ func TestContext_QueryP95Under50msAt2000Notes(t *testing.T) {
 		runs = append(runs, time.Since(start))
 	}
 	sort.Slice(runs, func(a, b int) bool { return runs[a] < runs[b] })
-	if p95 := runs[18]; p95 > 50*time.Millisecond {
-		t.Fatalf("p95 %v exceeds 50ms", p95)
+	// The budget is 50 ms (see BenchmarkContextByQuery); 200 ms here keeps a slow CI runner from flaking.
+	if p95 := runs[18]; p95 > 200*time.Millisecond {
+		t.Fatalf("p95 %v exceeds 200ms", p95)
+	}
+}
+
+func BenchmarkContextByQuery(b *testing.B) {
+	e := NewVaultEngine(b.TempDir())
+	writeBigIndex(b, e)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		e.ContextByQuery("note number 0042 term0042x07", 5)
 	}
 }
 ```
@@ -424,8 +462,12 @@ func (v *VaultEngine) ContextByQuery(query string, limit int) []ContextHit {
 	}
 	var hits []ContextHit
 	for _, e := range v.loadIndex("knowledge.jsonl") {
+		if e.Status != "active" {
+			continue
+		}
 		title, tags, body := toSet(Terms(e.Title)), toSet(Terms(strings.Join(e.Tags, " "))), toSet(e.Terms)
 		hit := ContextHit{Entry: e}
+		strong := false // a title or tag match; body-only overlap on common words is noise
 		for _, q := range qTerms {
 			w := 0
 			switch {
@@ -439,9 +481,10 @@ func (v *VaultEngine) ContextByQuery(query string, limit int) []ContextHit {
 			if w > 0 {
 				hit.Score += w
 				hit.Matched = append(hit.Matched, q)
+				strong = strong || w >= 2
 			}
 		}
-		if hit.Score >= contextThreshold {
+		if hit.Score >= contextThreshold && strong {
 			hits = append(hits, hit)
 		}
 	}
@@ -473,6 +516,9 @@ func (v *VaultEngine) ContextByCwd(dir string) []ContextHit {
 	repoTag := "repo:" + filepath.Base(root)
 	var hits []ContextHit
 	for _, e := range v.loadIndex("knowledge.jsonl") {
+		if e.Status != "active" {
+			continue
+		}
 		match := false
 		for _, id := range e.ProjectIDs {
 			match = match || projects[id]
@@ -514,7 +560,7 @@ func FormatContext(hits []ContextHit, maxBytes int) string {
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cd tools/vault-engine && go test ./pkg/vault/ -count=1`
-Expected: `ok  obsidian-vault-engine/pkg/vault` (all existing tests plus the seven `TestContext_*` tests).
+Expected: `ok  obsidian-vault-engine/pkg/vault` (all existing tests plus the eight `TestContext_*` tests).
 
 - [ ] **Step 6: Add the CLI command**
 
@@ -616,6 +662,7 @@ Create `tools/vault-engine/recall_eval.sh` and `chmod +x` it:
 ```bash
 #!/usr/bin/env bash
 # Scores retrieval against a private prompt set. Each line: {"prompt": "...", "expected_id": "..."}
+# An empty expected_id marks a prompt that must inject nothing (precision check).
 # Usage: recall_eval.sh <set.jsonl> [min_hits]   (VAULT_ENGINE overrides the binary)
 set -euo pipefail
 SET="${1:?usage: recall_eval.sh <set.jsonl> [min_hits]}"
@@ -628,7 +675,9 @@ while IFS= read -r line; do
   prompt=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prompt"])')
   want=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_id"])')
   total=$((total + 1))
-  if "$ENGINE" context --query "$prompt" --limit 3 | grep -qF -- "- $want |"; then
+  out=$("$ENGINE" context --query "$prompt" --limit 3)
+  # An empty expected_id means the prompt must inject nothing.
+  if { [ -z "$want" ] && [ -z "$out" ]; } || { [ -n "$want" ] && printf '%s' "$out" | grep -qF -- "- $want |"; }; then
     hits=$((hits + 1))
   else
     echo "MISS: $want <- $prompt"
@@ -640,8 +689,9 @@ echo "recall: $hits/$total (min $MIN)"
 
 - [ ] **Step 8: Run everything**
 
-Run: `cd tools/vault-engine && gofmt -l . && go vet ./... && go test -cover ./... && ./test_e2e.sh`
-Expected: `gofmt -l` prints nothing, `go vet` prints nothing, every package `ok`, and the e2e ends with `ALL TESTS PASSED` after the two new `✅ Context` lines.
+Run: `cd tools/vault-engine && rm -f bin/vault-engine && gofmt -l . && go vet ./... && go test -cover -timeout 300s ./... && ./test_e2e.sh && go test ./pkg/vault/ -run xxx -bench BenchmarkContextByQuery -benchtime 20x`
+(`rm -f bin/vault-engine` matters: `test_e2e.sh` only builds when the binary is missing, so a stale one would be tested. `pkg/vaultsync` tests take over a minute.)
+Expected: `gofmt -l` prints nothing, `go vet` prints nothing, every package `ok`, the e2e ends with `ALL TESTS PASSED` after the two new `✅ Context` lines, and the benchmark reports under 50,000,000 ns/op (50 ms).
 
 - [ ] **Step 9: Update `tools/vault-engine/README.md`**
 
@@ -691,6 +741,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -789,6 +840,35 @@ class TestVaultRecall(unittest.TestCase):
         state = json.loads((self.state / "s1.json").read_text())
         self.assertLessEqual(len(state["ids"]), 6)
         self.assertLessEqual(state["bytes"], 2400)
+
+    def test_session_cap_of_six_notes(self):
+        for i in range(2):
+            self.query_file.write_text(block(*[note(f"CONCEPT-{i}{j}") for j in range(3)]))
+            out = self.run_hook(prompt=f"prompt number {i} about codex quota")
+            self.assertEqual(self.context_of(out).count("\n- "), 3)
+        self.query_file.write_text(block(note("CONCEPT-99")))
+        self.assertEqual(self.run_hook(prompt="a third prompt about codex quota"), "")
+        self.assertEqual(len(json.loads((self.state / "s1.json").read_text())["ids"]), 6)
+
+    def test_oversized_note_is_skipped_not_blocking(self):
+        self.query_file.write_text(block(note("CONCEPT-big", pad=1300), note("CONCEPT-small")))
+        ctx = self.context_of(self.run_hook())
+        self.assertNotIn("CONCEPT-big", ctx)
+        self.assertIn("CONCEPT-small", ctx)
+
+    def test_slow_engine_times_out_silently(self):
+        slow = self.dir / "slow-engine"
+        slow.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n")
+        slow.chmod(slow.stat().st_mode | stat.S_IEXEC)
+        start = time.time()
+        self.assertEqual(self.run_hook(engine=slow), "")
+        self.assertLess(time.time() - start, 4)
+
+    def test_corrupt_state_is_reset(self):
+        self.query_file.write_text(block(note("CONCEPT-a")))
+        self.state.mkdir(parents=True)
+        (self.state / "s1.json").write_text("{broken")
+        self.assertIn("CONCEPT-a", self.run_hook())
 
     def test_missing_engine_is_silent(self):
         self.assertEqual(self.run_hook(engine=self.dir / "nope"), "")
@@ -909,9 +989,11 @@ def main() -> int:
         fcntl.flock(handle, fcntl.LOCK_EX)
         handle.seek(0)
         raw = handle.read()
-        if raw:
-            state = json.loads(raw)
-        else:
+        try:
+            state = json.loads(raw) if raw else None
+        except ValueError:
+            state = None  # corrupt state: start the session's budget again
+        if state is None:
             # First prompt of the session: count what the SessionStart hook already injected.
             seed = note_lines(run_engine(["--cwd", data.get("cwd") or os.getcwd()]))
             state = {"ids": [note_id(line) for line in seed], "bytes": sum(size(line) for line in seed)}
@@ -920,10 +1002,10 @@ def main() -> int:
             nid = note_id(line)
             if nid in state["ids"] or nid in demoted:
                 continue
-            if len(chosen) >= PROMPT_NOTES or used + size(line) > PROMPT_BYTES:
+            if len(chosen) >= PROMPT_NOTES or len(state["ids"]) >= SESSION_NOTES:
                 break
-            if len(state["ids"]) >= SESSION_NOTES or state["bytes"] + size(line) > SESSION_BYTES:
-                break
+            if used + size(line) > PROMPT_BYTES or state["bytes"] + size(line) > SESSION_BYTES:
+                continue  # this note does not fit; a smaller one further down may
             chosen.append(line)
             used += size(line)
             state["ids"].append(nid)
@@ -952,7 +1034,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tests.test_vault_recall -v`
-Expected: `Ran 11 tests` … `OK`.
+Expected: `Ran 15 tests` … `OK`.
 
 - [ ] **Step 5: Confirm CI picks the test up**
 
@@ -987,6 +1069,7 @@ Append to `tests/test_ps_skills_doctor.py`, before the `if __name__` block if on
 import importlib.machinery
 import importlib.util
 import json as _json
+from unittest import mock
 
 
 def _load_doctor():
@@ -1001,6 +1084,10 @@ class TestVaultRecallCheck(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.home = Path(self.temp_dir.name)
+        patcher = mock.patch.dict(os.environ)  # a VAULT_ROOT in the shell must not point the check at the real vault
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("VAULT_ROOT", None)
         self.doctor = _load_doctor()
         (self.home / "workspace" / "agentic-vault" / "_meta" / "indexes").mkdir(parents=True)
         (self.home / ".claude" / "hooks").mkdir(parents=True)
@@ -1048,6 +1135,39 @@ class TestVaultRecallCheck(unittest.TestCase):
         self.index.write_text('{"id":"CONCEPT-a","title":"A"}\n')
         issues, _ = self.run_check()
         self.assertTrue(any("rebuild-index" in i for i in issues), issues)
+
+    def test_terms_on_a_later_line_is_healthy(self):
+        self.healthy()
+        self.index.write_text('{"id":"CONCEPT-a","title":"A"}\n{"id":"CONCEPT-b","title":"B","terms":["beta"]}\n')
+        self.assertEqual(self.run_check(), ([], []))
+
+    def test_index_older_than_a_note_is_a_warning(self):
+        self.healthy()
+        note = self.home / "workspace" / "agentic-vault" / "04_Knowledge" / "concepts" / "n.md"
+        note.parent.mkdir(parents=True)
+        note.write_text("x")
+        os.utime(self.index, (1, 1))
+        _, warnings = self.run_check()
+        self.assertTrue(any("older than" in w for w in warnings), warnings)
+
+    def test_engine_copy_without_context_is_an_issue(self):
+        self.healthy()
+        stale = self.home / ".local" / "bin" / "vault-engine"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("#!/bin/sh\nexit 1\n")
+        stale.chmod(0o755)
+        issues, _ = self.run_check()
+        self.assertTrue(any("no `context` command" in i for i in issues), issues)
+
+    def test_known_title_returning_nothing_is_a_warning(self):
+        self.healthy()
+        self.index.write_text('{"id":"CONCEPT-a","title":"Codegen Drift Gate","terms":["alpha"]}\n')
+        silent = self.home / ".local" / "bin" / "vault-engine"
+        silent.parent.mkdir(parents=True)
+        silent.write_text("#!/bin/sh\nexit 0\n")
+        silent.chmod(0o755)
+        _, warnings = self.run_check()
+        self.assertTrue(any("returned nothing" in w for w in warnings), warnings)
 ```
 
 Verify-Cmd: python3 -m unittest tests.test_ps_skills_doctor -v
@@ -1055,11 +1175,11 @@ Verify-Cmd: python3 -m unittest tests.test_ps_skills_doctor -v
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tests.test_ps_skills_doctor -v`
-Expected: the five `TestVaultRecallCheck` tests error with `AttributeError: module 'ps_skills_doctor' has no attribute 'check_vault_recall'`; the existing tests still pass.
+Expected: the nine `TestVaultRecallCheck` tests error with `AttributeError: module 'ps_skills_doctor' has no attribute 'check_vault_recall'`; the existing tests still pass.
 
 - [ ] **Step 3: Add the check to `bin/ps-skills-doctor`**
 
-Add `import json` to the imports at the top. Add this function above `def main():`:
+Add `import json`, `import re` and `import subprocess` to the imports at the top. Add this function above `def main():`:
 
 ```python
 def check_vault_recall(home, issues, warnings):
@@ -1083,11 +1203,38 @@ def check_vault_recall(home, issues, warnings):
         issues.append("Vault recall hook not registered under UserPromptSubmit in ~/.claude/settings.json")
     index = vault / "_meta" / "indexes" / "knowledge.jsonl"
     try:
-        first = index.read_text().splitlines()[0]
-    except (OSError, IndexError):
-        first = ""
-    if '"terms"' not in first:
+        lines = index.read_text().splitlines()
+    except OSError:
+        lines = []
+    if not any('"terms"' in line for line in lines):
         issues.append(f"Vault index has no retrieval fields: run `vault-engine rebuild-index` ({index})")
+    notes = list((vault / "04_Knowledge").rglob("*.md"))
+    if lines and notes and max(n.stat().st_mtime for n in notes) > index.stat().st_mtime:
+        warnings.append("Vault index is older than the newest knowledge note: run `vault-engine rebuild-index`")
+
+    def run_context(binary, query):
+        try:
+            return subprocess.run([str(binary), "context", "--query", query], capture_output=True, text=True,
+                                  timeout=5, env={**os.environ, "VAULT_ROOT": str(vault)})
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    # Every installed copy must know `context`: an old copy that rebuilds the index strips the retrieval fields.
+    primary = home / ".local" / "bin" / "vault-engine"
+    copies = [primary, home / ".gemini" / "antigravity-cli" / "bin" / "vault-engine", vault / "_meta" / "bin" / "vault-engine"]
+    for binary in copies:
+        if not binary.exists():
+            continue
+        proc = run_context(binary, "x")
+        if proc is None or proc.returncode != 0:
+            issues.append(f"vault-engine copy has no `context` command: {binary} (rebuild it from tools/vault-engine)")
+    # A title with two real terms scores 6, so the engine must return its own note for it.
+    titles = [json.loads(line).get("title", "") for line in lines if '"terms"' in line]
+    known = next((t for t in titles if len([w for w in re.split(r"[^a-z0-9]+", t.lower()) if len(w) >= 4]) >= 2), "")
+    if primary.exists() and known:
+        proc = run_context(primary, known)
+        if proc is not None and proc.returncode == 0 and not proc.stdout.strip():
+            warnings.append(f"vault-engine context returned nothing for a known note title: {known!r}")
 ```
 
 In `main`, directly above the line `# Report`, add:
@@ -1149,6 +1296,10 @@ These steps change the live install, so run them from the feature worktree only 
 ```bash
 cp ~/.local/bin/vault-engine ~/.local/bin/vault-engine.bak-pre-context-$(date +%Y%m%d)
 (cd tools/vault-engine && go build -o ~/.local/bin/vault-engine ./cmd/vault-engine)
+# Replace every other installed copy too: an old copy that rebuilds the index strips the retrieval fields.
+for copy in ~/.gemini/antigravity-cli/bin/vault-engine ~/workspace/agentic-vault/_meta/bin/vault-engine; do
+  [ -f "$copy" ] && cp "$copy" "$copy.bak-pre-context-$(date +%Y%m%d)" && cp ~/.local/bin/vault-engine "$copy"
+done
 VAULT_ROOT=~/workspace/agentic-vault vault-engine rebuild-index
 cp ~/.claude/settings.json ~/.claude/settings.json.bak-vault-recall-$(date +%Y%m%d)
 ```
@@ -1171,7 +1322,7 @@ Add to `~/.claude/settings.json`, inside `hooks.UserPromptSubmit`, a new group a
 
 - [ ] **Step 9: Live verification on the user's surface (Tier 4)**
 
-Write the private recall set: pick 20 notes from `~/workspace/agentic-vault/_meta/indexes/knowledge.jsonl` and, for each, write one prompt a user would plausibly type about that topic without copying the title word for word. Save as `~/.claude/state/vault-recall/recall_set.jsonl`, one `{"prompt": "...", "expected_id": "..."}` per line.
+Write the private recall set: pick 20 notes from `~/workspace/agentic-vault/_meta/indexes/knowledge.jsonl` and, for each, write one prompt a user would plausibly type about that topic without copying the title word for word. Add 5 more lines with `"expected_id": ""` and an everyday prompt unrelated to any note (for example "update the readme and run the tests"); these must inject nothing. Save as `~/.claude/state/vault-recall/recall_set.jsonl`, one `{"prompt": "...", "expected_id": "..."}` per line.
 
 Run, and paste the output into the task report:
 
@@ -1179,11 +1330,11 @@ Run, and paste the output into the task report:
 VAULT_ROOT=~/workspace/agentic-vault vault-engine context --query "codegen drift gate fails in CI"
 CLAUDE_PROJECT_DIR=~/workspace/repos/atlas-world-svc ~/workspace/agent-harness/.venv/bin/python ~/workspace/agent-harness/scripts/vault-bootstrap.py | head -c 900
 echo '{"session_id":"live-check","prompt":"codegen drift gate fails in CI","cwd":"'$HOME'/ps-skills"}' | python3 ~/.claude/hooks/vault-recall.py
-VAULT_ROOT=~/workspace/agentic-vault tools/vault-engine/recall_eval.sh ~/.claude/state/vault-recall/recall_set.jsonl 16
+VAULT_ROOT=~/workspace/agentic-vault tools/vault-engine/recall_eval.sh ~/.claude/state/vault-recall/recall_set.jsonl 21
 ps-skills-doctor --strict
 ```
 
-Expected: the first command prints a `<vault-context>` block naming `CONCEPT-codegen-drift-gate`; the second prints a `<vault-context>` block of at most 800 bytes (empty only if no note carries `PROJ-atlas-world`; if empty, check `release_repo` in that project's hub and report it); the third prints JSON whose `additionalContext` names the note; the fourth ends with `recall: N/20 (min 16)` and exit 0; the doctor reports no vault issue. If recall is below 16, report the `MISS` lines; do not lower the threshold or edit the prompts to fit.
+Expected: the first command prints a `<vault-context>` block naming `CONCEPT-codegen-drift-gate`; the second prints a `<vault-context>` block of at most 800 bytes (empty only if no note carries `PROJ-atlas-world`; if empty, check `release_repo` in that project's hub and report it); the third prints JSON whose `additionalContext` names the note; the fourth ends with `recall: N/25 (min 21)` and exit 0 (16 of the 20 recall prompts plus all 5 silent prompts); the doctor reports no vault issue. If the score is below 21, report the `MISS` lines; do not lower the threshold or edit the prompts to fit.
 
 Then remove the live-check state: `rm -f ~/.claude/state/vault-recall/live-check.json`.
 
@@ -1194,3 +1345,12 @@ Then remove the live-check state: `rm -f ~/.claude/state/vault-recall/live-check
 - Spec coverage for slice 1: R0 (Task 1 Step 3), R1/R1f (ContextByCwd, tests), R2/R2f/R2p (ContextByQuery, tests), R3/R3f/R4/R5 (Task 2), R14 injection log (Task 2, pulled forward from slice 3 so usage data exists from day one), the retrieval part of R17 (Task 3; the save-side checks arrive with slice 2).
 - Not in this plan: R6–R13, R16, R18–R21, R10a/R10b and the `publish-knowledge` collision check (slices 2 and 3).
 - Deviation from the spec: the recall set is private (outside the public repo).
+
+## Audit trail
+
+- 2026-11-11 self-grill-audit (Opus, read-only; compiled and ran the plan's Go and Python in scratch copies): verdict ready-with-fixes. Applied:
+  - HIGH: go-live now replaces every installed `vault-engine` copy, and the doctor flags any copy without `context`, because an old copy that rebuilds the index strips the retrieval fields.
+  - MEDIUM: doctor checks any index line for `terms`, index age against the newest note, and that a known title returns output; tests added for the 6-note cap, the 2-second timeout and `matched: repo`; the speed assert is 200 ms in the unit test with the 50 ms budget on a benchmark; a note needs a title or tag match and status `active`, and the recall set gains 5 prompts that must inject nothing.
+  - LOW: `rm -f bin/vault-engine` before the e2e; oversized notes are skipped instead of ending the loop; corrupt state resets; doctor tests clear `VAULT_ROOT`.
+  - Not applied (backlog): notes injected before a `/compact` are not re-injected afterwards; the seed uses the payload `cwd` while `vault-bootstrap.py` uses `CLAUDE_PROJECT_DIR`; no test for the 150 ms hook latency.
+  - Not verified by the audit: the new `test_e2e.sh` case (its run hung in the existing `pkg/vaultsync` step).
