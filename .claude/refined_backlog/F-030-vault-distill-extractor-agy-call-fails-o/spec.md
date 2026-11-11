@@ -78,7 +78,12 @@ Tests make no network call: they replace the HTTP call in process (the module is
 - [ ] Given a Jev stage call that returns a fallback with an error text, then the report has one line "<stage> failed: <that text>".
 - [ ] Given a nightly run whose extract command fails three times with the same error text, then the report has one line "extract failed: <text>" and the failed count for extract is 3.
 - [ ] Given a failing stage whose error text holds a string that matches `SECRET_RE`, then the report line says "error text withheld" and does not hold the string.
-- [ ] Given any default call, then the logged argv has `--output-format json`, `--json-schema`, `--disable-slash-commands` and `--sandbox`, and has neither `--dangerously-skip-permissions` nor `--add-dir`.
+- [x] ~~Given any default call, then the logged argv has `--output-format json`, …~~ Struck: route A makes no `agy` call (review finding, 2026-11-11).
+- [ ] Given any default call, then the request body has `thinkingConfig` `{"thinkingLevel": "low"}`.
+- [ ] Given an `http.client.HTTPException` or a malformed reply shape, then the call is a fallback (tool failure), not a crash.
+- [ ] Given a failed call that used tokens (fallback or bad answer), then its tokens are counted in `extract_tokens`.
+- [ ] Given failures on calls 1, 3 and 4 and a success on call 2, then the night stops after call 4 (a success resets the two-in-a-row counter).
+- [ ] Given an extract command that exits 1, then the session is `invalid` at once.
 - [ ] `grep -n "agy" bin/vault-distill` finds no call to `agy`.
 - [ ] `python3 -m unittest tests.test_vault_distill tests.test_vault_distill_drafts tests.test_vault_distill_audit tests.test_vault_distill_gemini_api -v` passes.
 
@@ -100,4 +105,5 @@ Tests make no network call: they replace the HTTP call in process (the module is
 ## Appendix: audit trail
 
 - 2026-11-11 self-grill-audit: verdict safe-with-fixes, nothing critical. Confirmed on disk by the auditor: 339 `extract-pending`, the `text` flag, dropped stderr, the child's stderr reaching `Run.call`, no test pinned to the old flag. Corrected: Jev reports failure as a fallback on stdout, so the reason now comes from the fallback `error` first (design 4, X3); a failed call no longer discards the session (design 5 and 6, X8, X9; a narrow change to F-029 R9f for tool failures only); token use is now reported (design 7, X10); the non-SUCCESS rule contradicted its own test (design 2 and 3 now agree); "envelope" is defined and a missing `lesson` key is a failure (X11); the accepted-risk text said nothing about Obsidian Sync (added); the secret check runs before the cut (X5); "17 nights" is a lower bound. Not checked by the auditor: `num_turns` and status values of a tool-using run; whether Obsidian Sync is signed in. Open: none.
+- 2026-11-11 cost: owner asked "แพงตรงไหน"; thinking tokens (billed as output) were most of each call, so both calls send `thinkingLevel: low` (probe: 152 to 14 tokens; `minimal` is refused). Default cap stays 20 a night, which fits the AI Studio free tier (about 20 requests a day per model). Owner approved.
 - 2026-11-11 owner switched route C to route A (direct Gemini API, AI Studio key from Keychain) on cost. Design 1 to 4, X1, X2, X6, X7 and the model-call tests rewritten for the API; design 5 to 9 and X3 to X5, X8 to X11 carried over unchanged from the audited route-C spec. The API reply shape was probed live; not re-audited.
