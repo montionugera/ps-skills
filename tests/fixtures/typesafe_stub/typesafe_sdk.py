@@ -33,4 +33,9 @@ class TypeSafeClient:
             "touches_risky_surface": NS(noul=0.9 if risky else 0.05),
             "complexity": NS(score=2.5 if risky else 0.5),
         }
+        # vault-distill questions: a JEV_<NAME>=<p> marker anywhere in the state sets that answer, else 0.5.
+        blob = " ".join(str(v) for v in state.values())
+        for name in ("lesson", "specific", "novel", "high_stakes", "same_lesson"):
+            m = re.search(rf"JEV_{name.upper()}=([0-9.]+)", blob)
+            answers[name] = NS(noul=float(m.group(1)) if m else 0.5)
         return NS(model="stub", answers=answers, usage=NS(input_tokens=len(text)))
