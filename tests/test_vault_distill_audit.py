@@ -100,6 +100,23 @@ class TestVaultDistillAudit(DistillCase):
         self.assertIn("user: real prompt from human", digest)
         self.assertIn("corrections=0", digest)
 
+    def test_f1_non_existent_hotfix_worktree_matches_skip_list(self):
+        non_existent_cwd = str(self.dir / "repos" / "demo-repo-hotfix-x")
+        self.assertEqual(load_distill().repo_root(non_existent_cwd), str(self.dir / "repos" / "demo-repo"))
+        path = self.transcript("s-hotfix-dead", ["lesson in removed hotfix worktree JEV_LESSON=0.95"])
+        self.write_inbox([self.inbox_line("s-hotfix-dead", path, cwd=non_existent_cwd)])
+        res = self.distill(VAULT_DISTILL_SKIP_REPOS="demo-repo")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.seen()["s-hotfix-dead"]["state"], "not-allowed")
+
+    def test_f1_empty_cwd_with_non_empty_skip_list_marked_not_allowed(self):
+        path = self.transcript("s-empty-cwd", ["lesson in empty cwd session JEV_LESSON=0.95"])
+        self.write_inbox([self.inbox_line("s-empty-cwd", path, cwd="")])
+        res = self.distill(VAULT_DISTILL_SKIP_REPOS="demo-repo")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.seen()["s-empty-cwd"]["state"], "not-allowed")
+
+
 
 if __name__ == "__main__":
     unittest.main()

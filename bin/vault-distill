@@ -83,7 +83,8 @@ def repo_root(cwd):
             return str(Path(out.stdout.strip()).parent)
     except (OSError, subprocess.SubprocessError):
         pass
-    return cwd.rstrip("/").split("/.claude/worktrees/", 1)[0]
+    base = cwd.rstrip("/").split("/.claude/worktrees/", 1)[0]
+    return re.sub(r"-hotfix-[^/]+$", "", base)
 
 
 def atomic_write(path, text):
@@ -293,7 +294,7 @@ def screen(run, session, skip_repos):
     sid = session["sid"]
     prior = run.seen.get(sid, {})
     session["offset"] = prior.get("offset", 0)
-    if os.path.basename(repo_root(session["cwd"])) in skip_repos:
+    if (skip_repos and not session.get("cwd")) or os.path.basename(repo_root(session.get("cwd", ""))) in skip_repos:
         run.counts["not_allowed"] += 1
         run.mark(session, "not-allowed", offset=size_or_zero(session["transcript"]))
         return None
