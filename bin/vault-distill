@@ -1,0 +1,468 @@
+#!/usr/bin/env python3
+"""vault-distill: nightly batch that turns finished agent sessions into candidate knowledge notes.
+
+Shadow mode (I-040, slice 2 of I-039): it writes drafts, scores, candidates and review verdicts to
+the vault inbox and a report, and never publishes to 04_Knowledge/.
+
+Usage:
+  vault-distill              run the nightly batch
+  vault-distill --dry-run    gate preview: calls Jev, never the extractor or reviewer, records nothing
+  vault-distill --report     print the last run's report
+
+Env: VAULT_DISTILL=0 (do nothing), VAULT_DISTILL_MAX (20), VAULT_DISTILL_UNSURE_MAX (3),
+VAULT_DISTILL_SKIP_REPOS (comma-separated repo root basenames), VAULT_ROOT, VAULT_ENGINE.
+Test seams: VAULT_DISTILL_JEV_CMD, VAULT_DISTILL_EXTRACT_CMD, VAULT_DISTILL_REVIEW_CMD.
+"""
+import argparse
+import datetime
+import fcntl
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+DIGEST_MAX = 12000
+DIGEST_HEAD = 2000
+GROWTH_MIN = 4000
+ACTIVE_SECONDS = 30 * 60
+EXTRACT_AT = 0.85
+DROP_AT = 0.15
+PENDING = {"jev-failed", "unsure-pending", "extract-pending"}
+# Own copy of bin/ps-skills-sync SECRET_RE without the home-path rule (R11); a test keeps them in step.
+# The literal is split so this public file does not trip ps-skills-sync's scan of itself.
+SECRET_RE = re.compile(r"""ghp_[A-Za-z0-9]{20}|github""" r"""_pat_|sk-[A-Za-z0-9_-]{20}|xox[bpas]-|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|(password|passwd|api[_-]?key|secret|token)["' ]*[:=]["' ]*[A-Za-z0-9/+_-]{12,}""")
+LINE_RE = re.compile(r"repo: `[^`]*` — cwd: `(?P<cwd>[^`]*)` — session: `(?P<sid>[^`]+)` — transcript: `(?P<transcript>[^`]*)`")
+CORRECTION_RE = re.compile(r"^\s*(no\b|nope|wrong|don't|do not|stop|actually|that's not|not what|instead)", re.I)
+HOOK_BLOCK_RE = re.compile(r"hook (?:error|blocked)|blocked by (?:a |the )?\w*\s*hook|guard_check", re.I)
+COUNT_KEYS = ("seen", "not_allowed", "private", "no_transcript", "skipped_small", "skipped_active", "dropped",
+              "unsure", "no_lesson", "extracted", "invalid", "no_evidence", "junk", "unscored", "candidates_waiting",
+              "recurred", "ready", "would_publish", "published", "merged", "rejected", "collisions", "archived", "expired")
+STAGES = ("classify", "extract", "score", "same_lesson", "review")
+
+
+def env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def vault_root():
+    return Path(os.environ.get("VAULT_ROOT") or Path.home() / "workspace" / "agentic-vault")
+
+
+def state_dir():
+    return Path.home() / ".claude" / "state" / "vault-distill"
+
+
+def engine_bin():
+    return os.environ.get("VAULT_ENGINE") or shutil.which("vault-engine") or str(Path.home() / ".local/bin/vault-engine")
+
+
+def repo_root(cwd):
+    """Main repo path for a session cwd, resolved like vault-engine RepoRoot; a removed worktree falls back to its path."""
+    try:
+        out = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            return str(Path(out.stdout.strip()).parent)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return cwd.rstrip("/").split("/.claude/worktrees/", 1)[0]
+
+
+def atomic_write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    os.replace(tmp, path)
+
+
+class Run:
+    def __init__(self, dry_run=False):
+        self.dry = dry_run
+        self.vault = vault_root()
+        self.distill = self.vault / "_inbox" / "agent" / "distill"
+        self.live = self.vault / "_inbox" / "agent" / "session-summaries.md"
+        self.state = state_dir()
+        self.seen_path = self.state / "seen.jsonl"
+        self.digests = self.state / "digests"
+        self.start = time.time()
+        self.date = datetime.date.today().isoformat()
+        self.counts = dict.fromkeys(COUNT_KEYS, 0)
+        self.bytes = dict.fromkeys(STAGES, 0)
+        self.attempts = dict.fromkeys(STAGES, 0)
+        self.failures = dict.fromkeys(STAGES, 0)
+        self.classified = 0
+        self.notes = []  # report lines: expired candidates, verdicts
+        self.seen = self.load_seen()
+
+    # --- seen-file (R13): one JSON line per final state, last line per session wins ---
+    def load_seen(self):
+        seen = {}
+        try:
+            lines = self.seen_path.read_text().splitlines()
+        except OSError:
+            return seen
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue  # a torn last line from a crash
+            if isinstance(rec, dict) and rec.get("sid"):
+                seen[rec["sid"]] = rec
+        return seen
+
+    def mark(self, session, state, offset=None, **extra):
+        rec = {"sid": session["sid"], "transcript": session["transcript"], "cwd": session["cwd"],
+               "offset": session.get("offset", 0) if offset is None else offset, "state": state,
+               "ts": int(time.time()), **extra}
+        self.seen[session["sid"]] = rec
+        if self.dry:
+            return
+        self.state.mkdir(parents=True, exist_ok=True)
+        with open(self.seen_path, "a") as handle:
+            handle.write(json.dumps(rec) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    # --- external calls: every model call goes through one of these three seams ---
+    def call(self, stage, argv, stdin_text, timeout):
+        self.attempts[stage] += 1
+        self.bytes[stage] += len(stdin_text.encode())
+        try:
+            proc = subprocess.run(argv, input=stdin_text, capture_output=True, text=True, timeout=timeout)
+            out = json.loads(proc.stdout) if proc.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError, ValueError):
+            out = None
+        if out is None or (isinstance(out, dict) and out.get("fallback")):
+            self.failures[stage] += 1
+            return None
+        return out
+
+    def jev(self, stage, sub, flags, stdin_text):
+        cmd = shlex.split(os.environ.get("VAULT_DISTILL_JEV_CMD", "")) or [str(Path(__file__).resolve().parent / "jev-gate")]
+        return self.call(stage, [*cmd, sub, "--timeout", "20", *flags], stdin_text, timeout=60)
+
+
+# --- inbox rotation (R6, R6f) ---
+def work_files(run):
+    """Dated work files to process: a crashed run's first (R6f), then tonight's rotation."""
+    inbox = run.live.parent
+    files = sorted(inbox.glob("session-summaries.*.work.md"))
+    if run.dry:
+        return files + ([run.live] if run.live.exists() else [])
+    if run.live.exists():
+        target = inbox / f"session-summaries.{datetime.datetime.now():%Y-%m-%d-%H%M%S}.work.md"
+        os.rename(run.live, target)  # atomic: the Stop hook's next append starts a fresh live file
+        files.append(target)
+    return files
+
+
+def parse_entries(paths):
+    """One entry per session id (the last line wins), with the raw line kept for re-queueing."""
+    entries = {}
+    for path in paths:
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = LINE_RE.search(line)
+            if m:
+                entries[m["sid"]] = {"sid": m["sid"], "cwd": m["cwd"], "transcript": m["transcript"], "line": line}
+    return entries
+
+
+def requeue(run, session):
+    """A session still running goes back to the live inbox and is not processed (R6)."""
+    if run.dry or not session["line"]:
+        return
+    with open(run.live, "a") as handle:
+        handle.write(session["line"] + "\n")
+
+
+# --- digest (R7, R7s) ---
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def tool_result_text(block):
+    content = block.get("content")
+    if isinstance(content, list):
+        return "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
+    return content if isinstance(content, str) else ""
+
+
+def build_digest(transcript, offset):
+    """Signals line plus user prompts and each turn's last assistant text, tool output removed."""
+    with open(transcript, "rb") as handle:
+        handle.seek(offset)
+        raw = handle.read()
+    turns, last_assistant = [], ""
+    corrections = fail_then_pass = hook_blocks = 0
+    open_failures = 0
+    errors = {}
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("isMeta"):
+            continue
+        msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+        content = msg.get("content")
+        if rec.get("type") == "user":
+            user_text = text_of(content).strip()
+            if user_text and not user_text.startswith("<"):
+                if last_assistant:
+                    turns.append("assistant: " + last_assistant.strip())
+                    last_assistant = ""
+                corrections += bool(CORRECTION_RE.search(user_text))
+                turns.append("user: " + user_text)
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_result":
+                        continue
+                    text = tool_result_text(block)
+                    hook_blocks += bool(HOOK_BLOCK_RE.search(text))
+                    if block.get("is_error") is True:
+                        open_failures += 1
+                        first = text.strip().splitlines()[0][:200] if text.strip() else ""
+                        errors[first] = errors.get(first, 0) + 1
+                    elif open_failures:
+                        fail_then_pass += 1
+                        open_failures = 0
+        elif rec.get("type") == "assistant":
+            said = text_of(content)
+            if said.strip():
+                last_assistant = said
+    if last_assistant:
+        turns.append("assistant: " + last_assistant.strip())
+    repeats = sum(1 for k, n in errors.items() if k and n >= 2)
+    signals = (f"signals: corrections={corrections} fail_then_pass={fail_then_pass} "
+               f"hook_blocks={hook_blocks} repeated_errors={repeats}\n")
+    return signals + cut("\n".join(turns), DIGEST_MAX - len(signals.encode()))
+
+
+def cut(text, limit):
+    """First DIGEST_HEAD bytes plus the last bytes that fit, so the digest is at most `limit` bytes."""
+    data = text.encode()
+    if len(data) <= limit:
+        return text
+    head = data[:DIGEST_HEAD].decode("utf-8", errors="ignore")
+    tail = data[len(data) - (limit - len(head.encode()) - 5):].decode("utf-8", errors="ignore")
+    return head + "\n...\n" + tail
+
+
+def quarantine(run, name, text):
+    """R11: credential-bearing text goes to _inbox/private/, never to a model. Content is written only when
+    the vault's .gitignore quarantines that folder (vault-engine check-privacy's rule); else a pointer."""
+    private = run.vault / "_inbox" / "private"
+    try:
+        ignored = "_inbox/private/" in (run.vault / ".gitignore").read_text()
+    except OSError:
+        ignored = False
+    body = text if ignored else "content withheld: add _inbox/private/ to the vault .gitignore\n"
+    atomic_write(private / f"{name}.md", body)
+
+
+# --- one session through the cheap stages (R7, R7f, R8, R11, R11a) ---
+def screen(run, session, skip_repos):
+    """Return the lesson probability for a session, or None when it reached a final or pending state."""
+    sid = session["sid"]
+    prior = run.seen.get(sid, {})
+    session["offset"] = prior.get("offset", 0)
+    if os.path.basename(repo_root(session["cwd"])) in skip_repos:
+        run.counts["not_allowed"] += 1
+        run.mark(session, "not-allowed", offset=size_or_zero(session["transcript"]))
+        return None
+    try:
+        size = os.path.getsize(session["transcript"])
+        if size - session["offset"] < GROWTH_MIN and prior.get("state") not in PENDING:
+            run.counts["skipped_small"] += 1
+            return None
+        digest = build_digest(session["transcript"], session["offset"])
+    except OSError:
+        run.counts["no_transcript"] += 1
+        run.mark(session, "no-transcript")
+        return None
+    session["end"] = size
+    if SECRET_RE.search(digest):
+        run.counts["private"] += 1
+        quarantine(run, f"digest-{sid}", digest)
+        run.mark(session, "private", offset=size)
+        return None
+    session["digest"] = digest
+    session["digest_path"] = str(run.digests / f"{sid}.txt")
+    atomic_write(Path(session["digest_path"]), digest)  # kept for tomorrow's rescoring (R9df)
+    if prior.get("state") == "extract-pending":
+        return prior.get("p", 1.0)
+    run.classified += 1
+    out = run.jev("classify", "classify-lesson", ["--digest", session["digest_path"]], digest)
+    if out is None:
+        run.counts["unsure"] += 1
+        run.mark(session, "jev-failed")  # R8f: unsure, no extractor tonight, asked again next run
+        return None
+    return float(out.get("lesson_prob", 0.5))
+
+
+def size_or_zero(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def run_batch(run):
+    skip_repos = {r.strip() for r in os.environ.get("VAULT_DISTILL_SKIP_REPOS", "").split(",") if r.strip()}
+    files = work_files(run)
+    entries = parse_entries(files)
+    for sid, rec in run.seen.items():  # pending sessions from earlier nights (R8u, caps)
+        if rec.get("state") in PENDING and sid not in entries:
+            entries[sid] = {"sid": sid, "cwd": rec.get("cwd", ""), "transcript": rec.get("transcript", ""), "line": ""}
+    queue, unsure_again = [], []
+    for session in entries.values():
+        try:
+            active = run.start - os.path.getmtime(session["transcript"]) < ACTIVE_SECONDS
+        except OSError:
+            active = False
+        if active:
+            run.counts["skipped_active"] += 1
+            requeue(run, session)
+            continue
+        run.counts["seen"] += 1
+        prior_state = run.seen.get(session["sid"], {}).get("state")
+        p = screen(run, session, skip_repos)
+        if p is None:
+            continue
+        if p >= EXTRACT_AT or prior_state == "extract-pending":
+            queue.append((p, session))
+        elif p <= DROP_AT:
+            run.counts["dropped"] += 1
+            run.mark(session, "dropped", offset=session["end"], p=p)
+        elif prior_state == "unsure-pending":
+            unsure_again.append((p, session))
+        else:
+            run.counts["unsure"] += 1
+            run.mark(session, "unsure-pending", p=p)  # R8u: offered to Jev once more next run
+    unsure_again.sort(key=lambda item: -item[0])
+    keep = env_int("VAULT_DISTILL_UNSURE_MAX", 3)
+    for p, session in unsure_again[keep:]:
+        run.counts["unsure"] += 1
+        run.mark(session, "unsure", offset=session["end"], p=p)
+    queue.extend(unsure_again[:keep])
+    run_extractions(run, queue)
+    finish(run, files)
+
+
+def run_extractions(run, queue):
+    """Slice 2, Task 2: extraction is wired in Task 3. Until then a selected session waits as extract-pending."""
+    for p, session in queue:
+        run.counts["extracted"] += 1
+        run.mark(session, "extract-pending", p=p)
+
+
+# --- report and exit code (R12, R16) ---
+def injections_per_note():
+    counts = {}
+    try:
+        lines = (Path.home() / ".claude" / "state" / "vault-recall" / "injections.jsonl").read_text().splitlines()
+    except OSError:
+        return counts
+    for line in lines:
+        try:
+            nid = json.loads(line).get("note_id")
+        except (ValueError, AttributeError):
+            continue
+        if nid:
+            counts[nid] = counts.get(nid, 0) + 1
+    return counts
+
+
+def render_report(run, exit_code):
+    lines = [f"# vault-distill report {run.date}", "", "Shadow mode: nothing is published (I-040).", "",
+             "| count | value |", "|---|---|"]
+    lines += [f"| {k} | {v} |" for k, v in run.counts.items()]
+    lines += ["", "| stage | bytes sent | calls | failed |", "|---|---|---|---|"]
+    lines += [f"| {s} | {run.bytes[s]} | {run.attempts[s]} | {run.failures[s]} |" for s in STAGES]
+    lines += ["", "## Injections per note (used-rate arrives with R15, slice 3)", ""]
+    lines += [f"- {nid}: {n} injections, used n/a" for nid, n in sorted(injections_per_note().items(), key=lambda kv: -kv[1])[:20]]
+    lines += ["", "## Notes", ""] + [f"- {n}" for n in run.notes] + ["", f"exit: {exit_code}", ""]
+    return "\n".join(lines)
+
+
+def exit_code_for(run):
+    """R16: non-zero when more than half the classified sessions are unsure, or a stage failed every call."""
+    if run.classified and run.counts["unsure"] * 2 > run.classified:
+        return 2
+    if any(run.attempts[s] and run.failures[s] == run.attempts[s] for s in STAGES):
+        return 2
+    return 0
+
+
+def finish(run, files):
+    code = exit_code_for(run)
+    report = render_report(run, code)
+    run.exit_code = code
+    if run.dry:
+        print(report)
+        return
+    path = run.distill / f"report-{run.date}.md"
+    atomic_write(path, report)
+    atomic_write(run.state / "last-run.json", json.dumps({
+        "ts": int(time.time()), "date": run.date, "exit": code, "report": str(path),
+        "counts": run.counts, "bytes": run.bytes}, indent=2) + "\n")
+    for f in files:
+        if f != run.live:
+            f.unlink(missing_ok=True)  # R13: every session in it reached a final or pending state
+    print(f"vault-distill: report {path} (exit {code})")
+
+
+def show_report():
+    try:
+        last = json.loads((state_dir() / "last-run.json").read_text())
+        print(Path(last["report"]).read_text())
+        return 0
+    except (OSError, ValueError, KeyError, TypeError):
+        print("vault-distill: no run recorded yet")
+        return 1
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Nightly knowledge distillation from agent sessions (shadow mode).")
+    parser.add_argument("--dry-run", action="store_true", help="call Jev only; record, extract and review nothing")
+    parser.add_argument("--report", action="store_true", help="print the last run's report")
+    args = parser.parse_args()
+    if os.environ.get("VAULT_DISTILL") == "0":
+        return 0
+    if args.report:
+        return show_report()
+    if not (vault_root() / "_inbox").is_dir():
+        print(f"vault-distill: no vault inbox at {vault_root()}", file=sys.stderr)
+        return 0
+    state_dir().mkdir(parents=True, exist_ok=True)
+    with open(state_dir() / "run.lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("vault-distill: another run holds the lock", file=sys.stderr)
+            return 0
+        run = Run(dry_run=args.dry_run)
+        run_batch(run)
+        return run.exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
