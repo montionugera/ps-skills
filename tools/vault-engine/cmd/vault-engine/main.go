@@ -72,6 +72,11 @@ func main() {
 
 	engine := vault.NewVaultEngine(vaultRoot)
 
+	// Read-only and fail-open, so it runs before the sync config can refuse.
+	if command == "context" {
+		os.Exit(runContext(engine, os.Args[2:]))
+	}
+
 	syncCfg, err := vaultsync.LoadConfig(engine.Root)
 	if err != nil {
 		// A config file exists but cannot be used: the commands that save still end with the fixed line.
@@ -469,6 +474,7 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  rebuild-index                       Rebuild _meta/indexes/*.jsonl")
 	fmt.Println("  search <query>                      Search knowledge, projects, and ideas")
+	fmt.Println("  context [--cwd d] [--query q]       Print knowledge relevant to a session")
 	fmt.Println("  ingest <file_path>                  Ingest raw note from inbox")
 	fmt.Println("  read-record <record_id>             Read canonical record with SHA-256")
 	fmt.Println("  commit <id> <sha> <actor> <json>    Optimistic concurrency commit")

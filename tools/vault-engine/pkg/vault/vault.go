@@ -85,6 +85,12 @@ type IndexEntry struct {
 	Effort  int      `json:"effort,omitempty"`
 	Updated string   `json:"updated"`
 	SHA256  string   `json:"sha256"`
+	// Retrieval fields, filled for knowledge notes (ReleaseRepo for projects).
+	Tags        []string `json:"tags,omitempty"`
+	ProjectIDs  []string `json:"project_ids,omitempty"`
+	Summary     string   `json:"summary,omitempty"`
+	Terms       []string `json:"terms,omitempty"`
+	ReleaseRepo string   `json:"release_repo,omitempty"`
 }
 
 type AuditEvent struct {
@@ -487,13 +493,14 @@ func (v *VaultEngine) RebuildIndexes() error {
 		sha, _ := v.ComputeSHA256(hubPath)
 		relPath, _ := filepath.Rel(v.Root, hubPath)
 		projList = append(projList, IndexEntry{
-			ID:      id,
-			Path:    relPath,
-			Title:   title,
-			Status:  status,
-			AreaIDs: areaIDs,
-			Updated: updated,
-			SHA256:  sha,
+			ID:          id,
+			Path:        relPath,
+			Title:       title,
+			Status:      status,
+			AreaIDs:     areaIDs,
+			Updated:     updated,
+			SHA256:      sha,
+			ReleaseRepo: stringOrEmpty(fm["release_repo"]),
 		})
 	}
 
@@ -520,7 +527,7 @@ func (v *VaultEngine) RebuildIndexes() error {
 		if err != nil {
 			return nil
 		}
-		fm, _, err := v.ParseMarkdown(string(data))
+		fm, body, err := v.ParseMarkdown(string(data))
 		if err != nil {
 			return nil
 		}
@@ -533,12 +540,16 @@ func (v *VaultEngine) RebuildIndexes() error {
 		sha, _ := v.ComputeSHA256(path)
 		relPath, _ := filepath.Rel(v.Root, path)
 		knowList = append(knowList, IndexEntry{
-			ID:      id,
-			Path:    relPath,
-			Title:   title,
-			Status:  status,
-			Updated: fmt.Sprintf("%v", fm["updated"]),
-			SHA256:  sha,
+			ID:         id,
+			Path:       relPath,
+			Title:      title,
+			Status:     status,
+			Updated:    fmt.Sprintf("%v", fm["updated"]),
+			SHA256:     sha,
+			Tags:       stringList(fm["tags"]),
+			ProjectIDs: stringList(fm["project_ids"]),
+			Summary:    SummaryLine(body),
+			Terms:      capTerms(Terms(body), 200),
 		})
 		return nil
 	})
