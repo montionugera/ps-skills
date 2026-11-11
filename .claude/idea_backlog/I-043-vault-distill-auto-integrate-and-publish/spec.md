@@ -1,8 +1,7 @@
 ---
-title: "vault-distill nightly knowledge save in shadow mode (I-039 slice 2)"
+title: "vault-distill auto integrate and publish, calibration and usage loop (I-039 slice 3)"
 id: I-043
 status: idea
-from_idea: I-040
 ---
 
 > **Scope of I-040:** slice 2 only (R6-R13, R16, R19, R10/R10f, R11/R11a and the save rows of the token budget). This is the spec the owner approved for I-039 / F-027, copied unchanged below; slice 1 shipped as F-027 on 2026-11-11 and slice 3 gets its own feature.
