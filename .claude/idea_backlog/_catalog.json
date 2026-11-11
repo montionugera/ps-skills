@@ -251,6 +251,6 @@
     "id": "I-041",
     "title": "vault recall precision: skip automated prompts, fix rule-only summaries, down-weight generic terms",
     "created_at": "2026-11-11T04:08:42.194124+00:00",
-    "promoted_to": null
+    "promoted_to": "F-028"
   }
 ]

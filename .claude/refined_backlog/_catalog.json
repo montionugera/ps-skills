@@ -338,5 +338,14 @@
     "claimed_at": "2026-11-11T02:55:23.421165+00:00",
     "shipped_at": "2026-11-11T03:57:55.354891+00:00",
     "shipped_sha": "df3c36428b3ef95d347d33ce2882be305967dc66"
+  },
+  {
+    "id": "F-028",
+    "title": "vault recall precision: skip automated prompts, fix rule-only summaries, down-weight generic terms",
+    "from_idea": "I-041",
+    "created_at": "2026-11-11T04:38:23.440088+00:00",
+    "claimed_by": null,
+    "status": "open",
+    "release_version": null
   }
 ]
