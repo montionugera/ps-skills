@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook: inject up to 3 agentic-vault notes relevant to the prompt.
+"""UserPromptSubmit hook: inject up to 2 agentic-vault notes relevant to the prompt.
 
 Calls `vault-engine context --query <prompt>` (no LLM), injects each note at most once per
 session, and stops at 6 notes / 2,400 bytes per session. Fails open: any problem means no
@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-PROMPT_NOTES, PROMPT_BYTES = 3, 1200
+PROMPT_NOTES, PROMPT_BYTES = 2, 1200
 SESSION_NOTES, SESSION_BYTES = 6, 2400
 STATE_MAX_AGE = 7 * 24 * 3600
 OPT_OUT = ("VAULT_RECALL", "VAULT_CONTEXT_BOOTSTRAP", "CLAUDE_VAULT_SUMMARY")
@@ -55,7 +55,7 @@ def main() -> int:
     data = json.load(sys.stdin)
     prompt = (data.get("prompt") or "").strip()
     session = "".join(c for c in str(data.get("session_id") or "") if c.isalnum() or c in "-_")
-    if len(prompt) < 12 or prompt.startswith("/") or not session:
+    if len(prompt) < 12 or prompt.startswith(("/", "<")) or not session:
         return 0
 
     directory = state_dir()
@@ -78,7 +78,7 @@ def main() -> int:
             seed = note_lines(run_engine(["--cwd", data.get("cwd") or os.getcwd()]))
             state = {"ids": [note_id(line) for line in seed], "bytes": sum(size(line) for line in seed)}
         used = 33
-        for line in note_lines(run_engine(["--query", prompt[:2000], "--limit", "12"])):
+        for line in note_lines(run_engine(["--query", prompt[:2000], "--limit", "2"])):
             nid = note_id(line)
             if nid in state["ids"] or nid in demoted:
                 continue

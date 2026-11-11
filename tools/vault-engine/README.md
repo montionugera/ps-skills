@@ -26,9 +26,10 @@ Nothing changes: every command prints and exits as before.
 ### `context`: knowledge for a session
 
 `vault-engine context --cwd <dir>` prints notes tied to the repository that owns `<dir>` (through a project's `release_repo`, or a `repo:<name>` tag), up to 3 notes and 800 bytes.
-`vault-engine context --query "<prompt>"` scores notes by distinct prompt terms: title 3, tag 2, body 1, threshold 4, up to 5 notes.
+`vault-engine context --query "<prompt>"` scores notes by distinct prompt terms (cutting queries over 80 terms to the first 20, dropping digit-only terms and 77 common prompt noise words): for indices under 20 notes, flat weights (title 3, tag 2, body 1) with threshold 4; from 20 active notes up, matches are weighted by note rarity with threshold 2.5 and at least one title or tag match, up to 5 notes (or `--limit`).
 Both read only `_meta/indexes/`, print nothing when nothing matches, and always exit 0. Run `rebuild-index` once after upgrading so the index carries tags, summaries and terms.
 `recall_eval.sh <set.jsonl> [min]` scores retrieval against a private prompt set.
+`precision_eval.sh <set.jsonl> [min_percent]` scores injection precision against a private labelled set.
 
 ## Shared folder
 

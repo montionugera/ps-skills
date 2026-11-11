@@ -54,11 +54,11 @@ func TestContext_QueryScoresBestFieldPerTerm(t *testing.T) {
 func TestContext_TagWeightAndTieBreakByUpdated(t *testing.T) {
 	e := contextVault(t)
 	writeFixture(t, e.Root, "04_Knowledge/concepts/old.md",
-		knowledgeNote("CONCEPT-old", "misc", "worktree, quota", "", "2026-10-01T00:00:00Z", "x"))
+		knowledgeNote("CONCEPT-old", "misc", "latency, quota", "", "2026-10-01T00:00:00Z", "x"))
 	writeFixture(t, e.Root, "04_Knowledge/concepts/new.md",
-		knowledgeNote("CONCEPT-new", "misc", "worktree, quota", "", "2026-11-01T00:00:00Z", "x"))
+		knowledgeNote("CONCEPT-new", "misc", "latency, quota", "", "2026-11-01T00:00:00Z", "x"))
 	_ = e.RebuildIndexes()
-	hits := e.ContextByQuery("worktree quota", 5)
+	hits := e.ContextByQuery("latency quota", 5)
 	if len(hits) != 2 || hits[0].Entry.ID != "CONCEPT-new" || hits[0].Score != 4 {
 		t.Fatalf("want CONCEPT-new first with score 4, got %+v", hits)
 	}
@@ -230,5 +230,109 @@ func BenchmarkContextByQuery(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		e.ContextByQuery("note number 0042 term0042x07", 5)
+	}
+}
+
+func writeTwentyNoteIndex(t *testing.T, e *VaultEngine) {
+	t.Helper()
+	writeFixture(t, e.Root, "04_Knowledge/concepts/n00.md",
+		knowledgeNote("CONCEPT-00", "commonword rarealpha rarebeta", "", "", "2026-11-01T00:00:00Z", "first note body"))
+	for i := 1; i < 20; i++ {
+		writeFixture(t, e.Root, fmt.Sprintf("04_Knowledge/concepts/n%02d.md", i),
+			knowledgeNote(fmt.Sprintf("CONCEPT-%02d", i), fmt.Sprintf("commonword other%02d", i), "", "", "2026-11-01T00:00:00Z", "body"))
+	}
+	if err := e.RebuildIndexes(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSummaryLine_SkipsHeadingsRulesAndFences(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "headings then horizontal rule then prose",
+			body: "# Title\n## Subtitle\n---\nFirst prose line.",
+			want: "First prose line.",
+		},
+		{
+			name: "horizontal rules with stars and underscores",
+			body: "# Heading\n***\n___\nActual summary content",
+			want: "Actual summary content",
+		},
+		{
+			name: "opens with backtick fenced block",
+			body: "```go\npackage main\nfunc main() {}\n```\nFirst line after fence.",
+			want: "First line after fence.",
+		},
+		{
+			name: "opens with tilde fenced block",
+			body: "~~~json\n{\"id\": 1}\n~~~\nLine after tildes.",
+			want: "Line after tildes.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SummaryLine(tc.body)
+			if got != tc.want {
+				t.Fatalf("%s: SummaryLine() = %q, want %q", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContext_RarityWeightsOn20Notes(t *testing.T) {
+	e := contextVault(t)
+	writeTwentyNoteIndex(t, e)
+
+	// Query has the common word in every title and rare words in CONCEPT-00's title only.
+	hits := e.ContextByQuery("commonword rarealpha rarebeta", 5)
+	if len(hits) != 1 || hits[0].Entry.ID != "CONCEPT-00" {
+		t.Fatalf("expected only CONCEPT-00 returned, got %+v", hits)
+	}
+}
+
+func TestContext_LongQueryTruncationAt20Notes(t *testing.T) {
+	e := contextVault(t)
+	writeTwentyNoteIndex(t, e)
+
+	// 100-term query with matching terms at the 50th and 51st positions (index 49, 50).
+	var terms50th []string
+	for i := 0; i < 49; i++ {
+		terms50th = append(terms50th, fmt.Sprintf("fillerterm%03d", i))
+	}
+	terms50th = append(terms50th, "rarealpha", "rarebeta")
+	for i := 51; i < 100; i++ {
+		terms50th = append(terms50th, fmt.Sprintf("fillerterm%03d", i))
+	}
+
+	q50th := strings.Join(terms50th, " ")
+	if hits := e.ContextByQuery(q50th, 5); len(hits) != 0 {
+		t.Fatalf("expected nothing returned when matching terms are at 50th position, got %+v", hits)
+	}
+
+	// Same terms placed first
+	var termsFirst []string
+	termsFirst = append(termsFirst, "rarealpha", "rarebeta")
+	for i := 2; i < 100; i++ {
+		termsFirst = append(termsFirst, fmt.Sprintf("fillerterm%03d", i))
+	}
+	qFirst := strings.Join(termsFirst, " ")
+	hitsFirst := e.ContextByQuery(qFirst, 5)
+	if len(hitsFirst) != 1 || hitsFirst[0].Entry.ID != "CONCEPT-00" {
+		t.Fatalf("expected CONCEPT-00 returned when matching terms are placed first, got %+v", hitsFirst)
+	}
+}
+
+func TestContext_QueryMatchingOnlyDigitsAndNoiseReturnsNothing(t *testing.T) {
+	e := contextVault(t)
+	writeFixture(t, e.Root, "04_Knowledge/concepts/noise.md",
+		knowledgeNote("CONCEPT-noise", "build 2026", "", "", "2026-11-01T00:00:00Z", "build 2026 instructions"))
+	_ = e.RebuildIndexes()
+
+	if hits := e.ContextByQuery("2026 build", 5); len(hits) != 0 {
+		t.Fatalf("expected nothing returned for query with only digits and noise words, got %+v", hits)
 	}
 }
