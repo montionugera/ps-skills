@@ -9,15 +9,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_vault_distill import DISTILL, DistillCase, load_distill  # noqa: E402
-
-FAKE_AGY = """#!/usr/bin/env python3
-import json, os, sys
-with open(os.environ["AGY_LOG"], "a") as handle:
-    handle.write(json.dumps(sys.argv[1:]) + "\\n")
-sys.stdout.write(open(os.environ["AGY_REPLY"]).read())
-"""
-
+from test_vault_distill import DistillCase, load_distill  # noqa: E402
+from test_vault_distill_gemini_api import ANSWER, GeminiStub, reply  # noqa: E402
 
 class TestDraftStage(DistillCase):
     def session(self, sid, marker, run=True, **extra):
@@ -179,38 +172,13 @@ class TestDraftStage(DistillCase):
             self.assertGreater(int(row.split("|")[2]), 0, row)
 
 
-class TestDefaultModelCalls(DistillCase):
-    """The default extractor and reviewer: one agy print-mode call each, through a fake agy on PATH."""
+class TestDefaultModelCalls(GeminiStub, DistillCase):
+    """The default extractor and reviewer: one Gemini API call each, with the HTTP call replaced in process."""
 
-    def fake_agy(self, reply):
-        bindir = self.dir / "fakebin"
-        bindir.mkdir(exist_ok=True)
-        agy = bindir / "agy"
-        agy.write_text(FAKE_AGY)
-        agy.chmod(0o755)
-        (self.dir / "reply.txt").write_text(reply)
-        return {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", "AGY_LOG": str(self.dir / "agy.log"),
-                "AGY_REPLY": str(self.dir / "reply.txt")}
-
-    def request(self):
-        digest = self.dir / "digest.txt"
-        digest.write_text("signals: corrections=0\nuser: make check failed with exit 2\n")
-        return json.dumps({"session_id": "sess-1234abcd", "digest_path": str(digest),
-                           "out_dir": str(self.dir / "out"), "project_ids": [], "tags": ["repo:demo-repo"],
-                           "related": ""})
-
-    def run_default(self, flag, stdin, env):
-        return subprocess.run([sys.executable, str(DISTILL), flag], input=stdin, capture_output=True, text=True,
-                              env={**self.env(), **env}, timeout=60)
-
-    def test_extract_default_is_one_tool_free_flash_call_that_renders_the_draft(self):
-        answer = {"lesson": True, "title": "Make check exit 2", "summary": "Exit 2 means lint failed.",
-                  "when": "make check fails", "rule": "Run lint first.", "why": "Saves a cycle.",
-                  "scope": "repo", "evidence": ["make check failed with exit 2"]}
-        env = self.fake_agy("Here you go:\n" + json.dumps(answer))
-        res = self.run_default("--extract-default", self.request(), env)
-        self.assertEqual(res.returncode, 0, res.stderr)
-        draft = Path(json.loads(res.stdout)["path"])
+    def test_extract_default_is_one_gemini_api_call_that_renders_the_draft(self):
+        code, out, err = self.call_default("--extract-default", self.request(), body=reply(json.dumps(ANSWER)))
+        self.assertEqual(code, 0, err)
+        draft = Path(json.loads(out)["path"])
         text = draft.read_text()
         for section in ("## When this applies", "## Rule", "## Why", "## Source", "## Evidence"):
             self.assertIn(section, text)
@@ -219,17 +187,13 @@ class TestDefaultModelCalls(DistillCase):
         self.assertIn("- session `sess-1234abcd`", text)
         self.assertLessEqual(len(text.encode()), 1500)
         self.assertTrue(load_distill().evidence_ok(text, Path(json.loads(self.request())["digest_path"]).read_text()))
-        [argv] = [json.loads(line) for line in (self.dir / "agy.log").read_text().splitlines()]
-        self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash-high")
-        self.assertNotIn("--dangerously-skip-permissions", argv)
-        self.assertNotIn("--add-dir", argv)
-        self.assertEqual(argv[argv.index("--mode") + 1], "plan")
+        self.assertEqual(len(self.sent), 1)
 
     def test_extract_default_no_lesson_and_garbage(self):
-        res = self.run_default("--extract-default", self.request(), self.fake_agy('{"lesson": false}'))
-        self.assertEqual(json.loads(res.stdout), {"path": None, "reason": "no-lesson"})
-        res = self.run_default("--extract-default", self.request(), self.fake_agy("not json"))
-        self.assertNotEqual(res.returncode, 0)
+        code, out, _ = self.call_default("--extract-default", self.request(), body=reply('{"lesson": false}', tokens=9))
+        self.assertEqual(json.loads(out), {"path": None, "reason": "no-lesson", "tokens": 9})
+        code, _, _ = self.call_default("--extract-default", self.request(), body=reply("not json"))
+        self.assertNotEqual(code, 0)
 
     def test_render_draft_global_scope_and_proposed_addition(self):
         vd = load_distill()
@@ -238,14 +202,6 @@ class TestDefaultModelCalls(DistillCase):
         self.assertIn('tags: ["auto-distilled", "global"]', text)
         self.assertIn("project_ids: []", text)
         self.assertIn('proposed_addition_to: "KNOW-worktrees"', text)
-
-    def test_review_default_is_one_argon_low_call(self):
-        verdicts = {"verdicts": [{"draft": "candidates/a.md", "verdict": "publish", "reason": "solid"}]}
-        res = self.run_default("--review-default", json.dumps([{"draft": "candidates/a.md", "text": "x"}]),
-                               self.fake_agy(json.dumps(verdicts)))
-        self.assertEqual(json.loads(res.stdout), verdicts["verdicts"])
-        [argv] = [json.loads(line) for line in (self.dir / "agy.log").read_text().splitlines()]
-        self.assertEqual(argv[argv.index("--model") + 1], "gemini-4-argon-low")
 
     def test_evidence_needs_8_characters(self):
         vd = load_distill()
