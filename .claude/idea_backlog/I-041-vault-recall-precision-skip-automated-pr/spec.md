@@ -35,7 +35,7 @@ No single feature of today's score separates the two groups (score, number of ti
 - P4. `tools/vault-engine/precision_eval.sh <set.jsonl> <min_percent>` shall run each line's prompt (first 2,000 characters) through `context --query --limit 2`, count an injected note as relevant only when its id is in that line's `relevant_ids`, print injected, relevant and the percentage, and exit non-zero below `min_percent` or when nothing is injected. `recall_eval.sh` shall use the same limit of 2.
 - P5. Pass, measured with the installed engine after `rebuild-index`: `recall_eval.sh ~/.claude/state/vault-recall/recall_set.jsonl 21` and `precision_eval.sh ~/.claude/state/vault-recall/precision_set.jsonl 80` both exit 0. If both cannot hold, report the numbers; do not edit either set.
 
-## Acceptance
+## Acceptance criteria
 
 - [ ] Given a hook payload whose prompt is `<task-notification>…`, when the hook runs, then it prints nothing, exits 0 and creates no file in the state directory.
 - [ ] Given a note body of two headings, a `---` line and a prose line, when `SummaryLine` runs, then it returns the prose line; given a body that opens with a fenced block, it returns the first line after the block.
