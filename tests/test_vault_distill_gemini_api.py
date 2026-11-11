@@ -3,6 +3,7 @@
 
 No test makes a network call or reads the Keychain: urlopen and gemini_key are replaced in process."""
 import contextlib
+import http.client
 import io
 import json
 import sys
@@ -141,6 +142,23 @@ class TestGeminiApi(GeminiStub, DistillCase):
         cfg = body["generationConfig"]
         self.assertIn("responseJsonSchema", cfg)
         self.assertEqual(cfg["responseMimeType"], "application/json")
+        self.assertEqual(cfg["thinkingConfig"], {"thinkingLevel": "low"})  # thinking is the costly part
+
+    def test_http_client_exception_is_a_fallback(self):
+        code, out, _ = self.extract(error=http.client.IncompleteRead(b"x"))
+        self.assertEqual((code, json.loads(out)["error"]), (0, "IncompleteRead"))
+
+    def test_malformed_reply_shape_is_a_fallback_not_a_crash(self):
+        body = {"candidates": [{"finishReason": "STOP", "content": "not a dict"}], "usageMetadata": {"totalTokenCount": 40}}
+        code, out, _ = self.extract(body=body)
+        res = json.loads(out)
+        self.assertEqual((code, res["fallback"], res["tokens"]), (0, True, 40))
+
+    def test_failed_calls_report_their_tokens(self):
+        code, out, _ = self.extract(body=reply(json.dumps(ANSWER), finish="MAX_TOKENS", tokens=8100))
+        self.assertEqual((code, json.loads(out)["tokens"]), (0, 8100))
+        code, out, _ = self.extract(body=reply("not json", tokens=55))
+        self.assertEqual((code, json.loads(out)["tokens"]), (1, 55))
 
     def test_review_default_prints_verdicts_and_uses_argon(self):
         verdicts = [{"draft": "candidates/a.md", "verdict": "publish", "reason": "solid"}]
@@ -151,7 +169,7 @@ class TestGeminiApi(GeminiStub, DistillCase):
 
     def test_answer_without_lesson_key_is_a_bad_answer(self):
         code, out, err = self.extract(body=reply('{"title": "x"}'))
-        self.assertEqual((code, out), (1, ""))
+        self.assertEqual((code, json.loads(out)), (1, {"tokens": 259}))  # only the token count, never a draft
         self.assertIn("lesson", err)
 
     def test_unparsable_answer_is_a_bad_answer(self):
@@ -216,6 +234,26 @@ class TestNightly(DistillCase):
         self.sessions(2)
         self.distill(VAULT_DISTILL_EXTRACT_CMD=self.cmd("print(json.dumps({'path': None, 'tokens': 1000}))\n"))
         self.assertEqual(self.count(self.report(), "extract_tokens"), 2000)
+
+    def test_failed_call_tokens_are_summed(self):
+        self.sessions(1)
+        self.distill(VAULT_DISTILL_EXTRACT_CMD=self.cmd("print(json.dumps({'fallback': True, 'error': 'x', 'tokens': 300}))\n"))
+        self.assertEqual(self.count(self.report(), "extract_tokens"), 300)
+
+    def test_a_success_resets_the_two_in_a_row_counter(self):
+        sids = self.sessions(5)
+        # calls 1, 3, 4 fail; call 2 succeeds, so the night stops after call 4, not after call 3
+        body = ("n = sum(1 for _ in open(os.environ['EXTRACT_STUB_LOG']))\n"
+                "print(json.dumps({'path': None, 'tokens': 1} if n == 2 else {'fallback': True, 'error': 'down'}))\n")
+        self.distill(VAULT_DISTILL_EXTRACT_CMD=self.cmd(body))
+        self.assertEqual(len(self.calls(self.extract_log)), 4)
+        states = sorted(self.seen()[s]["state"] for s in sids)
+        self.assertEqual(states, ["extract-pending"] * 4 + ["no-lesson"])
+
+    def test_bad_answer_makes_the_session_invalid_at_once(self):
+        [sid] = self.sessions(1)
+        self.distill(VAULT_DISTILL_EXTRACT_CMD=self.cmd("print('garbled', file=sys.stderr)\nsys.exit(1)\n"))
+        self.assertEqual(self.seen()[sid]["state"], "invalid")
 
     def test_jev_fallback_text_reaches_the_report(self):
         path = self.transcript("s-j", ["hello JEV_LESSON=0.95"])

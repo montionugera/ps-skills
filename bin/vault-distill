@@ -16,6 +16,7 @@ Test seams: VAULT_DISTILL_JEV_CMD, VAULT_DISTILL_EXTRACT_CMD, VAULT_DISTILL_REVI
 import argparse
 import datetime
 import fcntl
+import http.client
 import json
 import os
 import re
@@ -167,9 +168,10 @@ class Run:
         than 1) from a bad answer (exit 1 or unparsable stdout): the caller retries the first, drops the second."""
         self.attempts[stage] += 1
         self.bytes[stage] += len(stdin_text.encode())
-        self.tool_failed, out, text = False, None, ""
+        self.tool_failed, out, text, self.spent = False, None, "", 0
         try:
             proc = subprocess.run(argv, input=stdin_text, capture_output=True, text=True, timeout=timeout)
+            self.spent = spent_tokens(proc.stdout)
             if proc.returncode != 0:
                 self.tool_failed = proc.returncode != 1
                 text = proc.stderr or f"exit {proc.returncode}"
@@ -199,6 +201,15 @@ class Run:
     def jev(self, stage, sub, flags, stdin_text):
         cmd = shlex.split(os.environ.get("VAULT_DISTILL_JEV_CMD", "")) or [str(Path(__file__).resolve().parent / "jev-gate")]
         return self.call(stage, [*cmd, sub, "--timeout", "20", *flags], stdin_text, timeout=60)
+
+
+def spent_tokens(stdout):
+    """The "tokens" field of a child's first stdout line, else 0."""
+    try:
+        value = json.loads((stdout or "").splitlines()[0]).get("tokens")
+    except (ValueError, IndexError, AttributeError):
+        return 0
+    return value if isinstance(value, int) and value >= 0 else 0
 
 
 # --- inbox rotation (R6, R6f) ---
@@ -522,12 +533,12 @@ def extract_session(run, session):
     run.bytes["extract"] += len(session["digest"].encode()) + len(request["related"].encode())  # what the model reads
     out = run.call("extract", cmd, json.dumps(request), timeout=360)
     run.extract_tool_failed = run.tool_failed  # later Jev calls overwrite tool_failed
+    run.counts["extract_tokens"] += run.spent  # failed calls cost tokens too
     if not isinstance(out, dict):
         if run.extract_tool_failed and run.seen.get(session["sid"], {}).get("tries", 0) < 2:
             return "extract-pending", None  # run_extractions raises the try count; the third tool failure falls through
         run.counts["invalid"] += 1
         return "invalid", None  # R9f: a bad answer, or the third tool failure
-    run.counts["extract_tokens"] += out.get("tokens") if isinstance(out.get("tokens"), int) else 0
     if not out.get("path"):
         run.counts["no_lesson"] += 1
         return "no-lesson", None
@@ -787,9 +798,10 @@ def ask_gemini(model, prompt, schema):
     key = gemini_key()
     if not key:
         return None, 0, ("tool", "no Gemini key (env GEMINI_API_KEY or Keychain joy-companion/gemini)")
+    # thinking is billed as output; "low" cut a probe call from 152 to 14 tokens (the API refuses "minimal")
     body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema,
-                                 "maxOutputTokens": 8000}}
+                                 "maxOutputTokens": 8000, "thinkingConfig": {"thinkingLevel": "low"}}}
     req = urllib.request.Request(GEMINI_URL.format(model), data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", "x-goog-api-key": key})
     try:
@@ -801,20 +813,24 @@ def ask_gemini(model, prompt, schema):
         except (OSError, ValueError, KeyError, TypeError):
             status = ""
         return None, 0, ("tool", f"HTTP {err.code} {status if re.fullmatch(r'[A-Z_]{1,40}', str(status)) else ''}".strip())
-    except (OSError, ValueError, urllib.error.URLError) as err:
+    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as err:
         return None, 0, ("tool", type(err).__name__)
     if not isinstance(reply, dict):
         return None, 0, ("tool", "unexpected reply shape")
-    block = (reply.get("promptFeedback") or {}).get("blockReason")
-    cands = reply.get("candidates")
-    if block or not cands or not isinstance(cands[0], dict):
-        return None, 0, ("tool", f"blocked {block}" if block else "no candidate")
-    finish = cands[0].get("finishReason")
-    if finish != "STOP":
-        return None, 0, ("tool", f"finishReason {finish}")
-    parts = [p for p in (cands[0].get("content") or {}).get("parts") or [] if isinstance(p, dict) and not p.get("thought")]
     usage = reply.get("usageMetadata")
     tokens = usage.get("totalTokenCount", 0) if isinstance(usage, dict) else 0
+    tokens = tokens if isinstance(tokens, int) else 0
+    try:
+        block = (reply.get("promptFeedback") or {}).get("blockReason")
+        cands = reply.get("candidates")
+        if block or not cands or not isinstance(cands[0], dict):
+            return None, tokens, ("tool", f"blocked {block}" if block else "no candidate")
+        finish = cands[0].get("finishReason")
+        if finish != "STOP":
+            return None, tokens, ("tool", f"finishReason {finish}")
+        parts = [p for p in (cands[0].get("content") or {}).get("parts") or [] if isinstance(p, dict) and not p.get("thought")]
+    except (AttributeError, TypeError, KeyError, IndexError):
+        return None, tokens, ("tool", "unexpected reply shape")
     answer = parse_json(parts[-1].get("text") or "") if parts and isinstance(parts[-1].get("text"), str) else None
     if not isinstance(answer, dict):
         return None, tokens, ("bad", "Gemini answer is not a JSON object")
@@ -848,12 +864,14 @@ def render_draft(answer, request):
     return slug, "\n".join(lines) + "\n"
 
 
-def call_failed(failure):
-    """A tool failure is a fallback on stdout (the jev-gate contract, exit 0); a bad answer is stderr and exit 1."""
+def call_failed(failure, tokens=0):
+    """A tool failure is a fallback on stdout (the jev-gate contract, exit 0); a bad answer is stderr and exit 1.
+    Both put the spent tokens on stdout so the night's total counts failed calls too."""
     kind, reason = failure
     if kind == "tool":
-        print(json.dumps({"fallback": True, "error": reason}))
+        print(json.dumps({"fallback": True, "error": reason, "tokens": tokens}))
         return 0
+    print(json.dumps({"tokens": tokens}))
     print(reason, file=sys.stderr)
     return 1
 
@@ -866,7 +884,7 @@ def extract_default():
     if failure is None and "lesson" not in answer:
         failure = ("bad", "Gemini answer has no lesson key")
     if failure:
-        return call_failed(failure)
+        return call_failed(failure, tokens)
     if not answer.get("lesson"):
         print(json.dumps({"path": None, "reason": "no-lesson", "tokens": tokens}))
         return 0
