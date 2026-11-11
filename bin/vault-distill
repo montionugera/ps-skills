@@ -295,7 +295,8 @@ def quarantine(run, name, text):
     the vault's .gitignore quarantines that folder (vault-engine check-privacy's rule); else a pointer."""
     private = run.vault / "_inbox" / "private"
     try:
-        ignored = "_inbox/private/" in (run.vault / ".gitignore").read_text()
+        lines = [ln.strip() for ln in (run.vault / ".gitignore").read_text().splitlines()]
+        ignored = any(ln in ("_inbox/private/", "/_inbox/private/") for ln in lines)
     except OSError:
         ignored = False
     body = text if ignored else "content withheld: add _inbox/private/ to the vault .gitignore\n"

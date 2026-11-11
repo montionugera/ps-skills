@@ -222,6 +222,32 @@ print(open(sys.argv[0] + ".reply").read())
             self.assertEqual(run.counts["private"], 1)
             self.assertTrue((run.vault / "_inbox" / "private" / "draft-s-secret.md").exists())
 
+    def test_f5_gitignore_quarantine_requires_exact_match(self):
+        vd = load_distill()
+        import unittest.mock
+        with unittest.mock.patch.dict(os.environ, self.env()):
+            run = vd.Run()
+            (run.vault / ".gitignore").write_text("#_inbox/private/\n")
+            vd.quarantine(run, "test-comment", "sensitive content")
+            out = (run.vault / "_inbox" / "private" / "test-comment.md").read_text()
+            self.assertIn("content withheld", out)
+
+            (run.vault / ".gitignore").write_text("!_inbox/private/\n")
+            vd.quarantine(run, "test-negated", "sensitive content")
+            out = (run.vault / "_inbox" / "private" / "test-negated.md").read_text()
+            self.assertIn("content withheld", out)
+
+            (run.vault / ".gitignore").write_text("  _inbox/private/  \n")
+            vd.quarantine(run, "test-exact", "sensitive content")
+            out = (run.vault / "_inbox" / "private" / "test-exact.md").read_text()
+            self.assertEqual(out, "sensitive content")
+
+            (run.vault / ".gitignore").write_text("/_inbox/private/\n")
+            vd.quarantine(run, "test-leading-slash", "sensitive content")
+            out = (run.vault / "_inbox" / "private" / "test-leading-slash.md").read_text()
+            self.assertEqual(out, "sensitive content")
+
+
 
 
 
