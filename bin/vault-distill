@@ -51,7 +51,8 @@ CORRECTION_RE = re.compile(r"^\s*(no\b|nope|wrong|don't|do not|stop|actually|tha
 HOOK_BLOCK_RE = re.compile(r"hook (?:error|blocked)|blocked by (?:a |the )?\w*\s*hook|guard_check", re.I)
 COUNT_KEYS = ("seen", "not_allowed", "private", "no_transcript", "skipped_small", "skipped_active", "dropped",
               "unsure", "no_lesson", "extracted", "invalid", "no_evidence", "junk", "unscored", "candidates_waiting",
-              "recurred", "ready", "would_publish", "published", "merged", "rejected", "collisions", "archived", "expired")
+              "recurred", "ready", "would_publish", "published", "merged", "rejected", "collisions", "archived", "expired",
+              "errors")
 STAGES = ("classify", "extract", "score", "same_lesson", "review")
 
 
@@ -202,9 +203,10 @@ def requeue(run, session):
 # --- digest (R7, R7s) ---
 def text_of(content):
     if isinstance(content, str):
-        return content
+        return content.encode("utf-8", "replace").decode("utf-8")
     if isinstance(content, list):
-        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+        return "\n".join(b.get("text", "").encode("utf-8", "replace").decode("utf-8")
+                         for b in content if isinstance(b, dict) and b.get("type") == "text")
     return ""
 
 
@@ -268,11 +270,11 @@ def build_digest(transcript, offset):
 
 def cut(text, limit):
     """First DIGEST_HEAD bytes plus the last bytes that fit, so the digest is at most `limit` bytes."""
-    data = text.encode()
+    data = text.encode("utf-8", errors="replace")
     if len(data) <= limit:
         return text
     head = data[:DIGEST_HEAD].decode("utf-8", errors="ignore")
-    tail = data[len(data) - (limit - len(head.encode()) - 5):].decode("utf-8", errors="ignore")
+    tail = data[len(data) - (limit - len(head.encode("utf-8", errors="replace")) - 5):].decode("utf-8", errors="ignore")
     return head + "\n...\n" + tail
 
 
@@ -354,19 +356,24 @@ def run_batch(run):
             continue
         run.counts["seen"] += 1
         prior_state = run.seen.get(session["sid"], {}).get("state")
-        p = screen(run, session, skip_repos)
-        if p is None:
+        try:
+            p = screen(run, session, skip_repos)
+            if p is None:
+                continue
+            if p >= EXTRACT_AT or prior_state == "extract-pending":
+                queue.append((p, session))
+            elif p <= DROP_AT:
+                run.counts["dropped"] += 1
+                run.mark(session, "dropped", offset=session["end"], p=p)
+            elif prior_state == "unsure-pending":
+                unsure_again.append((p, session))
+            else:
+                run.counts["unsure"] += 1
+                run.mark(session, "unsure-pending", p=p)  # R8u: offered to Jev once more next run
+        except Exception:
+            run.counts["errors"] += 1
+            run.mark(session, "error", offset=session.get("end", size_or_zero(session["transcript"])))
             continue
-        if p >= EXTRACT_AT or prior_state == "extract-pending":
-            queue.append((p, session))
-        elif p <= DROP_AT:
-            run.counts["dropped"] += 1
-            run.mark(session, "dropped", offset=session["end"], p=p)
-        elif prior_state == "unsure-pending":
-            unsure_again.append((p, session))
-        else:
-            run.counts["unsure"] += 1
-            run.mark(session, "unsure-pending", p=p)  # R8u: offered to Jev once more next run
     unsure_again.sort(key=lambda item: -item[0])
     keep = env_int("VAULT_DISTILL_UNSURE_MAX", 3)
     for p, session in unsure_again[keep:]:

@@ -116,6 +116,47 @@ class TestVaultDistillAudit(DistillCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(self.seen()["s-empty-cwd"]["state"], "not-allowed")
 
+    def test_f2_lone_surrogate_transcript_line_produces_digest_and_exits_normally(self):
+        path = self.transcript("s-surrogate", ["hello \ud83d world JEV_LESSON=0.95"])
+
+        digest = load_distill().build_digest(str(path), 0)
+        self.assertIn("user: hello", digest)
+        self.assertNotIn("\ud83d", digest)
+
+        self.write_inbox([self.inbox_line("s-surrogate", path)])
+        res = self.distill()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.seen()["s-surrogate"]["state"], "extracted")
+
+    def test_f2_session_screening_exception_marked_error_and_batch_continues(self):
+        vd = load_distill()
+        path_bad = self.transcript("s-bad", ["bad session JEV_LESSON=0.95"])
+        path_good = self.transcript("s-good", ["good session JEV_LESSON=0.95"])
+        self.write_inbox([self.inbox_line("s-bad", path_bad), self.inbox_line("s-good", path_good)])
+
+        orig_screen = vd.screen
+
+        def flaky_screen(run, session, skip_repos):
+            if session["sid"] == "s-bad":
+                raise RuntimeError("unexpected failure during screening")
+            return orig_screen(run, session, skip_repos)
+
+        import unittest.mock
+        with unittest.mock.patch.dict(os.environ, self.env()):
+            with unittest.mock.patch.object(vd, "screen", side_effect=flaky_screen):
+                run = vd.Run()
+                vd.run_batch(run)
+
+        seen = self.seen()
+        self.assertIn("s-bad", seen)
+        self.assertEqual(seen["s-bad"]["state"], "error")
+        self.assertIn("s-good", seen)
+        self.assertEqual(seen["s-good"]["state"], "extracted")
+
+        report = next((self.vault / "_inbox" / "agent" / "distill").glob("report-*.md")).read_text()
+        self.assertEqual(self.count(report, "errors"), 1)
+
+
 
 
 if __name__ == "__main__":
