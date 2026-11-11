@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 DIGEST_MAX = 12000
@@ -350,6 +351,14 @@ def size_or_zero(path):
         return 0
 
 
+def record_session_error(run, session, err):
+    traceback.print_exc()
+    run.counts["errors"] += 1
+    run.mark(session, "error", offset=session.get("end", size_or_zero(session.get("transcript", ""))))
+    if hasattr(run, "notes") and run.notes is not None:
+        run.notes.append(one_line(f"{session.get('sid', 'unknown')}: {type(err).__name__}: {err}", 200))
+
+
 def run_batch(run):
     skip_repos = {r.strip() for r in os.environ.get("VAULT_DISTILL_SKIP_REPOS", "").split(",") if r.strip()}
     files = work_files(run)
@@ -383,9 +392,8 @@ def run_batch(run):
             else:
                 run.counts["unsure"] += 1
                 run.mark(session, "unsure-pending", p=p)  # R8u: offered to Jev once more next run
-        except Exception:
-            run.counts["errors"] += 1
-            run.mark(session, "error", offset=session.get("end", size_or_zero(session["transcript"])))
+        except Exception as err:
+            record_session_error(run, session, err)
             continue
     unsure_again.sort(key=lambda item: -item[0])
     keep = env_int("VAULT_DISTILL_UNSURE_MAX", 3)
@@ -410,10 +418,14 @@ def run_extractions(run, queue):
         if i >= cap:
             run.mark(session, "extract-pending", p=p)  # over the nightly cap: first in line tomorrow
             continue
-        run.counts["extracted"] += 1
-        state, draft = extract_session(run, session)
-        run.mark(session, state, offset=session["end"], p=p, draft=draft)
-        save_ledger(run)
+        try:
+            state, draft = extract_session(run, session)
+            run.counts["extracted"] += 1
+            run.mark(session, state, offset=session["end"], p=p, draft=draft)
+            save_ledger(run)
+        except Exception as err:
+            record_session_error(run, session, err)
+            continue
     expire_candidates(run)
     review(run)
     for entry in run.ledger.values():
@@ -816,6 +828,9 @@ def render_report(run, exit_code):
 
 def exit_code_for(run):
     """R16: non-zero when more than half the classified sessions are unsure, or a stage failed every call."""
+    errors = run.counts.get("errors", 0)
+    if errors > 0 and errors * 2 > run.counts.get("seen", 0):
+        return 2
     if run.classified and run.counts["unsure"] * 2 > run.classified:
         return 2
     if any(run.attempts[s] and run.failures[s] == run.attempts[s] for s in STAGES):

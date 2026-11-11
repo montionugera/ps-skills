@@ -247,6 +247,122 @@ print(open(sys.argv[0] + ".reply").read())
             out = (run.vault / "_inbox" / "private" / "test-leading-slash.md").read_text()
             self.assertEqual(out, "sensitive content")
 
+    def test_gap_a_majority_errors_exit_code_2_and_report_written(self):
+        vd = load_distill()
+        # Direct check on exit_code_for
+        run_unit = vd.Run()
+        run_unit.counts["seen"] = 2
+        run_unit.counts["errors"] = 2
+        self.assertEqual(vd.exit_code_for(run_unit), 2)
+        run_unit.counts["seen"] = 3
+        run_unit.counts["errors"] = 1
+        self.assertEqual(vd.exit_code_for(run_unit), 0)
+
+        # Integration: two sessions that both raise -> exit code 2 and the report is still written
+        p1 = self.transcript("s-a1", ["err1 JEV_LESSON=0.95"])
+        p2 = self.transcript("s-a2", ["err2 JEV_LESSON=0.95"])
+        self.write_inbox([self.inbox_line("s-a1", p1), self.inbox_line("s-a2", p2)])
+
+        import io
+        import unittest.mock
+
+        def failing_screen(run, session, skip_repos):
+            raise RuntimeError("screen failed")
+
+        with unittest.mock.patch("sys.stdout", io.StringIO()), unittest.mock.patch("sys.stderr", io.StringIO()):
+            with unittest.mock.patch.dict(os.environ, self.env()):
+                with unittest.mock.patch.object(vd, "screen", side_effect=failing_screen):
+                    run = vd.Run()
+                    vd.run_batch(run)
+
+        self.assertEqual(run.exit_code, 2)
+        reports = list((self.vault / "_inbox" / "agent" / "distill").glob("report-*.md"))
+        self.assertEqual(len(reports), 1)
+        self.assertIn("exit: 2", reports[0].read_text())
+
+        # One erroring session out of three -> exit code stays 0
+        p3 = self.transcript("s-a3", ["ok3 JEV_LESSON=0.95"])
+        p4 = self.transcript("s-a4", ["ok4 JEV_LESSON=0.95"])
+        p5 = self.transcript("s-a5", ["err5 JEV_LESSON=0.95"])
+        self.write_inbox([self.inbox_line("s-a3", p3), self.inbox_line("s-a4", p4), self.inbox_line("s-a5", p5)])
+
+        orig_screen = vd.screen
+
+        def one_error_screen(run, session, skip_repos):
+            if session["sid"] == "s-a5":
+                raise RuntimeError("one error")
+            return orig_screen(run, session, skip_repos)
+
+        with unittest.mock.patch("sys.stdout", io.StringIO()), unittest.mock.patch("sys.stderr", io.StringIO()):
+            with unittest.mock.patch.dict(os.environ, self.env()):
+                with unittest.mock.patch.object(vd, "screen", side_effect=one_error_screen):
+                    run2 = vd.Run()
+                    vd.run_batch(run2)
+
+        self.assertEqual(run2.exit_code, 0)
+
+    def test_gap_b_exception_logged_to_notes_and_traceback_printed(self):
+        vd = load_distill()
+        path_bad = self.transcript("s-b-bad", ["bad session JEV_LESSON=0.95"])
+        self.write_inbox([self.inbox_line("s-b-bad", path_bad)])
+
+        def failing_screen(run, session, skip_repos):
+            raise TypeError("type failure in screening")
+
+        import io
+        import unittest.mock
+        stderr_capture = io.StringIO()
+        with unittest.mock.patch("sys.stdout", io.StringIO()), unittest.mock.patch("sys.stderr", stderr_capture):
+            with unittest.mock.patch.dict(os.environ, self.env()):
+                with unittest.mock.patch.object(vd, "screen", side_effect=failing_screen):
+                    run = vd.Run()
+                    vd.run_batch(run)
+
+        # Check run.notes
+        self.assertTrue(any("s-b-bad: TypeError: type failure in screening" in note for note in run.notes))
+        # Check report
+        report = next((self.vault / "_inbox" / "agent" / "distill").glob("report-*.md")).read_text()
+        self.assertIn("s-b-bad", report)
+        self.assertIn("TypeError", report)
+        # Check traceback printed to stderr
+        self.assertIn("Traceback (most recent call last):", stderr_capture.getvalue())
+        self.assertIn("type failure in screening", stderr_capture.getvalue())
+
+    def test_gap_c_extraction_exception_handled_and_batch_continues(self):
+        vd = load_distill()
+        path1 = self.transcript("s-c-bad", ["c bad session JEV_LESSON=0.99"])
+        path2 = self.transcript("s-c-good", ["c good session JEV_LESSON=0.90"])
+        self.write_inbox([self.inbox_line("s-c-bad", path1), self.inbox_line("s-c-good", path2)])
+
+        orig_extract = vd.extract_session
+
+        def failing_extract(run, session):
+            if session["sid"] == "s-c-bad":
+                raise RuntimeError("extract failed for s-c-bad")
+            return orig_extract(run, session)
+
+        import io
+        import unittest.mock
+        with unittest.mock.patch("sys.stdout", io.StringIO()), unittest.mock.patch("sys.stderr", io.StringIO()):
+            with unittest.mock.patch.dict(os.environ, self.env()):
+                with unittest.mock.patch.object(vd, "extract_session", side_effect=failing_extract):
+                    run = vd.Run()
+                    vd.run_batch(run)
+
+        seen = self.seen()
+        self.assertIn("s-c-bad", seen)
+        self.assertEqual(seen["s-c-bad"]["state"], "error")
+        self.assertIn("s-c-good", seen)
+        self.assertEqual(seen["s-c-good"]["state"], "extracted")
+
+        report_files = list((self.vault / "_inbox" / "agent" / "distill").glob("report-*.md"))
+        self.assertEqual(len(report_files), 1)
+        report = report_files[0].read_text()
+        self.assertEqual(self.count(report, "errors"), 1)
+        self.assertEqual(self.count(report, "extracted"), 1)
+        self.assertIn("s-c-bad", report)
+        self.assertIn("RuntimeError", report)
+
 
 
 
