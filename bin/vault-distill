@@ -498,15 +498,16 @@ def extract_session(run, session):
 def admit_draft(run, key, entry):
     path = run.distill / key
     text = path.read_text(errors="replace")
-    proc = engine(run, "validate", str(path))
-    if len(text.encode()) > DRAFT_MAX or proc is None or proc.returncode != 0:
-        entry["state"] = "invalid"  # R9f: stays in the inbox marked invalid
-        run.counts["invalid"] += 1
-    elif SECRET_RE.search(text):
+    if SECRET_RE.search(text):
         quarantine(run, f"draft-{entry['sid']}", text)
         path.unlink()  # a credential must not stay in a synced inbox path; the copy is in _inbox/private/
         entry["state"] = "private"
         run.counts["private"] += 1
+        return
+    proc = engine(run, "validate", str(path))
+    if len(text.encode()) > DRAFT_MAX or proc is None or proc.returncode != 0:
+        entry["state"] = "invalid"  # R9f: stays in the inbox marked invalid
+        run.counts["invalid"] += 1
     elif not evidence_ok(text, Path(entry["digest"]).read_text(errors="replace")):
         entry["state"] = "no-evidence"  # R9c: script check, no model
         run.counts["no_evidence"] += 1

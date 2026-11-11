@@ -195,6 +195,34 @@ print(open(sys.argv[0] + ".reply").read())
         self.assertTrue(p2.exists())
         self.assertTrue(str(p2).endswith("-2.md"))
 
+    def test_f4_oversized_draft_with_secret_is_quarantined_and_removed(self):
+        token = "ghp_" + ("x" * 25)
+        oversized_content = (
+            '---\nschema: "knowledge/v1"\nid: "KNOW-secret-lesson"\nkind: "knowledge"\ntitle: "Secret Lesson"\n'
+            'status: "draft"\ntags: ["auto-distilled"]\nproject_ids: []\n---\n\n'
+            f"Here is a secret token: {token}\n\n"
+            + ("padding line for oversized draft\n" * 100)
+        )
+        self.assertGreater(len(oversized_content.encode()), 1500)
+
+        vd = load_distill()
+        import unittest.mock
+        with unittest.mock.patch.dict(os.environ, self.env()):
+            run = vd.Run()
+            draft_path = run.distill / "draft-oversized.md"
+            draft_path.parent.mkdir(parents=True, exist_ok=True)
+            draft_path.write_text(oversized_content)
+
+            entry = {"sid": "s-secret", "digest": str(self.dir / "digest.txt"), "state": "new"}
+            key = "draft-oversized.md"
+            vd.admit_draft(run, key, entry)
+
+            self.assertEqual(entry["state"], "private")
+            self.assertFalse(draft_path.exists())
+            self.assertEqual(run.counts["private"], 1)
+            self.assertTrue((run.vault / "_inbox" / "private" / "draft-s-secret.md").exists())
+
+
 
 
 
