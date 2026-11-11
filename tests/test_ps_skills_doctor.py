@@ -143,9 +143,41 @@ class TestVaultRecallCheck(unittest.TestCase):
         issues, _ = self.run_check()
         self.assertTrue(any("no `context` command" in i for i in issues), issues)
 
+    def test_settings_not_a_dict_reports_hook_not_registered(self):
+        self.healthy()
+        self.settings.write_text("[]")
+        issues, _ = self.run_check()
+        self.assertTrue(any("not registered" in i for i in issues), issues)
+
+    def test_empty_index_file_reports_no_issues(self):
+        self.healthy()
+        self.index.write_text("")
+        issues, warnings = self.run_check()
+        self.assertEqual((issues, warnings), ([], []))
+
+    def test_truncated_index_line_is_skipped(self):
+        self.healthy()
+        self.index.write_text('{"id":"broken","terms":["alpha"]\n"terms"\n{"id":"CONCEPT-a","status":"active","title":"Codegen Drift Gate","terms":["alpha"]}\n')
+        silent = self.home / ".local" / "bin" / "vault-engine"
+        silent.parent.mkdir(parents=True, exist_ok=True)
+        silent.write_text("#!/bin/sh\nexit 0\n")
+        silent.chmod(0o755)
+        _, warnings = self.run_check()
+        self.assertTrue(any("returned nothing" in w for w in warnings), warnings)
+
+    def test_known_title_probe_ignores_inactive_or_fewer_than_3_words(self):
+        self.healthy()
+        self.index.write_text('{"id":"CONCEPT-a","status":"triage","title":"Codegen Drift Gate","terms":["alpha"]}\n{"id":"CONCEPT-b","status":"active","title":"Drift Gate","terms":["beta"]}\n')
+        silent = self.home / ".local" / "bin" / "vault-engine"
+        silent.parent.mkdir(parents=True, exist_ok=True)
+        silent.write_text("#!/bin/sh\nexit 0\n")
+        silent.chmod(0o755)
+        _, warnings = self.run_check()
+        self.assertFalse(any("returned nothing" in w for w in warnings), warnings)
+
     def test_known_title_returning_nothing_is_a_warning(self):
         self.healthy()
-        self.index.write_text('{"id":"CONCEPT-a","title":"Codegen Drift Gate","terms":["alpha"]}\n')
+        self.index.write_text('{"id":"CONCEPT-a","status":"active","title":"Codegen Drift Gate","terms":["alpha"]}\n')
         silent = self.home / ".local" / "bin" / "vault-engine"
         silent.parent.mkdir(parents=True)
         silent.write_text("#!/bin/sh\nexit 0\n")

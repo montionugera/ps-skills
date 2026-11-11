@@ -28,6 +28,8 @@ def check_vault_recall(home, issues, warnings):
         settings = json.loads((home / ".claude" / "settings.json").read_text())
     except (OSError, ValueError):
         settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
     registered = any(
         "vault-recall.py" in h.get("command", "")
         for group in settings.get("hooks", {}).get("UserPromptSubmit", [])
@@ -40,7 +42,7 @@ def check_vault_recall(home, issues, warnings):
         lines = index.read_text().splitlines()
     except OSError:
         lines = []
-    if not any('"terms"' in line for line in lines):
+    if any(line.strip() for line in lines) and not any('"terms"' in line for line in lines):
         issues.append(f"Vault index has no retrieval fields: run `vault-engine rebuild-index` ({index})")
     notes = list((vault / "04_Knowledge").rglob("*.md"))
     if lines and notes and max(n.stat().st_mtime for n in notes) > index.stat().st_mtime:
@@ -62,9 +64,20 @@ def check_vault_recall(home, issues, warnings):
         proc = run_context(binary, "x")
         if proc is None or proc.returncode != 0:
             issues.append(f"vault-engine copy has no `context` command: {binary} (rebuild it from tools/vault-engine)")
-    # A title with two real terms scores 6, so the engine must return its own note for it.
-    titles = [json.loads(line).get("title", "") for line in lines if '"terms"' in line]
-    known = next((t for t in titles if len([w for w in re.split(r"[^a-z0-9]+", t.lower()) if len(w) >= 4]) >= 2), "")
+    # A title with three real terms scores 9, so the engine must return its own note for it.
+    titles = []
+    for line in lines:
+        if '"terms"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") == "active" and entry.get("title"):
+            titles.append(entry["title"])
+    known = next((t for t in titles if len([w for w in re.split(r"[^a-z0-9]+", t.lower()) if len(w) >= 4]) >= 3), "")
     if primary.exists() and known:
         proc = run_context(primary, known)
         if proc is not None and proc.returncode == 0 and not proc.stdout.strip():
