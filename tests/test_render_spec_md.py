@@ -119,7 +119,8 @@ def test_hook_problem_exits_2(home):
     assert run_hook(home, md).returncode == 2
 
 
-def test_mermaid_syntax_error_fails_loudly(home, tmp_path):
+def test_mermaid_syntax_error_fails_loudly(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("QUANT_VALIDATE_MERMAID", "1")  # the check is opt-in
     md = home / "m.md"
     md.write_text(MERMAID)
     proc = run_cli(home, md, stub_mmdc(tmp_path, "Parse error on line 2"))
@@ -127,7 +128,8 @@ def test_mermaid_syntax_error_fails_loudly(home, tmp_path):
     assert "MERMAID SYNTAX ERROR" in proc.stderr
 
 
-def test_mermaid_validator_unavailable_is_not_silent(home, tmp_path):
+def test_mermaid_validator_unavailable_is_not_silent(home, tmp_path, monkeypatch):
+    monkeypatch.setenv("QUANT_VALIDATE_MERMAID", "1")  # the check is opt-in
     md = home / "m.md"
     md.write_text(MERMAID)
     proc = run_cli(home, md, stub_mmdc(tmp_path, "Could not find Chrome (ver. 1)"))

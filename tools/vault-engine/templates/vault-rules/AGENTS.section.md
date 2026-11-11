@@ -47,9 +47,10 @@ Agents in other places change this folder too. Follow these rules.
       says is not valid): correct it and try once more.
    b. Anything else: the engine or the shared copy hit a fault of its own
       (for example `hub settings unreadable`, or a git command that failed).
-      Your input is fine. Change nothing, wait one minute, and run the same
-      command again, up to 3 times. If an earlier try did arrive, the engine
-      answers `SAVED` or `REFUSED note-changed` and nothing is saved twice.
+      Your input is probably fine. Change nothing, wait one minute, and run
+      the same command again, up to 3 times. If an earlier try did arrive, the
+      engine answers `SAVED` or `REFUSED note-changed` and nothing is saved
+      twice.
    If it still fails, keep your result as a file in your own inbox, write the
    message into a short note there, and say so in your final report. Do not
    work around it.

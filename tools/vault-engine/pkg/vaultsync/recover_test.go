@@ -50,7 +50,10 @@ func TestRecover_InterruptedSaveMovesUnprovenFilesToQuarantineAndNeverTouchesAnI
 	r := newRepo(t, w.Mac)
 	lockFor(t, r)
 	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
-	original, _ := os.ReadFile(note)
+	original, err := os.ReadFile(note)
+	if err != nil {
+		t.Fatalf("read %s: %v", note, err)
+	}
 	stray := filepath.Join(w.Mac, "01_Ideas", "was-here-before.md")
 	writeFile(t, stray, []byte("untracked before the save started\n"))
 
@@ -68,8 +71,8 @@ func TestRecover_InterruptedSaveMovesUnprovenFilesToQuarantineAndNeverTouchesAnI
 	if err := r.Recover(func() error { rebuilt = true; return nil }); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if now, _ := os.ReadFile(note); string(now) != string(original) {
-		t.Errorf("note was not put back")
+	if now, err := os.ReadFile(note); err != nil || string(now) != string(original) {
+		t.Errorf("note was not put back: (%q, %v)", now, err)
 	}
 	// After a crash nothing proves who wrote an untracked file: it is moved, never deleted.
 	for rel, want := range map[string]string{
@@ -158,7 +161,10 @@ func TestUndo_RemovesExactlyTheListedFilesAndLeavesAHandMadeFileAlone(t *testing
 	lockFor(t, r)
 	note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
 	noteRel := "01_Ideas/" + filepath.Base(note)
-	original, _ := os.ReadFile(note)
+	original, err := os.ReadFile(note)
+	if err != nil {
+		t.Fatalf("read %s: %v", note, err)
+	}
 	m, err := r.Begin("commit", "agent-olivier")
 	if err != nil {
 		t.Fatalf("begin: %v", err)
@@ -176,8 +182,8 @@ func TestUndo_RemovesExactlyTheListedFilesAndLeavesAHandMadeFileAlone(t *testing
 	if err := r.Undo(m, list, noRebuild); err != nil {
 		t.Fatalf("undo: %v", err)
 	}
-	if now, _ := os.ReadFile(note); string(now) != string(original) {
-		t.Errorf("note was not put back")
+	if now, err := os.ReadFile(note); err != nil || string(now) != string(original) {
+		t.Errorf("note was not put back: (%q, %v)", now, err)
 	}
 	if _, err := os.Stat(written); !os.IsNotExist(err) {
 		t.Errorf("the listed file should be gone")
@@ -837,7 +843,10 @@ func undoAfterFailedPass(t *testing.T, firstPass func(r *Repo, m *Marker, list [
 			lockFor(t, r)
 			note := fixtureNote(t, w.Mac, "IDEA-2026-000001")
 			noteRel := "01_Ideas/" + filepath.Base(note)
-			original, _ := os.ReadFile(note)
+			original, err := os.ReadFile(note)
+			if err != nil {
+				t.Fatalf("read %s: %v", note, err)
+			}
 			m, err := r.Begin("commit", "agent-olivier")
 			if err != nil {
 				t.Fatalf("begin: %v", err)
@@ -863,6 +872,11 @@ func undoAfterFailedPass(t *testing.T, firstPass func(r *Repo, m *Marker, list [
 				t.Fatalf("the first pass must report the failed lookup")
 			}
 			r.gate = nil
+			// The premise of this test: the first pass failed after it had moved
+			// the folder back, so the save's commit is gone.
+			if head, err := r.Head(); err != nil || head != m.Base {
+				t.Fatalf("the first pass must have failed after the folder was moved back: head (%s, %v), base %s", head, err, m.Base)
+			}
 			if reread {
 				if m, err = r.readMarker(); err != nil || m == nil {
 					t.Fatalf("marker must still be on disk: (%v, %v)", m, err)
@@ -871,8 +885,8 @@ func undoAfterFailedPass(t *testing.T, firstPass func(r *Repo, m *Marker, list [
 			if err := r.Undo(m, list, noRebuild); err != nil {
 				t.Fatalf("second undo: %v", err)
 			}
-			if now, _ := os.ReadFile(note); string(now) != string(original) {
-				t.Errorf("the note should be back at the shared version, got %q", now)
+			if now, err := os.ReadFile(note); err != nil || string(now) != string(original) {
+				t.Errorf("the note should be back at the shared version, got (%q, %v)", now, err)
 			}
 			if _, err := os.Stat(fresh); !os.IsNotExist(err) {
 				t.Errorf("the new file should have been moved aside")
@@ -896,5 +910,246 @@ func TestWriteFileAtomic_LeavesNoTempFileWhenTheRenameFails(t *testing.T) {
 	}
 	if _, err := os.Stat(target + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf("the temp file was left behind: %v", err)
+	}
+}
+
+// A Recover that succeeds settles the save and removes the marker. An Undo
+// that still holds the old marker and list must then refuse: with no record on
+// disk nothing proves the list, and a listed file may be a person's by now.
+func TestUndo_RefusesWhenTheMarkerFileIsGone(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := r.Recover(noRebuild); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if r.hasMarker() {
+		t.Fatalf("a successful recover must remove the marker")
+	}
+	p := filepath.Join(w.Mac, "01_Ideas", "new.md")
+	writeFile(t, p, []byte("typed by a person after the save was settled\n"))
+	err = r.Undo(m, []string{"01_Ideas/new.md"}, noRebuild)
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("undo with no marker on disk must refuse and say nothing was changed, got %v", err)
+	}
+	if got, rerr := os.ReadFile(p); rerr != nil || string(got) != "typed by a person after the save was settled\n" {
+		t.Fatalf("the listed file must stay as it is: (%q, %v)", got, rerr)
+	}
+	if r.hasMarker() || m.UndoStarted {
+		t.Fatalf("a refused undo must not write a marker (on disk %v, in memory %v)", r.hasMarker(), m.UndoStarted)
+	}
+}
+
+// A marker on disk that belongs to another save is not this save's record:
+// Undo refuses whichever field differs, and changes nothing.
+func TestUndo_RefusesAMarkerThatBelongsToAnotherSave(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	p := filepath.Join(w.Mac, "01_Ideas", "new.md")
+	writeFile(t, p, []byte("written by the save that owns the marker\n"))
+	for name, change := range map[string]func(*Marker){
+		"other operation":  func(o *Marker) { o.Op = "update" },
+		"other actor":      func(o *Marker) { o.Actor = "agent-bestie" },
+		"other base":       func(o *Marker) { o.Base = strings.Repeat("1", 40) },
+		"other start time": func(o *Marker) { o.StartedAt = "2000-01-01T00:00:00Z" },
+		"other process":    func(o *Marker) { o.PID++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			other := *m
+			change(&other)
+			err := r.Undo(&other, []string{"01_Ideas/new.md"}, noRebuild)
+			if err == nil || !strings.Contains(err.Error(), "is not the one given to undo") || !strings.Contains(err.Error(), "nothing was changed") {
+				t.Fatalf("undo with another save's marker must refuse, got %v", err)
+			}
+			if got, rerr := os.ReadFile(p); rerr != nil || string(got) != "written by the save that owns the marker\n" {
+				t.Fatalf("the listed file must stay as it is: (%q, %v)", got, rerr)
+			}
+			disk, derr := r.readMarker()
+			if derr != nil || disk == nil || disk.UndoStarted || other.UndoStarted {
+				t.Fatalf("a refused undo must not record a start: on disk (%+v, %v), in memory %v", disk, derr, other.UndoStarted)
+			}
+		})
+	}
+}
+
+// The record "an undo was started" is written before the folder is moved back.
+// When it cannot be written, nothing is changed: not the folder, not the
+// marker on disk, not the marker the caller holds.
+func TestUndo_WhenTheUndoStartCannotBeRecordedNothingIsChanged(t *testing.T) {
+	w := newWorld(t)
+	r := newRepo(t, w.Mac)
+	lockFor(t, r)
+	m, err := r.Begin("commit", "agent-olivier")
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	p := filepath.Join(w.Mac, "01_Ideas", "new.md")
+	writeFile(t, p, []byte("what the save wrote\n"))
+	if err := r.Commit([]string{"01_Ideas/new.md"}, "agent-olivier", "vault: commit", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	head, err := r.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	// A folder sits where the marker's temp file must go: the marker cannot be rewritten.
+	if err := os.Mkdir(r.markerPath()+".tmp", 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	err = r.Undo(m, []string{"01_Ideas/new.md"}, noRebuild)
+	if err == nil || !strings.Contains(err.Error(), "record undo start") {
+		t.Fatalf("undo must fail and name the step that failed, got %v", err)
+	}
+	if m.UndoStarted {
+		t.Fatalf("the caller's marker must not say an undo was started")
+	}
+	if now, herr := r.Head(); herr != nil || now != head {
+		t.Fatalf("the folder must not have been moved back: head (%s, %v), want %s", now, herr, head)
+	}
+	if got, rerr := os.ReadFile(p); rerr != nil || string(got) != "what the save wrote\n" {
+		t.Fatalf("the save's file must stay as it is: (%q, %v)", got, rerr)
+	}
+	disk, derr := r.readMarker()
+	if derr != nil || disk == nil || disk.UndoStarted {
+		t.Fatalf("the marker on disk must be as Begin wrote it: (%+v, %v)", disk, derr)
+	}
+}
+
+// A stop that cuts the comparison of an untracked file with the incoming
+// file of the same name is not an answer: the file stays where it is, no
+// report line is written, the stop is returned, and the next pass decides.
+func TestUpdate_AnInterruptedCompareLeavesTheClashingFileWhereItIs(t *testing.T) {
+	w := newWorld(t)
+	mac, srv := newRepo(t, w.Mac), newRepo(t, w.Srv)
+	writeFile(t, filepath.Join(w.Mac, "_inbox", "human", "same-name.md"), []byte("from mac\n"))
+	if err := mac.Commit([]string{"_inbox/human/same-name.md"}, "inbox", "vault: inbox drop", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if out, err := pushAs(t, w.Mac, "mac-test", "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	local := filepath.Join(w.Srv, "_inbox", "human", "same-name.md")
+	writeFile(t, local, []byte("from srv, different\n"))
+	lockFor(t, srv)
+	srv.gate = func(args []string) error {
+		for _, a := range args {
+			if a == "hash-object" {
+				return ErrStopped
+			}
+		}
+		return nil
+	}
+	moved, err := srv.Update(noRebuild)
+	if moved || !errors.Is(err, ErrStopped) {
+		t.Fatalf("update = (%v, %v), want (false, an error that wraps ErrStopped)", moved, err)
+	}
+	if text, rerr := os.ReadFile(local); rerr != nil || string(text) != "from srv, different\n" {
+		t.Fatalf("the local file must stay where it is: (%q, %v)", text, rerr)
+	}
+	if _, serr := os.Stat(filepath.Join(w.Srv, "_quarantine")); !os.IsNotExist(serr) {
+		t.Fatalf("an interrupted compare must set nothing aside and report nothing (stat _quarantine: %v)", serr)
+	}
+	// The next pass, with git working again, decides: the two differ.
+	srv.gate = nil
+	if err := srv.Recover(noRebuild); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if moved, err := srv.Update(noRebuild); err != nil || !moved {
+		t.Fatalf("second update = (%v, %v), want (true, nil)", moved, err)
+	}
+	if text, rerr := os.ReadFile(local); rerr != nil || string(text) != "from mac\n" {
+		t.Fatalf("incoming version should be in place: (%q, %v)", text, rerr)
+	}
+	if got := quarantined(t, w.Srv, "srv-test", "_inbox/human/same-name.md"); string(got) != "from srv, different\n" {
+		t.Fatalf("the local file was not kept: %q", got)
+	}
+	if n := reportLines(t, w.Srv, "srv-test"); n != 1 {
+		t.Fatalf("expected one report line, from the pass that could compare; got %d", n)
+	}
+}
+
+// A comparison that fails for a reason other than a stop is not "unknown": a
+// file git cannot hash (here a link that points nowhere) with the name of an
+// incoming file is still moved aside, so the update is never blocked by it.
+func TestUpdate_AClashingFileThatCannotBeHashedIsStillSetAside(t *testing.T) {
+	w := newWorld(t)
+	mac, srv := newRepo(t, w.Mac), newRepo(t, w.Srv)
+	writeFile(t, filepath.Join(w.Mac, "_inbox", "human", "same-name.md"), []byte("from mac\n"))
+	if err := mac.Commit([]string{"_inbox/human/same-name.md"}, "inbox", "vault: inbox drop", ""); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if out, err := pushAs(t, w.Mac, "mac-test", "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	local := filepath.Join(w.Srv, "_inbox", "human", "same-name.md")
+	if err := os.Symlink("nowhere", local); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	lockFor(t, srv)
+	if moved, err := srv.Update(noRebuild); err != nil || !moved {
+		t.Fatalf("update = (%v, %v), want (true, nil)", moved, err)
+	}
+	if text, rerr := os.ReadFile(local); rerr != nil || string(text) != "from mac\n" {
+		t.Fatalf("incoming version should be in place: (%q, %v)", text, rerr)
+	}
+	kept, _ := filepath.Glob(filepath.Join(w.Srv, "_quarantine", "srv-test", "*", "_inbox", "human", "same-name.md"))
+	if len(kept) != 1 {
+		t.Fatalf("the local link must be set aside, found %v", kept)
+	}
+	if target, lerr := os.Readlink(kept[0]); lerr != nil || target != "nowhere" {
+		t.Fatalf("the link was not kept as it was: (%q, %v)", target, lerr)
+	}
+	if n := reportLines(t, w.Srv, "srv-test"); n != 1 {
+		t.Fatalf("expected one report line for the link that was set aside, got %d", n)
+	}
+}
+
+func TestWriteFileAtomic_SyncsTheFolderAfterTheRenameAndReturnsItsError(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "file.json")
+	prev := syncDir
+	t.Cleanup(func() { syncDir = prev })
+
+	var synced []string
+	inPlace := false
+	syncDir = func(d string) error {
+		synced = append(synced, d)
+		got, err := os.ReadFile(target)
+		inPlace = err == nil && string(got) == "new"
+		return nil
+	}
+	if err := writeFileAtomic(target, []byte("new")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if len(synced) != 1 || synced[0] != dir || !inPlace {
+		t.Fatalf("the folder must be synced once, after the rename: synced %v, new file in place at that moment %v", synced, inPlace)
+	}
+
+	// A folder sync that fails is reported, although the new file is in place.
+	failed := errors.New("folder sync failed")
+	syncDir = func(string) error { return failed }
+	if err := writeFileAtomic(target, []byte("newer")); !errors.Is(err, failed) {
+		t.Fatalf("a failed folder sync must be returned, got %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "newer" {
+		t.Fatalf("the rename had already happened: (%q, %v)", got, err)
+	}
+	if _, err := os.Stat(target + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("the temp file was left behind: %v", err)
+	}
+
+	// The real folder sync works on an ordinary folder.
+	syncDir = prev
+	if err := writeFileAtomic(target, []byte("real")); err != nil {
+		t.Fatalf("write with the real folder sync: %v", err)
 	}
 }

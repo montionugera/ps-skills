@@ -44,7 +44,7 @@ func TestHarness_InstallsTheRulesFiles(t *testing.T) {
 		"_meta/bin/vault-engine whoami", "SAVED", "REFUSED note-changed", "REFUSED no-connection",
 		"REFUSED too-large", "REFUSED type-not-allowed", "REFUSED busy", "REFUSED engine-error",
 		"_inbox/agent/<your-agent-id>/", "Never run git in this folder",
-		"hit a fault of its own", "Your input is fine",
+		"hit a fault of its own", "Your input is probably fine",
 	} {
 		if !strings.Contains(string(agents), want) {
 			t.Errorf("AGENTS.md does not mention %q", want)
@@ -118,5 +118,45 @@ func TestHarness_SetupNamesAMissingTargetFolder(t *testing.T) {
 	}
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {
 		t.Fatalf("setup must not create the folder it was asked about: %v", err)
+	}
+}
+
+// The harness script must drop every variable the product drops.
+func TestHarness_FixtureGitDropsEveryGitLocationVariable(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "sync-harness.sh"))
+	if err != nil {
+		t.Fatalf("read the harness script: %v", err)
+	}
+	for name := range gitLocationVars {
+		if name == "GIT_CEILING_DIRECTORIES" {
+			continue // set, not dropped
+		}
+		if !strings.Contains(string(script), "-u "+name+" ") {
+			t.Errorf("fixture_git in scripts/sync-harness.sh does not drop %s", name)
+		}
+	}
+	if !strings.Contains(string(script), `GIT_CEILING_DIRECTORIES="$(dirname "$dir")"`) {
+		t.Errorf("fixture_git does not stop git from looking above the fixture folder")
+	}
+}
+
+// With GIT_DIR and friends exported by the runner, the test helpers still act
+// on the folder they are given, never on the exported repository.
+func TestGitIn_IgnoresAnExportedGitDir(t *testing.T) {
+	other := filepath.Join(t.TempDir(), "other")
+	state := otherRepo(t, other)
+	before := state()
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+	t.Setenv("GIT_WORK_TREE", other)
+	dir := filepath.Join(t.TempDir(), "fixture")
+	writeFile(t, filepath.Join(dir, "a.md"), []byte("a\n"))
+	mustGit(t, dir, "init", "--quiet", "--initial-branch=main")
+	mustGit(t, dir, "add", "-A")
+	mustGit(t, dir, "commit", "--quiet", "-m", "fixture")
+	if top := mustGit(t, dir, "rev-parse", "--show-toplevel"); filepath.Base(top) != "fixture" {
+		t.Fatalf("the helper worked on %s, not on the fixture folder", top)
+	}
+	if after := state(); after != before {
+		t.Fatalf("the exported repository was changed:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }

@@ -222,6 +222,7 @@ func TestPreReceive_RefusesInputItCannotRead(t *testing.T) {
 	limits := filepath.Join(t.TempDir(), "hooks", "vault-limits.json")
 	writeFile(t, limits, data)
 	zero := strings.Repeat("0", 40)
+	dir := hubRepo(t)
 	cases := map[string]io.Reader{
 		"two fields":      strings.NewReader(zero + " " + zero + "\n"),
 		"four fields":     strings.NewReader(zero + " " + zero + " refs/heads/main extra\n"),
@@ -232,7 +233,7 @@ func TestPreReceive_RefusesInputItCannotRead(t *testing.T) {
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
 			var stderr strings.Builder
-			code := PreReceive(in, &stderr, limits, "mac-test", time.Now())
+			code := PreReceive(dir, in, &stderr, limits, "mac-test", time.Now())
 			// git itself writes these lines; one the hub cannot read is the hub's
 			// own fault, not a rule the sender broke.
 			if code == 0 || !strings.Contains(stderr.String(), "vault-hub: REFUSED engine-error: ") {
@@ -279,6 +280,72 @@ func TestChargeDaily_RefusesAnUnreadableOrCorruptLedger(t *testing.T) {
 	})
 }
 
+func TestChargeDaily_AFolderSyncFailureAfterTheRenameStillCountsAsCharged(t *testing.T) {
+	prev := syncDir
+	t.Cleanup(func() { syncDir = prev })
+	syncDir = func(string) error { return errors.New("simulated folder sync failure") }
+
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	file := filepath.Join(dir, "2026-10-10.json")
+
+	used1, ok, err := chargeDaily(dir, "mac-test", now, 100, 1000)
+	if err != nil || !ok {
+		t.Fatalf("first chargeDaily: ok=%v err=%v, want ok=true err=nil", ok, err)
+	}
+	if used1 != 100 {
+		t.Fatalf("first chargeDaily returned used=%d, want 100", used1)
+	}
+
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("reading usage file: %v", err)
+	}
+	var usage map[string]int64
+	if err := json.Unmarshal(data, &usage); err != nil {
+		t.Fatalf("unmarshaling usage file: %v", err)
+	}
+	if usage["mac-test"] != used1 {
+		t.Fatalf("usage file on disk has %d, chargeDaily returned %d", usage["mac-test"], used1)
+	}
+
+	used2, ok, err := chargeDaily(dir, "mac-test", now, 50, 1000)
+	if err != nil || !ok {
+		t.Fatalf("second chargeDaily: ok=%v err=%v, want ok=true err=nil", ok, err)
+	}
+	if used2 != used1+50 {
+		t.Fatalf("expected total to grow by exactly added amount once to %d, got %d", used1+50, used2)
+	}
+
+	data, err = os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("reading usage file after second charge: %v", err)
+	}
+	if err := json.Unmarshal(data, &usage); err != nil {
+		t.Fatalf("unmarshaling usage file after second charge: %v", err)
+	}
+	if usage["mac-test"] != used2 {
+		t.Fatalf("usage file on disk has %d, chargeDaily returned %d", usage["mac-test"], used2)
+	}
+}
+
+// hubRepo returns an empty bare repository for PreReceive's git commands, and
+// clears git's own location variables for the length of the test. Without it
+// those commands would run in the source checkout, or in whatever repository
+// the test runner exported (GIT_DIR in a git hook, `git rebase --exec`).
+func hubRepo(t *testing.T) string {
+	t.Helper()
+	for name := range gitLocationVars {
+		if _, set := os.LookupEnv(name); set {
+			t.Setenv(name, "") // registers the restore for the end of the test
+			_ = os.Unsetenv(name)
+		}
+	}
+	dir := filepath.Join(t.TempDir(), "hub.git")
+	mustGit(t, t.TempDir(), "init", "--quiet", "--bare", "--initial-branch=main", dir)
+	return dir
+}
+
 // hubLimitsCopy puts the shipped settings into a temp "hooks" folder; the
 // usage ledger then goes to <hooks>/../vault-usage, also in the temp folder.
 func hubLimitsCopy(t *testing.T) string {
@@ -297,9 +364,10 @@ func hubLimitsCopy(t *testing.T) string {
 // sender its file is too large or of the wrong type.
 func TestPreReceive_OwnFaultsAreEngineErrors(t *testing.T) {
 	zero, unknown := strings.Repeat("0", 40), strings.Repeat("1", 40)
+	dir := hubRepo(t)
 	t.Run("settings unreadable", func(t *testing.T) {
 		var stderr strings.Builder
-		code := PreReceive(strings.NewReader(""), &stderr, filepath.Join(t.TempDir(), "missing.json"), "mac-test", time.Now())
+		code := PreReceive(dir, strings.NewReader(""), &stderr, filepath.Join(t.TempDir(), "missing.json"), "mac-test", time.Now())
 		if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: hub settings unreadable") {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
@@ -308,20 +376,20 @@ func TestPreReceive_OwnFaultsAreEngineErrors(t *testing.T) {
 		limits := filepath.Join(t.TempDir(), "hooks", "vault-limits.json")
 		writeFile(t, limits, []byte("{not json"))
 		var stderr strings.Builder
-		code := PreReceive(strings.NewReader(""), &stderr, limits, "mac-test", time.Now())
+		code := PreReceive(dir, strings.NewReader(""), &stderr, limits, "mac-test", time.Now())
 		if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: hub settings unreadable") {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
 	})
 	t.Run("git cannot list the incoming commits", func(t *testing.T) {
 		var stderr strings.Builder
-		code := PreReceive(strings.NewReader(zero+" "+unknown+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
+		code := PreReceive(dir, strings.NewReader(zero+" "+unknown+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
 		if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: cannot list incoming commits") {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
 	})
 	t.Run("an object cannot be measured", func(t *testing.T) {
-		code, msg := batchCheck(unknown+"\n", "%(objectname) %(objectsize)", "cannot measure incoming files",
+		code, msg := batchCheck(dir, unknown+"\n", "%(objectname) %(objectsize)", "cannot measure incoming files",
 			func(string, int64) (string, string) { return "", "" })
 		if code != "engine-error" || !strings.Contains(msg, "cannot be measured") {
 			t.Fatalf("code=%q msg=%q", code, msg)
@@ -334,7 +402,7 @@ func TestPreReceive_OwnFaultsAreEngineErrors(t *testing.T) {
 			"delete":         {"mac-test", unknown + " " + zero + " refs/heads/main\n", "vault-hub: REFUSED type-not-allowed: deleting"},
 		} {
 			var stderr strings.Builder
-			code := PreReceive(strings.NewReader(c.line), &stderr, hubLimitsCopy(t), c.place, time.Now())
+			code := PreReceive(dir, strings.NewReader(c.line), &stderr, hubLimitsCopy(t), c.place, time.Now())
 			if code == 0 || !strings.HasPrefix(stderr.String(), c.want) {
 				t.Errorf("%s: code=%d stderr=%q", name, code, stderr.String())
 			}
@@ -371,8 +439,8 @@ func TestPreReceive_AncestorCheckThatCannotRunIsAnEngineError(t *testing.T) {
 	// Two object names the repository does not have: git cannot answer at all.
 	older, newer := strings.Repeat("2", 40), strings.Repeat("1", 40)
 	var stderr strings.Builder
-	code := PreReceive(strings.NewReader(older+" "+newer+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
-	if code == 0 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: cannot check that refs/heads/main only moves forward") {
+	code := PreReceive(hubRepo(t), strings.NewReader(older+" "+newer+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
+	if code != 1 || !strings.HasPrefix(stderr.String(), "vault-hub: REFUSED engine-error: cannot check that refs/heads/main only moves forward") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 	if strings.Contains(stderr.String(), "rewriting the history") {
@@ -399,5 +467,103 @@ func TestHub_HookItselfRefusesAHistoryRewrite(t *testing.T) {
 	}
 	if now := mustGit(t, hub, "rev-parse", "refs/heads/main"); now != tip {
 		t.Fatalf("hub tip changed from %s to %s", tip, now)
+	}
+}
+
+// A send that points the main line at a tree or a blob breaks a rule: the
+// forward-only question cannot even be asked about it. That is the sender's
+// doing, so the label is type-not-allowed, not the hub's own engine-error.
+func TestPreReceive_ATreeOrBlobAsTheNewTipIsTypeNotAllowed(t *testing.T) {
+	hub := newHub(t)
+	seededClone(t, hub)
+	tip := mustGit(t, hub, "rev-parse", "refs/heads/main")
+	for kind, object := range map[string]string{
+		"tree": mustGit(t, hub, "rev-parse", "refs/heads/main^{tree}"),
+		"blob": mustGit(t, hub, "rev-parse", "refs/heads/main:README.md"),
+	} {
+		t.Run(kind, func(t *testing.T) {
+			var stderr strings.Builder
+			code := PreReceive(hub, strings.NewReader(tip+" "+object+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now())
+			want := "vault-hub: REFUSED type-not-allowed: refs/heads/main may only point at a commit; this send points it at a " + kind
+			if code != 1 || !strings.HasPrefix(stderr.String(), want) {
+				t.Fatalf("code=%d stderr=%q, want code 1 and %q", code, stderr.String(), want)
+			}
+		})
+	}
+}
+
+// The same refusal as the sending place sees it. The place reads the hub's
+// line from what git prints and answers with the exit code of the label: 6
+// for type-not-allowed (it was 1, engine-error, before the label was fixed).
+func TestSave_ATreeOrBlobRefusalFromTheHubEndsWithExitSix(t *testing.T) {
+	hub := newHub(t)
+	seededClone(t, hub)
+	tip := mustGit(t, hub, "rev-parse", "refs/heads/main")
+	tree := mustGit(t, hub, "rev-parse", "refs/heads/main^{tree}")
+	var stderr strings.Builder
+	if code := PreReceive(hub, strings.NewReader(tip+" "+tree+" refs/heads/main\n"), &stderr, hubLimitsCopy(t), "mac-test", time.Now()); code != 1 {
+		t.Fatalf("the hub must refuse a tree as the new tip, code=%d stderr=%q", code, stderr.String())
+	}
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	mac.Hooks.PushResult = func(_ int, _ gitResult) gitResult {
+		return gitResult{Stderr: "remote: " + stderr.String(), Err: errors.New("exit status 1")}
+	}
+	_, out := mac.Save(commitOp(mac, note1, readSHA(t, w.Mac, note1), 5))
+	if out.Line != "REFUSED type-not-allowed" || out.Exit != 6 {
+		t.Fatalf("outcome = %+v, want REFUSED type-not-allowed with exit 6", out)
+	}
+}
+
+func TestChargeDaily_AUsageFileThatCannotBeWrittenChargesNothing(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "2026-10-10.json")
+	writeFile(t, file, []byte(`{"mac-test":5}`))
+	// A folder sits where the temp file of the write must go.
+	if err := os.Mkdir(file+".tmp", 0755); err != nil {
+		t.Fatal(err)
+	}
+	used, ok, err := chargeDaily(dir, "mac-test", now, 10, 1000)
+	if err == nil || ok || used != 0 || !strings.Contains(err.Error(), "writing usage file") {
+		t.Fatalf("chargeDaily = (%d, %v, %v), want (0, false, an error about writing the usage file)", used, ok, err)
+	}
+	data, rerr := os.ReadFile(file)
+	if rerr != nil || string(data) != `{"mac-test":5}` {
+		t.Fatalf("nothing may be charged when the write fails: (%s, %v)", data, rerr)
+	}
+}
+
+// The same through a real send: refused as the hub's own fault, nothing taken
+// in, and no usage file written for the day.
+func TestHub_UsageFileThatCannotBeWrittenRefusesTheSendAndChargesNothing(t *testing.T) {
+	hub := newHub(t)
+	usage := filepath.Join(hub, "vault-usage")
+	// The hook reads the clock itself: cover today and, for a run at midnight, tomorrow (UTC).
+	var days []string
+	for _, at := range []time.Time{time.Now().UTC(), time.Now().UTC().Add(time.Hour)} {
+		day := filepath.Join(usage, at.Format("2006-01-02")+".json")
+		days = append(days, day)
+		if err := os.MkdirAll(day+".tmp", 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := filepath.Join(t.TempDir(), "place")
+	writeFile(t, filepath.Join(dir, "README.md"), []byte("seed\n"))
+	mustGit(t, dir, "init", "--quiet", "--initial-branch=main")
+	mustGit(t, dir, "remote", "add", "origin", hub)
+	mustGit(t, dir, "add", "-A")
+	mustGit(t, dir, "commit", "--quiet", "-m", "seed")
+	out, err := pushAs(t, dir, "mac-test", "HEAD:refs/heads/main")
+	if err == nil || !strings.Contains(out, "vault-hub: REFUSED engine-error: daily allowance cannot be recorded: writing usage file") {
+		t.Fatalf("expected an engine-error refusal about the usage file, got err=%v\n%s", err, out)
+	}
+	if refs := mustGit(t, hub, "for-each-ref"); refs != "" {
+		t.Fatalf("the hub must not have taken the send:\n%s", refs)
+	}
+	for _, day := range days {
+		if _, serr := os.Stat(day); !os.IsNotExist(serr) {
+			t.Fatalf("no usage may be recorded for a refused send: %s exists (%v)", day, serr)
+		}
 	}
 }

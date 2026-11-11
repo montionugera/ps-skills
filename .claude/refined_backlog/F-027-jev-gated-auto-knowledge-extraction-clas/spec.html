@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Automatic knowledge save and retrieve for agent sessions (Jev-gated)</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700;9..144,800&family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07090d;
+      --surface: #10141b;
+      --surface-2: #161b24;
+      --surface-3: #1b212c;
+      --border: #2a3340;
+      --border-soft: #1c232e;
+      --ink: #d6dde7;
+      --ink-bright: #f6f8fb;
+      --ink-dim: #8392a3;
+      --accent: #4ee39b;
+      --accent-dim: #2f8f63;
+      --amber: #ffc746;
+      --amber-dim: #a37a1a;
+      --blue: #74b0ff;
+      --blue-dim: #3a5d8a;
+      --red: #ff6b6b;
+      --red-dim: #a14242;
+      --purple: #b288ff;
+      --purple-dim: #7a4dc5;
+      --teal: #4ed2c8;
+      --teal-dim: #347e7a;
+      --serif-display: "Fraunces", Georgia, serif;
+      --serif-body: "Spectral", Georgia, serif;
+      --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: var(--serif-body);
+      font-size: 19.5px;
+      line-height: 1.66;
+      color: var(--ink);
+      background: var(--bg);
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 64px 30px 160px;
+      counter-reset: sec;
+      animation: riseIn .55s cubic-bezier(.2,.7,.2,1) both;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    body::before {
+      content: "";
+      position: fixed; inset: 0; z-index: -1; pointer-events: none;
+      background:
+        radial-gradient(900px 500px at 80% -10%, rgba(78,227,155,.10), transparent 62%),
+        radial-gradient(720px 520px at -4% 110%, rgba(255,199,70,.055), transparent 60%),
+        linear-gradient(rgba(255,255,255,.020) 1px, transparent 1px) 0 0 / 100% 30px,
+        linear-gradient(90deg, rgba(255,255,255,.020) 1px, transparent 1px) 0 0 / 30px 100%;
+    }
+
+    @keyframes riseIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+    /* ---------- headings ---------- */
+    h1, h2, h3, h4 { font-family: var(--serif-display); color: var(--ink-bright); line-height: 1.16; letter-spacing: -.012em; font-weight: 600; }
+    h1 {
+      font-size: 3.2rem; font-weight: 700; margin: 0 0 .25em; letter-spacing: -.028em;
+      background: linear-gradient(180deg, #ffffff, #afb9c5);
+      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    h2 {
+      counter-increment: sec;
+      font-size: 2rem; margin: 2.8em 0 .7em; padding-top: .65em;
+      border-top: 1px solid var(--border-soft);
+      display: flex; align-items: baseline; gap: .55em; flex-wrap: wrap;
+      font-weight: 700;
+    }
+    h2::before {
+      content: "§" counter(sec, decimal-leading-zero);
+      font-family: var(--mono); font-size: .74rem; font-weight: 600;
+      color: var(--accent); letter-spacing: .04em;
+      border: 1px solid var(--accent-dim); border-radius: 6px;
+      padding: .3em .55em; transform: translateY(-.22em);
+      background: rgba(78,227,155,.06);
+    }
+    h3 { font-size: 1.42rem; margin: 2.1em 0 .55em; color: var(--ink-bright); font-weight: 600; }
+    h3 code { font-size: .88em; }
+    h4 { font-size: 1.1rem; margin: 1.5em 0 .4em; color: var(--accent); text-transform: uppercase; letter-spacing: .08em; font-family: var(--mono); font-weight: 600; }
+
+    p { margin: .95em 0; }
+    strong { color: var(--ink-bright); font-weight: 600; }
+    em { color: #d4dce6; }
+
+    mark {
+      background: linear-gradient(180deg, rgba(255,199,70,.0) 60%, rgba(255,199,70,.32) 60%);
+      color: var(--ink-bright); padding: 0 .2em; border-radius: 3px;
+    }
+
+    /* ---------- links ---------- */
+    a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(78,227,155,.32); transition: border-color .15s, color .15s; }
+    a:hover { color: #8af0c2; border-bottom-color: var(--accent); }
+
+    /* ---------- inline code & code blocks ---------- */
+    code { font-family: var(--mono); font-size: .85em; background: var(--surface-2); color: #e0ecf6; padding: .14em .45em; border-radius: 5px; border: 1px solid var(--border-soft); }
+    pre {
+      position: relative; font-size: .82rem; line-height: 1.62;
+      background: linear-gradient(180deg, #0e1219, #0a0d13);
+      border: 1px solid var(--border); border-radius: 11px;
+      padding: 20px 20px 18px; margin: 1.4em 0; overflow-x: auto;
+      box-shadow: 0 1px 0 rgba(255,255,255,.02) inset, 0 18px 44px -28px rgba(0,0,0,.9);
+    }
+    pre::before { content: ""; position: absolute; left: 0; top: 0; height: 100%; width: 3px; background: linear-gradient(var(--accent), transparent); border-radius: 11px 0 0 11px; opacity: .6; }
+    pre code { background: none; border: none; padding: 0; color: #d3e4f3; font-size: 1em; }
+
+    kbd { font-family: var(--mono); font-size: .82em; background: var(--surface-2); border: 1px solid var(--border); border-bottom-width: 2px; padding: 2px 8px; border-radius: 6px; color: var(--ink-bright); box-shadow: 0 1px 0 var(--border-soft); }
+
+    /* ---------- tables ---------- */
+    table { border-collapse: collapse; width: 100%; margin: 1.4em 0; font-size: .87rem; font-family: var(--mono); }
+    th, td { border: 1px solid var(--border); padding: 11px 14px; text-align: left; vertical-align: top; }
+    th { background: var(--surface); color: var(--ink-bright); font-weight: 600; border-bottom: 2px solid var(--accent-dim); text-transform: uppercase; font-size: .76rem; letter-spacing: .08em; }
+    tr:nth-child(even) td { background: rgba(255,255,255,.015); }
+    tr:hover td { background: rgba(78,227,155,.04); }
+    td code { font-size: .94em; }
+    td strong { color: var(--amber); }
+
+    /* ---------- lists ---------- */
+    ul, ol { padding-left: 1.5em; margin: .9em 0; }
+    li { margin: .4em 0; }
+    li::marker { color: var(--accent-dim); font-weight: 600; }
+    ul ul, ol ol, ul ol, ol ul { margin: .3em 0; }
+
+    /* ---------- blockquote (used by pandoc) ---------- */
+    blockquote { border-left: 3px solid var(--accent-dim); margin: 1.2em 0; padding: .2em 0 .2em 18px; color: var(--ink-dim); font-style: italic; }
+
+    hr { border: none; border-top: 1px solid var(--border); margin: 2.6em 0; }
+
+    /* ---------- masthead (h1 + first p) ---------- */
+    h1 + p { font-family: var(--mono); font-size: .82rem; color: var(--ink-dim); line-height: 2; letter-spacing: .02em; border-bottom: 1px solid var(--border-soft); padding-bottom: 1.2em; }
+    h1 + p strong { color: var(--amber); font-weight: 500; }
+
+    /* ---------- TOC ---------- */
+    #TOC {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 18px 22px; margin: 1.8em 0 2.4em; font-family: var(--mono); font-size: .78rem;
+    }
+    #TOC::before { content: "CONTENTS"; display: block; color: var(--accent); letter-spacing: .22em; font-size: .7rem; margin-bottom: .7em; font-weight: 600; }
+    #TOC ul { list-style: none; padding-left: 0; margin: 0; }
+    #TOC > ul > li { margin: .22em 0; }
+    #TOC ul ul { padding-left: 1.1em; border-left: 1px solid var(--border-soft); margin: .25em 0 .5em; }
+    #TOC a { color: var(--ink); border: none; }
+    #TOC a:hover { color: var(--accent); }
+
+    @media (min-width: 1320px) {
+      #TOC {
+        position: fixed; top: 0; left: 0; bottom: 0; width: 300px; margin: 0;
+        border-radius: 0; border: none; border-right: 1px solid var(--border);
+        padding: 64px 28px; overflow-y: auto;
+        background: linear-gradient(180deg, rgba(13,17,23,.92), rgba(8,10,14,.92));
+        backdrop-filter: blur(6px);
+      }
+      body { max-width: 1320px; padding-left: 360px; }
+    }
+
+    /* ============================================================
+       CALLOUTS — info / warn / success / danger / idea / metric
+       Use via:
+         ::: callout-warn
+         **Heading**
+         body text
+         :::
+       or raw <div class="callout warn"> ... </div>
+       ============================================================ */
+    /* Robust layout: icon is absolutely positioned and the content is padded.
+       (An earlier `display:grid` + `.callout > * { grid-column: 2 }` approach broke
+       when pandoc emitted loose prose as bare text nodes — those became anonymous
+       grid items that fell into the icon column and wrapped one word per line.
+       Absolute icon + padding flows ANY content structure correctly: loose text,
+       multiple inline elements, nested lists.) */
+    .callout {
+      position: relative;
+      margin: 1.7em 0;
+      padding: 18px 22px 16px 58px;
+      border-radius: 13px;
+      border: 1px solid var(--callout-border, var(--border));
+      border-left-width: 4px;
+      background: var(--callout-bg, var(--surface));
+    }
+    .callout::before {
+      content: var(--callout-icon, "·");
+      position: absolute;
+      left: 14px; top: 16px;
+      width: 30px; text-align: center;
+      font-size: 28px; line-height: 1.1;
+      color: var(--callout-accent, var(--accent));
+    }
+    .callout > * { min-width: 0; margin-top: 0; }
+    .callout > * + * { margin-top: .55em; }
+    .callout > p:first-child strong:first-child {
+      display: block;
+      font-family: var(--serif-display);
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: var(--callout-accent, var(--ink-bright));
+      letter-spacing: -.01em;
+      margin-bottom: .35em;
+    }
+    .callout p { line-height: 1.55; }
+    .callout code { background: rgba(0,0,0,.28); border-color: rgba(255,255,255,.06); }
+
+    .callout.info,    .callout-info    { --callout-border: var(--blue-dim);   --callout-bg: rgba(116,176,255,.08);   --callout-accent: var(--blue);   --callout-icon: "ℹ"; }
+    .callout.warn,    .callout-warn    { --callout-border: var(--amber-dim);  --callout-bg: rgba(255,199,70,.09);    --callout-accent: var(--amber);  --callout-icon: "⚠"; }
+    .callout.success, .callout-success { --callout-border: var(--accent-dim); --callout-bg: rgba(78,227,155,.08);    --callout-accent: var(--accent); --callout-icon: "✓"; }
+    .callout.danger,  .callout-danger  { --callout-border: var(--red-dim);    --callout-bg: rgba(255,107,107,.09);   --callout-accent: var(--red);    --callout-icon: "✕"; }
+    .callout.idea,    .callout-idea    { --callout-border: var(--purple-dim); --callout-bg: rgba(178,136,255,.08);   --callout-accent: var(--purple); --callout-icon: "✦"; }
+    .callout.metric,  .callout-metric  { --callout-border: var(--teal-dim);   --callout-bg: rgba(78,210,200,.08);    --callout-accent: var(--teal);   --callout-icon: "Σ"; }
+    .callout.action,  .callout-action  { --callout-border: var(--accent-dim); --callout-bg: rgba(78,227,155,.04);    --callout-accent: var(--accent); --callout-icon: "▸"; }
+
+    /* ============================================================
+       METRIC TILES — grid of big-number cards
+       Use via raw HTML:
+         <div class="metric-grid">
+           <div class="metric-tile alarm">
+             <div class="label">Pass all gates</div>
+             <div class="value">21%</div>
+             <div class="delta">39 / 187 results</div>
+           </div>
+         </div>
+       Variants: .alarm (red), .win (green), .info (blue), .warn (amber)
+       ============================================================ */
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px;
+      margin: 1.5em 0;
+    }
+    .metric-tile {
+      background: linear-gradient(180deg, var(--surface), var(--bg));
+      border: 1px solid var(--border);
+      border-top: 3px solid var(--tile-accent, var(--accent));
+      border-radius: 12px;
+      padding: 18px 18px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .metric-tile .label {
+      font-family: var(--mono);
+      font-size: .72rem;
+      letter-spacing: .14em;
+      color: var(--ink-dim);
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .metric-tile .value {
+      font-family: var(--serif-display);
+      font-weight: 700;
+      font-size: 2.55rem;
+      color: var(--tile-accent, var(--ink-bright));
+      line-height: 1;
+      letter-spacing: -.025em;
+    }
+    .metric-tile .delta {
+      font-family: var(--mono);
+      font-size: .8rem;
+      color: var(--ink-dim);
+    }
+    .metric-tile.alarm { --tile-accent: var(--red); }
+    .metric-tile.win   { --tile-accent: var(--accent); }
+    .metric-tile.info  { --tile-accent: var(--blue); }
+    .metric-tile.warn  { --tile-accent: var(--amber); }
+    .metric-tile.teal  { --tile-accent: var(--teal); }
+    .metric-tile.dim .value { color: var(--ink-bright); }
+
+    /* ============================================================
+       TOPIC CHIP — colored pill that can appear next to H2 text
+       ============================================================ */
+    .topic-chip {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: .68rem;
+      letter-spacing: .16em;
+      color: var(--bg);
+      background: var(--accent);
+      padding: 5px 11px;
+      border-radius: 999px;
+      font-weight: 700;
+      text-transform: uppercase;
+      vertical-align: middle;
+    }
+    .topic-chip.warn   { background: var(--amber); }
+    .topic-chip.danger { background: var(--red);   color: #fff; }
+    .topic-chip.info   { background: var(--blue);  color: var(--bg); }
+    .topic-chip.idea   { background: var(--purple); color: #fff; }
+    .topic-chip.teal   { background: var(--teal);  color: var(--bg); }
+
+    /* ============================================================
+       PULL QUOTE
+       ============================================================ */
+    .pullquote {
+      font-family: var(--serif-display);
+      font-size: 1.55rem;
+      font-weight: 500;
+      line-height: 1.38;
+      color: var(--ink-bright);
+      border-left: 4px solid var(--accent);
+      padding: 4px 0 4px 22px;
+      margin: 1.8em 0;
+      letter-spacing: -.012em;
+    }
+
+    /* ============================================================
+       SCHEMATIC — ASCII box-drawing diagrams, monospace canvas
+       Use via:
+         <div class="schematic">
+         ┌─────────┐    ┌─────────┐
+         │ Phase 0 │ ─→ │ Phase 1 │
+         └─────────┘    └─────────┘
+         </div>
+       ============================================================ */
+    .schematic {
+      font-family: var(--mono);
+      font-size: .86rem;
+      line-height: 1.4;
+      background: linear-gradient(180deg, #0d1117, #0a0d13);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px 28px;
+      margin: 1.6em 0;
+      color: #cfdcec;
+      white-space: pre;
+      overflow-x: auto;
+      position: relative;
+    }
+    .schematic::before { content: ""; position: absolute; left: 0; top: 0; height: 100%; width: 3px; background: linear-gradient(var(--teal), transparent); border-radius: 12px 0 0 12px; opacity: .6; }
+
+    /* ============================================================
+       RAW SVG / inline diagrams
+       ============================================================ */
+    .diagram, svg.diagram, .figure {
+      display: block; margin: 1.6em auto; max-width: 100%;
+      background: linear-gradient(180deg, #0d1117, #0a0d13);
+      border: 1px solid var(--border); border-radius: 12px;
+      padding: 22px 14px;
+    }
+    .figure-caption {
+      text-align: center; font-family: var(--mono); font-size: .76rem;
+      color: var(--ink-dim); margin-top: -.6em; margin-bottom: 1.6em;
+      letter-spacing: .04em;
+    }
+
+    /* ============================================================
+       MERMAID block — bigger frame, softer glow
+       ============================================================ */
+    .mermaid {
+      margin: 1.6em 0; text-align: center;
+      background: linear-gradient(180deg, #0e1320, #0a0d13);
+      border: 1px solid var(--border); border-radius: 13px;
+      padding: 24px 14px;
+      box-shadow: 0 18px 50px -36px rgba(78,227,155,.55) inset;
+    }
+    .mermaid svg { max-width: 100%; height: auto; }
+
+    /* Hide pandoc's title-block if present */
+    #title-block-header { display: none; }
+
+    /* ============================================================
+       UTILITY ROW — two-up / three-up adjacent blocks
+       ============================================================ */
+    .row {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: 1fr;
+      margin: 1.5em 0;
+    }
+    .row.two { grid-template-columns: 1fr 1fr; }
+    .row.three { grid-template-columns: repeat(3, 1fr); }
+    @media (max-width: 760px) {
+      .row.two, .row.three { grid-template-columns: 1fr; }
+    }
+  </style>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    const render = () => {
+      const blocks = new Set();
+      document.querySelectorAll('pre.mermaid, pre.sourceCode.mermaid').forEach((p) => blocks.add(p));
+      document.querySelectorAll('code.mermaid, code.language-mermaid').forEach((c) => {
+        const pre = c.closest('pre'); if (pre) blocks.add(pre);
+      });
+      blocks.forEach((pre) => {
+        const div = document.createElement('div');
+        div.className = 'mermaid';
+        div.textContent = pre.textContent.trim();
+        pre.replaceWith(div);
+      });
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'base',
+        securityLevel: 'loose',
+        fontFamily: 'IBM Plex Mono, monospace',
+        themeVariables: {
+          background: '#0a0d13',
+          primaryColor: '#1a212c',
+          primaryTextColor: '#f0f3f7',
+          primaryBorderColor: '#4ee39b',
+          lineColor: '#6c7a8b',
+          secondaryColor: '#191e28',
+          tertiaryColor: '#11161e',
+          tertiaryBorderColor: '#2a3340',
+          clusterBkg: 'rgba(78,227,155,.05)',
+          clusterBorder: '#2f8f63',
+          titleColor: '#4ee39b',
+          actorBkg: '#1a212c',
+          actorBorder: '#4ee39b',
+          actorTextColor: '#f0f3f7',
+          signalColor: '#9aa7b6',
+          signalTextColor: '#d3dbe5',
+          noteBkgColor: 'rgba(255,199,70,.14)',
+          noteBorderColor: '#ffc746',
+          noteTextColor: '#f6f8fb',
+          fontSize: '14px'
+        }
+      });
+      mermaid.run();
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', render);
+    else render();
+  </script>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Automatic knowledge save and retrieve for agent
+sessions (Jev-gated)</h1>
+</header>
+<nav id="TOC" role="doc-toc">
+<ul>
+<li><a
+href="#automatic-knowledge-save-and-retrieve-for-agent-sessions-jev-gated"
+id="toc-automatic-knowledge-save-and-retrieve-for-agent-sessions-jev-gated">Automatic
+knowledge save and retrieve for agent sessions (Jev-gated)</a>
+<ul>
+<li><a href="#goal" id="toc-goal">Goal</a></li>
+<li><a href="#problem-measured-2026-11-11"
+id="toc-problem-measured-2026-11-11">Problem (measured
+2026-11-11)</a></li>
+<li><a href="#non-goals" id="toc-non-goals">Non-goals</a></li>
+<li><a href="#users-jobs" id="toc-users-jobs">Users &amp; jobs</a></li>
+<li><a href="#success-measure" id="toc-success-measure">Success
+measure</a></li>
+<li><a href="#quality-attributes-each-maps-to-requirements-below"
+id="toc-quality-attributes-each-maps-to-requirements-below">Quality
+attributes (each maps to requirements below)</a></li>
+<li><a href="#token-budget-hard-limits-enforced-in-code-and-tested"
+id="toc-token-budget-hard-limits-enforced-in-code-and-tested">Token
+budget (hard limits, enforced in code and tested)</a></li>
+<li><a href="#requirements" id="toc-requirements">Requirements</a></li>
+<li><a href="#acceptance-criteria"
+id="toc-acceptance-criteria">Acceptance criteria</a></li>
+<li><a href="#end-to-end-verification"
+id="toc-end-to-end-verification">End-to-end verification</a></li>
+<li><a href="#interfaces-files" id="toc-interfaces-files">Interfaces
+&amp; files</a></li>
+<li><a href="#alternatives-considered"
+id="toc-alternatives-considered">Alternatives considered</a></li>
+<li><a href="#assumptions" id="toc-assumptions">Assumptions</a></li>
+<li><a href="#appendix-spec-review"
+id="toc-appendix-spec-review">Appendix — spec review</a></li>
+</ul></li>
+</ul>
+</nav>
+<h1
+id="automatic-knowledge-save-and-retrieve-for-agent-sessions-jev-gated">Automatic
+knowledge save and retrieve for agent sessions (Jev-gated)</h1>
+<p>User request, verbatim: “want it help auto save knowledge + auto
+retrieve knowledge to session”, “make sure it is token efficient”,
+“consider speed , session result, knowledge reusability , scale ,
+robust, production grade”, “visibility + readiness”, “auto integrate +
+publish if pass”, and (on junk) “Token typesafe is cheap”.</p>
+<h2 id="goal">Goal</h2>
+<p>Agent sessions in any repo get the relevant agentic-vault notes
+without anyone asking, and lessons from finished sessions are integrated
+and published into <code>04_Knowledge/</code> without anyone running a
+command, at a token cost small enough to leave on permanently.</p>
+<p>The user will confirm this by (a) typing a prompt about a topic the
+vault covers in a new session and seeing a
+<code>&lt;vault-context&gt;</code> block naming the matching note and
+the terms that matched, (b) running <code>vault-distill --report</code>
+the next morning and seeing sessions gated, notes published or merged,
+bytes sent per stage and used-rate per note, and (c) running
+<code>ps-skills-doctor</code> and seeing the vault section all
+green.</p>
+<h2 id="problem-measured-2026-11-11">Problem (measured 2026-11-11)</h2>
+<ul>
+<li><strong>Retrieve is dead.</strong> The SessionStart hook
+<code>agent-harness/scripts/vault-bootstrap.py</code> runs
+<code>vault-engine context --cwd &lt;dir&gt;</code>. The binary has no
+<code>context</code> command, so the hook prints nothing and exits
+0.</li>
+<li><strong>Save stores pointers, not knowledge.</strong> The Stop hook
+<code>vault-session-summary.sh</code> appends one line (repo, cwd,
+session id, transcript path) per turn to
+<code>_inbox/agent/session-summaries.md</code>: 5,730 lines, 2 MB, read
+by nothing.</li>
+<li><strong>The nightly summarizer reads another vault.</strong> Cron
+<code>55 23 * * *</code> runs <code>vault-nightly-summary.sh</code>
+against <code>obsidian-vault/wiki/meta/session-inbox.md</code>.</li>
+<li><strong>Search matches only id, title and path</strong>
+(<code>SearchIndexes</code>,
+<code>tools/vault-engine/pkg/vault/vault.go:1101</code>).
+<code>codex</code>, <code>worktree</code>, <code>quota</code>,
+<code>handoff</code> return nothing across 27 notes.</li>
+<li><strong><code>publish-knowledge</code> can overwrite a
+note.</strong> <code>PublishKnowledge</code> (<code>vault.go:963</code>)
+writes with <code>os.WriteFile</code> and no existence check, and
+<code>commit</code> (<code>CommitRecord</code>,
+<code>vault.go:1004</code>) patches frontmatter only, so nothing can
+safely add to a note’s body.</li>
+</ul>
+<h2 id="non-goals">Non-goals</h2>
+<ul>
+<li>Embeddings, vector stores, or a long-running daemon.</li>
+<li>Editing the Stop hook, <code>vault-bootstrap.py</code>, or the old
+nightly script in <code>agent-harness</code>.</li>
+<li>The Joy voice vault (S3), and retrieval in AGY / T3 Code sessions
+(their hooks are disabled in <code>install.sh</code>).</li>
+<li>Rewriting or deleting existing note text. Integration only appends a
+dated section.</li>
+</ul>
+<h2 id="users-jobs">Users &amp; jobs</h2>
+<p>The owner, working through Claude Code sessions across many repos.
+They want a session to start already knowing recorded traps and
+decisions, and they do not want to remember to write lessons down or to
+approve each one.</p>
+<h2 id="success-measure">Success measure</h2>
+<ul>
+<li>Retrieval: <code>tools/vault-engine/recall_eval.sh</code> over
+<code>tests/fixtures/vault_recall_set.jsonl</code> (20 prompts with an
+expected note id) scores at least 16.</li>
+<li>Session result: over 7 nights, at least 30% of injected notes are
+used (read or cited) in the session that received them.</li>
+<li>Save: over 7 nights, at least 80% of auto-published or auto-merged
+notes are still unarchived after the owner’s weekly look, and at most 5
+notes are published per night.</li>
+<li>Cost: median injected context per session is at most 2,400 bytes
+including SessionStart; a nightly run sends at most 12,000 bytes per
+session to Jev and runs at most 20 extractions.</li>
+</ul>
+<h2 id="quality-attributes-each-maps-to-requirements-below">Quality
+attributes (each maps to requirements below)</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>How it is met</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Token efficiency</td>
+<td>Hard byte limits in the budget table; pointers injected, never
+bodies; extractor runs only on a confident yes</td>
+</tr>
+<tr>
+<td>Speed</td>
+<td>Query reads one index file; engine p95 at most 50 ms at 2,000 notes;
+hook p95 at most 150 ms, hard timeout 2 s (R2, R3)</td>
+</tr>
+<tr>
+<td>Session result</td>
+<td>Injection log plus a no-LLM used check; unused notes are demoted
+(R14, R15)</td>
+</tr>
+<tr>
+<td>Reusability</td>
+<td>Fixed note shape, project or global scope, merge into an existing
+note before creating one (R9, R10b)</td>
+</tr>
+<tr>
+<td>Scale</td>
+<td>Index scoring, inbox rotation, transcript offsets, nightly cap (R2,
+R6, R7)</td>
+</tr>
+<tr>
+<td>Low junk</td>
+<td>Evidence check, Jev draft score, recurrence before publish,
+probation with automatic archive, nightly publish cap (R9, R9c, R9d,
+R19, R20, R21)</td>
+</tr>
+<tr>
+<td>Robustness</td>
+<td>Every stage fails open to “parked in inbox”; file locks; idempotent
+publish; crash resume (all <code>f</code> rows)</td>
+</tr>
+<tr>
+<td>Production grade</td>
+<td>Tests in CI, end-to-end case, kill switches, non-zero exit on
+degraded runs, doctor check (R16, R17)</td>
+</tr>
+<tr>
+<td>Visibility</td>
+<td>Matched terms on each injected line; nightly report note;
+<code>--report</code> (R3, R12)</td>
+</tr>
+<tr>
+<td>Readiness</td>
+<td><code>ps-skills-doctor</code> vault section; shadow mode that ends
+by itself when calibration passes (R17, R18)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="token-budget-hard-limits-enforced-in-code-and-tested">Token
+budget (hard limits, enforced in code and tested)</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Where</th>
+<th>Limit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SessionStart <code>&lt;vault-context&gt;</code> block</td>
+<td>800 bytes</td>
+</tr>
+<tr>
+<td>Per-prompt injection</td>
+<td>3 notes, 1,200 bytes, nothing below the score threshold</td>
+</tr>
+<tr>
+<td>Per-session total, including the SessionStart block</td>
+<td>6 distinct notes, 2,400 bytes; a note is injected once per
+session</td>
+</tr>
+<tr>
+<td>Injected form</td>
+<td>id, title, path, matched terms, and a summary of at most 120 bytes.
+Never more of the body</td>
+</tr>
+<tr>
+<td>Session digest sent to Jev</td>
+<td>12,000 bytes (first 2,000 + last 10,000), tool output stripped</td>
+</tr>
+<tr>
+<td>Extractor input</td>
+<td>the same digest, never the raw transcript</td>
+</tr>
+<tr>
+<td>Jev calls (cheap, per the owner)</td>
+<td>one per session, one per draft, and at most 5 same-lesson
+comparisons per draft</td>
+</tr>
+<tr>
+<td>Extractor runs</td>
+<td>only on a confident yes, plus at most 3 unsure; at most 20 per night
+(<code>VAULT_DISTILL_MAX</code>)</td>
+</tr>
+<tr>
+<td>Notes published or merged</td>
+<td>at most 5 per night (<code>VAULT_DISTILL_PUBLISH_MAX</code>)</td>
+</tr>
+<tr>
+<td>Draft note size</td>
+<td>1,500 bytes</td>
+</tr>
+<tr>
+<td>Review</td>
+<td>one Argon-low call per night, only for candidates that recurred or
+are high-stakes</td>
+</tr>
+</tbody>
+</table>
+<h2 id="requirements">Requirements</h2>
+<h3 id="slice-1-retrieve-no-llm-calls">Slice 1: retrieve (no LLM
+calls)</h3>
+<ul>
+<li>R0. When <code>vault-engine rebuild-index</code> or
+<code>publish-knowledge</code> runs, the engine shall write for each
+knowledge note, into <code>_meta/indexes/knowledge.jsonl</code>:
+<code>tags</code>, <code>project_ids</code>, <code>summary</code> (the
+first non-heading body line, cut to 120 bytes) and <code>terms</code>
+(distinct lower-case body terms of 4 or more characters, at most
+200).</li>
+<li>R1. When <code>vault-engine context --cwd &lt;dir&gt;</code> runs,
+the engine shall resolve <code>&lt;dir&gt;</code> to its main repo root
+(<code>git rev-parse --git-common-dir</code>, parent directory;
+<code>basename</code> of <code>&lt;dir&gt;</code> outside git), collect
+the ids of project notes whose <code>release_repo</code> equals that
+path, and print a <code>&lt;vault-context&gt;</code> block of at most
+800 bytes listing knowledge notes whose <code>project_ids</code> contain
+one of those ids or whose tags contain
+<code>repo:&lt;root basename&gt;</code>, newest <code>updated</code>
+first.</li>
+<li>R1f. If no note matches or the vault is missing, then the engine
+shall print nothing and exit 0.</li>
+<li>R2. When <code>vault-engine context --query &lt;text&gt;</code>
+runs, the engine shall tokenise the query (split on non-alphanumerics,
+lower-case, keep terms of 4 or more characters, drop the stop-word list
+in <code>pkg/vault/stopwords.go</code>), and give each note a score
+equal to the sum, over each distinct query term, of the highest weight
+among the fields containing it (title 3, any tag 2, body terms 1). It
+shall print up to 5 notes with a score of at least 4, highest first,
+ties broken by newest <code>updated</code>, each with its matched terms,
+reading only the index file.</li>
+<li>R2f. If no note reaches the threshold or the index is missing, then
+the engine shall print nothing and exit 0.</li>
+<li>R2p. While the index holds 2,000 notes, <code>context --query</code>
+shall complete in at most 50 ms at p95 (Go benchmark).</li>
+<li>R3. When the user submits a prompt, the <code>vault-recall.py</code>
+UserPromptSubmit hook shall pass the prompt to
+<code>context --query</code>, drop demoted and already-injected ids, and
+emit the first 3 remaining notes (at most 1,200 bytes) as additional
+context.</li>
+<li>R3f. If the engine is missing, errors, or takes longer than 2
+seconds, then the hook shall emit nothing and exit 0.</li>
+<li>R4. While a session is running, the hook shall keep
+<code>~/.claude/state/vault-recall/&lt;session_id&gt;.json</code>
+(<code>{"ids": [...], "bytes": N}</code>), updated under
+<code>fcntl.flock</code>. On its first run in a session it shall seed
+the file with the ids and bytes of
+<code>context --cwd &lt;cwd&gt;</code>. It shall not inject a recorded
+id and shall stop at 6 notes or 2,400 bytes. State files older than 7
+days are deleted on each run.</li>
+<li>R5. Where the prompt is shorter than 12 characters, starts with
+<code>/</code>, or any of <code>VAULT_RECALL=0</code>,
+<code>VAULT_CONTEXT_BOOTSTRAP=0</code>,
+<code>CLAUDE_VAULT_SUMMARY=0</code> is set, the hook shall do nothing.
+(<code>CLAUDE_VAULT_SUMMARY=0</code> is already set in dispatch worker
+sessions, per
+<code>~/.claude/logs/vault-session-summary.log</code>.)</li>
+</ul>
+<h3 id="slice-2-save-in-shadow-mode-nightly-batch">Slice 2: save in
+shadow mode (nightly batch)</h3>
+<ul>
+<li>R6. When <code>vault-distill</code> runs, it shall rename
+<code>_inbox/agent/session-summaries.md</code> to a dated work file
+(atomic, so the Stop hook’s next append starts a fresh file) and keep
+one entry per session id. A session whose transcript mtime is within 30
+minutes of the run start is appended back to the live file and not
+processed.</li>
+<li>R6f. If a dated work file from a crashed run exists, then the run
+shall process it first.</li>
+<li>R7. When a session is selected, <code>vault-distill</code> shall
+build a digest of at most 12,000 bytes from the transcript, starting at
+the byte offset recorded for that session in the seen-file (0 if none):
+user prompts and the last assistant text of each turn, tool output
+removed. A session whose transcript has grown by less than 4,000 bytes
+since its recorded offset is skipped.</li>
+<li>R7f. If the transcript is missing or unreadable, then the session
+shall be marked seen with reason <code>no-transcript</code>.</li>
+<li>R7s. When a digest is built, <code>vault-distill</code> shall
+prepend a signals line counted by script from the transcript: user
+corrections, test or command failures followed by a pass, hook blocks,
+and errors that repeat. The signals are input to Jev, never a gate:
+every allowed session is sent to Jev.</li>
+<li>R8. When a digest is built,
+<code>jev-gate classify-lesson --digest &lt;path&gt;</code> shall print
+<code>{"lesson_prob": &lt;0..1&gt;, "fallback": &lt;bool&gt;}</code>. At
+0.85 or above the session is extracted; at 0.15 or below it is dropped;
+in between it is unsure.</li>
+<li>R8f. If no Jev key is found (env <code>TYPESAFE_API_KEY</code> or
+the <code>~/.zshrc</code> fallback in <code>_load_api_key</code>) or the
+call fails, then the session shall be treated as unsure and no extractor
+shall run for it that night.</li>
+<li>R8u. Unsure sessions shall be offered to Jev once more on the next
+run. If still unsure, the top 3 by probability
+(<code>VAULT_DISTILL_UNSURE_MAX</code>) go to the extractor and count
+toward <code>VAULT_DISTILL_MAX</code>; the rest are marked seen with
+reason <code>unsure</code>.</li>
+<li>R9. When a session is extracted, a flash worker
+(<code>gemini-3.8-flash-high</code> through
+<code>dispatch-worker --agent agy</code>) shall first run
+<code>context --query</code> on the lesson’s title, then write one
+<code>knowledge/v1</code> draft of at most 1,500 bytes to
+<code>_inbox/agent/distill/</code>. The body shall be a one-sentence
+summary line followed by the sections <code>When this applies</code>,
+<code>Rule</code>, <code>Why</code>, <code>Source</code> (session id).
+Frontmatter shall carry the tag <code>auto-distilled</code> and either
+<code>project_ids</code> for the session’s repo or, when the repo has no
+project note, the tag <code>repo:&lt;name&gt;</code>; a lesson that
+applies everywhere carries the tag <code>global</code>. If an existing
+note covers the lesson, the draft shall instead be a proposed addition
+naming that note id. The draft shall include an <code>Evidence</code>
+section quoting at least one string copied from the digest (an error
+message, command or file path). The worker may instead return
+<code>{"path": null, "reason": "no-lesson"}</code>, and the session is
+then marked seen with reason <code>no-lesson</code>.</li>
+<li>R9f. If the draft fails <code>vault-engine validate</code> or the
+worker fails, then the draft shall stay in the inbox marked
+<code>invalid</code>.</li>
+<li>R9c. If no quoted <code>Evidence</code> string is a substring of the
+digest, then the draft shall be marked <code>no-evidence</code> and go
+no further (script check, no model).</li>
+<li>R9d. When a draft passes R9c,
+<code>jev-gate score-draft --draft &lt;path&gt; --digest &lt;path&gt;</code>
+shall print <code>{"specific": p, "novel": p, "high_stakes": p}</code>,
+given the draft, the digest, the top 3 existing notes from
+<code>context --query</code>, and the first 20,000 bytes of
+<code>~/.claude/CLAUDE.md</code>. A draft with <code>specific</code> or
+<code>novel</code> below 0.5 is marked <code>junk</code> and goes no
+further.</li>
+<li>R9df. If the Jev call fails, then the draft shall stay in the inbox
+unscored and be scored on the next run.</li>
+<li>R19. When a draft passes R9d, it becomes a candidate in
+<code>_inbox/agent/distill/candidates/</code>.
+<code>jev-gate same-lesson</code> compares it with at most 5 existing
+candidates chosen by the R2 keyword score. A candidate goes to review
+only when a candidate from a different session matches at 0.85 or above
+(the two are merged, citing both sessions), or when its
+<code>high_stakes</code> is 0.85 or above (data loss, production
+failure, security). Candidates with no match after 60 days are removed
+and listed in the report.</li>
+<li>R10. When candidates are ready for review, one Argon-low review call
+shall return publish or reject with a reason for each.</li>
+<li>R10f. If the review call fails, then nothing shall be published or
+merged and all drafts shall stay in the inbox.</li>
+<li>R11. When a digest or draft matches <code>vault-distill</code>’s own
+copy of the credential patterns from <code>bin/ps-skills-sync</code>
+<code>SECRET_RE</code> (every pattern except
+<code>/Users/[a-z]+/</code>), it shall be written to
+<code>_inbox/private/</code> and not sent to any model.</li>
+<li>R11a. Where a session’s repo is not listed in
+<code>VAULT_DISTILL_ALLOW_REPOS</code>, <code>vault-distill</code> shall
+mark it seen with reason <code>not-allowed</code> and send nothing.</li>
+<li>R12. When <code>vault-distill</code> finishes, it shall write
+<code>_inbox/agent/distill/report-&lt;date&gt;.md</code> and make the
+same numbers available through <code>vault-distill --report</code>:
+sessions seen, not-allowed, dropped, unsure, no-lesson, extracted,
+no-evidence, junk, candidates waiting, published, merged, rejected,
+collisions, archived, bytes sent per stage, and used-rate per note.</li>
+<li>R13. <code>vault-distill</code> shall append a session id, its
+transcript offset and its final state to the seen-file immediately after
+that session reaches a final state, before the next session starts, and
+shall delete the dated work file when the run finishes.</li>
+<li>R16. When more than 50% of the night’s sessions are unsure, or any
+stage fails for every session, <code>vault-distill</code> shall exit
+non-zero. Where <code>VAULT_DISTILL=0</code> is set it shall do
+nothing.</li>
+</ul>
+<h3 id="slice-3-auto-integrate-and-publish-and-the-result-loop">Slice 3:
+auto integrate and publish, and the result loop</h3>
+<ul>
+<li>R10a. When a new-note draft has a publish verdict and publishing is
+enabled, <code>vault-distill</code> shall run
+<code>vault-engine publish-knowledge &lt;draft&gt; &lt;category&gt; agent-distiller</code>,
+with the tag <code>probation</code> added, for at most 5 notes per night
+(highest <code>high_stakes</code>, then most sessions cited); the rest
+wait for the next run.</li>
+<li>R10af. If a note with the same path or the same <code>id</code>
+already exists, then <code>publish-knowledge</code> shall refuse with a
+non-zero exit (engine change) and the draft shall stay in the inbox
+marked <code>collision</code>.</li>
+<li>R10b. When a proposed-addition draft has a publish verdict and
+publishing is enabled, <code>vault-distill</code> shall read the target
+with <code>read-record</code>, then run
+<code>vault-engine commit &lt;id&gt; &lt;sha&gt; agent-distiller '{}' --append-body &lt;file&gt;</code>
+(engine change: appends the file as a dated section under the same flock
+and SHA check).</li>
+<li>R10bf. If the commit returns <code>OCC_CONFLICT</code>, then
+<code>vault-distill</code> shall re-read and retry once, and on a second
+conflict leave the draft in the inbox marked <code>conflict</code>.</li>
+<li>R18. While <code>~/.claude/state/vault-distill/calibrated</code>
+does not exist, publishing is disabled (shadow mode: drafts and verdicts
+are produced and reported, nothing is published or merged).
+<code>vault-distill --calibrate</code> scores four labelled sets under
+<code>tests/fixtures/vault_distill/</code> (30 sessions for the lesson
+gate, 20 drafts for <code>specific</code> and <code>novel</code>, 20
+draft pairs for same-lesson, 20 drafts for high-stakes) and writes the
+marker only if every set has at most 10% of its positive examples scored
+below that job’s threshold and at most 10% of its negative examples
+scored above it. Where <code>VAULT_DISTILL_PUBLISH=0</code> is set,
+publishing stays disabled.</li>
+<li>R14. When the hook injects a note, it shall append
+<code>{ts, session_id, note_id}</code> to
+<code>~/.claude/state/vault-recall/injections.jsonl</code>.</li>
+<li>R15. When <code>vault-distill</code> processes a session, it shall
+mark each injected note used if the transcript after the injection
+contains the note’s path or id, and write per-note counts to
+<code>~/.claude/state/vault-recall/usage.json</code>. A note with at
+least 10 injections and 0 uses is demoted, and the hook drops demoted
+ids.</li>
+<li>R20. When a <code>probation</code> note is used once,
+<code>vault-distill</code> shall remove the tag through
+<code>vault-engine commit</code>.</li>
+<li>R21. When a <code>probation</code> note has 10 injections and 0
+uses, or has not been injected for 60 days, <code>vault-distill</code>
+shall archive it through the engine and list it in the report. Notes
+without the <code>auto-distilled</code> tag are never archived
+automatically.</li>
+<li>R17. When <code>ps-skills-doctor</code> runs, its vault section
+shall check and report: the UserPromptSubmit hook is registered,
+<code>vault-engine context --query</code> on a known note title returns
+output, the index is newer than every note, a Jev key is found, the cron
+line exists, the last <code>vault-distill</code> run is under 36 hours
+old, and whether publishing is enabled.</li>
+</ul>
+<h2 id="acceptance-criteria">Acceptance criteria</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />Given a temp vault with note A
+(title “codex quota”) and note B (body only “codex quota handoff”), when
+<code>context --query "codex quota handoff"</code> runs, then A (score
+6) is printed with its matched terms and B (score 3) is
+not.</label></li>
+<li><label><input type="checkbox" />Given the current vault, when
+<code>context --query "zzzz qqqq"</code> runs, then stdout is empty and
+the exit code is 0.</label></li>
+<li><label><input type="checkbox" />Given cwd
+<code>~/workspace/repos/atlas-world-svc/.claude/worktrees/F-001-x</code>,
+when <code>context --cwd</code> runs, then the output is at most 800
+bytes and lists a note with <code>PROJ-atlas-world</code> in
+<code>project_ids</code>.</label></li>
+<li><label><input type="checkbox" />Given a note with no summary field
+whose first body line is 300 bytes, when it is injected, then its
+summary is exactly 120 bytes.</label></li>
+<li><label><input type="checkbox" />Given a 2,000-note index, when the
+Go benchmark runs, then <code>context --query</code> p95 is at most 50
+ms.</label></li>
+<li><label><input type="checkbox" />Given a stub engine returning 3
+notes of 900 bytes each, when <code>vault-recall.py</code> runs for 3
+prompts in one session, then total emitted bytes are at most 2,400, the
+state file lists at most 6 ids, and no id is emitted twice.</label></li>
+<li><label><input type="checkbox" />Given <code>vault-engine</code>
+removed from PATH, or <code>CLAUDE_VAULT_SUMMARY=0</code> set, when
+<code>vault-recall.py</code> runs, then it exits 0 with empty stdout in
+under 2 seconds.</label></li>
+<li><label><input type="checkbox" />Given an inbox with 40 pointer lines
+for 3 session ids and Jev stubbed to 0.95, 0.05 and 0.5, when
+<code>vault-distill --dry-run</code> runs, then it reports extracted 1,
+dropped 1, unsure 1 and sends 3 digests of at most 12,000 bytes
+each.</label></li>
+<li><label><input type="checkbox" />Given a transcript touched 5 minutes
+before the run, when <code>vault-distill --dry-run</code> runs, then
+that session is not in the seen-file and its line is in the live
+inbox.</label></li>
+<li><label><input type="checkbox" />Given <code>TYPESAFE_API_KEY</code>
+unset and <code>HOME</code> pointed at a temp dir with no
+<code>.zshrc</code>, when <code>vault-distill</code> runs, then every
+session is reported unsure, no worker is dispatched, and the exit code
+is non-zero.</label></li>
+<li><label><input type="checkbox" />Given a digest that contains
+<code>/Users/x/repo</code> and no credential, when
+<code>vault-distill --dry-run</code> runs, then it is sent; given a
+digest containing <code>ghp_</code> plus 20 characters, then it is in
+<code>_inbox/private/</code> with 0 bytes sent.</label></li>
+<li><label><input type="checkbox" />Given a session in a repo not listed
+in <code>VAULT_DISTILL_ALLOW_REPOS</code>, when
+<code>vault-distill</code> runs, then the report shows it as not-allowed
+with 0 bytes sent.</label></li>
+<li><label><input type="checkbox" />Given a draft whose
+<code>Evidence</code> quote does not appear in the digest, when
+<code>vault-distill</code> runs, then it is marked
+<code>no-evidence</code> and no Jev call is made for it.</label></li>
+<li><label><input type="checkbox" />Given Jev stubbed to
+<code>specific</code> 0.3 for a draft, when <code>vault-distill</code>
+runs, then the draft is marked <code>junk</code> and is not a
+candidate.</label></li>
+<li><label><input type="checkbox" />Given one candidate from session S1
+and no match, when <code>vault-distill</code> runs, then nothing is sent
+to review; given a second candidate from session S2 with same-lesson
+stubbed to 0.9, then one merged candidate citing S1 and S2 is sent to
+review.</label></li>
+<li><label><input type="checkbox" />Given a single candidate with
+<code>high_stakes</code> stubbed to 0.9, when <code>vault-distill</code>
+runs, then it is sent to review without a second session.</label></li>
+<li><label><input type="checkbox" />Given 8 publish verdicts in one
+night, when <code>vault-distill</code> finishes, then 5 notes are
+published and 3 remain candidates.</label></li>
+<li><label><input type="checkbox" />Given a <code>probation</code> note
+with 10 injections and 0 uses, when <code>vault-distill</code> runs,
+then it is archived and listed in the report; given a human-written note
+with the same counts, then it is only demoted.</label></li>
+<li><label><input type="checkbox" />Given no calibration marker, when
+<code>vault-distill</code> runs with a publish verdict, then
+<code>04_Knowledge/</code> is unchanged and the report shows the draft
+as “would publish”.</label></li>
+<li><label><input type="checkbox" />Given a publish verdict for a draft
+whose basename matches an existing note, when <code>vault-distill</code>
+finishes, then the existing note’s sha256 is unchanged and the draft is
+marked <code>collision</code>.</label></li>
+<li><label><input type="checkbox" />Given a proposed addition with a
+publish verdict, when <code>vault-distill</code> finishes, then the
+target note’s body ends with the dated section, its earlier text is
+byte-identical, and <code>_meta/events/</code> holds one commit event by
+<code>agent-distiller</code>.</label></li>
+<li><label><input type="checkbox" />Given a run killed after publishing
+session S1, when <code>vault-distill</code> runs again, then
+<code>04_Knowledge/</code> holds exactly one note citing
+S1.</label></li>
+<li><label><input type="checkbox" />Given a transcript that contains an
+injected note’s path after the injection, when
+<code>vault-distill</code> runs, then <code>usage.json</code> counts one
+use for that note; given a note with 10 injections and 0 uses, then the
+hook does not emit it.</label></li>
+<li><label><input type="checkbox" />Given the hook unregistered, when
+<code>ps-skills-doctor</code> runs, then the vault section reports that
+check as failed and exits non-zero.</label></li>
+</ul>
+<h2 id="end-to-end-verification">End-to-end verification</h2>
+<p><code>bash tools/vault-engine/test_e2e.sh</code>, extended with one
+case: seed a temp vault with two notes and a fake transcript, write the
+calibration marker, run <code>vault-distill</code> with stubbed Jev,
+extractor and reviewer, then pipe
+<code>{"session_id":"e2e","prompt":"&lt;the published note's title&gt;"}</code>
+into <code>skills/agentic-vault/hooks/vault-recall.py</code> with
+<code>VAULT_ROOT</code> at the temp vault, and assert the hook’s
+<code>additionalContext</code> contains the published note id and
+<code>_meta/events/</code> holds one publish event by
+<code>agent-distiller</code>.</p>
+<h2 id="interfaces-files">Interfaces &amp; files</h2>
+<ul>
+<li>Before claim, run <code>psrw sync-main</code>:
+<code>bin/jev-gate</code> and <code>tests/test_jev_gate.py</code> exist
+on <code>main</code> but not yet on <code>release/1.12</code>.</li>
+<li><code>tools/vault-engine/</code>: <code>context</code> command,
+index fields, <code>stopwords.go</code>, existence check in
+<code>publish-knowledge</code>, <code>--append-body</code> on
+<code>commit</code>, <code>recall_eval.sh</code>, Go tests and
+benchmark.</li>
+<li><code>skills/agentic-vault/hooks/vault-recall.py</code>:
+UserPromptSubmit hook. <code>install.sh</code> links it; registering it
+in <code>~/.claude/settings.json</code> is one manual entry that the
+doctor check verifies.</li>
+<li><code>bin/jev-gate</code>: <code>classify-lesson</code>,
+<code>score-draft</code> and <code>same-lesson</code>, same
+<code>_load_api_key</code> / <code>system_one</code> / fail-open
+structure as <code>cmd_triage_spec</code>.</li>
+<li><code>bin/vault-distill</code>: stdlib Python CLI;
+<code>install.sh</code> adds it to the bin list. Stub seams:
+<code>VAULT_DISTILL_JEV_CMD</code>,
+<code>VAULT_DISTILL_EXTRACT_CMD</code>,
+<code>VAULT_DISTILL_REVIEW_CMD</code>; each gets input on stdin and
+returns JSON on stdout (Jev returns the JSON of the subcommand named in
+its first argument, extractor <code>{"path": str}</code>, reviewer
+<code>[{"draft": str, "verdict": "publish|reject", "reason": str}]</code>).
+Tests point them at scripts in
+<code>tests/fixtures/vault_distill/</code>.</li>
+<li><code>bin/ps-skills-doctor</code>: vault section.</li>
+<li>Cron: one new line for <code>vault-distill</code> at 23:40.</li>
+<li><code>tests/test_vault_recall.py</code>,
+<code>tests/test_vault_distill.py</code>, additions to
+<code>tests/test_jev_gate.py</code>,
+<code>tests/fixtures/vault_recall_set.jsonl</code>.</li>
+<li><code>README.md</code> and
+<code>skills/agentic-vault/SKILL.md</code>: the commands, the hook, and
+the env vars <code>VAULT_RECALL</code>, <code>VAULT_DISTILL</code>,
+<code>VAULT_DISTILL_PUBLISH</code>, <code>VAULT_DISTILL_MAX</code>,
+<code>VAULT_DISTILL_UNSURE_MAX</code>,
+<code>VAULT_DISTILL_PUBLISH_MAX</code>,
+<code>VAULT_DISTILL_ALLOW_REPOS</code>.</li>
+</ul>
+<h2 id="alternatives-considered">Alternatives considered</h2>
+<ul>
+<li><strong>Do nothing.</strong> Retrieval stays silently dead and the
+inbox keeps growing unread.</li>
+<li><strong>Enable the installed <code>claude-mem</code>
+plugin.</strong> No new code, but a second store outside the vault with
+no OCC commits, no schema and no review before a lesson becomes
+durable.</li>
+<li><strong>Embeddings.</strong> Better recall, but a model call per
+prompt or a local index. Revisit above about 2,000 notes or if the
+recall set drops below 16 of 20.</li>
+<li><strong>Extract in the Stop hook.</strong> Stop fires every turn, so
+one session would be gated many times. A nightly batch sees each session
+once.</li>
+<li><strong>Collision and append handled in <code>vault-distill</code>
+only.</strong> Leaves <code>publish-knowledge</code> able to overwrite a
+note for every other caller; the fix belongs in the engine.</li>
+</ul>
+<h2 id="assumptions">Assumptions</h2>
+<ul>
+<li>ASSUMED: three slices in order: retrieve, save in shadow mode, auto
+publish and result loop — reversible: Y</li>
+<li>ASSUMED: keyword scoring with threshold 4 and no embeddings —
+reversible: Y</li>
+<li>ASSUMED: new hook and CLIs live in <code>ps-skills</code>;
+<code>agent-harness</code> scripts are not edited — reversible: Y</li>
+<li>ASSUMED: the old 23:55 nightly script is left running; its stale
+vault path is a separate backlog line — reversible: Y</li>
+<li>ASSUMED: the SessionStart block counts toward the 2,400-byte session
+cap (tech lens; the QA lens proposed not counting it) — reversible: Y —
+raised by tech+qa</li>
+<li>ASSUMED: the calibration set is labelled by Argon-low and the owner
+spot-checks 10 — reversible: Y</li>
+<li>ASSUMED: a lesson is published only after it recurs in a second
+session, unless Jev scores it high-stakes; a one-off lesson that is
+important but not high-stakes waits as a candidate for 60 days and is
+then dropped — reversible: Y</li>
+<li>ASSUMED: the 0.5 thresholds for <code>specific</code> and
+<code>novel</code> are starting values that calibration may move —
+reversible: Y</li>
+<li>ASSUMED: archiving uses an existing engine path; if none exists, the
+plan adds
+<code>vault-engine archive &lt;id&gt; &lt;sha&gt; &lt;actor&gt;</code> —
+reversible: Y</li>
+<li>ASSUMED: the extractor is a single model call if AGY allows it,
+otherwise a <code>dispatch-worker</code> agent run — reversible: Y</li>
+<li>ASSUMED: integration appends a dated section and never rewrites
+existing text — reversible: Y</li>
+<li>ASSUMED: auto-published and auto-merged changes are undone by
+archiving the note or reverting the commit event — reversible: Y</li>
+<li>ASSUMED: session digests go to TypeSafe (Jev) and Gemini only for
+repos in <code>VAULT_DISTILL_ALLOW_REPOS</code> (opt-in), after the
+credential scan — reversible: N (sent data cannot be recalled) — raised
+by product</li>
+</ul>
+<h2 id="appendix-spec-review">Appendix — spec review</h2>
+<ul>
+<li>2026-11-11 spec-review: lenses tech, qa, product (no UI terms, UX
+lens skipped). Findings 21 raw → 15 merged (6 dropped: bad citation 0,
+dup 6, low-conf 0). Applied: scoring rule made unambiguous (qa);
+<code>publish-knowledge</code> collision check and author argument
+(tech); summary source defined (qa+product+tech); repo resolved through
+<code>release_repo</code> and worktree root, plus
+<code>repo:&lt;name&gt;</code> tag (qa+product+tech); per-session state
+file and cap (qa+tech); stub seams named (qa); seen-file written per
+session, with transcript offsets (qa+product); “active” defined by
+transcript mtime (qa); end-to-end runs through the hook, recall set and
+script named (qa); unsure sessions resolved automatically (product); own
+credential patterns without the home-path rule (tech);
+<code>sync-main</code> before claim and <code>classify-lesson</code>
+output shape (tech); worker opt-out through an env var already set
+(tech); <code>.zshrc</code> key fallback in R8f and its test (tech).
+Answered from disk: 0. Asked at gate: 1 (which repos may send digests to
+external models). Assumed: 1 (session cap counting).</li>
+<li>2026-11-11 owner additions after the review started: quality
+attributes table (speed, session result, reusability, scale, robustness,
+production grade, visibility, readiness) and automatic integrate and
+publish on pass (R10a, R10b, R18). These were not seen by the
+lenses.</li>
+<li>2026-11-11 owner additions on junk and cost: evidence check, Jev
+draft score, recurrence before publish, probation with automatic
+archive, publish cap of 5, and Jev used for every screening step because
+TypeSafe tokens are cheap (R7s, R9c, R9d, R19, R20, R21). Not seen by
+the lenses.</li>
+</ul>
+</body>
+</html>

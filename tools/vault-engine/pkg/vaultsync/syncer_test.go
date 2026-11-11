@@ -842,3 +842,41 @@ func TestSave_RemoteRejectedByAHookIsNotTriedAgain(t *testing.T) {
 		t.Errorf("the local commit must stay, ahead by %s", n)
 	}
 }
+
+// A stop that lands on the confirmation fetch ends the asking at once: one
+// fetch, no retries, and the answer is still "not confirmed".
+func TestSave_StopDuringTheConfirmFetchAsksOnceAndStaysUnconfirmed(t *testing.T) {
+	w := newWorld(t)
+	mac := newSyncer(t, w.Mac)
+	sha := readSHA(t, w.Mac, note1)
+	stopping, fetches := false, 0
+	mac.Hooks.PushResult = func(_ int, res gitResult) gitResult {
+		stopping = true // the send arrived, its answer was lost, and the daemon is told to stop
+		return gitResult{Err: errors.New("simulated: connection reset")}
+	}
+	mac.Repo.gate = func(args []string) error {
+		if stopping && len(args) > 0 && args[0] == "fetch" {
+			fetches++
+			return ErrStopped
+		}
+		return nil
+	}
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "REFUSED no-connection" || out.Exit != ExitNoConnection {
+		t.Fatalf("outcome = %+v, want REFUSED no-connection (the send is not confirmed)", out)
+	}
+	if fetches != 1 {
+		t.Fatalf("the confirm loop asked the shared copy %d times after the stop, want 1", fetches)
+	}
+	if !mac.Repo.hasMarker() {
+		t.Fatalf("the marker must stay until the hub can be asked")
+	}
+	// The next command settles it: the first try did arrive.
+	mac.Hooks, mac.Repo.gate = Hooks{}, nil
+	if _, out := mac.Save(commitOp(mac, note1, sha, 5)); out.Line != "REFUSED note-changed" {
+		t.Fatalf("retry = %+v, want REFUSED note-changed because the first try arrived", out)
+	}
+	if mac.Repo.hasMarker() {
+		t.Fatalf("marker should be settled")
+	}
+	cleanExceptIgnored(t, w.Mac)
+}

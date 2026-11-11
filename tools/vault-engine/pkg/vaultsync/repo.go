@@ -34,6 +34,9 @@ var unsafeActorChars = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 // Repo is the git side of one place. The engine itself never runs git; this
 // type is the only code that does.
+//
+// A Repo is not safe for use from more than one goroutine: lock, gate and stop
+// are plain fields, set and read without any synchronisation.
 type Repo struct {
 	Root       string
 	Place      string
@@ -55,6 +58,8 @@ type Repo struct {
 	// command that is running is killed (whole process group) and reported as
 	// ErrStopped, and a wait for the folder lock ends. Nil means "never": the
 	// one-shot commands leave it nil. The daemon sets it for the length of Run.
+	// It is set and read on the one goroutine that uses the Repo, never from
+	// another one (see the note on Repo).
 	stop context.Context
 }
 
