@@ -264,5 +264,11 @@
     "title": "vault-distill auto integrate and publish, calibration and usage loop (I-039 slice 3)",
     "created_at": "2026-11-11T06:03:01.793624+00:00",
     "promoted_to": null
+  },
+  {
+    "id": "I-044",
+    "title": "vault-recall precision measure goes stale when the vault grows",
+    "created_at": "2026-11-11T12:30:16.825823+00:00",
+    "promoted_to": null
   }
 ]
