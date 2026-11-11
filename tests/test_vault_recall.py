@@ -199,6 +199,25 @@ open({repr(str(arg_file))}, "w").write(json.dumps(sys.argv[1:]))
         proc = subprocess.run([sys.executable, str(HOOK)], input="not json", capture_output=True, text=True, timeout=10)
         self.assertEqual((proc.returncode, proc.stdout), (0, ""))
 
+    def test_precision_eval_script(self):
+        script = REPO_ROOT / "tools" / "vault-engine" / "precision_eval.sh"
+        self.assertTrue(script.is_file() and os.access(script, os.X_OK))
+        engine = self.dir / "stub-engine"
+        engine.write_text("#!/usr/bin/env bash\necho '- NOTE-1 | Title 1 | path | '\necho '- NOTE-2 | Title 2 | path | '\n")
+        engine.chmod(engine.stat().st_mode | stat.S_IEXEC)
+        eval_set = self.dir / "set.jsonl"
+        eval_set.write_text(
+            json.dumps({"prompt": "p1", "relevant_ids": ["NOTE-1"]}) + "\n" +
+            json.dumps({"prompt": "p2", "relevant_ids": ["NOTE-1"]}) + "\n"
+        )
+        env = {**os.environ, "VAULT_ENGINE": str(engine)}
+        res80 = subprocess.run([str(script), str(eval_set), "80"], capture_output=True, text=True, env=env)
+        self.assertEqual(res80.returncode, 1)
+        self.assertIn("precision: 2/4 = 50.0% (min 80%)", res80.stdout)
+        res50 = subprocess.run([str(script), str(eval_set), "50"], capture_output=True, text=True, env=env)
+        self.assertEqual(res50.returncode, 0)
+        self.assertIn("precision: 2/4 = 50.0% (min 50%)", res50.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,7 @@ while IFS= read -r line; do
   prompt=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prompt"])')
   want=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["expected_id"])')
   total=$((total + 1))
-  out=$("$ENGINE" context --query "$prompt" --limit 3)
+  out=$("$ENGINE" context --query "$prompt" --limit 2)
   # An empty expected_id means the prompt must inject nothing.
   if { [ -z "$want" ] && [ -z "$out" ]; } || { [ -n "$want" ] && printf '%s' "$out" | grep -qF -- "- $want |"; }; then
     hits=$((hits + 1))
