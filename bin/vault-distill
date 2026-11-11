@@ -26,6 +26,8 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 DIGEST_MAX = 12000
@@ -42,8 +44,8 @@ HIGH_STAKES_AT = 0.85
 SAME_MAX = 5
 CANDIDATE_DAYS = 60
 JEV_RULES_MAX = 20000
-EXTRACT_MODEL = "gemini-3.8-flash-high"
-REVIEW_MODEL = "gemini-4-argon-low"
+EXTRACT_MODEL = "gemini-3.8-flash"
+REVIEW_MODEL = "gemini-4-argon"
 # Own copy of bin/ps-skills-sync SECRET_RE without the home-path rule (R11); a test keeps them in step.
 # The literal is split so this public file does not trip ps-skills-sync's scan of itself.
 SECRET_RE = re.compile(r"""ghp_[A-Za-z0-9]{20}|github""" r"""_pat_|sk-[A-Za-z0-9_-]{20}|xox[bpas]-|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|(password|passwd|api[_-]?key|secret|token)["' ]*[:=]["' ]*[A-Za-z0-9/+_-]{12,}""")
@@ -53,7 +55,7 @@ HOOK_BLOCK_RE = re.compile(r"hook (?:error|blocked)|blocked by (?:a |the )?\w*\s
 COUNT_KEYS = ("seen", "not_allowed", "private", "no_transcript", "skipped_small", "skipped_active", "dropped",
               "unsure", "no_lesson", "extracted", "invalid", "no_evidence", "junk", "unscored", "candidates_waiting",
               "recurred", "ready", "would_publish", "published", "merged", "rejected", "collisions", "archived", "expired",
-              "errors")
+              "errors", "extract_tokens")
 STAGES = ("classify", "extract", "score", "same_lesson", "review")
 
 
@@ -124,6 +126,8 @@ class Run:
         self.bytes = dict.fromkeys(STAGES, 0)
         self.attempts = dict.fromkeys(STAGES, 0)
         self.failures = dict.fromkeys(STAGES, 0)
+        self.failure_lines = {}
+        self.tool_failed = self.extract_tool_failed = False
         self.classified = 0
         self.notes = []  # report lines: expired candidates, verdicts
         self.seen = self.load_seen()
@@ -159,17 +163,38 @@ class Run:
 
     # --- external calls: every model call goes through one of these three seams ---
     def call(self, stage, argv, stdin_text, timeout):
+        """Returns the child's JSON, or None. self.tool_failed tells a tool failure (fallback, timeout, exit other
+        than 1) from a bad answer (exit 1 or unparsable stdout): the caller retries the first, drops the second."""
         self.attempts[stage] += 1
         self.bytes[stage] += len(stdin_text.encode())
+        self.tool_failed, out, text = False, None, ""
         try:
             proc = subprocess.run(argv, input=stdin_text, capture_output=True, text=True, timeout=timeout)
-            out = json.loads(proc.stdout) if proc.returncode == 0 else None
-        except (OSError, subprocess.SubprocessError, ValueError):
-            out = None
-        if out is None or (isinstance(out, dict) and out.get("fallback")):
+            if proc.returncode != 0:
+                self.tool_failed = proc.returncode != 1
+                text = proc.stderr or f"exit {proc.returncode}"
+            else:
+                out = json.loads(proc.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError) as err:
+            self.tool_failed = not isinstance(err, ValueError)
+            text = type(err).__name__
+        if isinstance(out, dict) and out.get("fallback"):
+            self.tool_failed, text, out = True, str(out.get("error") or "fallback"), None
+        if out is None:
             self.failures[stage] += 1
-            return None
+            self.note_failure(stage, text)
         return out
+
+    def note_failure(self, stage, text):
+        """Report line "<stage> failed: <reason>": secret check on the full text, then one line of 200 characters."""
+        if SECRET_RE.search(text):
+            text = "error text withheld"
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        line = f"{stage} failed: {one_line(lines[-1] if lines else text, 200)}"
+        seen = self.failure_lines.setdefault(stage, set())
+        if line not in seen and len(seen) < 5:
+            seen.add(line)
+            self.notes.append(line)
 
     def jev(self, stage, sub, flags, stdin_text):
         cmd = shlex.split(os.environ.get("VAULT_DISTILL_JEV_CMD", "")) or [str(Path(__file__).resolve().parent / "jev-gate")]
@@ -414,12 +439,18 @@ def run_extractions(run, queue):
         return
     run.ledger = load_ledger(run)
     rescore_unscored(run)
+    in_a_row = 0
     for i, (p, session) in enumerate(queue):
-        if i >= cap:
-            run.mark(session, "extract-pending", p=p)  # over the nightly cap: first in line tomorrow
+        tries = run.seen.get(session["sid"], {}).get("tries", 0)
+        if i >= cap or in_a_row >= 2:  # over the nightly cap, or the tool is down tonight: first in line tomorrow
+            run.mark(session, "extract-pending", p=p, **({"tries": tries} if tries else {}))
             continue
         try:
             state, draft = extract_session(run, session)
+            in_a_row = in_a_row + 1 if run.extract_tool_failed else 0
+            if run.extract_tool_failed and state != "invalid":  # a tool failure does not use up the session (X8)
+                run.mark(session, "extract-pending", p=p, tries=tries + 1)
+                continue
             run.counts["extracted"] += 1
             run.mark(session, state, offset=session["end"], p=p, draft=draft)
             save_ledger(run)
@@ -490,9 +521,13 @@ def extract_session(run, session):
     cmd = shlex.split(os.environ.get("VAULT_DISTILL_EXTRACT_CMD", "")) or [sys.executable, str(Path(__file__).resolve()), "--extract-default"]
     run.bytes["extract"] += len(session["digest"].encode()) + len(request["related"].encode())  # what the model reads
     out = run.call("extract", cmd, json.dumps(request), timeout=360)
+    run.extract_tool_failed = run.tool_failed  # later Jev calls overwrite tool_failed
     if not isinstance(out, dict):
+        if run.extract_tool_failed and run.seen.get(session["sid"], {}).get("tries", 0) < 2:
+            return "extract-pending", None  # run_extractions raises the try count; the third tool failure falls through
         run.counts["invalid"] += 1
-        return "invalid", None  # R9f: the worker failed
+        return "invalid", None  # R9f: a bad answer, or the third tool failure
+    run.counts["extract_tokens"] += out.get("tokens") if isinstance(out.get("tokens"), int) else 0
     if not out.get("path"):
         run.counts["no_lesson"] += 1
         return "no-lesson", None
@@ -671,7 +706,7 @@ def review(run):
             run.notes.append(f"rejected: {verdict['draft']} ({entry['reason']})")
 
 
-# --- default extractor and reviewer: one agy print-mode call each, no tools, no workspace ---
+# --- default extractor and reviewer: one Gemini API call each (plain HTTP: no tools, no workspace) ---
 EXTRACT_SCHEMA = {
     "type": "object", "required": ["lesson"],
     "properties": {
@@ -687,7 +722,7 @@ EXTRACT_SCHEMA = {
     },
 }
 EXTRACT_PROMPT = """You turn one finished agent session into at most one reusable lesson for a knowledge vault.
-Answer with JSON only, matching the schema. Use no tools.
+Answer with JSON only, matching the schema.
 - lesson: false when the session holds no trap, fix, decision or rule that would help a future session.
 - title: a short name for the lesson. summary: one sentence. when / rule / why: one or two sentences each.
 - scope: "global" when the rule applies in every repo, else "repo".
@@ -710,7 +745,7 @@ REVIEW_SCHEMA = {
 }
 REVIEW_PROMPT = """You review candidate knowledge notes written automatically from agent sessions.
 For each candidate return publish or reject with a one-sentence reason. Publish only a rule that is specific,
-correct as far as the text shows, useful in a future session, and not a one-off. Answer with JSON only. Use no tools.
+correct as far as the text shows, useful in a future session, and not a one-off. Answer with JSON only.
 
 Candidates (JSON):
 """
@@ -731,17 +766,59 @@ def parse_json(text):
         return None
 
 
-def ask_agy(model, prompt, schema):
-    """One print-mode turn: no --add-dir, no --dangerously-skip-permissions, plan mode, empty cwd."""
-    cmd = ["agy", "-p", prompt, "--model", model, "--mode", "plan", "--disable-slash-commands",
-           "--sandbox", "--json-schema", json.dumps(schema), "--output-format", "text", "--print-timeout", "300s"]
-    with tempfile.TemporaryDirectory() as empty:
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
+
+
+def gemini_key():
+    """GEMINI_API_KEY from the environment, else the Keychain entry; "" when neither has it."""
+    if os.environ.get("GEMINI_API_KEY"):
+        return os.environ["GEMINI_API_KEY"]
+    try:
+        proc = subprocess.run(["security", "find-generic-password", "-s", "joy-companion", "-a", "gemini", "-w"],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def ask_gemini(model, prompt, schema):
+    """One generateContent call. Returns (answer, tokens, failure); failure is None, ("tool", reason) or ("bad", reason).
+    The key goes in a header only, and no response body is copied into a reason, so neither can reach the report."""
+    key = gemini_key()
+    if not key:
+        return None, 0, ("tool", "no Gemini key (env GEMINI_API_KEY or Keychain joy-companion/gemini)")
+    body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema,
+                                 "maxOutputTokens": 8000}}
+    req = urllib.request.Request(GEMINI_URL.format(model), data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "x-goog-api-key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            reply = json.loads(resp.read())
+    except urllib.error.HTTPError as err:
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=330, cwd=empty,
-                                  env={**os.environ, "CLAUDE_VAULT_SUMMARY": "0"})
-        except (OSError, subprocess.SubprocessError):
-            return None
-    return parse_json(proc.stdout) if proc.returncode == 0 else None
+            status = json.loads(err.read())["error"]["status"]
+        except (OSError, ValueError, KeyError, TypeError):
+            status = ""
+        return None, 0, ("tool", f"HTTP {err.code} {status if re.fullmatch(r'[A-Z_]{1,40}', str(status)) else ''}".strip())
+    except (OSError, ValueError, urllib.error.URLError) as err:
+        return None, 0, ("tool", type(err).__name__)
+    if not isinstance(reply, dict):
+        return None, 0, ("tool", "unexpected reply shape")
+    block = (reply.get("promptFeedback") or {}).get("blockReason")
+    cands = reply.get("candidates")
+    if block or not cands or not isinstance(cands[0], dict):
+        return None, 0, ("tool", f"blocked {block}" if block else "no candidate")
+    finish = cands[0].get("finishReason")
+    if finish != "STOP":
+        return None, 0, ("tool", f"finishReason {finish}")
+    parts = [p for p in (cands[0].get("content") or {}).get("parts") or [] if isinstance(p, dict) and not p.get("thought")]
+    usage = reply.get("usageMetadata")
+    tokens = usage.get("totalTokenCount", 0) if isinstance(usage, dict) else 0
+    answer = parse_json(parts[-1].get("text") or "") if parts and isinstance(parts[-1].get("text"), str) else None
+    if not isinstance(answer, dict):
+        return None, tokens, ("bad", "Gemini answer is not a JSON object")
+    return answer, tokens, None
 
 
 def one_line(value, limit):
@@ -771,28 +848,42 @@ def render_draft(answer, request):
     return slug, "\n".join(lines) + "\n"
 
 
+def call_failed(failure):
+    """A tool failure is a fallback on stdout (the jev-gate contract, exit 0); a bad answer is stderr and exit 1."""
+    kind, reason = failure
+    if kind == "tool":
+        print(json.dumps({"fallback": True, "error": reason}))
+        return 0
+    print(reason, file=sys.stderr)
+    return 1
+
+
 def extract_default():
     request = json.loads(sys.stdin.read())
     digest = Path(request["digest_path"]).read_text(errors="replace")
-    answer = ask_agy(EXTRACT_MODEL, EXTRACT_PROMPT.format(related=request.get("related") or "(none)", digest=digest),
-                     EXTRACT_SCHEMA)
-    if not isinstance(answer, dict):
-        return 1
+    answer, tokens, failure = ask_gemini(EXTRACT_MODEL, EXTRACT_PROMPT.format(related=request.get("related") or "(none)", digest=digest),
+                                      EXTRACT_SCHEMA)
+    if failure is None and "lesson" not in answer:
+        failure = ("bad", "Gemini answer has no lesson key")
+    if failure:
+        return call_failed(failure)
     if not answer.get("lesson"):
-        print(json.dumps({"path": None, "reason": "no-lesson"}))
+        print(json.dumps({"path": None, "reason": "no-lesson", "tokens": tokens}))
         return 0
     slug, text = render_draft(answer, request)
     path = free_path(Path(request["out_dir"]) / f"{slug}--{request['session_id'][:8]}.md")
     atomic_write(path, text)
-    print(json.dumps({"path": str(path)}))
+    print(json.dumps({"path": str(path), "tokens": tokens}))
     return 0
 
 
 def review_default():
     items = sys.stdin.read()
-    answer = ask_agy(REVIEW_MODEL, REVIEW_PROMPT + items, REVIEW_SCHEMA)
-    if not isinstance(answer, dict) or not isinstance(answer.get("verdicts"), list):
-        return 1
+    answer, _, failure = ask_gemini(REVIEW_MODEL, REVIEW_PROMPT + items, REVIEW_SCHEMA)
+    if failure is None and not isinstance(answer.get("verdicts"), list):
+        failure = ("bad", "Gemini answer has no verdicts list")
+    if failure:
+        return call_failed(failure)
     print(json.dumps(answer["verdicts"]))
     return 0
 
