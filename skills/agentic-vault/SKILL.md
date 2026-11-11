@@ -126,6 +126,8 @@ vault-engine publish-knowledge /tmp/new-lesson.md "thesis" "agent-olivier"
 ```
 The note is validated against `knowledge/v1`, stored in `04_Knowledge/`, logged to `_meta/events/`, and added to `_meta/indexes/knowledge.jsonl` so future agents benefit.
 
+Lessons are also captured without anyone asking: the nightly `vault-distill` batch drafts candidate notes from finished sessions into `_inbox/agent/distill/` (shadow mode, nothing is published yet). Read the morning report with `vault-distill --report`. Do not hand-edit `_inbox/agent/distill/` or `~/.claude/state/vault-distill/`.
+
 ---
 
 ## 🧪 Verification & Audit
