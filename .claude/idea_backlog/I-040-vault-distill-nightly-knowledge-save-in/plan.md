@@ -36,6 +36,32 @@ Copied from the spec. Every task must meet them.
 Batch: 1,2
 Batch: 3,4
 
+## Audit amendments (2026-11-11, binding)
+
+These override the task text below wherever they differ. The code in Tasks 1 to 4 was run before it was written down; the amendments were not, so each one is implemented test first.
+
+- **A1 (Task 2, `repo_root`).** Resolve the repo the way `vault-engine` does (`tools/vault-engine/pkg/vault/context.go`, `RepoRoot`), so a sibling hotfix worktree (`../<repo>-hotfix-<x>`) maps to its main repo for the skip list and for `repo_scope`. Keep the string split as the fallback for a cwd that no longer exists:
+
+  ```python
+  def repo_root(cwd):
+      """Main repo path for a session cwd, resolved like vault-engine RepoRoot; a removed worktree falls back to its path."""
+      try:
+          out = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                               capture_output=True, text=True, timeout=5)
+          if out.returncode == 0 and out.stdout.strip():
+              return str(Path(out.stdout.strip()).parent)
+      except (OSError, subprocess.SubprocessError):
+          pass
+      return cwd.rstrip("/").split("/.claude/worktrees/", 1)[0]
+  ```
+
+  Test: a temp repo with `git worktree add ../demo-hotfix-x`; a session whose cwd is that worktree is `not-allowed` when the skip list names the main repo's basename.
+- **A2 (Task 2, `run_batch`).** A session parked by the nightly cap must be extracted on the next run whatever its probability: the first branch becomes `if p >= EXTRACT_AT or prior_state == "extract-pending":`. Test: an unsure session that was marked `extract-pending` (p 0.5) is queued the next night and is not counted as unsure.
+- **A3 (Task 2, `build_digest`).** A user record's typed text is its string content, or the joined `text` blocks when the content is a list. A typed text that starts with `<` after stripping is an automated prompt (task notification, command output): leave it out of the digest and out of the correction count. Tool results in a list are handled as written. Tests: a list-form text prompt appears in the digest; a `<task-notification>` prompt does not.
+- **A4 (Task 3, `ask_agy`).** Add `"--sandbox"` to the command. Go-live G4 confirms the call still returns JSON; if it does not, drop the flag and say so in the report.
+- **A5 (Task 4, README).** State that the skip list for the nightly run is the `VAULT_DISTILL_SKIP_REPOS=` assignment on the cron line (cron does not read `~/.zshrc`), and that `--dry-run` still writes digest files under the state directory.
+- **Effect of F-028 (merged after this plan was written).** `context --query` now keeps only the first 20 terms of a query longer than 80 terms, drops a fixed noise list, weights by note rarity and takes `--limit` as given. No test in this plan depends on engine scoring (all use the engine stub). `related_notes` on the user prompts is therefore driven by the opening of the session; this is accepted.
+
 ## Deviations from the spec
 
 1. **The extractor is one model call, not an agent run (R9).** The spec routes the extractor through `dispatch-worker --agent agy`. What I checked:
@@ -2296,7 +2322,7 @@ git commit -m "feat(vault-distill): install link, doctor save checks, e2e shadow
 
 ## Go-live (controller only, after the final review; not a worker task)
 
-Workers must not run this section. It changes the live machine, the real vault, and sends real session digests to external models. Each step is R1: state it, then do it.
+Workers must not run this section. It changes the live machine, the real vault, and sends real session digests to external models. Run it after `psrw ship`, from the `_release` worktree. G1, G2 and G6 are R1: state it, then do it. G3, G4 and G5 send session digests to Jev and Gemini, which cannot be recalled; the owner approved these sends on 2026-11-11 for every repo outside the skip list. Before G3, print the skip list in force (`echo "${VAULT_DISTILL_SKIP_REPOS:-<empty>}"`) and state the number of sessions about to be sent.
 
 - [ ] **G1: Quarantine rule in the real vault.** Back up the vault's `.gitignore`, then append `_inbox/private/` unless it is already there:
 
@@ -2306,7 +2332,7 @@ cp "$V/.gitignore" "$V/.gitignore.bak-vault-distill-$(date +%Y%m%d)"
 grep -qxF '_inbox/private/' "$V/.gitignore" || echo '_inbox/private/' >> "$V/.gitignore"
 ```
 
-- [ ] **G2: Link the CLI** (the same link `install.sh` makes once the feature is on `main`): `ln -sfn "$PWD/bin/vault-distill" ~/.local/bin/vault-distill`. `vault-distill` calls the `jev-gate` next to its resolved path, which is the worktree's copy with the new subcommands. After promotion and worktree removal, run `./install.sh` from the main checkout.
+- [ ] **G2: Link the CLI** to the `_release` worktree, which outlives the feature worktree (`psrw ship` may remove that one): `ln -sfn /Users/$USER/ps-skills/.claude/worktrees/_release/bin/vault-distill ~/.local/bin/vault-distill`, after checking that the target exists. `vault-distill` calls the `jev-gate` next to its resolved path, which is the release copy with the new subcommands. After promotion, run `./install.sh` from the main checkout so the link points at `main`.
 
 - [ ] **G3: Real Jev smoke on a small copy (first external send).** Build a temp vault holding the real indexes and the last 20 inbox lines, then do a dry run with real Jev:
 
@@ -2327,7 +2353,7 @@ echo "{\"session_id\":\"golive\",\"digest_path\":\"$D\",\"out_dir\":\"$T/_inbox/
   | vault-distill --extract-default; echo "exit=$?"
 ```
 
-Expected: `{"path": ...}` with exit 0, or `{"path": null, "reason": "no-lesson"}`. If there is a path, `VAULT_ROOT="$T" vault-engine validate <path>` passes and the file is at most 1,500 bytes. If `agy` prints something `parse_json` cannot read, or the call takes longer than 5 minutes, stop and switch `VAULT_DISTILL_EXTRACT_CMD` to a `dispatch-worker --agent agy` wrapper (the spec's route) before G5. Then `rm -rf "$T"`.
+Expected: `{"path": ...}` with exit 0, or `{"path": null, "reason": "no-lesson"}`. Also check that the empty temp cwd of the call stayed empty and that nothing under `$T` changed apart from the draft: plan mode with `--sandbox` (A4) must not have written files. If there is a path, `VAULT_ROOT="$T" vault-engine validate <path>` passes and the file is at most 1,500 bytes. If `agy` prints something `parse_json` cannot read, or the call takes longer than 5 minutes, stop and switch `VAULT_DISTILL_EXTRACT_CMD` to a `dispatch-worker --agent agy` wrapper (the spec's route) before G5. Then `rm -rf "$T"`.
 
 - [ ] **G5: First real run, in the background.** It rotates the real inbox (about 5,700 lines) and classifies every finished session it lists, one Jev call each:
 
@@ -2342,7 +2368,7 @@ Wait for it to finish with one blocking wait, not a poll. Then run `vault-distil
 
 ```bash
 crontab -l > ~/.claude/crontab.bak-vault-distill-$(date +%Y%m%d)
-( crontab -l; echo '40 23 * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin $HOME/.local/bin/vault-distill >> $HOME/.claude/logs/vault-distill.log 2>&1' ) | crontab -
+( crontab -l; echo '40 23 * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin VAULT_DISTILL_SKIP_REPOS= $HOME/.local/bin/vault-distill >> $HOME/.claude/logs/vault-distill.log 2>&1' ) | crontab -
 ```
 
 - [ ] **G7: Live check on the user's surface (Tier 4).** The next morning, run these and paste the output into the report:
@@ -2403,3 +2429,10 @@ Expected:
 ## Audit trail
 
 - 2026-11-11 plan written (writing-plans). Next: `self-grill-audit`.
+- 2026-11-11 self-grill-audit (Opus, all 2,405 lines read): verdict safe-with-fixes, no Critical. Each High was checked against the plan text before editing.
+  - Corrected (High): the skip list never reached cron (now on the cron line, G6, A5); `repo_root` split the path instead of asking git (A1); G2 linked the live CLI to a worktree that ship may remove (now `_release`).
+  - Corrected (Medium): a capped unsure session bounced back to unsure (A2); automated `<` prompts filled the digest and list-form typed prompts were dropped (A3); `--sandbox` added (A4); README wording on `--dry-run` (A5).
+  - Not changed: the sends in G3 to G5 stay approved (owner, 2026-11-11), with the skip list and the session count stated first. Auditor confirmed: `bin/jev-gate` is on `release/1.12`, CI's `pytest tests` collects the four new test files, every `agy` flag used exists, tasks sharing `bin/vault-distill` run in sequence.
+  - Parked (Medium): cron skips a night when the Mac sleeps (launchd would catch up); the first run has no cap on classify calls (one serial call per session).
+  - Parked (Low): an oversized draft is rejected before the credential scan, so one holding a secret stays in the inbox; extract bytes are counted twice in the report; `digests/` and `related/` are never pruned; Batch `3,4` puts about 900 lines on one worker.
+  - Still unverified until G4 and G7: that the `agy` print call makes no tool calls and prints bare JSON; that `agy` is logged in under cron; that Jev accepts a 35 KB `score-draft` input.
