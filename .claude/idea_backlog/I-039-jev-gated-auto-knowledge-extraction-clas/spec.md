@@ -6,50 +6,65 @@ status: idea
 
 # Automatic knowledge save and retrieve for agent sessions (Jev-gated)
 
-User request, verbatim: "want it help auto save knowledge + auto retrieve knowledge to session" and "make sure it is token efficient".
+User request, verbatim: "want it help auto save knowledge + auto retrieve knowledge to session", "make sure it is token efficient", "consider speed , session result, knowledge reusability , scale , robust, production grade", "visibility + readiness", "auto integrate + publish if pass".
 
 ## Goal
 
-Agent sessions in any repo get the relevant agentic-vault notes without anyone asking, and lessons from finished sessions reach `04_Knowledge/` without anyone running a command, at a token cost small enough to leave on permanently.
+Agent sessions in any repo get the relevant agentic-vault notes without anyone asking, and lessons from finished sessions are integrated and published into `04_Knowledge/` without anyone running a command, at a token cost small enough to leave on permanently.
 
-The user will confirm this by (a) typing a prompt about a topic the vault covers in a new session and seeing a `<vault-context>` block naming the matching note, and (b) running `vault-distill --report` the next morning and seeing sessions gated, notes published, and bytes sent per stage.
+The user will confirm this by (a) typing a prompt about a topic the vault covers in a new session and seeing a `<vault-context>` block naming the matching note and the terms that matched, (b) running `vault-distill --report` the next morning and seeing sessions gated, notes published or merged, bytes sent per stage and used-rate per note, and (c) running `ps-skills-doctor` and seeing the vault section all green.
 
 ## Problem (measured 2026-11-11)
 
-- **Retrieve is dead.** The SessionStart hook `agent-harness/scripts/vault-bootstrap.py` runs `vault-engine context --cwd <dir>`. The binary has no `context` command, so it prints usage to stderr, the hook prints nothing and exits 0.
-- **Save stores pointers, not knowledge.** The Stop hook `vault-session-summary.sh` appends one line (repo, cwd, session id, transcript path) per turn to `_inbox/agent/session-summaries.md`. The file is 5,730 lines and 2 MB. Nothing reads it.
-- **The nightly summarizer reads another vault.** Cron `55 23 * * *` runs `vault-nightly-summary.sh`, which reads `obsidian-vault/wiki/meta/session-inbox.md`, not the agentic-vault inbox.
-- **Search matches only id, title and path.** `SearchIndexes` in `tools/vault-engine/pkg/vault/vault.go:1104` never reads tags or bodies. Queries `codex`, `worktree`, `quota`, `handoff` return nothing across 27 knowledge notes.
+- **Retrieve is dead.** The SessionStart hook `agent-harness/scripts/vault-bootstrap.py` runs `vault-engine context --cwd <dir>`. The binary has no `context` command, so the hook prints nothing and exits 0.
+- **Save stores pointers, not knowledge.** The Stop hook `vault-session-summary.sh` appends one line (repo, cwd, session id, transcript path) per turn to `_inbox/agent/session-summaries.md`: 5,730 lines, 2 MB, read by nothing.
+- **The nightly summarizer reads another vault.** Cron `55 23 * * *` runs `vault-nightly-summary.sh` against `obsidian-vault/wiki/meta/session-inbox.md`.
+- **Search matches only id, title and path** (`SearchIndexes`, `tools/vault-engine/pkg/vault/vault.go:1101`). `codex`, `worktree`, `quota`, `handoff` return nothing across 27 notes.
+- **`publish-knowledge` can overwrite a note.** `PublishKnowledge` (`vault.go:963`) writes with `os.WriteFile` and no existence check, and `commit` (`CommitRecord`, `vault.go:1004`) patches frontmatter only, so nothing can safely add to a note's body.
 
 ## Non-goals
 
 - Embeddings, vector stores, or a long-running daemon.
-- Changing the Stop hook, `vault-bootstrap.py`, or the old nightly script in `agent-harness`.
-- The Joy voice vault (S3). This is the agentic vault only.
-- Retrieval for AGY / T3 Code sessions (their hooks are disabled, see `install.sh` line 102).
-- Rewriting or merging existing knowledge notes automatically. The extractor may only propose.
+- Editing the Stop hook, `vault-bootstrap.py`, or the old nightly script in `agent-harness`.
+- The Joy voice vault (S3), and retrieval in AGY / T3 Code sessions (their hooks are disabled in `install.sh`).
+- Rewriting or deleting existing note text. Integration only appends a dated section.
 
 ## Users & jobs
 
-The owner, working through Claude Code sessions across many repos. They want a session to start already knowing the traps and decisions recorded earlier, and they do not want to remember to write lessons down.
+The owner, working through Claude Code sessions across many repos. They want a session to start already knowing recorded traps and decisions, and they do not want to remember to write lessons down or to approve each one.
 
 ## Success measure
 
-- Retrieval: on a fixed set of 20 prompts with a known matching note, the right note is in the injected set for at least 16.
-- Save: over 7 nights, at least 80% of auto-published notes are still unarchived after the owner's weekly look.
-- Cost: median injected context per session is at most 2,400 bytes. A nightly run sends at most 12 KB per session to Jev and runs at most 20 extractions.
+- Retrieval: `tools/vault-engine/recall_eval.sh` over `tests/fixtures/vault_recall_set.jsonl` (20 prompts with an expected note id) scores at least 16.
+- Session result: over 7 nights, at least 30% of injected notes are used (read or cited) in the session that received them.
+- Save: over 7 nights, at least 80% of auto-published or auto-merged notes are still unarchived after the owner's weekly look.
+- Cost: median injected context per session is at most 2,400 bytes including SessionStart; a nightly run sends at most 12,000 bytes per session to Jev and runs at most 20 extractions.
 
-## Token budget (hard limits, all enforced in code and tested)
+## Quality attributes (each maps to requirements below)
+
+| Attribute | How it is met |
+|---|---|
+| Token efficiency | Hard byte limits in the budget table; pointers injected, never bodies; extractor runs only on a confident yes |
+| Speed | Query reads one index file; engine p95 at most 50 ms at 2,000 notes; hook p95 at most 150 ms, hard timeout 2 s (R2, R3) |
+| Session result | Injection log plus a no-LLM used check; unused notes are demoted (R14, R15) |
+| Reusability | Fixed note shape, project or global scope, merge into an existing note before creating one (R9, R10b) |
+| Scale | Index scoring, inbox rotation, transcript offsets, nightly cap (R2, R6, R7) |
+| Robustness | Every stage fails open to "parked in inbox"; file locks; idempotent publish; crash resume (all `f` rows) |
+| Production grade | Tests in CI, end-to-end case, kill switches, non-zero exit on degraded runs, doctor check (R16, R17) |
+| Visibility | Matched terms on each injected line; nightly report note; `--report` (R3, R12) |
+| Readiness | `ps-skills-doctor` vault section; shadow mode that ends by itself when calibration passes (R17, R18) |
+
+## Token budget (hard limits, enforced in code and tested)
 
 | Where | Limit |
 |---|---|
 | SessionStart `<vault-context>` block | 800 bytes |
-| Per-prompt injection | 3 notes, 1,200 bytes, and nothing at all below the score threshold |
-| Per-session total injection | 6 distinct notes, 2,400 bytes; a note is injected once per session |
-| Injected form | id, title, one-line summary, path. Never the note body; the agent reads the note if it needs it |
+| Per-prompt injection | 3 notes, 1,200 bytes, nothing below the score threshold |
+| Per-session total, including the SessionStart block | 6 distinct notes, 2,400 bytes; a note is injected once per session |
+| Injected form | id, title, path, matched terms, and a summary of at most 120 bytes. Never more of the body |
 | Session digest sent to Jev | 12,000 bytes (first 2,000 + last 10,000), tool output stripped |
 | Extractor input | the same digest, never the raw transcript |
-| Extractor runs | only on a confident yes; at most 20 per night (`VAULT_DISTILL_MAX`) |
+| Extractor runs | only on a confident yes, plus at most 3 unsure; at most 20 per night (`VAULT_DISTILL_MAX`) |
 | Draft note size | 1,500 bytes |
 | Review | one Argon-low call for the whole night's drafts |
 
@@ -57,73 +72,107 @@ The owner, working through Claude Code sessions across many repos. They want a s
 
 ### Slice 1: retrieve (no LLM calls)
 
-- R1. When `vault-engine context --cwd <dir>` runs, the engine shall print a `<vault-context>` block of at most 800 bytes listing knowledge notes whose `project_ids` or tags match the repo name of `<dir>`, newest first.
+- R0. When `vault-engine rebuild-index` or `publish-knowledge` runs, the engine shall write for each knowledge note, into `_meta/indexes/knowledge.jsonl`: `tags`, `project_ids`, `summary` (the first non-heading body line, cut to 120 bytes) and `terms` (distinct lower-case body terms of 4 or more characters, at most 200).
+- R1. When `vault-engine context --cwd <dir>` runs, the engine shall resolve `<dir>` to its main repo root (`git rev-parse --git-common-dir`, parent directory; `basename` of `<dir>` outside git), collect the ids of project notes whose `release_repo` equals that path, and print a `<vault-context>` block of at most 800 bytes listing knowledge notes whose `project_ids` contain one of those ids or whose tags contain `repo:<root basename>`, newest `updated` first.
 - R1f. If no note matches or the vault is missing, then the engine shall print nothing and exit 0.
-- R2. When `vault-engine context --query <text>` runs, the engine shall score each note in `04_Knowledge/` by the number of distinct query terms (lower-case, at least 4 characters, stop words removed) found in the title (weight 3), tags (weight 2) and body (weight 1), and print the top 3 notes with a score of at least 4.
-- R2f. If no note reaches the threshold, then the engine shall print nothing and exit 0.
-- R3. When the user submits a prompt, the `vault-recall.py` UserPromptSubmit hook shall pass the prompt to `context --query` and emit the result as additional context.
+- R2. When `vault-engine context --query <text>` runs, the engine shall tokenise the query (split on non-alphanumerics, lower-case, keep terms of 4 or more characters, drop the stop-word list in `pkg/vault/stopwords.go`), and give each note a score equal to the sum, over each distinct query term, of the highest weight among the fields containing it (title 3, any tag 2, body terms 1). It shall print up to 5 notes with a score of at least 4, highest first, ties broken by newest `updated`, each with its matched terms, reading only the index file.
+- R2f. If no note reaches the threshold or the index is missing, then the engine shall print nothing and exit 0.
+- R2p. While the index holds 2,000 notes, `context --query` shall complete in at most 50 ms at p95 (Go benchmark).
+- R3. When the user submits a prompt, the `vault-recall.py` UserPromptSubmit hook shall pass the prompt to `context --query`, drop demoted and already-injected ids, and emit the first 3 remaining notes (at most 1,200 bytes) as additional context.
 - R3f. If the engine is missing, errors, or takes longer than 2 seconds, then the hook shall emit nothing and exit 0.
-- R4. While a session is running, the hook shall not inject a note id it has already injected in that session, and shall stop injecting after 6 notes or 2,400 bytes.
-- R5. Where the prompt is shorter than 12 characters, starts with `/`, or `VAULT_CONTEXT_BOOTSTRAP=0` is set (worker and subagent sessions), the hook shall do nothing.
+- R4. While a session is running, the hook shall keep `~/.claude/state/vault-recall/<session_id>.json` (`{"ids": [...], "bytes": N}`), updated under `fcntl.flock`. On its first run in a session it shall seed the file with the ids and bytes of `context --cwd <cwd>`. It shall not inject a recorded id and shall stop at 6 notes or 2,400 bytes. State files older than 7 days are deleted on each run.
+- R5. Where the prompt is shorter than 12 characters, starts with `/`, or any of `VAULT_RECALL=0`, `VAULT_CONTEXT_BOOTSTRAP=0`, `CLAUDE_VAULT_SUMMARY=0` is set, the hook shall do nothing. (`CLAUDE_VAULT_SUMMARY=0` is already set in dispatch worker sessions, per `~/.claude/logs/vault-session-summary.log`.)
 
-### Slice 2: save (nightly batch)
+### Slice 2: save in shadow mode (nightly batch)
 
-- R6. When `vault-distill` runs, it shall rename `_inbox/agent/session-summaries.md` to a dated work file (an atomic rename, so the Stop hook's next append starts a fresh file), keep one entry per session id, and skip sessions already recorded in its seen-file. Sessions active in the last 30 minutes are written back to the live file for the next run.
-- R7. When a session is selected, `vault-distill` shall build a digest of at most 12,000 bytes from the transcript: user prompts and the last assistant text of each turn, with tool output removed.
-- R7f. If the transcript file is missing or unreadable, then the session shall be marked seen with reason `no-transcript` and skipped.
-- R8. When a digest is built, `jev-gate classify-lesson` shall return the probability that it holds a durable lesson, decision or trap. At 0.85 or above the session is extracted; at 0.15 or below it is dropped; in between it is listed in `_inbox/agent/distill/unsure.md`.
-- R8f. If `TYPESAFE_API_KEY` is unset or the call fails, then the session shall be treated as unsure and no extractor shall run.
-- R9. When a session is extracted, a flash worker (`gemini-3.8-flash-high` through `dispatch-worker --agent agy`) shall write one `knowledge/v1` draft of at most 1,500 bytes to `_inbox/agent/distill/`, citing the session id, after running `context --query` on its own title; if an existing note covers the lesson it shall write a proposed addition naming that note id instead of a new note.
-- R9f. If the draft fails `vault-engine validate` or the worker fails, then the draft shall stay in the inbox marked `invalid` and shall not be published.
-- R10. When the night's drafts exist, one Argon-low review call shall return publish or reject with a reason for each, and `vault-distill` shall run `vault-engine publish-knowledge` for each publish verdict with the tag `auto-distilled`.
-- R10f. If the review call fails, then no draft shall be published and all drafts shall stay in the inbox.
-- R11. When a digest or draft matches the secret scan, it shall be written to `_inbox/private/` and shall not be sent to any model.
-- R12. When `vault-distill --report` runs, it shall print for the last run: sessions seen, dropped, unsure, extracted, published, rejected, and bytes sent per stage.
-- R13. When `vault-distill` finishes, it shall delete the dated work file, so pointer lines for seen sessions are gone and the inbox stops growing.
-- R13f. If the run crashes before finishing, then the dated work file shall remain and the next run shall process it first.
+- R6. When `vault-distill` runs, it shall rename `_inbox/agent/session-summaries.md` to a dated work file (atomic, so the Stop hook's next append starts a fresh file) and keep one entry per session id. A session whose transcript mtime is within 30 minutes of the run start is appended back to the live file and not processed.
+- R6f. If a dated work file from a crashed run exists, then the run shall process it first.
+- R7. When a session is selected, `vault-distill` shall build a digest of at most 12,000 bytes from the transcript, starting at the byte offset recorded for that session in the seen-file (0 if none): user prompts and the last assistant text of each turn, tool output removed. A session whose transcript has grown by less than 4,000 bytes since its recorded offset is skipped.
+- R7f. If the transcript is missing or unreadable, then the session shall be marked seen with reason `no-transcript`.
+- R8. When a digest is built, `jev-gate classify-lesson --digest <path>` shall print `{"lesson_prob": <0..1>, "fallback": <bool>}`. At 0.85 or above the session is extracted; at 0.15 or below it is dropped; in between it is unsure.
+- R8f. If no Jev key is found (env `TYPESAFE_API_KEY` or the `~/.zshrc` fallback in `_load_api_key`) or the call fails, then the session shall be treated as unsure and no extractor shall run for it that night.
+- R8u. Unsure sessions shall be offered to Jev once more on the next run. If still unsure, the top 3 by probability (`VAULT_DISTILL_UNSURE_MAX`) go to the extractor and count toward `VAULT_DISTILL_MAX`; the rest are marked seen with reason `unsure`.
+- R9. When a session is extracted, a flash worker (`gemini-3.8-flash-high` through `dispatch-worker --agent agy`) shall first run `context --query` on the lesson's title, then write one `knowledge/v1` draft of at most 1,500 bytes to `_inbox/agent/distill/`. The body shall be a one-sentence summary line followed by the sections `When this applies`, `Rule`, `Why`, `Source` (session id). Frontmatter shall carry the tag `auto-distilled` and either `project_ids` for the session's repo or, when the repo has no project note, the tag `repo:<name>`; a lesson that applies everywhere carries the tag `global`. If an existing note covers the lesson, the draft shall instead be a proposed addition naming that note id.
+- R9f. If the draft fails `vault-engine validate` or the worker fails, then the draft shall stay in the inbox marked `invalid`.
+- R10. When the night's drafts exist, one Argon-low review call shall return publish or reject with a reason for each.
+- R10f. If the review call fails, then nothing shall be published or merged and all drafts shall stay in the inbox.
+- R11. When a digest or draft matches `vault-distill`'s own copy of the credential patterns from `bin/ps-skills-sync` `SECRET_RE` (every pattern except `/Users/[a-z]+/`), it shall be written to `_inbox/private/` and not sent to any model.
+- R11a. Where a session's repo is not listed in `VAULT_DISTILL_ALLOW_REPOS`, `vault-distill` shall mark it seen with reason `not-allowed` and send nothing.
+- R12. When `vault-distill` finishes, it shall write `_inbox/agent/distill/report-<date>.md` and make the same numbers available through `vault-distill --report`: sessions seen, not-allowed, dropped, unsure, extracted, published, merged, rejected, collisions, bytes sent per stage, and used-rate per note.
+- R13. `vault-distill` shall append a session id, its transcript offset and its final state to the seen-file immediately after that session reaches a final state, before the next session starts, and shall delete the dated work file when the run finishes.
+- R16. When more than 50% of the night's sessions are unsure, or any stage fails for every session, `vault-distill` shall exit non-zero. Where `VAULT_DISTILL=0` is set it shall do nothing.
+
+### Slice 3: auto integrate and publish, and the result loop
+
+- R10a. When a new-note draft has a publish verdict and publishing is enabled, `vault-distill` shall run `vault-engine publish-knowledge <draft> <category> agent-distiller`.
+- R10af. If a note with the same path or the same `id` already exists, then `publish-knowledge` shall refuse with a non-zero exit (engine change) and the draft shall stay in the inbox marked `collision`.
+- R10b. When a proposed-addition draft has a publish verdict and publishing is enabled, `vault-distill` shall read the target with `read-record`, then run `vault-engine commit <id> <sha> agent-distiller '{}' --append-body <file>` (engine change: appends the file as a dated section under the same flock and SHA check).
+- R10bf. If the commit returns `OCC_CONFLICT`, then `vault-distill` shall re-read and retry once, and on a second conflict leave the draft in the inbox marked `conflict`.
+- R18. While `~/.claude/state/vault-distill/calibrated` does not exist, publishing is disabled (shadow mode: drafts and verdicts are produced and reported, nothing is published or merged). `vault-distill --calibrate` scores `tests/fixtures/vault_distill/calibration.jsonl` (30 labelled sessions) and writes the marker only if at most 3 sessions labelled lesson score 0.15 or below. Where `VAULT_DISTILL_PUBLISH=0` is set, publishing stays disabled.
+- R14. When the hook injects a note, it shall append `{ts, session_id, note_id}` to `~/.claude/state/vault-recall/injections.jsonl`.
+- R15. When `vault-distill` processes a session, it shall mark each injected note used if the transcript after the injection contains the note's path or id, and write per-note counts to `~/.claude/state/vault-recall/usage.json`. A note with at least 10 injections and 0 uses is demoted, and the hook drops demoted ids.
+- R17. When `ps-skills-doctor` runs, its vault section shall check and report: the UserPromptSubmit hook is registered, `vault-engine context --query` on a known note title returns output, the index is newer than every note, a Jev key is found, the cron line exists, the last `vault-distill` run is under 36 hours old, and whether publishing is enabled.
 
 ## Acceptance criteria
 
-- [ ] Given the current vault, when `vault-engine context --query "codegen drift gate fails in CI"` runs, then the output names `CONCEPT-codegen-drift-gate` and is at most 1,200 bytes.
-- [ ] Given the current vault, when `vault-engine context --query "zzzz qqqq"` runs, then stdout is empty and the exit code is 0.
-- [ ] Given a new Claude Code session in `ps-skills`, when the SessionStart hook runs, then `vault-bootstrap.py` prints a `<vault-context>` block of at most 800 bytes, or nothing if no note is tied to the repo.
-- [ ] Given a hook payload whose prompt matches a note, when `vault-recall.py` runs twice with the same session id, then the first run emits the note and the second emits nothing.
-- [ ] Given `vault-engine` removed from PATH, when `vault-recall.py` runs, then it exits 0 with empty stdout in under 2 seconds.
-- [ ] Given an inbox with 40 pointer lines for 3 session ids, when `vault-distill --dry-run` runs with stubbed Jev answers 0.95, 0.05 and 0.5, then it reports extracted 1, dropped 1, unsure 1 and sends 3 digests of at most 12,000 bytes each.
-- [ ] Given `TYPESAFE_API_KEY` unset, when `vault-distill` runs, then every session is reported unsure and no worker is dispatched.
-- [ ] Given a draft containing a string that matches the secret scan, when `vault-distill` runs, then the draft is in `_inbox/private/` and the report shows 0 bytes sent for it.
-- [ ] Given a review verdict of reject for a draft, when `vault-distill` finishes, then `04_Knowledge/` is unchanged and the draft is still in the inbox with the reason.
-- [ ] Given 30 past sessions labelled lesson / no lesson, when `jev-gate classify-lesson` scores them, then at most 3 sessions labelled lesson score 0.15 or below.
+- [ ] Given a temp vault with note A (title "codex quota") and note B (body only "codex quota handoff"), when `context --query "codex quota handoff"` runs, then A (score 6) is printed with its matched terms and B (score 3) is not.
+- [ ] Given the current vault, when `context --query "zzzz qqqq"` runs, then stdout is empty and the exit code is 0.
+- [ ] Given cwd `~/workspace/repos/atlas-world-svc/.claude/worktrees/F-001-x`, when `context --cwd` runs, then the output is at most 800 bytes and lists a note with `PROJ-atlas-world` in `project_ids`.
+- [ ] Given a note with no summary field whose first body line is 300 bytes, when it is injected, then its summary is exactly 120 bytes.
+- [ ] Given a 2,000-note index, when the Go benchmark runs, then `context --query` p95 is at most 50 ms.
+- [ ] Given a stub engine returning 3 notes of 900 bytes each, when `vault-recall.py` runs for 3 prompts in one session, then total emitted bytes are at most 2,400, the state file lists at most 6 ids, and no id is emitted twice.
+- [ ] Given `vault-engine` removed from PATH, or `CLAUDE_VAULT_SUMMARY=0` set, when `vault-recall.py` runs, then it exits 0 with empty stdout in under 2 seconds.
+- [ ] Given an inbox with 40 pointer lines for 3 session ids and Jev stubbed to 0.95, 0.05 and 0.5, when `vault-distill --dry-run` runs, then it reports extracted 1, dropped 1, unsure 1 and sends 3 digests of at most 12,000 bytes each.
+- [ ] Given a transcript touched 5 minutes before the run, when `vault-distill --dry-run` runs, then that session is not in the seen-file and its line is in the live inbox.
+- [ ] Given `TYPESAFE_API_KEY` unset and `HOME` pointed at a temp dir with no `.zshrc`, when `vault-distill` runs, then every session is reported unsure, no worker is dispatched, and the exit code is non-zero.
+- [ ] Given a digest that contains `/Users/x/repo` and no credential, when `vault-distill --dry-run` runs, then it is sent; given a digest containing `ghp_` plus 20 characters, then it is in `_inbox/private/` with 0 bytes sent.
+- [ ] Given a session in a repo not listed in `VAULT_DISTILL_ALLOW_REPOS`, when `vault-distill` runs, then the report shows it as not-allowed with 0 bytes sent.
+- [ ] Given no calibration marker, when `vault-distill` runs with a publish verdict, then `04_Knowledge/` is unchanged and the report shows the draft as "would publish".
+- [ ] Given a publish verdict for a draft whose basename matches an existing note, when `vault-distill` finishes, then the existing note's sha256 is unchanged and the draft is marked `collision`.
+- [ ] Given a proposed addition with a publish verdict, when `vault-distill` finishes, then the target note's body ends with the dated section, its earlier text is byte-identical, and `_meta/events/` holds one commit event by `agent-distiller`.
+- [ ] Given a run killed after publishing session S1, when `vault-distill` runs again, then `04_Knowledge/` holds exactly one note citing S1.
+- [ ] Given a transcript that contains an injected note's path after the injection, when `vault-distill` runs, then `usage.json` counts one use for that note; given a note with 10 injections and 0 uses, then the hook does not emit it.
+- [ ] Given the hook unregistered, when `ps-skills-doctor` runs, then the vault section reports that check as failed and exits non-zero.
 
 ## End-to-end verification
 
-`bash tools/vault-engine/test_e2e.sh` extended with one case: seed a temp vault with two notes and a fake transcript, run `vault-distill` with stubbed Jev, extractor and reviewer, then assert `context --query` returns the newly published note and `_meta/events/` holds one publish event by `agent-distiller`.
+`bash tools/vault-engine/test_e2e.sh`, extended with one case: seed a temp vault with two notes and a fake transcript, write the calibration marker, run `vault-distill` with stubbed Jev, extractor and reviewer, then pipe `{"session_id":"e2e","prompt":"<the published note's title>"}` into `skills/agentic-vault/hooks/vault-recall.py` with `VAULT_ROOT` at the temp vault, and assert the hook's `additionalContext` contains the published note id and `_meta/events/` holds one publish event by `agent-distiller`.
 
 ## Interfaces & files
 
-- `tools/vault-engine/cmd/vault-engine/main.go`, `pkg/vault/`: new `context` command and scoring, with Go tests.
-- `skills/agentic-vault/hooks/vault-recall.py`: new UserPromptSubmit hook. `install.sh` links it; registering it in `~/.claude/settings.json` is one manual entry.
-- `bin/jev-gate`: new `classify-lesson` subcommand, same shape as `triage-spec`.
-- `bin/vault-distill`: new stdlib Python CLI. `install.sh` adds it to the bin list.
+- Before claim, run `psrw sync-main`: `bin/jev-gate` and `tests/test_jev_gate.py` exist on `main` but not yet on `release/1.12`.
+- `tools/vault-engine/`: `context` command, index fields, `stopwords.go`, existence check in `publish-knowledge`, `--append-body` on `commit`, `recall_eval.sh`, Go tests and benchmark.
+- `skills/agentic-vault/hooks/vault-recall.py`: UserPromptSubmit hook. `install.sh` links it; registering it in `~/.claude/settings.json` is one manual entry that the doctor check verifies.
+- `bin/jev-gate`: `classify-lesson`, same `_load_api_key` / `system_one` / fail-open structure as `cmd_triage_spec`.
+- `bin/vault-distill`: stdlib Python CLI; `install.sh` adds it to the bin list. Stub seams: `VAULT_DISTILL_JEV_CMD`, `VAULT_DISTILL_EXTRACT_CMD`, `VAULT_DISTILL_REVIEW_CMD`; each gets input on stdin and returns JSON on stdout (Jev `{"lesson_prob": float}`, extractor `{"path": str}`, reviewer `[{"draft": str, "verdict": "publish|reject", "reason": str}]`). Tests point them at scripts in `tests/fixtures/vault_distill/`.
+- `bin/ps-skills-doctor`: vault section.
 - Cron: one new line for `vault-distill` at 23:40.
-- `tests/test_vault_recall.py`, `tests/test_vault_distill.py`, `tests/test_jev_gate.py` additions.
-- `README.md` and `skills/agentic-vault/SKILL.md`: document the two commands, the hook, and the env vars `VAULT_DISTILL_MAX`, `VAULT_DISTILL_SKIP_REPOS`.
+- `tests/test_vault_recall.py`, `tests/test_vault_distill.py`, additions to `tests/test_jev_gate.py`, `tests/fixtures/vault_recall_set.jsonl`.
+- `README.md` and `skills/agentic-vault/SKILL.md`: the commands, the hook, and the env vars `VAULT_RECALL`, `VAULT_DISTILL`, `VAULT_DISTILL_PUBLISH`, `VAULT_DISTILL_MAX`, `VAULT_DISTILL_UNSURE_MAX`, `VAULT_DISTILL_ALLOW_REPOS`.
 
 ## Alternatives considered
 
-- **Do nothing.** Retrieval stays silently dead and the inbox grows 2 MB of unread pointers.
-- **Enable the installed `claude-mem` plugin.** Works without new code, but adds a second store outside the vault with no OCC commits, no schema and no review before a lesson becomes durable.
-- **Embeddings.** Better recall than keywords, but needs a model call per prompt or a local index. Not justified for 27 notes; revisit above about 2,000 notes or if the 20-prompt recall set drops below 16.
+- **Do nothing.** Retrieval stays silently dead and the inbox keeps growing unread.
+- **Enable the installed `claude-mem` plugin.** No new code, but a second store outside the vault with no OCC commits, no schema and no review before a lesson becomes durable.
+- **Embeddings.** Better recall, but a model call per prompt or a local index. Revisit above about 2,000 notes or if the recall set drops below 16 of 20.
 - **Extract in the Stop hook.** Stop fires every turn, so one session would be gated many times. A nightly batch sees each session once.
+- **Collision and append handled in `vault-distill` only.** Leaves `publish-knowledge` able to overwrite a note for every other caller; the fix belongs in the engine.
 
 ## Assumptions
 
-- ASSUMED: slice 1 (retrieve) ships before slice 2 (save) — reversible: Y
+- ASSUMED: three slices in order: retrieve, save in shadow mode, auto publish and result loop — reversible: Y
 - ASSUMED: keyword scoring with threshold 4 and no embeddings — reversible: Y
 - ASSUMED: new hook and CLIs live in `ps-skills`; `agent-harness` scripts are not edited — reversible: Y
-- ASSUMED: the old 23:55 nightly script is left running; its stale vault path is filed as a separate backlog line — reversible: Y
-- ASSUMED: seen-sessions state is a plain file at `~/.claude/state/vault-distill-seen.txt` — reversible: Y
-- ASSUMED: the secret scan reused is the one `ps-skills-sync --push` runs; confirm its entry point when planning — reversible: Y
-- ASSUMED: the 30-session calibration set is labelled by Argon-low and the owner spot-checks 10 — reversible: Y
-- ASSUMED: notes are published automatically after the Argon review, tagged `auto-distilled`, and undone by moving to `_archive/` — reversible: Y
-- ASSUMED: session digests from every repo may be sent to TypeSafe (Jev) and Gemini after the secret scan, except repos named in `VAULT_DISTILL_SKIP_REPOS` — reversible: N (sent data cannot be recalled)
+- ASSUMED: the old 23:55 nightly script is left running; its stale vault path is a separate backlog line — reversible: Y
+- ASSUMED: the SessionStart block counts toward the 2,400-byte session cap (tech lens; the QA lens proposed not counting it) — reversible: Y — raised by tech+qa
+- ASSUMED: the calibration set is labelled by Argon-low and the owner spot-checks 10 — reversible: Y
+- ASSUMED: integration appends a dated section and never rewrites existing text — reversible: Y
+- ASSUMED: auto-published and auto-merged changes are undone by archiving the note or reverting the commit event — reversible: Y
+- ASSUMED: session digests go to TypeSafe (Jev) and Gemini only for repos in `VAULT_DISTILL_ALLOW_REPOS` (opt-in), after the credential scan — reversible: N (sent data cannot be recalled) — raised by product
+
+## Appendix — spec review
+
+- 2026-11-11 spec-review: lenses tech, qa, product (no UI terms, UX lens skipped). Findings 21 raw → 15 merged (6 dropped: bad citation 0, dup 6, low-conf 0).
+  Applied: scoring rule made unambiguous (qa); `publish-knowledge` collision check and author argument (tech); summary source defined (qa+product+tech); repo resolved through `release_repo` and worktree root, plus `repo:<name>` tag (qa+product+tech); per-session state file and cap (qa+tech); stub seams named (qa); seen-file written per session, with transcript offsets (qa+product); "active" defined by transcript mtime (qa); end-to-end runs through the hook, recall set and script named (qa); unsure sessions resolved automatically (product); own credential patterns without the home-path rule (tech); `sync-main` before claim and `classify-lesson` output shape (tech); worker opt-out through an env var already set (tech); `.zshrc` key fallback in R8f and its test (tech).
+  Answered from disk: 0. Asked at gate: 1 (which repos may send digests to external models). Assumed: 1 (session cap counting).
+- 2026-11-11 owner additions after the review started: quality attributes table (speed, session result, reusability, scale, robustness, production grade, visibility, readiness) and automatic integrate and publish on pass (R10a, R10b, R18). These were not seen by the lenses.
