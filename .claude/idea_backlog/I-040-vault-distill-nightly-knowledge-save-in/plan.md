@@ -2332,7 +2332,7 @@ cp "$V/.gitignore" "$V/.gitignore.bak-vault-distill-$(date +%Y%m%d)"
 grep -qxF '_inbox/private/' "$V/.gitignore" || echo '_inbox/private/' >> "$V/.gitignore"
 ```
 
-- [ ] **G2: Link the CLI** to the `_release` worktree, which outlives the feature worktree (`psrw ship` may remove that one): `ln -sfn /Users/$USER/ps-skills/.claude/worktrees/_release/bin/vault-distill ~/.local/bin/vault-distill`, after checking that the target exists. `vault-distill` calls the `jev-gate` next to its resolved path, which is the release copy with the new subcommands. After promotion, run `./install.sh` from the main checkout so the link points at `main`.
+- [ ] **G2: Link the CLI** to the `_release` worktree, which outlives the feature worktree (`psrw ship` may remove that one): `ln -sfn ~/ps-skills/.claude/worktrees/_release/bin/vault-distill ~/.local/bin/vault-distill`, after checking that the target exists. `vault-distill` calls the `jev-gate` next to its resolved path, which is the release copy with the new subcommands. After promotion, run `./install.sh` from the main checkout so the link points at `main`.
 
 - [ ] **G3: Real Jev smoke on a small copy (first external send).** Build a temp vault holding the real indexes and the last 20 inbox lines, then do a dry run with real Jev:
 
