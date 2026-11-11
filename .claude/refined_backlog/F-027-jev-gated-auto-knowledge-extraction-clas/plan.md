@@ -1360,3 +1360,12 @@ Then remove the live-check state: `rm -f ~/.claude/state/vault-recall/live-check
   - LOW: `rm -f bin/vault-engine` before the e2e; oversized notes are skipped instead of ending the loop; corrupt state resets; doctor tests clear `VAULT_ROOT`.
   - Not applied (backlog): notes injected before a `/compact` are not re-injected afterwards; the seed uses the payload `cwd` while `vault-bootstrap.py` uses `CLAUDE_PROJECT_DIR`; no test for the 150 ms hook latency.
   - Not verified by the audit: the new `test_e2e.sh` case (its run hung in the existing `pkg/vaultsync` step).
+- 2026-11-11 final whole-branch review (code-reviewer, Opus): fix first, 1 Important and 6 Minor. One fix round (`18de4e8`..`07a417b`), one scoped re-review: SHIP.
+  - Ruling: `context --limit` applies to both modes; default 5 for `--query`, 3 for `--cwd`, so SessionStart leaves half of the 6-note session budget for per-prompt recall. The spec does not set this split.
+  - Parked (Minor, backlog):
+    - the doctor crashes on a nested wrong type in settings.json (`{"hooks": []}`);
+    - the doctor's known-title probe ignores the engine's stop words and can warn falsely;
+    - a 0-byte `knowledge.jsonl` beside existing notes now passes `--strict` silently;
+    - the session byte count leaves out the 33-byte wrapper per block (worst case 2,598 bytes against 2,400);
+    - `FormatContext` does not clean the id and matched fields;
+    - the first prompt of a session makes two engine calls (worst case about 4 s against the 5 s hook timeout).
