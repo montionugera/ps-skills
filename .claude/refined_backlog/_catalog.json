@@ -356,8 +356,9 @@
     "title": "vault-distill nightly knowledge save in shadow mode (I-039 slice 2)",
     "from_idea": "I-040",
     "created_at": "2026-11-11T05:00:43.289140+00:00",
-    "claimed_by": null,
-    "status": "open",
-    "release_version": null
+    "claimed_by": "claude-a6c35399",
+    "status": "claimed",
+    "release_version": null,
+    "claimed_at": "2026-11-11T05:00:51.405947+00:00"
   }
 ]
