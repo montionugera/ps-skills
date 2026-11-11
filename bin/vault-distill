@@ -96,6 +96,18 @@ def atomic_write(path, text):
     os.replace(tmp, path)
 
 
+def free_path(path):
+    p = Path(path)
+    if not p.exists():
+        return p
+    i = 2
+    while True:
+        candidate = p.with_name(f"{p.stem}-{i}{p.suffix}")
+        if not candidate.exists():
+            return candidate
+        i += 1
+
+
 class Run:
     def __init__(self, dry_run=False):
         self.dry = dry_run
@@ -563,9 +575,7 @@ def keyword_score(query, text):
 def become_candidate(run, key, entry):
     """R19: a candidate goes to review on recurrence in another session or on high_stakes >= 0.85."""
     src = run.distill / key
-    dest = run.distill / "candidates" / src.name
-    if dest.exists():
-        dest = dest.with_name(f"{dest.stem}-{entry['sid'][:8]}.md")
+    dest = free_path(run.distill / "candidates" / src.name)
     dest.parent.mkdir(parents=True, exist_ok=True)
     os.replace(src, dest)
     new_key = str(dest.relative_to(run.distill))
@@ -597,7 +607,7 @@ def merge(run, keep_key, new_key):
     with open(run.distill / keep_key, "a") as handle:
         handle.write("\n## Also seen in\n" + "".join(f"- session `{s}`\n" for s in new["sessions"]))
     src = run.distill / new_key
-    dest = run.distill / "merged" / src.name
+    dest = free_path(run.distill / "merged" / src.name)
     dest.parent.mkdir(parents=True, exist_ok=True)
     os.replace(src, dest)
     run.ledger.pop(new_key)
@@ -610,7 +620,7 @@ def expire_candidates(run):
     cutoff = time.time() - CANDIDATE_DAYS * 86400
     for key, entry in list(run.ledger.items()):
         if entry["state"] == "candidate" and entry["created"] < cutoff and (run.distill / key).exists():
-            dest = run.distill / "expired" / Path(key).name
+            dest = free_path(run.distill / "expired" / Path(key).name)
             dest.parent.mkdir(parents=True, exist_ok=True)
             os.replace(run.distill / key, dest)
             run.ledger.pop(key)
@@ -758,7 +768,7 @@ def extract_default():
         print(json.dumps({"path": None, "reason": "no-lesson"}))
         return 0
     slug, text = render_draft(answer, request)
-    path = Path(request["out_dir"]) / f"{slug}--{request['session_id'][:8]}.md"
+    path = free_path(Path(request["out_dir"]) / f"{slug}--{request['session_id'][:8]}.md")
     atomic_write(path, text)
     print(json.dumps({"path": str(path)}))
     return 0

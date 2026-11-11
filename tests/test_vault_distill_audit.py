@@ -7,7 +7,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from tests.test_vault_distill import DistillCase, load_distill
+from tests.test_vault_distill import DISTILL, DistillCase, load_distill
 
 
 class TestVaultDistillAudit(DistillCase):
@@ -155,6 +155,47 @@ class TestVaultDistillAudit(DistillCase):
 
         report = next((self.vault / "_inbox" / "agent" / "distill").glob("report-*.md")).read_text()
         self.assertEqual(self.count(report, "errors"), 1)
+
+    def test_f3_extracting_twice_keeps_both_files(self):
+        answer = {"lesson": True, "title": "Same Title Lesson", "summary": "Summary",
+                  "when": "When", "rule": "Rule", "why": "Why", "scope": "repo",
+                  "evidence": ["test prompt"]}
+        bindir = self.dir / "fakebin"
+        bindir.mkdir(exist_ok=True)
+        agy = bindir / "agy"
+        fake_agy_script = """#!/usr/bin/env python3
+import json, sys
+print("Here is the answer:")
+print(open(sys.argv[0] + ".reply").read())
+"""
+        agy.write_text(fake_agy_script)
+        (bindir / "agy.reply").write_text(json.dumps(answer))
+        agy.chmod(0o755)
+
+        digest = self.dir / "digest.txt"
+        digest.write_text("signals: corrections=0\nuser: test prompt\n")
+        req = json.dumps({"session_id": "sess-1234abcd", "digest_path": str(digest),
+                          "out_dir": str(self.dir / "out"), "project_ids": [], "tags": ["repo:demo-repo"],
+                          "related": ""})
+
+        curr_path = os.environ.get("PATH", "")
+        env = {**self.env(), "PATH": f"{bindir}{os.pathsep}{curr_path}"}
+        res1 = subprocess.run([sys.executable, str(DISTILL), "--extract-default"],
+                              input=req, capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(res1.returncode, 0, f"res1 failed: err={res1.stderr} out={res1.stdout}")
+        p1 = Path(json.loads(res1.stdout)["path"])
+
+        res2 = subprocess.run([sys.executable, str(DISTILL), "--extract-default"],
+                              input=req, capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(res2.returncode, 0, f"res2 failed: err={res2.stderr} out={res2.stdout}")
+        p2 = Path(json.loads(res2.stdout)["path"])
+
+        self.assertNotEqual(p1, p2)
+        self.assertTrue(p1.exists())
+        self.assertTrue(p2.exists())
+        self.assertTrue(str(p2).endswith("-2.md"))
+
+
 
 
 
