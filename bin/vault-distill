@@ -648,7 +648,7 @@ def review(run):
         if not isinstance(verdict, dict) or verdict.get("draft") not in ready:
             continue
         entry = run.ledger[verdict["draft"]]
-        entry["reason"] = str(verdict.get("reason", ""))[:300]
+        entry["reason"] = one_line(verdict.get("reason", ""), 300)
         if verdict.get("verdict") == "publish":
             entry["state"] = "would-publish"
             run.counts["would_publish"] += 1
