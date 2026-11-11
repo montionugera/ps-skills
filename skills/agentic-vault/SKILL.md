@@ -103,7 +103,7 @@ flowchart LR
 ```
 
 ### 1. Pre-Flight Knowledge Discovery (Before Coding)
-Retrieval is automatic in Claude Code: the SessionStart hook injects notes tied to the repo, and the `vault-recall.py` prompt hook injects up to 3 notes per prompt as a `<vault-context>` block. Each line gives the note id, path and the terms that matched. Read the note with `vault-engine read-record "<ID>"` when a line looks relevant. In harnesses without hooks, query by hand:
+Retrieval is automatic in Claude Code: the SessionStart hook injects notes tied to the repo, and the `vault-recall.py` prompt hook injects up to 2 notes per prompt as a `<vault-context>` block. Each line gives the note id, path and the terms that matched. Read the note with `vault-engine read-record "<ID>"` when a line looks relevant. In harnesses without hooks, query by hand:
 ```bash
 vault-engine context --query "<topic>"
 vault-engine read-record "<ID>"
