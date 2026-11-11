@@ -246,5 +246,11 @@
     "title": "vault-distill nightly knowledge save in shadow mode (I-039 slice 2)",
     "created_at": "2026-11-11T04:00:37.078738+00:00",
     "promoted_to": null
+  },
+  {
+    "id": "I-041",
+    "title": "vault recall precision: skip automated prompts, fix rule-only summaries, down-weight generic terms",
+    "created_at": "2026-11-11T04:08:42.194124+00:00",
+    "promoted_to": null
   }
 ]
