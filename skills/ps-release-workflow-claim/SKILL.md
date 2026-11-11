@@ -46,11 +46,13 @@ To abandon a claim instead of resuming it: `psrw unclaim F-NNN`.
 
 ## Then
 
+If the claim JSON has `needs_sync: true`, run `psrw sync` inside the new worktree before reading `plan.md`: the worktree is cut from `main`, while the feature's spec and plan live on `release/<v>`. The JSON's `plan` field is the path to read.
+
 Implement via `/subagent-driven-development` (it reads the F-NNN `plan.md`).
 
 ## Refuses if
 
-No release in progress · the feature is already claimed · `--next` with no free feature.
+No release in progress · the feature is already claimed · `--next` with no free feature · the repo already has `PSRW_MAX_WIP` (default 3) features claimed: ship or unclaim one first (`--resume` and `--reopen` are exempt).
 
 Mechanics: `~/.claude/ps-release-workflow/docs/lifecycle.md#d11-backlog-routing`
 Flags: `psrw claim --help`

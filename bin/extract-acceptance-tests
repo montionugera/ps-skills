@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""extract-acceptance-tests: Extract and lock acceptance tests from plan tasks."""
+from __future__ import annotations
+
+import argparse, ast, hashlib, json, os, re, subprocess, sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+
+@dataclass
+class TestBlock:
+    path: str
+    lang: Optional[str]
+    content: str
+
+@dataclass
+class TestMeta:
+    name: str
+    cls_name: Optional[str]
+    assertions: int
+    has_skip: bool = False
+
+
+def extract_task_lines(plan_path: Path, task_n: str) -> List[str]:
+    """Extract lines corresponding to Task TASK_N from PLAN_FILE."""
+    if not plan_path.is_file():
+        sys.stderr.write(f"Error: plan file not found: {plan_path}\n")
+        sys.exit(2)
+    lines = plan_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    task_n_str = str(task_n).strip()
+    heading_re = re.compile(r"^#+[ \t]+Task[ \t]+([0-9]+)(?:[^0-9]|$)", re.I)
+    match_re = re.compile(r"^#+[ \t]+Task[ \t]+" + re.escape(task_n_str) + r"(?:[^0-9]|$)", re.I)
+    in_fence, in_task, task_level, task_lines = False, False, 0, []
+    for line in lines:
+        s = line.strip()
+        if s.startswith(("```", "~~~")):
+            in_fence = not in_fence
+        if not in_fence and s.startswith("#"):
+            if in_task and (heading_re.match(s) or (len(s) - len(s.lstrip("#"))) <= task_level):
+                break
+            if match_re.match(s):
+                in_task, task_level = True, len(s) - len(s.lstrip("#"))
+                task_lines.append(line)
+                continue
+        if in_task:
+            task_lines.append(line)
+    if not in_task or not task_lines:
+        sys.stderr.write(f"Error: task {task_n_str} not found in {plan_path}\n")
+        sys.exit(3)
+    return task_lines
+
+
+def parse_task_content(task_lines: List[str]) -> Tuple[List[TestBlock], Optional[str]]:
+    """Parse tagged test code blocks and Verify-Cmd from task lines."""
+    test_blocks, verify_cmd = [], None
+    verify_re = re.compile(r"^[ \t]*(?:[-*]\s*)?(?:\*\*)?Verify-Cmd:(?:\*\*)?[ \t]*`?([^`\r\n]+)`?[ \t]*$", re.I)
+    fence_re = re.compile(r"^[ \t]*(`{3,}|~{3,})\s*(?:([a-zA-Z0-9_-]+)\s+)?test:([^\s`]+)")
+    in_fence, fence_char, fence_len, cur_lang, cur_path, cur_lines = False, "", 0, None, None, []
+    for line in task_lines:
+        if not in_fence:
+            vm, fm = verify_re.match(line), fence_re.match(line)
+            if vm:
+                verify_cmd = vm.group(1).strip()
+            if fm:
+                in_fence = True
+                fstr = fm.group(1)
+                fence_char, fence_len = fstr[0], len(fstr)
+                cur_lang, cur_path, cur_lines = fm.group(2), fm.group(3).strip(), []
+        else:
+            s = line.strip()
+            if s.startswith(fence_char * fence_len) and not s.rstrip(fence_char):
+                in_fence = False
+                if cur_path:
+                    test_blocks.append(TestBlock(path=cur_path, lang=cur_lang, content="".join(cur_lines)))
+                cur_lang, cur_path, cur_lines = None, None, []
+            else:
+                cur_lines.append(line)
+    return test_blocks, verify_cmd
+
+
+def validate_and_resolve_target(rel_path_str: str, worktree: Path) -> Path:
+    """Ensure path is relative, does not escape worktree, and returns absolute Path."""
+    p = Path(rel_path_str)
+    if p.is_absolute():
+        sys.stderr.write(f"Error: refusing absolute path in test block: {rel_path_str}\n")
+        sys.exit(1)
+    wt, target = worktree.resolve(), (worktree.resolve() / p).resolve()
+    try:
+        rel = target.relative_to(wt)
+    except ValueError:
+        sys.stderr.write(f"Error: refusing path escaping worktree: {rel_path_str}\n")
+        sys.exit(1)
+    if rel == Path(".") or target == wt:
+        sys.stderr.write(f"Error: refusing path resolving to worktree root: {rel_path_str}\n")
+        sys.exit(1)
+    return target
+
+
+def _is_skip(d: ast.AST) -> bool:
+    try:
+        return "skip" in ast.unparse(d).lower()
+    except Exception:
+        return False
+
+
+def _iter_len(node: ast.AST, local_vars: Dict[str, int]) -> int:
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return len(node.elts)
+    if isinstance(node, ast.Dict):
+        return len(node.keys)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+        return len(node.value)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "range":
+        args = node.args
+        if len(args) == 1 and isinstance(args[0], ast.Constant) and isinstance(args[0].value, int):
+            return max(0, args[0].value)
+        if len(args) >= 2 and isinstance(args[0], ast.Constant) and isinstance(args[1], ast.Constant):
+            s, e = args[0].value, args[1].value
+            step = args[2].value if len(args) >= 3 and isinstance(args[2], ast.Constant) else 1
+            if isinstance(s, int) and isinstance(e, int) and isinstance(step, int) and step != 0:
+                return max(0, (e - s + (step - (1 if step > 0 else -1))) // step)
+    return local_vars.get(node.id, 1) if isinstance(node, ast.Name) else 1
+
+
+def _returns_unconditionally(stmts: List[ast.stmt]) -> bool:
+    return any(isinstance(s, ast.Return) or (isinstance(s, ast.If) and _returns_unconditionally(s.body) and _returns_unconditionally(s.orelse)) for s in stmts)
+
+
+def _process_stmts(stmts: List[ast.stmt], multiplier: int = 1) -> Tuple[int, bool]:
+    assertions, has_skip, local_vars = 0, False, {}
+    for stmt in stmts:
+        if isinstance(stmt, ast.Return):
+            break
+        if isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                if isinstance(t, ast.Name):
+                    ln = _iter_len(stmt.value, local_vars)
+                    if ln > 0:
+                        local_vars[t.id] = ln
+        if isinstance(stmt, ast.For):
+            loop_mult = _iter_len(stmt.iter, local_vars)
+            a, s = _process_stmts(stmt.body, multiplier * loop_mult)
+            assertions, has_skip = assertions + a, has_skip or s
+            if stmt.orelse:
+                a, s = _process_stmts(stmt.orelse, multiplier)
+                assertions, has_skip = assertions + a, has_skip or s
+            continue
+        if isinstance(stmt, ast.If):
+            a1, s1 = _process_stmts(stmt.body, multiplier)
+            a2, s2 = _process_stmts(stmt.orelse, multiplier)
+            assertions, has_skip = assertions + a1 + a2, has_skip or s1 or s2
+            if _returns_unconditionally(stmt.body) and _returns_unconditionally(stmt.orelse):
+                break
+            continue
+        if isinstance(stmt, (ast.While, ast.With, ast.Try)):
+            for b in [stmt.body, getattr(stmt, "orelse", []), getattr(stmt, "finalbody", [])] + [h.body for h in getattr(stmt, "handlers", [])]:
+                a, s = _process_stmts(b, multiplier)
+                assertions, has_skip = assertions + a, has_skip or s
+            continue
+
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Assert):
+                if not isinstance(node.test, ast.Constant):
+                    assertions += 1 * multiplier
+            elif isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Attribute):
+                    attr, val_id = func.attr, getattr(func.value, "id", None)
+                    if attr.startswith("assert") or (attr in ("raises", "warns") and val_id == "pytest") or (attr == "fail" and val_id == "self"):
+                        assertions += 1 * multiplier
+                    elif attr == "skip" and val_id == "pytest":
+                        has_skip = True
+                elif isinstance(func, ast.Name):
+                    if func.id.startswith("assert") or func.id == "expect":
+                        assertions += 1 * multiplier
+                    elif func.id == "skip":
+                        has_skip = True
+            elif isinstance(node, ast.Raise) and node.exc:
+                try:
+                    if "skiptest" in ast.unparse(node.exc).lower():
+                        has_skip = True
+                except Exception:
+                    pass
+    return assertions, has_skip
+
+
+class PythonTestVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.tests: Dict[str, TestMeta] = {}
+        self.current_class: Optional[str] = None
+        self.class_has_skip: bool = False
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        old_cls, old_skip = self.current_class, self.class_has_skip
+        self.current_class, self.class_has_skip = node.name, any(_is_skip(d) for d in node.decorator_list)
+        self.generic_visit(node)
+        self.current_class, self.class_has_skip = old_cls, old_skip
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._handle_fn(node)
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def _handle_fn(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        if node.name.startswith("test"):
+            fn_skip = any(_is_skip(d) for d in node.decorator_list)
+            asserts, body_skip = _process_stmts(node.body)
+            full_name = f"{self.current_class}.{node.name}" if self.current_class else node.name
+            self.tests[full_name] = TestMeta(
+                name=node.name, cls_name=self.current_class, assertions=asserts,
+                has_skip=fn_skip or body_skip or self.class_has_skip,
+            )
+
+
+def analyze_python_file(content: str, rel_path: str) -> Dict[str, TestMeta]:
+    """Parse Python source into AST and extract test metadata."""
+    try:
+        tree = ast.parse(content, filename=rel_path)
+    except SyntaxError as e:
+        sys.stderr.write(f"Error: SyntaxError in test file {rel_path}: {e}\n")
+        sys.exit(1)
+    visitor = PythonTestVisitor()
+    visitor.visit(tree)
+    return visitor.tests
+
+
+def analyze_js_ts_file(content: str, rel_path: str) -> Dict[str, TestMeta]:
+    """Extract JS/TS test metadata (describe, it, test, xit, expect)."""
+    clean = re.sub(r"//[^\r\n]*", "", re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL))
+    has_global_skip = bool(re.search(r"\bdescribe\.skip\s*\(", clean))
+    tests: Dict[str, TestMeta] = {}
+    pattern = re.compile(r"(?P<fn>\b(?:it|test|xit|xtest)(?:\.skip)?)\s*\(\s*(['\"`])(?P<name>.*?)\2")
+    for m in pattern.finditer(clean):
+        fn_call, name = m.group("fn"), m.group("name")
+        has_skip = has_global_skip or fn_call.startswith(("xit", "xtest")) or ".skip" in fn_call
+        start_idx, body = clean.find("{", m.end()), ""
+        if start_idx != -1:
+            depth, idx, quote = 1, start_idx + 1, None
+            while idx < len(clean) and depth > 0:
+                ch = clean[idx]
+                if quote:
+                    if ch == quote and clean[idx - 1] != "\\":
+                        quote = None
+                elif ch in ('"', "'", "`"):
+                    quote = ch
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                idx += 1
+            body = clean[start_idx:idx]
+        assertions = len(re.findall(r"\b(?:expect\s*\(|assert(?:\s*\(|\.))", body))
+        tests[name] = TestMeta(name=name, cls_name=None, assertions=assertions, has_skip=has_skip)
+    return tests
+
+
+def analyze_test_file(content: str, rel_path: str) -> Dict[str, TestMeta]:
+    """Route test file analysis based on extension."""
+    if rel_path.endswith((".py", ".pyw")):
+        return analyze_python_file(content, rel_path)
+    return analyze_js_ts_file(content, rel_path) if rel_path.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")) else {}
+
+
+def run_extract(
+    plan_file: Path, task_n: str, worktree: Path, sdd_dir: Optional[Path], verify_timeout: float = 300.0
+) -> None:
+    task_lines = extract_task_lines(plan_file, task_n)
+    test_blocks, verify_cmd = parse_task_content(task_lines)
+    if not test_blocks:
+        print(f"no acceptance tests found in task {task_n} of {plan_file.name}")
+        sys.exit(0)
+    if not verify_cmd:
+        sys.stderr.write(f"Error: task {task_n} has test blocks but is missing a Verify-Cmd: line\n")
+        sys.exit(1)
+
+    combined_blocks: Dict[str, str] = {}
+    for block in test_blocks:
+        validate_and_resolve_target(block.path, worktree)
+        prev = combined_blocks.get(block.path)
+        combined_blocks[block.path] = (prev + ("" if prev.endswith("\n") else "\n") + block.content) if prev else block.content
+
+    for rel_path, content in combined_blocks.items():
+        if rel_path.endswith((".py", ".pyw")):
+            try:
+                ast.parse(content, filename=rel_path)
+            except SyntaxError as e:
+                sys.stderr.write(f"Error: SyntaxError in test file {rel_path}: {e}\n")
+                sys.exit(1)
+        target = validate_and_resolve_target(rel_path, worktree)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    try:
+        proc = subprocess.run(verify_cmd, shell=True, cwd=str(worktree.resolve()), capture_output=True, text=True, timeout=verify_timeout)
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(f"Error: Verify-Cmd timed out after {verify_timeout}s: {verify_cmd}\n")
+        sys.exit(1)
+
+    if proc.returncode == 0:
+        sys.stderr.write(f"Error: Verify-Cmd succeeded (exit 0) but expected RED state (failing test): {verify_cmd}\nSTDOUT:\n{proc.stdout}\n")
+        sys.exit(1)
+
+    combined_err = f"{proc.stdout}\n{proc.stderr}"
+    if "SyntaxError" in combined_err:
+        for rel_path in combined_blocks:
+            if rel_path in combined_err or Path(rel_path).name in combined_err:
+                sys.stderr.write(f"Error: Python SyntaxError in test file {rel_path} detected during verification:\n{combined_err}\n")
+                sys.exit(1)
+
+    files_record: Dict[str, Any] = {}
+    for rel_path, content in combined_blocks.items():
+        tests_meta = analyze_test_file(content, rel_path)
+        files_record[rel_path] = {
+            "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "tests": {k: {"name": m.name, "class": m.cls_name, "assertions": m.assertions} for k, m in tests_meta.items()},
+        }
+
+    sdd_dir = sdd_dir or (worktree / ".superpowers" / "sdd" / plan_file.stem)
+    sdd_dir.mkdir(parents=True, exist_ok=True)
+    hashfile_path = sdd_dir / f"task-{task_n}-tests.sha256"
+    payload = {"version": 1, "plan_file": str(plan_file.resolve()), "task_n": task_n, "worktree": str(worktree.resolve()), "verify_cmd": verify_cmd, "files": files_record}
+    hashfile_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"Registered {sum(len(f['tests']) for f in files_record.values())} acceptance test(s) across {len(files_record)} file(s) in {hashfile_path}")
+
+
+def run_check_intact(hashfile_path: Path, worktree_override: Optional[Path]) -> None:
+    if not hashfile_path.is_file():
+        sys.stderr.write(f"Error: hashfile not found: {hashfile_path}\n")
+        sys.exit(1)
+    try:
+        data = json.loads(hashfile_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        sys.stderr.write(f"Error: failed to parse hashfile {hashfile_path}: {e}\n")
+        sys.exit(1)
+
+    worktree = worktree_override.resolve() if worktree_override else (Path(data.get("worktree", ".")).resolve() if Path(data.get("worktree", ".")).exists() else Path.cwd().resolve())
+    files = data.get("files", {})
+    if not files:
+        print("No acceptance tests registered in hashfile.")
+        sys.exit(0)
+
+    total_checked = 0
+    for rel_path, file_info in files.items():
+        target_path = worktree / rel_path
+        if not target_path.exists():
+            sys.stderr.write(f"Error: test file missing from worktree: {rel_path}\n")
+            sys.exit(1)
+        current_tests = analyze_test_file(target_path.read_text(encoding="utf-8"), rel_path)
+        for reg_key, reg_info in file_info.get("tests", {}).items():
+            total_checked += 1
+            reg_name, reg_class, min_assertions = reg_info.get("name"), reg_info.get("class"), reg_info.get("assertions", 0)
+            matched = current_tests.get(reg_key)
+            if not matched:
+                cands = [t for t in current_tests.values() if t.name == reg_name and (reg_class is None or t.cls_name == reg_class)]
+                matched = cands[0] if len(cands) == 1 else None
+            if matched is None:
+                sys.stderr.write(f"Error: Registered acceptance test '{reg_key}' was deleted or renamed in {rel_path}\n")
+                sys.exit(1)
+            if matched.has_skip:
+                sys.stderr.write(f"Error: Registered acceptance test '{reg_key}' has a skip marker in {rel_path}\n")
+                sys.exit(1)
+            if matched.assertions < min_assertions:
+                sys.stderr.write(f"Error: Registered acceptance test '{reg_key}' in {rel_path} lost assertions: expected at least {min_assertions}, found {matched.assertions}\n")
+                sys.exit(1)
+
+    print(f"All {total_checked} registered acceptance test(s) intact across {len(files)} file(s).")
+    sys.exit(0)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.strip(), formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--check-intact", dest="check_intact", metavar="HASHFILE", type=Path, help="Path to hashfile to verify")
+    parser.add_argument("--worktree", type=Path, help="Worktree directory override")
+    parser.add_argument("--sdd-dir", type=Path, help="SDD directory for hashfile")
+    parser.add_argument("--verify-timeout", type=float, default=300.0, help="Verify timeout in seconds (default: 300)")
+    parser.add_argument("args", nargs="*", help="Positional arguments")
+    parsed = parser.parse_args()
+
+    if parsed.check_intact:
+        run_check_intact(parsed.check_intact, parsed.worktree)
+        return
+    pos = [a for a in parsed.args if a != "extract"]
+    if pos and pos[0] == "check-intact":
+        if len(pos) < 2:
+            parser.error("missing HASHFILE for check-intact")
+        return run_check_intact(Path(pos[1]), parsed.worktree)
+    if len(pos) == 3:
+        return run_extract(Path(pos[0]), pos[1], Path(pos[2]), parsed.sdd_dir, parsed.verify_timeout)
+    parser.error("usage: extract-acceptance-tests PLAN_FILE TASK_N WORKTREE or --check-intact HASHFILE")
+
+
+if __name__ == "__main__":
+    main()

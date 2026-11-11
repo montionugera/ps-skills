@@ -1,0 +1,372 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 960" width="1480" height="960" style="background-color: #0b0f17; font-family: IBM Plex Mono, ui-monospace, Menlo, sans-serif;" content="&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;
+&lt;mxfile host=&quot;drawio&quot; version=&quot;26.0.0&quot;&gt;
+  &lt;diagram name=&quot;In-Session Native AGY Multi-Agent Pipeline&quot; id=&quot;agy-native-flow&quot;&gt;
+    &lt;mxGraphModel dx=&quot;1440&quot; dy=&quot;960&quot; grid=&quot;1&quot; gridSize=&quot;10&quot; guides=&quot;1&quot; tooltips=&quot;1&quot; connect=&quot;1&quot; arrows=&quot;1&quot; fold=&quot;1&quot; page=&quot;1&quot; pageScale=&quot;1&quot; pageWidth=&quot;1480&quot; pageHeight=&quot;960&quot; background=&quot;#0b0f17&quot; math=&quot;0&quot; shadow=&quot;0&quot;&gt;
+      &lt;root&gt;
+        &lt;mxCell id=&quot;0&quot; /&gt;
+        &lt;mxCell id=&quot;1&quot; parent=&quot;0&quot; /&gt;
+
+        &lt;!-- Title Banner --&gt;
+        &lt;mxCell id=&quot;title&quot; value=&quot;Flow A — 80/20 Flash-First Native AGY Multi-Agent Pipeline (Gemini 4 Argon + 3.8 Flash High)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#4ee39b;fontColor=#f6f8fb;fontStyle=1;fontSize=15;align=left;spacingLeft=16;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;20&quot; width=&quot;1400&quot; height=&quot;50&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Swimlane 1: Thin Orchestrator --&gt;
+        &lt;mxCell id=&quot;lane-orch&quot; value=&quot;1. Parent Thin Orchestrator (20% Frontier Tier: Gemini 4 Argon — Architecture, Synthesis &amp;amp; Adjudication)&quot; style=&quot;swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#4ee39b;fontColor=#4ee39b;fontStyle=1;fontSize=12;pointerEvents=0;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;90&quot; width=&quot;1400&quot; height=&quot;170&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;orch-think&quot; value=&quot;Inline Frontier Thinking&amp;#xa;(Gemini 4 Argon)&amp;#xa;Specs · Plans · Adjudication&amp;#xa;(Zero External Thinker Tax)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-orch&quot;&gt;
+          &lt;mxGeometry x=&quot;30&quot; y=&quot;50&quot; width=&quot;260&quot; height=&quot;90&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;orch-define&quot; value=&quot;define_subagent&amp;#xa;Register Custom Session Roles:&amp;#xa;• code-reviewer (Argon inherit)&amp;#xa;• simplifier / drawio (3.8 Flash)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-orch&quot;&gt;
+          &lt;mxGeometry x=&quot;360&quot; y=&quot;50&quot; width=&quot;260&quot; height=&quot;90&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;orch-fanout&quot; value=&quot;invoke_subagent (80/20 Tiering)&amp;#xa;• 80% Model: &amp;quot;flash&amp;quot; (Research/R1-2/Drawio)&amp;#xa;• 20% Model: &amp;quot;inherit&amp;quot; (Argon Review/R3)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-orch&quot;&gt;
+          &lt;mxGeometry x=&quot;690&quot; y=&quot;50&quot; width=&quot;280&quot; height=&quot;90&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;orch-wake&quot; value=&quot;Reactive Event Loop Wakeup&amp;#xa;(Zero Polling / Zero sleep)&amp;#xa;Consolidates ≤15-Line Summaries&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-orch&quot;&gt;
+          &lt;mxGeometry x=&quot;1060&quot; y=&quot;50&quot; width=&quot;300&quot; height=&quot;90&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Swimlane 2: Parallel Subagent Execution Pool --&gt;
+        &lt;mxCell id=&quot;lane-pool&quot; value=&quot;2. Parallel Native Subagent Pool (80% Fast 3.8 Flash Workhorses + 20% Frontier Argon Reviewers)&quot; style=&quot;swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#74b0ff;fontColor=#74b0ff;fontStyle=1;fontSize=12;pointerEvents=0;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;320&quot; width=&quot;1400&quot; height=&quot;210&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;sub-research&quot; value=&quot;Discovery &amp;amp; Diagram Worker&amp;#xa;Model: &amp;quot;flash&amp;quot; (3.8-flash-high)&amp;#xa;Graft Lookups · Draw.io XML · Render&amp;#xa;Saves Argon from Coordinate Math&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#161b24;strokeColor=#4ed2c8;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-pool&quot;&gt;
+          &lt;mxGeometry x=&quot;30&quot; y=&quot;60&quot; width=&quot;280&quot; height=&quot;110&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;sub-share&quot; value=&quot;Round 1–2 Implementer (Disjoint)&amp;#xa;Model: &amp;quot;flash&amp;quot; · Workspace: &amp;quot;share&amp;quot;&amp;#xa;Executes Exact Plan + TDD Spans&amp;#xa;Runs Step 2 Verify &amp;amp; Step 4 Simplify&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-pool&quot;&gt;
+          &lt;mxGeometry x=&quot;380&quot; y=&quot;60&quot; width=&quot;300&quot; height=&quot;110&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;sub-branch&quot; value=&quot;Round 1–2 Implementer (Isolated)&amp;#xa;Model: &amp;quot;flash&amp;quot; · Workspace: &amp;quot;branch&amp;quot;&amp;#xa;Overlapping / Risky Surface Changes&amp;#xa;3–5× Speed with Isolated Test Suite&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-pool&quot;&gt;
+          &lt;mxGeometry x=&quot;750&quot; y=&quot;60&quot; width=&quot;300&quot; height=&quot;110&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;sub-review&quot; value=&quot;Step 3 Adversarial Reviewer&amp;#xa;TypeName: &amp;quot;code-reviewer&amp;quot;&amp;#xa;Model: &amp;quot;inherit&amp;quot; (Gemini 4 Argon)&amp;#xa;Frontier Audit of 3.8-Flash Code&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-pool&quot;&gt;
+          &lt;mxGeometry x=&quot;1120&quot; y=&quot;60&quot; width=&quot;250&quot; height=&quot;110&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Swimlane 3: Stateful Fix &amp; Progressive Escalation Loop --&gt;
+        &lt;mxCell id=&quot;lane-fix&quot; value=&quot;3. Rule 7 Phase Gate Split &amp;amp; Progressive Escalation Loop (Flash R1–R2 → Argon R3+)&quot; style=&quot;swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#ffc746;fontColor=#ffc746;fontStyle=1;fontSize=12;pointerEvents=0;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;590&quot; width=&quot;1400&quot; height=&quot;190&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;fix-gate&quot; value=&quot;Rule 7 Phase Gate Split&amp;#xa;• Step 2 Verify &amp;amp; Step 4 Simplify: Flash&amp;#xa;• Step 3 Adversarial Review: Argon&amp;#xa;• README.md + graft build Sync: Flash&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-fix&quot;&gt;
+          &lt;mxGeometry x=&quot;380&quot; y=&quot;55&quot; width=&quot;280&quot; height=&quot;100&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;fix-resume&quot; value=&quot;Round 2 Fix: Warm Flash Resume&amp;#xa;send_message(Recipient: convId)&amp;#xa;Reuses 3.8-Flash Implementer Context&amp;#xa;(Zero Cold-Start Token Tax)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-fix&quot;&gt;
+          &lt;mxGeometry x=&quot;750&quot; y=&quot;55&quot; width=&quot;300&quot; height=&quot;100&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;fix-fresh&quot; value=&quot;Round 3+ Auto-Escalation&amp;#xa;manage_subagents(Action: &amp;quot;kill&amp;quot;)&amp;#xa;invoke_subagent Model: &amp;quot;inherit&amp;quot; (Argon)&amp;#xa;Frontier Takeover on R2 Failure&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#2b1619;strokeColor=#ff6b6b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-fix&quot;&gt;
+          &lt;mxGeometry x=&quot;1120&quot; y=&quot;55&quot; width=&quot;250&quot; height=&quot;100&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Legend Container --&gt;
+        &lt;mxCell id=&quot;legend&quot; value=&quot;Legend (80/20 Allocation)&quot; style=&quot;swimlane;startSize=24;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#2a3340;fontColor=#f6f8fb;fontStyle=1;fontSize=11;pointerEvents=0;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;70&quot; y=&quot;615&quot; width=&quot;290&quot; height=&quot;140&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;leg1&quot; value=&quot;20% Frontier Argon Thinker (Green)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=10;&quot; vertex=&quot;1&quot; parent=&quot;legend&quot;&gt;
+          &lt;mxGeometry x=&quot;15&quot; y=&quot;32&quot; width=&quot;260&quot; height=&quot;22&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;leg2&quot; value=&quot;80% Fast 3.8-Flash Worker (Blue)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=10;&quot; vertex=&quot;1&quot; parent=&quot;legend&quot;&gt;
+          &lt;mxGeometry x=&quot;15&quot; y=&quot;60&quot; width=&quot;260&quot; height=&quot;22&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;leg3&quot; value=&quot;20% Argon Reviewer / Audit (Purple)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=10;&quot; vertex=&quot;1&quot; parent=&quot;legend&quot;&gt;
+          &lt;mxGeometry x=&quot;15&quot; y=&quot;88&quot; width=&quot;260&quot; height=&quot;22&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;leg4&quot; value=&quot;Warm Resume / R3 Escalation (Amber/Red)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=10;&quot; vertex=&quot;1&quot; parent=&quot;legend&quot;&gt;
+          &lt;mxGeometry x=&quot;15&quot; y=&quot;114&quot; width=&quot;260&quot; height=&quot;22&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Edges with explicit waypoints &amp; labelBackgroundColor pills --&gt;
+        &lt;mxCell id=&quot;e1&quot; value=&quot;1. Register Roles&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;orch-think&quot; target=&quot;orch-define&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;360&quot; y=&quot;185&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e2&quot; value=&quot;2. Build Subagents[]&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;orch-define&quot; target=&quot;orch-fanout&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;690&quot; y=&quot;185&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e3&quot; value=&quot;3. Yield Turn (Idle)&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;dashed=1;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;orch-fanout&quot; target=&quot;orch-wake&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;1050&quot; y=&quot;185&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Fan-out edges from orch-fanout to Pool --&gt;
+        &lt;mxCell id=&quot;e4&quot; value=&quot;Model: flash (Research/Drawio)&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ed2c8;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.2;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;orch-fanout&quot; target=&quot;sub-research&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;786&quot; y=&quot;280&quot; /&gt;
+              &lt;mxPoint x=&quot;210&quot; y=&quot;280&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e5&quot; value=&quot;Model: flash (share Lane)&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.45;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;orch-fanout&quot; target=&quot;sub-share&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;856&quot; y=&quot;295&quot; /&gt;
+              &lt;mxPoint x=&quot;570&quot; y=&quot;295&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e6&quot; value=&quot;Model: flash (branch Lane)&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;orch-fanout&quot; target=&quot;sub-branch&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;940&quot; y=&quot;300&quot; /&gt;
+              &lt;mxPoint x=&quot;940&quot; y=&quot;350&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Return / Gate edges --&gt;
+        &lt;mxCell id=&quot;e7&quot; value=&quot;send_message (≤15 lines)&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.8;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;sub-review&quot; target=&quot;orch-wake&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;1360&quot; y=&quot;300&quot; /&gt;
+              &lt;mxPoint x=&quot;1250&quot; y=&quot;300&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e8&quot; value=&quot;4. Trigger Quality Gate&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;sub-share&quot; target=&quot;fix-gate&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;570&quot; y=&quot;560&quot; /&gt;
+              &lt;mxPoint x=&quot;560&quot; y=&quot;560&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e9&quot; value=&quot;5. R2 Findings? Resume Flash&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;fix-gate&quot; target=&quot;fix-resume&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;740&quot; y=&quot;695&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e10&quot; value=&quot;send_message to convId&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;dashed=1;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;fix-resume&quot; target=&quot;sub-branch&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;940&quot; y=&quot;560&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e11&quot; value=&quot;6. R2 Failed → R3 Argon Escalation&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ff6b6b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;fix-resume&quot; target=&quot;fix-fresh&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;1120&quot; y=&quot;695&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e12&quot; value=&quot;7. Re-Review Diff (Argon)&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;fix-fresh&quot; target=&quot;sub-review&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;1285&quot; y=&quot;560&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+      &lt;/root&gt;
+    &lt;/mxGraphModel&gt;
+  &lt;/diagram&gt;
+&lt;/mxfile&gt;
+">
+<defs>
+  <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#4ee39b"/></marker>
+  <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#74b0ff"/></marker>
+  <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#b288ff"/></marker>
+  <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#ffc746"/></marker>
+  <marker id="arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#4ed2c8"/></marker>
+  <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#ff6b6b"/></marker>
+</defs>
+<rect width="1480" height="960" fill="#0b0f17" rx="12"/>
+<g id="cell-title">
+  <rect x="40.0" y="20.0" width="1400.0" height="50.0" rx="8" fill="#10141b" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="56.0" y="50.0" fill="#f6f8fb" font-size="15" font-weight="700" text-anchor="start">Flow A — 80/20 Flash-First Native AGY Multi-Agent Pipeline (Gemini 4 Argon + 3.8 Flash High)</text>
+</g>
+<g id="cell-lane-orch">
+  <rect x="40.0" y="90.0" width="1400.0" height="170.0" rx="8" fill="#10141b" stroke="#4ee39b" stroke-width="1.5"/>
+  <rect x="40.0" y="90.0" width="1400.0" height="32.0" rx="8" fill="#161b24" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="54.0" y="110.0" fill="#4ee39b" font-size="12" font-weight="700">1. Parent Thin Orchestrator (20% Frontier Tier: Gemini 4 Argon — Architecture, Synthesis &amp; Adjudication)</text>
+</g>
+<g id="cell-orch-think">
+  <rect x="70.0" y="140.0" width="260.0" height="90.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="200.0" y="164.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Inline Frontier Thinking</text>
+  <text x="200.0" y="180.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">(Gemini 4 Argon)</text>
+  <text x="200.0" y="196.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Specs · Plans · Adjudication</text>
+  <text x="200.0" y="212.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">(Zero External Thinker Tax)</text>
+</g>
+<g id="cell-orch-define">
+  <rect x="400.0" y="140.0" width="260.0" height="90.0" rx="8" fill="#1d1829" stroke="#b288ff" stroke-width="1.5"/>
+  <text x="530.0" y="164.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">define_subagent</text>
+  <text x="530.0" y="180.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">Register Custom Session Roles:</text>
+  <text x="530.0" y="196.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• code-reviewer (Argon inherit)</text>
+  <text x="530.0" y="212.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• simplifier / drawio (3.8 Flash)</text>
+</g>
+<g id="cell-orch-fanout">
+  <rect x="730.0" y="140.0" width="280.0" height="90.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="870.0" y="172.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">invoke_subagent (80/20 Tiering)</text>
+  <text x="870.0" y="188.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">• 80% Model: &quot;flash&quot; (Research/R1-2/Drawio)</text>
+  <text x="870.0" y="204.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">• 20% Model: &quot;inherit&quot; (Argon Review/R3)</text>
+</g>
+<g id="cell-orch-wake">
+  <rect x="1100.0" y="140.0" width="300.0" height="90.0" rx="8" fill="#292112" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="1250.0" y="172.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Reactive Event Loop Wakeup</text>
+  <text x="1250.0" y="188.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">(Zero Polling / Zero sleep)</text>
+  <text x="1250.0" y="204.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Consolidates ≤15-Line Summaries</text>
+</g>
+<g id="cell-lane-pool">
+  <rect x="40.0" y="320.0" width="1400.0" height="210.0" rx="8" fill="#10141b" stroke="#74b0ff" stroke-width="1.5"/>
+  <rect x="40.0" y="320.0" width="1400.0" height="32.0" rx="8" fill="#161b24" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="54.0" y="340.0" fill="#74b0ff" font-size="12" font-weight="700">2. Parallel Native Subagent Pool (80% Fast 3.8 Flash Workhorses + 20% Frontier Argon Reviewers)</text>
+</g>
+<g id="cell-sub-research">
+  <rect x="70.0" y="380.0" width="280.0" height="110.0" rx="8" fill="#161b24" stroke="#4ed2c8" stroke-width="1.5"/>
+  <text x="210.0" y="414.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Discovery &amp; Diagram Worker</text>
+  <text x="210.0" y="430.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">Model: &quot;flash&quot; (3.8-flash-high)</text>
+  <text x="210.0" y="446.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">Graft Lookups · Draw.io XML · Render</text>
+  <text x="210.0" y="462.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">Saves Argon from Coordinate Math</text>
+</g>
+<g id="cell-sub-share">
+  <rect x="420.0" y="380.0" width="300.0" height="110.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="570.0" y="414.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Round 1–2 Implementer (Disjoint)</text>
+  <text x="570.0" y="430.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Model: &quot;flash&quot; · Workspace: &quot;share&quot;</text>
+  <text x="570.0" y="446.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Executes Exact Plan + TDD Spans</text>
+  <text x="570.0" y="462.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Runs Step 2 Verify &amp; Step 4 Simplify</text>
+</g>
+<g id="cell-sub-branch">
+  <rect x="790.0" y="380.0" width="300.0" height="110.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="940.0" y="414.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Round 1–2 Implementer (Isolated)</text>
+  <text x="940.0" y="430.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Model: &quot;flash&quot; · Workspace: &quot;branch&quot;</text>
+  <text x="940.0" y="446.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Overlapping / Risky Surface Changes</text>
+  <text x="940.0" y="462.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">3–5× Speed with Isolated Test Suite</text>
+</g>
+<g id="cell-sub-review">
+  <rect x="1160.0" y="380.0" width="250.0" height="110.0" rx="8" fill="#1d1829" stroke="#b288ff" stroke-width="1.5"/>
+  <text x="1285.0" y="414.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Step 3 Adversarial Reviewer</text>
+  <text x="1285.0" y="430.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">TypeName: &quot;code-reviewer&quot;</text>
+  <text x="1285.0" y="446.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Model: &quot;inherit&quot; (Gemini 4 Argon)</text>
+  <text x="1285.0" y="462.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Frontier Audit of 3.8-Flash Code</text>
+</g>
+<g id="cell-lane-fix">
+  <rect x="40.0" y="590.0" width="1400.0" height="190.0" rx="8" fill="#10141b" stroke="#ffc746" stroke-width="1.5"/>
+  <rect x="40.0" y="590.0" width="1400.0" height="32.0" rx="8" fill="#161b24" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="54.0" y="610.0" fill="#ffc746" font-size="12" font-weight="700">3. Rule 7 Phase Gate Split &amp; Progressive Escalation Loop (Flash R1–R2 → Argon R3+)</text>
+</g>
+<g id="cell-fix-gate">
+  <rect x="420.0" y="645.0" width="280.0" height="100.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="560.0" y="674.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Rule 7 Phase Gate Split</text>
+  <text x="560.0" y="690.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• Step 2 Verify &amp; Step 4 Simplify: Flash</text>
+  <text x="560.0" y="706.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• Step 3 Adversarial Review: Argon</text>
+  <text x="560.0" y="722.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• README.md + graft build Sync: Flash</text>
+</g>
+<g id="cell-fix-resume">
+  <rect x="790.0" y="645.0" width="300.0" height="100.0" rx="8" fill="#292112" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="940.0" y="674.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Round 2 Fix: Warm Flash Resume</text>
+  <text x="940.0" y="690.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">send_message(Recipient: convId)</text>
+  <text x="940.0" y="706.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Reuses 3.8-Flash Implementer Context</text>
+  <text x="940.0" y="722.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">(Zero Cold-Start Token Tax)</text>
+</g>
+<g id="cell-fix-fresh">
+  <rect x="1160.0" y="645.0" width="250.0" height="100.0" rx="8" fill="#2b1619" stroke="#ff6b6b" stroke-width="1.5"/>
+  <text x="1285.0" y="674.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Round 3+ Auto-Escalation</text>
+  <text x="1285.0" y="690.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">manage_subagents(Action: &quot;kill&quot;)</text>
+  <text x="1285.0" y="706.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">invoke_subagent Model: &quot;inherit&quot; (Argon)</text>
+  <text x="1285.0" y="722.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Frontier Takeover on R2 Failure</text>
+</g>
+<g id="cell-legend">
+  <rect x="70.0" y="615.0" width="290.0" height="140.0" rx="8" fill="#10141b" stroke="#2a3340" stroke-width="1.5"/>
+  <rect x="70.0" y="615.0" width="290.0" height="24.0" rx="8" fill="#161b24" stroke="#2a3340" stroke-width="1.5"/>
+  <text x="84.0" y="631.0" fill="#f6f8fb" font-size="11" font-weight="700">Legend (80/20 Allocation)</text>
+</g>
+<g id="cell-leg1">
+  <rect x="85.0" y="647.0" width="260.0" height="22.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="215.0" y="660.5" fill="#f6f8fb" font-size="10" font-weight="400" text-anchor="middle">20% Frontier Argon Thinker (Green)</text>
+</g>
+<g id="cell-leg2">
+  <rect x="85.0" y="675.0" width="260.0" height="22.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="215.0" y="688.5" fill="#f6f8fb" font-size="10" font-weight="400" text-anchor="middle">80% Fast 3.8-Flash Worker (Blue)</text>
+</g>
+<g id="cell-leg3">
+  <rect x="85.0" y="703.0" width="260.0" height="22.0" rx="8" fill="#1d1829" stroke="#b288ff" stroke-width="1.5"/>
+  <text x="215.0" y="716.5" fill="#f6f8fb" font-size="10" font-weight="400" text-anchor="middle">20% Argon Reviewer / Audit (Purple)</text>
+</g>
+<g id="cell-leg4">
+  <rect x="85.0" y="729.0" width="260.0" height="22.0" rx="8" fill="#292112" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="215.0" y="742.5" fill="#f6f8fb" font-size="10" font-weight="400" text-anchor="middle">Warm Resume / R3 Escalation (Amber/Red)</text>
+</g>
+<g id="edge-e1">
+  <path d="M 330.0 185.0 L 360.0 185.0 L 400.0 185.0" fill="none" stroke="#4ee39b" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <rect x="316.8" y="175.0" width="126.5" height="20" rx="5" fill="#10141b" stroke="#4ee39b" stroke-width="1"/>
+  <text x="380.0" y="188.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">1. Register Roles</text>
+</g>
+<g id="edge-e2">
+  <path d="M 660.0 185.0 L 690.0 185.0 L 730.0 185.0" fill="none" stroke="#b288ff" stroke-width="2" marker-end="url(#arrow-purple)"/>
+  <rect x="637.0" y="175.0" width="146.0" height="20" rx="5" fill="#10141b" stroke="#b288ff" stroke-width="1"/>
+  <text x="710.0" y="188.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">2. Build Subagents[]</text>
+</g>
+<g id="edge-e3">
+  <path d="M 1010.0 185.0 L 1050.0 185.0 L 1100.0 185.0" fill="none" stroke="#ffc746" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow-amber)"/>
+  <rect x="1002.0" y="175.0" width="146.0" height="20" rx="5" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="1075.0" y="188.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">3. Yield Turn (Idle)</text>
+</g>
+<g id="edge-e4">
+  <path d="M 786.0 230.0 L 786.0 280.0 L 210.0 280.0 L 210.0 380.0" fill="none" stroke="#4ed2c8" stroke-width="2" marker-end="url(#arrow-teal)"/>
+  <rect x="392.5" y="270.0" width="211.0" height="20" rx="5" fill="#10141b" stroke="#4ed2c8" stroke-width="1"/>
+  <text x="498.0" y="283.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">Model: flash (Research/Drawio)</text>
+</g>
+<g id="edge-e5">
+  <path d="M 856.0 230.0 L 856.0 295.0 L 570.0 295.0 L 570.0 380.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="623.8" y="285.0" width="178.5" height="20" rx="5" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="713.0" y="298.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">Model: flash (share Lane)</text>
+</g>
+<g id="edge-e6">
+  <path d="M 940.0 230.0 L 940.0 300.0 L 940.0 350.0 L 940.0 380.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="847.5" y="255.0" width="185.0" height="20" rx="5" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="940.0" y="268.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">Model: flash (branch Lane)</text>
+</g>
+<g id="edge-e7">
+  <path d="M 1360.0 380.0 L 1360.0 300.0 L 1250.0 300.0 L 1250.0 230.0" fill="none" stroke="#ffc746" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <rect x="1219.0" y="290.0" width="172.0" height="20" rx="5" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="1305.0" y="303.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">send_message (≤15 lines)</text>
+</g>
+<g id="edge-e8">
+  <path d="M 570.0 490.0 L 570.0 560.0 L 560.0 560.0 L 560.0 645.0" fill="none" stroke="#4ee39b" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <rect x="477.2" y="592.5" width="165.5" height="20" rx="5" fill="#10141b" stroke="#4ee39b" stroke-width="1"/>
+  <text x="560.0" y="606.0" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">4. Trigger Quality Gate</text>
+</g>
+<g id="edge-e9">
+  <path d="M 700.0 695.0 L 740.0 695.0 L 790.0 695.0" fill="none" stroke="#ffc746" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <rect x="666.0" y="685.0" width="198.0" height="20" rx="5" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="765.0" y="698.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">5. R2 Findings? Resume Flash</text>
+</g>
+<g id="edge-e10">
+  <path d="M 940.0 645.0 L 940.0 560.0 L 940.0 490.0" fill="none" stroke="#ffc746" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow-amber)"/>
+  <rect x="860.5" y="592.5" width="159.0" height="20" rx="5" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="940.0" y="606.0" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">send_message to convId</text>
+</g>
+<g id="edge-e11">
+  <path d="M 1090.0 695.0 L 1120.0 695.0 L 1160.0 695.0" fill="none" stroke="#ff6b6b" stroke-width="2" marker-end="url(#arrow-red)"/>
+  <rect x="1021.5" y="685.0" width="237.0" height="20" rx="5" fill="#10141b" stroke="#ff6b6b" stroke-width="1"/>
+  <text x="1140.0" y="698.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">6. R2 Failed → R3 Argon Escalation</text>
+</g>
+<g id="edge-e12">
+  <path d="M 1285.0 645.0 L 1285.0 560.0 L 1285.0 490.0" fill="none" stroke="#b288ff" stroke-width="2" marker-end="url(#arrow-purple)"/>
+  <rect x="1195.8" y="592.5" width="178.5" height="20" rx="5" fill="#10141b" stroke="#b288ff" stroke-width="1"/>
+  <text x="1285.0" y="606.0" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">7. Re-Review Diff (Argon)</text>
+</g>
+</svg>

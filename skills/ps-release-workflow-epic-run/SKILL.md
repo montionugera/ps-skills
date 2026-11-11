@@ -5,7 +5,9 @@ description: |
   slices", "drive this epic to shipped" — in a ps-release-workflow repo. Takes an
   explicit --slices allowlist of approved slice ideas through refine, claim,
   implement, review and ship --no-deploy, one at a time, stops at the first
-  failed gate, and never promotes. Not for a single feature: use claim and ship.
+  failed gate, and never promotes. Inside AGY, leverages native subagents (invoke_subagent,
+  Model: "flash" R1-R2, Model: "inherit" Argon R3 escalation & review, enable_subagent_tools: true).
+argument-hint: "E-NNN --slices I-001,I-002 [--allow-no-precheck]"
 ---
 
 # ps-release-workflow:epic-run
@@ -38,13 +40,13 @@ slice in order with `state`, `claimed_by`, `action`. Touch only slices in its `a
 3. In the worktree run `psrw epic sync`. Conflict -> STOP. Keep its `base` sha.
 4. Implement: dispatch a subagent that starts with `psrw claim F-NNN --resume`, then runs
    /writing-plans (plan path `.claude/refined_backlog/F-NNN-<slug>/plan.md`), an independent
-   /self-grill-audit of that plan (accepted cost), then /subagent-driven-development (if nested
-   dispatch is unavailable, implement flat in the same subagent). Brief it: never ship, push, open a
-   PR, promote, merge to main, or leave this worktree; never edit `_catalog.json`. On a resumed
-   slice, tell it which plan tasks are already ticked.
-5. Independent whole-slice review of `git diff <base> HEAD` (code-reviewer plus the language
-   reviewer); step 4's per-task reviews are per-phase and do not replace it. Fix (the fixer first
-   runs `psrw claim F-NNN --resume`); re-review. Still failing after 2 rounds -> STOP.
+   /self-grill-audit of that plan (accepted cost), then /subagent-driven-development.
+   - **In AGY**: plan + `self-grill-audit` on Frontier (`Model: "inherit"` / `gemini-4-argon`); Round 1-2 implementers on `Model: "flash"` (`gemini-3.8-flash-high`) with `Workspace: "share"` (disjoint files) or `"branch"`; nested dispatch via `enable_subagent_tools: true` (`define_subagent`) or direct `invoke_subagent`.
+   - **AGY fix rounds**: Round 2 sends reviewer feedback warm via `send_message(Recipient: "<convId>")` to the idle implementer; if Round 2 still fails, `manage_subagents(Action: "kill")` the Flash subagent and escalate Round 3 to Frontier (`Model: "inherit"`).
+   - Brief the subagent: never ship, push, open a PR, promote, merge to main, or leave this worktree; never edit `_catalog.json`. On a resumed slice, tell it which plan tasks are already ticked.
+5. Independent whole-slice review of `git diff <base> HEAD`:
+   - Always runs on Frontier Tier (`Model: "inherit"` / `gemini-4-argon` in AGY via `code-reviewer` and language reviewer; `model: opus` in Claude Code); step 4's per-task reviews are per-phase and do not replace it.
+   - Fix: the fixer first runs `psrw claim F-NNN --resume` (resuming warm via `send_message` in AGY or fresh subagent); re-review. Still failing after 2 rounds -> STOP.
 6. Verify: full test suite passes, tree clean and committed, else STOP. If
    `git diff --quiet <base> HEAD` (the slice added no commits) -> STOP.
 7. Ship: `psrw ship --no-deploy` in the worktree. Non-zero -> STOP: report and end the run; a

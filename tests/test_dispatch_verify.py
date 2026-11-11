@@ -32,6 +32,10 @@ dispatch_mod = importlib.util.module_from_spec(spec)
 loader.exec_module(dispatch_mod)
 
 
+# What a clean `agy --output-format stream-json` run ends with; a run without it is not a success.
+AGY_RESULT = '{"event":"result","result":{"status":"SUCCESS","response":"fake-agy-done"}}'
+
+
 def _write_executable(path, body):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
@@ -342,6 +346,14 @@ class TestPromptContractVerify(unittest.TestCase):
     def test_no_acceptance_section_when_not_given(self):
         self.assertNotIn("Acceptance criteria:", dispatch_mod.wrap_prompt_contract("task"))
 
+    def test_contract_carries_worker_budget_rules_in_both_modes(self):
+        for kwargs in ({}, {"is_thinking": True}):
+            wrapped = dispatch_mod.wrap_prompt_contract("task", **kwargs)
+            self.assertIn("Worker budget (token economy):", wrapped)
+            self.assertIn("Never poll", wrapped)
+            self.assertIn("<=15 lines", wrapped)
+            self.assertLess(wrapped.index("Worker budget"), wrapped.index("Task Brief:"))
+
     def test_thinking_mode_contract_unchanged_by_verify(self):
         wrapped = dispatch_mod.wrap_prompt_contract("task", is_thinking=True, acceptance="must cover X")
         self.assertIn("Thinking / Architecture Mode", wrapped)
@@ -401,7 +413,7 @@ class VerifyCLIBase(VerifyTestBase):
             {"kind": "weekly", "remaining_percent": 90.0},
         ]}}), encoding="utf-8")
         self.fake_bin = self.tmp / "fakebin"
-        _write_executable(self.fake_bin / "agy", f"#!/bin/sh\necho call >> '{self.worker_calls}'\necho fake-agy-done\n")
+        _write_executable(self.fake_bin / "agy", f"#!/bin/sh\necho call >> '{self.worker_calls}'\necho '{AGY_RESULT}'\n")
         self.env = os.environ.copy()
         self.env["PATH"] = f"{self.fake_bin}:{self.env.get('PATH', '')}"
 
@@ -439,7 +451,7 @@ class TestVerifyCLI(VerifyCLIBase):
         acc.write_text("- totals match source row count\n", encoding="utf-8")
         _write_executable(
             self.fake_bin / "agy",
-            f"#!/bin/sh\nprintf '%s' \"$*\" > '{self.tmp}/prompt.txt'\n",
+            f"#!/bin/sh\nprintf '%s' \"$*\" > '{self.tmp}/prompt.txt'\necho '{AGY_RESULT}'\n",
         )
         res = self._cli("--verify-cmd", "true", "--acceptance-file", str(acc))
         self.assertEqual(res.returncode, 0, res.stderr[-500:])
@@ -539,7 +551,7 @@ class TestNoChangesUnverifiedStatus(VerifyCLIBase):
         self.assertNotIn("Status: SUCCESS", res.stdout)
 
     def test_cli_worker_that_changes_a_file_is_still_success(self):
-        _write_executable(self.fake_bin / "agy", "#!/bin/sh\necho changed > new-file.txt\n")
+        _write_executable(self.fake_bin / "agy", f"#!/bin/sh\necho changed > new-file.txt\necho '{AGY_RESULT}'\n")
         res = self._cli("--no-verify")
         self.assertEqual(res.returncode, 0, res.stderr[-500:])
         self.assertIn("Status: SUCCESS (exit 0)", res.stdout)

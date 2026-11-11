@@ -367,17 +367,22 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
                         expected, self._find_contract_contradictions(mutation)
                     )
 
-    def test_installer_links_skill_for_claude_and_codex(self) -> None:
+    def test_installer_links_skill_for_claude_not_agents(self) -> None:
+        # 3cd810d stopped linking into $AGENTS_HOME/skills: a copy there duplicates
+        # the ~/.claude/skills entry as a second slash command in Claude Code.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             result = self._run_installer(root)
             self.assertEqual(result.returncode, 0, result.stderr)
-            for destination in (
-                root / ".claude" / "skills" / "ps-interactive-learning-builder",
-                root / ".agents" / "skills" / "ps-interactive-learning-builder",
-            ):
-                self.assertTrue(destination.is_symlink())
-                self.assertEqual(destination.resolve(), SKILL_DIR)
+            destination = (
+                root / ".claude" / "skills" / "ps-interactive-learning-builder"
+            )
+            self.assertTrue(destination.is_symlink())
+            self.assertEqual(destination.resolve(), SKILL_DIR)
+            duplicate = (
+                root / ".agents" / "skills" / "ps-interactive-learning-builder"
+            )
+            self.assertFalse(duplicate.exists() or duplicate.is_symlink())
 
     def test_installer_preserves_foreign_symlink_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -386,7 +391,7 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             foreign.mkdir()
             destination = (
                 root
-                / ".agents"
+                / ".claude"
                 / "skills"
                 / "ps-interactive-learning-builder"
             )
@@ -407,7 +412,7 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             foreign.mkdir()
             destination = (
                 root
-                / ".agents"
+                / ".claude"
                 / "skills"
                 / "ps-interactive-learning-builder"
             )
@@ -428,7 +433,7 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             self.assertEqual(first.returncode, 0, first.stderr)
             self.assertEqual(second.returncode, 0, second.stderr)
 
-            for home in (".claude", ".agents"):
+            for home in (".claude",):
                 destination = (
                     root / home / "skills" / "ps-interactive-learning-builder"
                 )
@@ -447,7 +452,7 @@ class InteractiveLearningBuilderSkillTest(unittest.TestCase):
             self.assertEqual(second.returncode, 0, second.stderr)
             destination = (
                 root
-                / ".agents"
+                / ".claude"
                 / "skills"
                 / "ps-interactive-learning-builder"
             )

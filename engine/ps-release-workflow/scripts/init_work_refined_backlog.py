@@ -11,6 +11,7 @@ from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,10 +48,34 @@ class NotClaimedError(Exception): pass
 
 
 class FeatureNotReadyError(Exception): pass
+class WipLimitError(Exception): pass
+
+
+DEFAULT_MAX_WIP = 3
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _max_wip() -> int:
+    """PSRW_MAX_WIP: claims allowed per repo. <= 0 disables; junk keeps the default."""
+    try:
+        return int(os.environ.get("PSRW_MAX_WIP", DEFAULT_MAX_WIP))
+    except ValueError:
+        return DEFAULT_MAX_WIP
+
+
+def _active_features(claims: dict, catalog: list) -> set:
+    """Features in flight: catalog `claimed`, plus ledger rows of `open` features.
+
+    A concurrent claim writes its ledger row before the catalog says `claimed`.
+    Rows for shipped/promoted features are stale and do not count.
+    """
+    status = {e["id"]: e.get("status") for e in catalog}
+    return {fid for fid, s in status.items() if s == "claimed"} | {
+        fid for fid in claims if status.get(fid) == "open"
+    }
 
 
 def _drop_claim(claims_file: Path, feature_id: str) -> None:
@@ -59,6 +84,42 @@ def _drop_claim(claims_file: Path, feature_id: str) -> None:
         claims.pop(feature_id, None)
         return claims
     mutate_state(claims_file, drop, default={})
+
+
+def release_ahead(repo: Path, branch: str) -> int:
+    """Commits on release/<v> that `branch` lacks (0 when unknown — never raises).
+
+    A fresh feature branch is cut from main, so its own spec/plan (committed on
+    release/<v>) are missing until `psrw sync` merges the release in.
+    """
+    try:
+        state = read_release_state(repo)
+        if state is None or not state.get("version"):
+            return 0
+        # Local release branch only: the _release worktree always has it checked out.
+        res = git_run(
+            repo, "rev-list", "--count",
+            f"refs/heads/{branch}..refs/heads/release/{state['version']}", check=False,
+        )
+        return int(res.stdout.strip()) if res.returncode == 0 else 0
+    except (OSError, ValueError, GitError):
+        return 0
+
+
+def _next_steps(worktree: Path, folder: str, ahead: int) -> dict:
+    """Machine-readable follow-up fields shared by claim and resume.
+
+    `ahead` must be counted BEFORE the claim/resume catalog commit lands on
+    release/<v>, or that bookkeeping commit alone would read as "needs sync".
+    """
+    needs_sync = ahead > 0
+    nxt = (["psrw sync"] if needs_sync else []) + ["/subagent-driven-development"]
+    return {
+        "plan": str(worktree / ".claude" / "refined_backlog" / folder / "plan.md"),
+        "needs_sync": needs_sync,
+        "release_ahead": ahead,
+        "next": nxt,
+    }
 
 
 def claim_feature(
@@ -138,6 +199,14 @@ def claim_feature(
             raise AlreadyClaimedError(
                 f"{feature_id} held by owner={claims[feature_id]['owner']}"
             )
+        max_wip = _max_wip()
+        if max_wip > 0 and not reopen:
+            active = _active_features(claims, list_entries(refined_cat)) - {feature_id}
+            if len(active) >= max_wip:
+                raise WipLimitError(
+                    f"{len(active)} features already claimed (limit {max_wip}): "
+                    f"{', '.join(sorted(active))} — ship or unclaim one first"
+                )
         claims[feature_id] = {
             "owner": owner,
             "worktree": str(worktree_path),
@@ -195,6 +264,9 @@ def claim_feature(
         elif (worktree_path / ".git").is_dir():
             (worktree_path / ".git" / "working-feature.json").write_text(json.dumps(marker_data, indent=2))
 
+        # --reopen bases on shipped_sha by design; never ask it to sync.
+        ahead = 0 if reopen else release_ahead(repo, branch_name)
+
         # SR-1: mark catalog status=claimed in the _release worktree and commit
         # THERE. If reopening an already-shipped feature, status remains "shipped".
         if not reopen:
@@ -237,6 +309,7 @@ def claim_feature(
         "owner": owner,
         "reattached": reattached,
         "reopened": reopen,
+        **_next_steps(worktree_path, f"{feature_id}-{slug}", ahead),
     }
 
 
@@ -331,6 +404,8 @@ def resume_feature(repo: Path, feature_id: str, *, owner: str) -> dict:
     # Commit when the entry changed OR the _release worktree is dirty (M-2): a
     # previous run that crashed between mutate and commit left the catalog
     # change uncommitted — "no change now" must not strand it forever.
+    ahead = release_ahead(repo, branch_name)  # before the reown commit below
+
     def reown(e: dict) -> None:
         e["claimed_by"] = owner
 
@@ -344,6 +419,7 @@ def resume_feature(repo: Path, feature_id: str, *, owner: str) -> dict:
         "branch": branch_name,
         "owner": owner,
         "recreated": recreated,
+        **_next_steps(worktree_path, f"{feature_id}-{slug}", ahead),
     }
 
 
@@ -404,6 +480,7 @@ def main() -> int:
         FeatureNotFoundError,
         FeatureNotReadyError,
         NotClaimedError,
+        WipLimitError,
         CatalogEntryNotFoundError,
         GitError,
         ValueError,
@@ -420,10 +497,18 @@ def main() -> int:
     elif args.reopen:
         print(f"\n✅ Reopened {result['feature']} (worktree: {result['worktree']})")
         print(f"   Catalog status remains 'shipped'. Edit and run `psrw ship` when done.")
+        return 0
     else:
         print(f"\n✅ Claimed {result['feature']} (worktree: {result['worktree']})")
-        print("   Implement: /superpowers:subagent-driven-development")
-        print(f"   (reads {result['worktree']}/plan.md)")
+    if result["needs_sync"]:
+        print(
+            f"   ⚠ release branch is {result['release_ahead']} commit(s) ahead "
+            f"(your spec/plan live there): run `psrw sync` in the worktree first"
+        )
+        print(f"   Plan (available after the sync): {result['plan']}")
+    else:
+        print(f"   Plan: {result['plan']}")
+    print("   Implement: /subagent-driven-development")
     return 0
 
 

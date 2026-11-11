@@ -48,6 +48,7 @@ VERBS = {
 NON_VERBS = {
     "__init__.py",                    # empty package marker
     "guard_check.py",                 # PreToolUse hook, absolute path in settings.json
+    "release_git_guard.py",           # Bash PreToolUse hook, absolute path in settings.json
     "cleanup_legacy_worktrees.py",    # garbage collection — deferred to spec 1b
 }
 

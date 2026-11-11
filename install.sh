@@ -13,7 +13,6 @@
 #
 # What it does:
 #   skills/ps-*            -> $CLAUDE_HOME/skills/ps-*
-#   skills/ps-*            -> $AGENTS_HOME/skills/ps-*
 #   skills/ps-*            -> $GEMINI_HOME/skills/ps-*
 #   skills/*/hooks/*       -> $CLAUDE_HOME/hooks/*   (hook scripts; register them in settings.json)
 #   bin/ps-skills-sync     -> $HOME/.local/bin/ps-skills-sync
@@ -54,12 +53,12 @@ while (($#)); do
   shift
 done
 
-mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$AGENTS_HOME/skills" "$GEMINI_HOME/skills" "$CURSOR_HOME/skills" "$BIN_HOME"
+mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$GEMINI_HOME/skills" "$CURSOR_HOME/skills" "$BIN_HOME"
 
 replace_destination() {  # dest
   local dest="$1"
   case "$dest" in
-    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
+    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$GEMINI_HOME/hooks/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/jev-gate"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
     *) echo "refuse unsafe destination: $dest" >&2; return 1 ;;
   esac
   rm -rf -- "$dest"
@@ -90,13 +89,37 @@ link() {  # src dest
 
 for d in "$REPO"/skills/*/; do
   link "${d%/}" "$CLAUDE_HOME/skills/$(basename "$d")"
-  link "${d%/}" "$AGENTS_HOME/skills/$(basename "$d")"
   link "${d%/}" "$GEMINI_HOME/skills/$(basename "$d")"
   link "${d%/}" "$CURSOR_HOME/skills/$(basename "$d")"
 done
+mkdir -p "$GEMINI_HOME/hooks"
 for h in "$REPO"/skills/*/hooks/*; do
-  if [[ -f "$h" ]]; then link "$h" "$CLAUDE_HOME/hooks/$(basename "$h")"; fi
+  if [[ -f "$h" ]]; then
+    link "$h" "$CLAUDE_HOME/hooks/$(basename "$h")"
+    link "$h" "$GEMINI_HOME/hooks/$(basename "$h")"
+  fi
 done
+# T3 Code Antigravity provider configs: hooks symlink, but NO hooks.json.
+# AGY ACP harness bug (agy_acp_server 7cd97045, 2026-11-07): with ANY hook registered
+# (even a no-op `echo {}`), killing a background task (manage_task kill) makes the harness
+# fail "no pending hook for ID hook_request_N" in ~50% of runs: the turn ends with no reply,
+# and the next turn's in-place rebuild always fails "Failed to rebuild agent: received 1000
+# (OK); then sent 1000 (OK)", so the T3 thread stays dead until the ACP server restarts.
+# Repro: 0/8 failures without hooks.json, 5/8 with it. Re-enable once a newer harness
+# passes the same repro (background `sleep 90`, kill it, send a second turn).
+if [[ -d "$HOME/.t3/userdata/providers/antigravity" ]]; then
+  for t3_cfg in "$HOME"/.t3/userdata/providers/antigravity/*/config; do
+    [[ -d "$t3_cfg" ]] || continue
+    if [[ ! -e "$t3_cfg/hooks" && ! -L "$t3_cfg/hooks" ]]; then
+      ln -s "$GEMINI_HOME/hooks" "$t3_cfg/hooks"
+      echo "symlink: $t3_cfg/hooks -> $GEMINI_HOME/hooks"
+    fi
+    if [[ -f "$t3_cfg/hooks.json" ]]; then
+      mv "$t3_cfg/hooks.json" "$t3_cfg/hooks.json.disabled-agy-cancel-race"
+      echo "disabled: $t3_cfg/hooks.json (AGY hook/cancel race kills T3 sessions)"
+    fi
+  done
+fi
 link "$REPO/engine/ps-release-workflow" "$CLAUDE_HOME/ps-release-workflow"
 link "$REPO/engine/ps-release-workflow/bin/psrw" "$BIN_HOME/psrw"
 link "$REPO/bin/ps-skills-sync" "$BIN_HOME/ps-skills-sync"
@@ -108,6 +131,7 @@ link "$REPO/bin/dispatch-codex-worker" "$BIN_HOME/dispatch-codex-worker"
 link "$REPO/bin/dispatch-cursor-worker" "$BIN_HOME/dispatch-cursor-worker"
 link "$REPO/bin/dispatch-worker" "$BIN_HOME/dispatch-worker"
 link "$REPO/bin/dispatch-thinker" "$BIN_HOME/dispatch-thinker"
+link "$REPO/bin/jev-gate" "$BIN_HOME/jev-gate"
 link "$REPO/bin/ps-skills-doctor" "$BIN_HOME/ps-skills-doctor"
 link "$REPO/bin/ps-plugin-bridge" "$BIN_HOME/ps-plugin-bridge"
 link "$REPO/bin/sync-agent-rules" "$BIN_HOME/sync-agent-rules"
@@ -185,7 +209,7 @@ reconcile_parity() {
   # Link critical binaries to Antigravity CLI bin if present
   local agy_bin="$HOME/.gemini/antigravity-cli/bin"
   if [[ -d "$agy_bin" ]]; then
-    for b in dispatch-worker dispatch-thinker dispatch-agy-worker dispatch-codex-worker dispatch-cursor-worker ps-skills-sync ps-skills-doctor ps-plugin-bridge mesh mesh-run; do
+    for b in dispatch-worker dispatch-thinker dispatch-agy-worker dispatch-codex-worker dispatch-cursor-worker jev-gate ps-skills-sync ps-skills-doctor ps-plugin-bridge mesh mesh-run; do
       if [[ -f "$REPO/bin/$b" ]]; then
         link "$REPO/bin/$b" "$agy_bin/$b"
       fi
@@ -241,15 +265,10 @@ import json, os, shutil, subprocess
 data = {"agy": None, "codex": None, "cursor": None}
 
 if shutil.which("agy"):
-    try:
-        res = subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=3)
-        models = [line.split()[0] for line in res.stdout.splitlines() if line.strip() and not line.startswith("⠋") and not line.startswith("Fetching")]
-        data["agy"] = models[:4] if models else ["gemini-3.8-flash-high", "gemini-3.1-pro-high"]
-    except Exception:
-        data["agy"] = ["gemini-3.8-flash-high", "gemini-3.1-pro-high"]
+    data["agy"] = ["gemini-3.8-flash-high", "gemini-4-argon-medium"]
 
 if shutil.which("codex"):
-    data["codex"] = ["gpt-5.6-terra"]
+    data["codex"] = ["gpt-6.1-terra"]
 
 cursor_bin = shutil.which("cursor-agent") or os.path.expanduser("~/.local/bin/cursor-agent")
 if os.path.exists(cursor_bin):
@@ -268,7 +287,7 @@ PY
 )
 
   local agy_model=""
-  local codex_model="gpt-5.6-terra"
+  local codex_model="gpt-6.1-terra"
   local cursor_info=""
 
   if [[ $(echo "$discovery_json" | python3 -c 'import sys, json; print(bool(json.load(sys.stdin).get("agy")))') == "True" ]]; then
@@ -446,7 +465,7 @@ EOF
 configure_dispatch
 
 echo
-echo "Installed into $CLAUDE_HOME, $AGENTS_HOME, $GEMINI_HOME, and $CURSOR_HOME. Restart Claude Code, Codex, Cursor, and Antigravity to pick up new skills."
+echo "Installed into $CLAUDE_HOME, $GEMINI_HOME, and $CURSOR_HOME. Restart Claude Code, Codex, Cursor, and Antigravity to pick up new skills."
 echo "ps-commu-explain is self-contained; ps-release-workflow-* use $CLAUDE_HOME/ps-release-workflow."
 
 if [[ -x "$REPO/bin/ps-skills-doctor" ]]; then

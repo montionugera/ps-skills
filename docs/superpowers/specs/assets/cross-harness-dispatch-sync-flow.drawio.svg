@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 960" width="1480" height="960" style="background-color: #0b0f17; font-family: IBM Plex Mono, ui-monospace, Menlo, sans-serif;" content="&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;
+&lt;mxfile host=&quot;drawio&quot; version=&quot;26.0.0&quot;&gt;
+  &lt;diagram name=&quot;Cross-Harness CLI Dispatch and Rule Sync Loop&quot; id=&quot;cross-harness-flow&quot;&gt;
+    &lt;mxGraphModel dx=&quot;1440&quot; dy=&quot;960&quot; grid=&quot;1&quot; gridSize=&quot;10&quot; guides=&quot;1&quot; tooltips=&quot;1&quot; connect=&quot;1&quot; arrows=&quot;1&quot; fold=&quot;1&quot; page=&quot;1&quot; pageScale=&quot;1&quot; pageWidth=&quot;1480&quot; pageHeight=&quot;960&quot; background=&quot;#0b0f17&quot; math=&quot;0&quot; shadow=&quot;0&quot;&gt;
+      &lt;root&gt;
+        &lt;mxCell id=&quot;0&quot; /&gt;
+        &lt;mxCell id=&quot;1&quot; parent=&quot;0&quot; /&gt;
+
+        &lt;!-- Title Banner --&gt;
+        &lt;mxCell id=&quot;title&quot; value=&quot;Flow B — Cross-Harness Rule Sync &amp;amp; Quota-Aware Tiered CLI Dispatch (80% 3.8-Flash / 20% Argon+Opus)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#74b0ff;fontColor=#f6f8fb;fontStyle=1;fontSize=15;align=left;spacingLeft=16;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;20&quot; width=&quot;1400&quot; height=&quot;50&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Swimlane 1: Single Source of Truth Rules &amp; Sync Pipeline --&gt;
+        &lt;mxCell id=&quot;lane-sync&quot; value=&quot;1. Rule &amp;amp; Skill Synchronization Pipeline (Single Source of Truth → Harness-Aware Build Target)&quot; style=&quot;swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#4ee39b;fontColor=#4ee39b;fontStyle=1;fontSize=12;pointerEvents=0;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;90&quot; width=&quot;1400&quot; height=&quot;190&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;src-claude&quot; value=&quot;~/.claude/CLAUDE.md&amp;#xa;(Canonical Global Rules 1–12)&amp;#xa;80/20 Tiered Model &amp;amp; Tool Tables&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-sync&quot;&gt;
+          &lt;mxGeometry x=&quot;30&quot; y=&quot;55&quot; width=&quot;260&quot; height=&quot;100&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;src-local&quot; value=&quot;~/.gemini/GEMINI.local.md&amp;#xa;(Cleaned AGY-Only Overrides)&amp;#xa;Argon Orchestrator + Flash Workers&amp;#xa;(Legacy ClickUp RFC Removed)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-sync&quot;&gt;
+          &lt;mxGeometry x=&quot;360&quot; y=&quot;55&quot; width=&quot;280&quot; height=&quot;100&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;sync-bin&quot; value=&quot;bin/sync-agent-rules&amp;#xa;• Inline @file Import Resolution&amp;#xa;• Harness Tool Call Callout Banner&amp;#xa;• --check / --write Atomic Build&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-sync&quot;&gt;
+          &lt;mxGeometry x=&quot;720&quot; y=&quot;55&quot; width=&quot;290&quot; height=&quot;100&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;dst-gemini&quot; value=&quot;~/.gemini/GEMINI.md&amp;#xa;(Generated Build Artifact)&amp;#xa;Loaded Automatically by AGY Sessions&amp;#xa;+ Symlinked ~/.gemini/skills/*&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-sync&quot;&gt;
+          &lt;mxGeometry x=&quot;1090&quot; y=&quot;55&quot; width=&quot;280&quot; height=&quot;100&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Swimlane 2: Cross-Harness Dispatch &amp; Two-Tier Routing --&gt;
+        &lt;mxCell id=&quot;lane-dispatch&quot; value=&quot;2. Quota-Aware Tiered CLI Dispatch (80% Default: agy:gemini-3.8-flash-high | 20% Escalate/Think: agy:gemini-4-argon)&quot; style=&quot;swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#74b0ff;fontColor=#74b0ff;fontStyle=1;fontSize=12;pointerEvents=0;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;340&quot; width=&quot;1400&quot; height=&quot;210&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;caller-session&quot; value=&quot;Caller Orchestrator Session&amp;#xa;• Claude Code (Opus 5.5)&amp;#xa;• Antigravity IDE/CLI (Gemini 4 Argon)&amp;#xa;Thinks Inline; Offloads 80% to Flash&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-dispatch&quot;&gt;
+          &lt;mxGeometry x=&quot;30&quot; y=&quot;60&quot; width=&quot;280&quot; height=&quot;110&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;disp-thinker&quot; value=&quot;Frontier / Escalation Tier (--think | --escalate)&amp;#xa;Allowed: claude-opus-5-5 | gemini-4-argon&amp;#xa;Used for: Deep Design, R3+ Escalation,&amp;#xa;Adversarial Review &amp;amp; [complex] Tasks&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-dispatch&quot;&gt;
+          &lt;mxGeometry x=&quot;380&quot; y=&quot;60&quot; width=&quot;300&quot; height=&quot;110&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;disp-worker&quot; value=&quot;Fast Mechanical Tier (80% Default)&amp;#xa;Default: agy:gemini-3.8-flash-high&amp;#xa;Used for: R1–R2 Implementation, Draw.io,&amp;#xa;Render-Spec, Simplify, README &amp;amp; Graft&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-dispatch&quot;&gt;
+          &lt;mxGeometry x=&quot;750&quot; y=&quot;60&quot; width=&quot;300&quot; height=&quot;110&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;disp-result&quot; value=&quot;Headless AGY Execution &amp;amp; Gate&amp;#xa;Runs --verify-cmd Before Merge&amp;#xa;Salvages Partial Patch on Timeout&amp;#xa;Emits ≤15-Line Report + JSONL Event&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-dispatch&quot;&gt;
+          &lt;mxGeometry x=&quot;1120&quot; y=&quot;60&quot; width=&quot;250&quot; height=&quot;110&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Swimlane 3: Governance, Mesh Coordination &amp; Vault Registry --&gt;
+        &lt;mxCell id=&quot;lane-gov&quot; value=&quot;3. Persistence, Mesh Coordination &amp;amp; Vault Agent Governance Boundary&quot; style=&quot;swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#b288ff;fontColor=#b288ff;fontStyle=1;fontSize=12;pointerEvents=0;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;40&quot; y=&quot;610&quot; width=&quot;1400&quot; height=&quot;190&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;gov-mesh&quot; value=&quot;Agent Mesh &amp;amp; Handoff Claims&amp;#xa;• In-Session: invoke_subagent + send_message&amp;#xa;• Cross-Session: mesh claim / send / inbox&amp;#xa;• Atomic mkdir &amp;lt;handoff&amp;gt;.claim Lock&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#161b24;strokeColor=#4ed2c8;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-gov&quot;&gt;
+          &lt;mxGeometry x=&quot;380&quot; y=&quot;55&quot; width=&quot;320&quot; height=&quot;105&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;gov-vault&quot; value=&quot;tools/vault-engine/pkg/agent/registry.go&amp;#xa;• System Orchestrators: Full Subagent &amp;amp; Shell&amp;#xa;• Recruited Leaf Agents: No Recursive Spawn&amp;#xa;  (define_subagent / agent_recruit Forbidden)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;&quot; vertex=&quot;1&quot; parent=&quot;lane-gov&quot;&gt;
+          &lt;mxGeometry x=&quot;770&quot; y=&quot;55&quot; width=&quot;320&quot; height=&quot;105&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;gov-state&quot; value=&quot;Persistent State &amp;amp; Telemetry&amp;#xa;• ~/.local/state/dispatch/events.jsonl&amp;#xa;• ~/.agentmesh/mesh.db (SQLite)&amp;#xa;• .superpowers/sdd/progress.md Ledger&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;&quot; vertex=&quot;1&quot; parent=&quot;lane-gov&quot;&gt;
+          &lt;mxGeometry x=&quot;1150&quot; y=&quot;55&quot; width=&quot;220&quot; height=&quot;105&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Legend Container --&gt;
+        &lt;mxCell id=&quot;legend&quot; value=&quot;Legend&quot; style=&quot;swimlane;startSize=24;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#2a3340;fontColor=#f6f8fb;fontStyle=1;fontSize=11;pointerEvents=0;&quot; vertex=&quot;1&quot; parent=&quot;1&quot;&gt;
+          &lt;mxGeometry x=&quot;70&quot; y=&quot;630&quot; width=&quot;290&quot; height=&quot;140&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;leg1&quot; value=&quot;20% Frontier Tier / State (Green)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=10;&quot; vertex=&quot;1&quot; parent=&quot;legend&quot;&gt;
+          &lt;mxGeometry x=&quot;15&quot; y=&quot;32&quot; width=&quot;260&quot; height=&quot;22&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;leg2&quot; value=&quot;80% Fast 3.8-Flash Tier (Blue)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=10;&quot; vertex=&quot;1&quot; parent=&quot;legend&quot;&gt;
+          &lt;mxGeometry x=&quot;15&quot; y=&quot;60&quot; width=&quot;260&quot; height=&quot;22&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;leg3&quot; value=&quot;Orchestrator / Governance (Purple)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=10;&quot; vertex=&quot;1&quot; parent=&quot;legend&quot;&gt;
+          &lt;mxGeometry x=&quot;15&quot; y=&quot;88&quot; width=&quot;260&quot; height=&quot;22&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+        &lt;mxCell id=&quot;leg4&quot; value=&quot;Build / Verification Pipeline (Amber)&quot; style=&quot;rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=10;&quot; vertex=&quot;1&quot; parent=&quot;legend&quot;&gt;
+          &lt;mxGeometry x=&quot;15&quot; y=&quot;114&quot; width=&quot;260&quot; height=&quot;22&quot; as=&quot;geometry&quot; /&gt;
+        &lt;/mxCell&gt;
+
+        &lt;!-- Edges with explicit waypoints &amp; labelBackgroundColor pills --&gt;
+        &lt;mxCell id=&quot;e1&quot; value=&quot;Base Rules&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;src-claude&quot; target=&quot;sync-bin&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;200&quot; y=&quot;265&quot; /&gt;
+              &lt;mxPoint x=&quot;905&quot; y=&quot;265&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e2&quot; value=&quot;Append Local Overrides&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;src-local&quot; target=&quot;sync-bin&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;720&quot; y=&quot;195&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e3&quot; value=&quot;--write Atomic Output&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;sync-bin&quot; target=&quot;dst-gemini&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;1090&quot; y=&quot;195&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e4&quot; value=&quot;Configures AGY Harness&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;dashed=1;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;dst-gemini&quot; target=&quot;caller-session&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;1270&quot; y=&quot;310&quot; /&gt;
+              &lt;mxPoint x=&quot;210&quot; y=&quot;310&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e5&quot; value=&quot;20% --think / --escalate (Argon)&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;caller-session&quot; target=&quot;disp-thinker&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;380&quot; y=&quot;455&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e6&quot; value=&quot;80% Bulk / R1–R2 Offload (Flash)&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;caller-session&quot; target=&quot;disp-worker&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;210&quot; y=&quot;380&quot; /&gt;
+              &lt;mxPoint x=&quot;940&quot; y=&quot;380&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e7&quot; value=&quot;agy --model gemini-3.8-flash-high&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;disp-worker&quot; target=&quot;disp-result&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;1120&quot; y=&quot;455&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e8&quot; value=&quot;Cross-Tab / Repo Claims&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ed2c8;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;caller-session&quot; target=&quot;gov-mesh&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;210&quot; y=&quot;580&quot; /&gt;
+              &lt;mxPoint x=&quot;580&quot; y=&quot;580&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e9&quot; value=&quot;Enforces Leaf Allowlist&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;gov-mesh&quot; target=&quot;gov-vault&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;770&quot; y=&quot;715&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+
+        &lt;mxCell id=&quot;e10&quot; value=&quot;Logs JSONL &amp;amp; Ledger&quot; style=&quot;edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;&quot; edge=&quot;1&quot; parent=&quot;1&quot; source=&quot;disp-result&quot; target=&quot;gov-state&quot;&gt;
+          &lt;mxGeometry relative=&quot;1&quot; as=&quot;geometry&quot;&gt;
+            &lt;Array as=&quot;points&quot;&gt;
+              &lt;mxPoint x=&quot;1285&quot; y=&quot;580&quot; /&gt;
+              &lt;mxPoint x=&quot;1300&quot; y=&quot;580&quot; /&gt;
+            &lt;/Array&gt;
+          &lt;/mxGeometry&gt;
+        &lt;/mxCell&gt;
+      &lt;/root&gt;
+    &lt;/mxGraphModel&gt;
+  &lt;/diagram&gt;
+&lt;/mxfile&gt;
+">
+<defs>
+  <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#4ee39b"/></marker>
+  <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#74b0ff"/></marker>
+  <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#b288ff"/></marker>
+  <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#ffc746"/></marker>
+  <marker id="arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#4ed2c8"/></marker>
+  <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#ff6b6b"/></marker>
+</defs>
+<rect width="1480" height="960" fill="#0b0f17" rx="12"/>
+<g id="cell-title">
+  <rect x="40.0" y="20.0" width="1400.0" height="50.0" rx="8" fill="#10141b" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="56.0" y="50.0" fill="#f6f8fb" font-size="15" font-weight="700" text-anchor="start">Flow B — Cross-Harness Rule Sync &amp; Quota-Aware Tiered CLI Dispatch (80% 3.8-Flash / 20% Argon+Opus)</text>
+</g>
+<g id="cell-lane-sync">
+  <rect x="40.0" y="90.0" width="1400.0" height="190.0" rx="8" fill="#10141b" stroke="#4ee39b" stroke-width="1.5"/>
+  <rect x="40.0" y="90.0" width="1400.0" height="32.0" rx="8" fill="#161b24" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="54.0" y="110.0" fill="#4ee39b" font-size="12" font-weight="700">1. Rule &amp; Skill Synchronization Pipeline (Single Source of Truth → Harness-Aware Build Target)</text>
+</g>
+<g id="cell-src-claude">
+  <rect x="70.0" y="145.0" width="260.0" height="100.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="200.0" y="182.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">~/.claude/CLAUDE.md</text>
+  <text x="200.0" y="198.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">(Canonical Global Rules 1–12)</text>
+  <text x="200.0" y="214.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">80/20 Tiered Model &amp; Tool Tables</text>
+</g>
+<g id="cell-src-local">
+  <rect x="400.0" y="145.0" width="280.0" height="100.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="540.0" y="174.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">~/.gemini/GEMINI.local.md</text>
+  <text x="540.0" y="190.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">(Cleaned AGY-Only Overrides)</text>
+  <text x="540.0" y="206.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">Argon Orchestrator + Flash Workers</text>
+  <text x="540.0" y="222.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">(Legacy ClickUp RFC Removed)</text>
+</g>
+<g id="cell-sync-bin">
+  <rect x="760.0" y="145.0" width="290.0" height="100.0" rx="8" fill="#292112" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="905.0" y="174.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">bin/sync-agent-rules</text>
+  <text x="905.0" y="190.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">• Inline @file Import Resolution</text>
+  <text x="905.0" y="206.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">• Harness Tool Call Callout Banner</text>
+  <text x="905.0" y="222.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">• --check / --write Atomic Build</text>
+</g>
+<g id="cell-dst-gemini">
+  <rect x="1130.0" y="145.0" width="280.0" height="100.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="1270.0" y="174.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">~/.gemini/GEMINI.md</text>
+  <text x="1270.0" y="190.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">(Generated Build Artifact)</text>
+  <text x="1270.0" y="206.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Loaded Automatically by AGY Sessions</text>
+  <text x="1270.0" y="222.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">+ Symlinked ~/.gemini/skills/*</text>
+</g>
+<g id="cell-lane-dispatch">
+  <rect x="40.0" y="340.0" width="1400.0" height="210.0" rx="8" fill="#10141b" stroke="#74b0ff" stroke-width="1.5"/>
+  <rect x="40.0" y="340.0" width="1400.0" height="32.0" rx="8" fill="#161b24" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="54.0" y="360.0" fill="#74b0ff" font-size="12" font-weight="700">2. Quota-Aware Tiered CLI Dispatch (80% Default: agy:gemini-3.8-flash-high | 20% Escalate/Think: agy:gemini-4-argon)</text>
+</g>
+<g id="cell-caller-session">
+  <rect x="70.0" y="400.0" width="280.0" height="110.0" rx="8" fill="#1d1829" stroke="#b288ff" stroke-width="1.5"/>
+  <text x="210.0" y="434.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Caller Orchestrator Session</text>
+  <text x="210.0" y="450.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">• Claude Code (Opus 5.5)</text>
+  <text x="210.0" y="466.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">• Antigravity IDE/CLI (Gemini 4 Argon)</text>
+  <text x="210.0" y="482.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Thinks Inline; Offloads 80% to Flash</text>
+</g>
+<g id="cell-disp-thinker">
+  <rect x="420.0" y="400.0" width="300.0" height="110.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="570.0" y="434.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Frontier / Escalation Tier (--think | --escalate)</text>
+  <text x="570.0" y="450.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Allowed: claude-opus-5-5 | gemini-4-argon</text>
+  <text x="570.0" y="466.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Used for: Deep Design, R3+ Escalation,</text>
+  <text x="570.0" y="482.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Adversarial Review &amp; [complex] Tasks</text>
+</g>
+<g id="cell-disp-worker">
+  <rect x="790.0" y="400.0" width="300.0" height="110.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="940.0" y="434.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Fast Mechanical Tier (80% Default)</text>
+  <text x="940.0" y="450.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Default: agy:gemini-3.8-flash-high</text>
+  <text x="940.0" y="466.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Used for: R1–R2 Implementation, Draw.io,</text>
+  <text x="940.0" y="482.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Render-Spec, Simplify, README &amp; Graft</text>
+</g>
+<g id="cell-disp-result">
+  <rect x="1160.0" y="400.0" width="250.0" height="110.0" rx="8" fill="#292112" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="1285.0" y="434.0" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Headless AGY Execution &amp; Gate</text>
+  <text x="1285.0" y="450.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">Runs --verify-cmd Before Merge</text>
+  <text x="1285.0" y="466.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">Salvages Partial Patch on Timeout</text>
+  <text x="1285.0" y="482.0" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">Emits ≤15-Line Report + JSONL Event</text>
+</g>
+<g id="cell-lane-gov">
+  <rect x="40.0" y="610.0" width="1400.0" height="190.0" rx="8" fill="#10141b" stroke="#b288ff" stroke-width="1.5"/>
+  <rect x="40.0" y="610.0" width="1400.0" height="32.0" rx="8" fill="#161b24" stroke="#b288ff" stroke-width="1.5"/>
+  <text x="54.0" y="630.0" fill="#b288ff" font-size="12" font-weight="700">3. Persistence, Mesh Coordination &amp; Vault Agent Governance Boundary</text>
+</g>
+<g id="cell-gov-mesh">
+  <rect x="420.0" y="665.0" width="320.0" height="105.0" rx="8" fill="#161b24" stroke="#4ed2c8" stroke-width="1.5"/>
+  <text x="580.0" y="696.5" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Agent Mesh &amp; Handoff Claims</text>
+  <text x="580.0" y="712.5" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• In-Session: invoke_subagent + send_message</text>
+  <text x="580.0" y="728.5" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• Cross-Session: mesh claim / send / inbox</text>
+  <text x="580.0" y="744.5" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• Atomic mkdir &lt;handoff&gt;.claim Lock</text>
+</g>
+<g id="cell-gov-vault">
+  <rect x="810.0" y="665.0" width="320.0" height="105.0" rx="8" fill="#1d1829" stroke="#b288ff" stroke-width="1.5"/>
+  <text x="970.0" y="696.5" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">tools/vault-engine/pkg/agent/registry.go</text>
+  <text x="970.0" y="712.5" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">• System Orchestrators: Full Subagent &amp; Shell</text>
+  <text x="970.0" y="728.5" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">• Recruited Leaf Agents: No Recursive Spawn</text>
+  <text x="970.0" y="744.5" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">  (define_subagent / agent_recruit Forbidden)</text>
+</g>
+<g id="cell-gov-state">
+  <rect x="1190.0" y="665.0" width="220.0" height="105.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="1300.0" y="696.5" fill="#f6f8fb" font-size="11" font-weight="700" text-anchor="middle">Persistent State &amp; Telemetry</text>
+  <text x="1300.0" y="712.5" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• ~/.local/state/dispatch/events.jsonl</text>
+  <text x="1300.0" y="728.5" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• ~/.agentmesh/mesh.db (SQLite)</text>
+  <text x="1300.0" y="744.5" fill="#f6f8fb" font-size="11" font-weight="400" text-anchor="middle">• .superpowers/sdd/progress.md Ledger</text>
+</g>
+<g id="cell-legend">
+  <rect x="70.0" y="630.0" width="290.0" height="140.0" rx="8" fill="#10141b" stroke="#2a3340" stroke-width="1.5"/>
+  <rect x="70.0" y="630.0" width="290.0" height="24.0" rx="8" fill="#161b24" stroke="#2a3340" stroke-width="1.5"/>
+  <text x="84.0" y="646.0" fill="#f6f8fb" font-size="11" font-weight="700">Legend</text>
+</g>
+<g id="cell-leg1">
+  <rect x="85.0" y="662.0" width="260.0" height="22.0" rx="8" fill="#162420" stroke="#4ee39b" stroke-width="1.5"/>
+  <text x="215.0" y="675.5" fill="#f6f8fb" font-size="10" font-weight="400" text-anchor="middle">20% Frontier Tier / State (Green)</text>
+</g>
+<g id="cell-leg2">
+  <rect x="85.0" y="690.0" width="260.0" height="22.0" rx="8" fill="#142030" stroke="#74b0ff" stroke-width="1.5"/>
+  <text x="215.0" y="703.5" fill="#f6f8fb" font-size="10" font-weight="400" text-anchor="middle">80% Fast 3.8-Flash Tier (Blue)</text>
+</g>
+<g id="cell-leg3">
+  <rect x="85.0" y="718.0" width="260.0" height="22.0" rx="8" fill="#1d1829" stroke="#b288ff" stroke-width="1.5"/>
+  <text x="215.0" y="731.5" fill="#f6f8fb" font-size="10" font-weight="400" text-anchor="middle">Orchestrator / Governance (Purple)</text>
+</g>
+<g id="cell-leg4">
+  <rect x="85.0" y="744.0" width="260.0" height="22.0" rx="8" fill="#292112" stroke="#ffc746" stroke-width="1.5"/>
+  <text x="215.0" y="757.5" fill="#f6f8fb" font-size="10" font-weight="400" text-anchor="middle">Build / Verification Pipeline (Amber)</text>
+</g>
+<g id="edge-e1">
+  <path d="M 200.0 245.0 L 200.0 265.0 L 905.0 265.0 L 905.0 245.0" fill="none" stroke="#4ee39b" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <rect x="512.0" y="255.0" width="81.0" height="20" rx="5" fill="#10141b" stroke="#4ee39b" stroke-width="1"/>
+  <text x="552.5" y="268.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">Base Rules</text>
+</g>
+<g id="edge-e2">
+  <path d="M 680.0 195.0 L 720.0 195.0 L 760.0 195.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="620.5" y="185.0" width="159.0" height="20" rx="5" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="700.0" y="198.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">Append Local Overrides</text>
+</g>
+<g id="edge-e3">
+  <path d="M 1050.0 195.0 L 1090.0 195.0 L 1130.0 195.0" fill="none" stroke="#ffc746" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <rect x="993.8" y="185.0" width="152.5" height="20" rx="5" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="1070.0" y="198.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">--write Atomic Output</text>
+</g>
+<g id="edge-e4">
+  <path d="M 1270.0 245.0 L 1270.0 310.0 L 210.0 310.0 L 210.0 400.0" fill="none" stroke="#4ee39b" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow-green)"/>
+  <rect x="660.5" y="300.0" width="159.0" height="20" rx="5" fill="#10141b" stroke="#4ee39b" stroke-width="1"/>
+  <text x="740.0" y="313.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">Configures AGY Harness</text>
+</g>
+<g id="edge-e5">
+  <path d="M 350.0 455.0 L 380.0 455.0 L 420.0 455.0" fill="none" stroke="#b288ff" stroke-width="2" marker-end="url(#arrow-purple)"/>
+  <rect x="288.0" y="445.0" width="224.0" height="20" rx="5" fill="#10141b" stroke="#b288ff" stroke-width="1"/>
+  <text x="400.0" y="458.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">20% --think / --escalate (Argon)</text>
+</g>
+<g id="edge-e6">
+  <path d="M 210.0 400.0 L 210.0 380.0 L 940.0 380.0 L 940.0 400.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="463.0" y="370.0" width="224.0" height="20" rx="5" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="575.0" y="383.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">80% Bulk / R1–R2 Offload (Flash)</text>
+</g>
+<g id="edge-e7">
+  <path d="M 1090.0 455.0 L 1120.0 455.0 L 1160.0 455.0" fill="none" stroke="#74b0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="1024.8" y="445.0" width="230.5" height="20" rx="5" fill="#10141b" stroke="#74b0ff" stroke-width="1"/>
+  <text x="1140.0" y="458.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">agy --model gemini-3.8-flash-high</text>
+</g>
+<g id="edge-e8">
+  <path d="M 210.0 510.0 L 210.0 580.0 L 580.0 580.0 L 580.0 665.0" fill="none" stroke="#4ed2c8" stroke-width="2" marker-end="url(#arrow-teal)"/>
+  <rect x="312.2" y="570.0" width="165.5" height="20" rx="5" fill="#10141b" stroke="#4ed2c8" stroke-width="1"/>
+  <text x="395.0" y="583.5" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">Cross-Tab / Repo Claims</text>
+</g>
+<g id="edge-e9">
+  <path d="M 740.0 717.5 L 770.0 715.0 L 810.0 717.5" fill="none" stroke="#b288ff" stroke-width="2" marker-end="url(#arrow-purple)"/>
+  <rect x="707.2" y="706.2" width="165.5" height="20" rx="5" fill="#10141b" stroke="#b288ff" stroke-width="1"/>
+  <text x="790.0" y="719.8" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">Enforces Leaf Allowlist</text>
+</g>
+<g id="edge-e10">
+  <path d="M 1285.0 510.0 L 1285.0 580.0 L 1300.0 580.0 L 1300.0 665.0" fill="none" stroke="#ffc746" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <rect x="1230.2" y="612.5" width="139.5" height="20" rx="5" fill="#10141b" stroke="#ffc746" stroke-width="1"/>
+  <text x="1300.0" y="626.0" fill="#f6f8fb" font-size="10" font-weight="600" text-anchor="middle">Logs JSONL &amp; Ledger</text>
+</g>
+</svg>

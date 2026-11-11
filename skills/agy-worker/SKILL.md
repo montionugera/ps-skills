@@ -1,27 +1,71 @@
 ---
 name: agy-worker
-description: "Use when a task is bulk mechanical work a brief fully specifies (bulk edits, sweeps, renames, spec fix-ups, diagram redraws, command-only checks, plan tasks with exact files and tests). Dispatches it to Antigravity CLI via dispatch-worker --agent agy with a verify command and acceptance criteria, falling back to a Sonnet subagent when quota is low."
-argument-hint: "[task prompt] --agent agy [--cwd <dir>] [--verify-cmd <cmd>] [--acceptance-file <file>] [--timeout <seconds>]"
+description: "Use when a task is bulk mechanical work a brief fully specifies. Supports two modes: (1) native in-session AGY multi-agent orchestration (invoke_subagent with 80/20 Flash gemini-3.8-flash-high vs Argon gemini-4-argon tiering), and (2) external CLI dispatch via dispatch-worker --agent agy with quota guarding and verify gates."
+argument-hint: "[task prompt] [--agent agy] [--escalate] [--cwd <dir>] [--verify-cmd <cmd>] [--acceptance-file <file>] [--timeout <seconds>]"
 ---
 
-# External Worker Dispatcher (`agy-worker`, `cursor-worker`)
+# External Worker Dispatcher (`agy-worker`, `cursor-worker`) & Native AGY Multi-Agent
 
 ## Overview
 
-Offloads coding, refactoring, and test execution tasks to **Google Antigravity CLI (`agy`)** or **Cursor CLI (`cursor-agent`)** running in headless mode.
+Offloads coding, refactoring, and test execution tasks using a **Two-Mode Architecture**:
+1. **Mode 1: In-Session Native AGY (`invoke_subagent`)**: When running inside Google Antigravity (`agy`), leverage native multi-agent capabilities directly with the **80/20 Flash-First pipeline**. Never shell out to `dispatch-worker` from within an active AGY session.
+2. **Mode 2: External Cross-Harness CLI (`dispatch-worker --agent agy`)**: When orchestrating from Claude Code, OpenCode, or headless shell scripts, dispatch to Google Antigravity CLI (`agy`) or Cursor CLI (`cursor-agent`) in headless mode with quota guarding and verify gates.
 
 **Codex is disabled (2026-10-03): never dispatch to it.** `--agent codex` and `dispatch-codex-worker` exit 2 with `codex is disabled`; a `--priority` chain entry naming codex is dropped with a one-line stderr notice and routing continues with the rest (a chain naming only codex exits 2).
 
-This workflow:
+---
+
+## Two-Mode & 80/20 Flash-First Architecture
+
+### Mode 1: In-Session Native AGY Orchestration (`invoke_subagent`)
+
+When executing inside Antigravity (`agy`), orchestrators MUST prioritize native in-session multi-agent tools over shelling out to CLI scripts:
+- **`invoke_subagent`**: Dispatch parallel subagents in a single turn. Set workspace isolation explicitly:
+  - `Workspace: "share"`: Zero-copy shared repository worktree for parallel disjoint tasks (optimal speed & disk usage).
+  - `Workspace: "branch"`: Isolated cloned/branched worktree for overlapping files or high-blast-radius edits.
+  - `Workspace: "inherit"`: Shares the exact working directory for read-only research, codebase grep, or diagnostic runs.
+- **`send_message`**: Multi-turn warm fix loops. In Round 2 fixes, send feedback directly to the idle implementer subagent's `conversationID`. Zero cold-start token penalty; preserves context from Round 1.
+- **`define_subagent`**: Declare specialized session-scoped subagents (e.g. `code-reviewer`, `self-grill-auditor`) with tailored system prompts and tool restrictions.
+- **`manage_subagents`**: Inspect running subagents (`Action: "list"`), kill stalled agents (`Action: "kill"`), or clean up.
+- **Liveness Watchdog for Long Subagents (Anti-502 Stall Rule)**:
+  - Pair long-running `invoke_subagent` calls with `schedule(DurationSeconds=240, TimerCondition="<conversationId>", Prompt="Check subagent status")`.
+  - When woken by the timer, inspect `manage_subagents(Action="list")`: only respawn/recover if `state == "errored"` (such as `502 Bad Gateway`) or `state == "idle"` without a final report; never kill a subagent whose `state == "running"`.
+
+#### The 80/20 Flash-First Model Tiering in AGY:
+- **80% Fast Worker Tier (`Model: "flash"` / `gemini-3.8-flash-high`)**:
+  - Codebase exploration & `graft` queries (`TypeName: "research"`, `Model: "flash"`, `Workspace: "inherit"`).
+  - Diagram XML math & visual rendering (`drawio-skill` loops, `validate.py --score`, `render-spec`).
+  - Round 1 & Round 2 plan implementation (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"` or `"branch"`).
+  - Step 2 Test verification (`Verify`) and Step 4 simplification (`/simplify`, `README.md` sync, `graft build`).
+- **20% Frontier Tier (`Model: "inherit"` / `gemini-4-argon`)**:
+  - Thin orchestrator thinking, brainstorming, spec writing, and plan drafting on the main thread.
+  - Step 3 Adversarial review (`code-reviewer`, `self-grill-audit`).
+  - Round 3+ Escalation: If Round 2 fails review/verification, terminate the Flash subagent (`manage_subagents(Action: "kill")`) and escalate to a fresh `gemini-4-argon` subagent (`Model: "inherit"`). Also default to Argon for `[complex]` or `[architectural]` tasks.
+
+### Mode 1b: T3 Code Native Cross-Provider Delegation (`t3-code:delegate_task`)
+
+When running inside **T3 Code** (either as Antigravity `antigravity` or Claude Code `claudeAgent`), use the `t3-code` MCP server for cross-provider child tasks:
+- **Discover live models**: Call `orchestrator_capabilities` to inspect active providers (`claudeAgent`: `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-1`, `claude-haiku-5-5`; `antigravity`: `gemini-4-argon-*`, `gemini-3.8-flash-*`) and effort options.
+- **Dispatch (`delegate_task`)**: Use `mode: "async"` with `target: {"providerInstanceId": "claudeAgent", "model": "claude-sonnet-5-5", "options": [{"id": "effort", "value": "high"}]}` (or vice versa from Claude to `antigravity`).
+- **Zero-Polling Reactive Monitoring**: End your turn after `delegate_task(mode="async")`. T3 Code automatically wakes the parent thread when the child reaches a terminal state; then call `task_status(taskId)` to read the summary, or `t3_thread_read(threadId=childThreadId)` to inspect detailed steps.
+
+### Mode 2: External Cross-Harness CLI Dispatch (`dispatch-worker --agent agy`)
+
+When orchestrating from Claude Code, OpenCode, or headless CI:
 1. **Preserves Primary Token Quota**: Coding tasks run on external provider infrastructure instead of depleting Claude limits.
 2. **Proactive Rate Limit Protection**: Reads live provider quota before dispatching. If remaining quota is **< 30% for 5-hour** or **< 10% for weekly**, it returns exit code `10` (`FALLBACK_INTERNAL`), instructing caller orchestrators to seamlessly route to Claude's internal `sonnet` subagents.
 3. **Preference Chain & Dynamic Auto-Routing**:
    - Supports declarative priority chains via `--priority` or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE` (e.g. `cursor:gemini-3.8-flash > agy`).
-   - Evaluates left-to-right, respecting `--mode {subscription_quota_remaining,on_demand}` (or `AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_MODE`) to guard against unexpected metered billing.
+   - Default worker model is `agy:gemini-3.8-flash-high`.
    - **Always pass `--agent agy`.** The tool's own default is `auto`; never rely on it and never write `--agent auto`.
-4. **Prompt Contract & Scoped Verification**: Wraps prompts with non-negotiable standing rules (TDD cycle, new commits only / never amend, preserving protected configs like `.release.json`, running targeted tests for touched modules, and visual integrity forbidding invented CSS classes).
-5. **Isolated Execution (`--isolated`) & Salvage**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success. If a worker fails or times out (default 900s / 15m, configurable via `AI_AGENT_AUTO_DISPATCH_TIMEOUT`), any partial work is automatically preserved to `/tmp/worker-salvage-<timestamp>.patch` before cleanup.
-6. **Enforces Thin Orchestration**: Returns a standardized **≤ 15-line report** (status, modified files, diff summary, and execution output) so orchestrator context windows remain clean and free from archaeological bloat.
+4. **Escalation Flag (`--escalate`)**:
+   - Pass `--escalate` to route implementation tasks directly to `gemini-4-argon` (for Round 3+ retries or complex tasks).
+5. **Frontier Thinking Mode (`dispatch-thinker` / `--capability deep-design-v1`)**:
+   - Routes to **Claude Opus 5.5** or **Gemini 4 Argon** (`gemini-4-argon`). Fails closed (exit code `12`) if neither frontier model is available or an ineligible model is requested.
+6. **Prompt Contract & Scoped Verification**: Wraps prompts with non-negotiable standing rules (TDD cycle, new commits only / never amend, preserving protected configs like `.release.json`, running targeted tests for touched modules, and visual integrity forbidding invented CSS classes).
+7. **Isolated Execution (`--isolated`) & Salvage**: Cuts a temporary git worktree off `HEAD`, executes within it, and merges changes back on success. If a worker fails or times out, any partial work is automatically preserved to `/tmp/worker-salvage-<timestamp>.patch` before cleanup.
+8. **Enforces Thin Orchestration**: Returns a standardized **≤ 15-line report** (status, modified files, diff summary, and execution output) so orchestrator context windows remain clean and free from archaeological bloat.
 
 ---
 
@@ -59,12 +103,17 @@ dispatch-worker --agent agy --batch-file tasks.json --max-parallel 4 --cwd "$REP
 dispatch-worker --agent agy --task "Heavy refactor in src/engine" --detach --cwd "$REPO_DIR" \
   --verify-cmd "<cmd>" --acceptance-file "$ACCEPTANCE_FILE" --timeout 9000
 
+# --- Escalation Mode (Frontier Gemini 4 Argon Implementation) ---
+# Escalate from default 3.8-flash worker to frontier Gemini 4 Argon for Round 3 fixes or complex architectural tasks
+dispatch-worker --agent agy --escalate --task "Fix complex concurrency race in src/engine" \
+  --cwd "$WORKTREE_DIR" --verify-cmd "<cmd>"
+
 # --- Heavy Thinking & Architecture Mode (Capability deep-design-v1) ---
-# Offload deep reasoning, RFC generation, or code reviews: Claude Opus 5.5 only (`claude -p`).
-# There is no fallback thinker: a failed Claude run is reported as a failure.
-# Defaults reasoning effort to 'medium' (--effort overrides, or THINK_EFFORT env var).
-# Fails closed (exit code 12) if Claude is unavailable or a non-Claude model is specified.
-dispatch-thinker --task "Synthesize multi-wave portal architecture" \
+# Offload deep reasoning, RFC generation, or code reviews: Claude Opus 5.5 or Gemini 4 Argon (`gemini-4-argon`).
+# There is no fallback thinker: a failed run is reported as a failure.
+# Defaults reasoning effort to 'medium' (--effort overrides, or THINK_EFFORT / AGY_THINK_EFFORT env vars).
+# Fails closed (exit code 12) if neither frontier model is available or an ineligible model is specified.
+dispatch-thinker --agent agy --model gemini-4-argon --task "Synthesize multi-wave portal architecture" \
   --context docs/specs/hub.md \
   --output-file /tmp/portal-synthesis.md
 
@@ -111,6 +160,7 @@ The default `--timeout` is 900s. That fits a read-only check or a small edit; it
 | One plan task implemented from a brief, with its tests | `3600` |
 | A multi-task plan part, or anything whose verify command runs a full suite or a build | `9000` |
 
+- **Foreground runs are tracked too, and one folder takes one worker.** A run without `--detach` registers itself, so `--status` lists it. A second non-isolated run on a `--cwd` that already has a running job exits 2 with `REFUSED`; wait for it, use `--isolated`, or pass `--allow-shared`. Prefer `--detach` for anything longer than a couple of minutes.
 - **Wait once, never poll.** After `--detach`, run `dispatch-worker --wait <job-id> --timeout <seconds>` as a single background command and do other work until it returns. Do not loop on `--status`, `--tail`, `sleep`, or marker files, and do not end the turn with a "still running" message.
 - `--wait` is bounded by its own `--timeout` (also 900s by default). Give it the job's `--timeout` plus the `--verify-timeout`; when the bound passes it reports `Status: UNKNOWN (exit 1)` while the job keeps running, so wait again rather than re-dispatching.
 - `--wait all` blocks on every running job; use it for a batch.
@@ -120,10 +170,13 @@ The default `--timeout` is 900s. That fits a read-only check or a small edit; it
 
 - **Event log**: every run appends JSONL records to `~/.local/state/dispatch/events.jsonl` (override with `DISPATCH_EVENTS_FILE`): `route`, `start`, `fallback`, `timeout`, `verify_failed`, `finish` (agent, model, status, exit code, duration, files changed). Sync, detached and batch runs are all covered; only a task hash is logged, never any prompt text, and the file is created owner-only (0600).
 - **Live output**: detached jobs stream worker stdout/stderr into their log as it arrives, so `dispatch-worker --tail <job> -f` shows progress before the worker exits.
+- **Agy streaming and self-healing**: agy runs always use `--output-format stream-json`; the final `response` is the job output, the `conversation_id` is saved in the job state (and the `finish` event) as soon as agy reports it, and the job log gets one `[agy] step ...` heartbeat line per 30s. `DISPATCH_AGY_IDLE_SECONDS` (default 1200, `0` disables) kills a run that emits no event for that long (`idle_timeout` event); when the limit expires and files in the folder changed since the previous check the timer resets instead. **Remaining limit: a silent step longer than the limit that changes no files is killed.** `--timeout` stays the hard cap. A run that already sent its `SUCCESS` result and only lingers counts as finished (no resume). After either kill, if a conversation id is known, the job resumes **once** (`resume` event, budget `min(max(900, timeout/2), timeout)`, so the agy runs take at most 2x `--timeout`, plus any verify retry, `resumed: true`); a second stall ends it as `TIMEOUT_*`. `DISPATCH_AGY_RESUME=0` turns the resume off. A killed run's output carries the last step and any error events (bounded tail). A run that exits 0 without a `result` event or with a non-string `response`, or a resumed run whose answer ends in a question, is a failure.
+- **Per-job file counts**: `Files Modified` counts only paths new or changed since the job started (size/mtime compared, not file content), not the folder's cumulative dirt. If git status failed at the start the report says `count not baseline-adjusted`.
+- **Check `Status`, never `$?`**: `RESUMED_UNVERIFIED` and `NO_CHANGES_UNVERIFIED` both exit 0 on purpose (a non-zero exit would trigger the runtime fallback on a folder holding partial work). On either one, run your own verify before accepting. A resumed job with 0 files changed and no artifact reports `NO_CHANGES_UNVERIFIED`.
 - **Stall detection**: `dispatch-worker --status` shows `last output Ns ago` for RUNNING jobs and marks `STALLED?` after 300s of silence. Check `--tail` before killing it.
 - **Stats**: `dispatch-worker --stats [DAYS]` (default 7) prints runs, success %, timeouts, fallbacks, verify failures and median duration per agent.
 - **Recovery**: a run pinned with `--agent agy` is never retried on another agent, and a quota observation older than 60 minutes counts as not eligible.
-- **Stale quota reading**: when the `FALLBACK_INTERNAL` message contains `[stale: observation`, the reading is old, not low. The reading is rewritten by an interactive agy session's status line, so if `herdr agent list` shows a live `agy` pane, re-run the same dispatch once. If it is still stale, take the Sonnet fallback and say in your report that the cause was a stale reading, not low quota.
+- **Stale quota reading**: only an interactive agy session's status line rewrites the reading (`agy -p` does not), so when it is over 60 minutes old `dispatch-worker` starts an idle agy on a pseudo-terminal, sends no prompt, spends no quota, and rereads it (about 3s, 20s limit). A `FALLBACK_INTERNAL` message that still contains `[stale: observation` means that refresh failed: the reading is old, not low. Follow the refresh hint in the message, re-run the same dispatch once, and if it is still stale take the Sonnet fallback and say in your report that the cause was a stale reading, not low quota.
 - **Detached jobs do not get the runtime fallback**: a `--detach` job runs only the agent it was routed to; if it fails, re-dispatch it yourself.
 
 ### Exit Codes Contract
@@ -163,15 +216,97 @@ dispatch-worker --isolated --task "..." \
 | `Files Modified:` above 0 **and** `Verified: true` | Accepted. Advance to the Review Gate; the verify output is the test evidence, do not re-run it |
 | `Files Modified: 0` (`0 files (no git diff)`) on a task that was meant to write something | **Failed.** Nothing landed. Read `dispatch-worker --tail <job-id>`, fix the brief, re-dispatch |
 | `Verified: skipped` (`verified=skipped`) on a task that wrote files | **Unverified, not done.** Run the verify command yourself once in the worktree, or re-dispatch with `--verify-cmd`. Do not send it to review as finished work |
+| `RESUMED_UNVERIFIED` (`Resumed: true`) | **Unverified, not done.** agy was killed once (no events for `DISPATCH_AGY_IDLE_SECONDS`, or `--timeout` hit) and auto-resumed with `--conversation`; a resume can lose the killed turn's prompt, so exit 0 proves nothing. Inspect the work or run the verify command yourself; a resumed job with a passing `--verify-cmd` reports plain `SUCCESS` |
+| `Files Modified:` ends with `[shared folder: ...]` | The count is not attributable: another job was running in the same `--cwd`. Check `git status` yourself |
 | `TIMEOUT_PARTIAL_WORK` | **Failed, but keep the work.** The edits are in the worktree (or the salvage patch). Re-dispatch in the same `--cwd` with a larger `--timeout` and "continue from the existing changes"; never start over from the default 900s |
 
 ---
 
 ## Integration with Subagent-Driven Development (SDD)
 
-When using `subagent-driven-development`:
+When using `subagent-driven-development`, select the execution path based on the orchestrator environment:
 
-### 1. Synchronous or Detached Single Batch
+### Path A.1: Inside T3 Code (App-Owned `delegate_task` Orchestration)
+
+When running inside **T3 Code** (where the `t3-code` MCP server exposes `delegate_task` and `orchestrator_capabilities`):
+
+1. **Never call `invoke_subagent` inside T3 Code**: Antigravity's ACP bridge in T3 Code does not initialize `PlatformClient`, so `invoke_subagent` fails with `PlatformClient is nil`. Always use `call_mcp_tool(ServerName="t3-code", ToolName="delegate_task", ...)`.
+2. **Always nest `providerInstanceId` and `model` inside `target` (never top-level)**:
+   Top-level `model` or `providerInstanceId` fields are ignored by T3 Code and silently fall back to the parent's provider/model.
+   ```json
+   {
+     "task": "Goal: ...\nFiles in scope: ...\nAcceptance criteria: ...\nVerify command: ...",
+     "description": "Implement Wave 1",
+     "subagentType": "implementation",
+     "mode": "async",
+     "isolation": "worktree",
+     "target": {
+       "providerInstanceId": "claudeAgent",
+       "model": "claude-opus-5-5"
+     },
+     "clientRequestId": "impl-wave-1-r1"
+   }
+   ```
+3. **Choose `isolation: "worktree"` for parallel code-writing subagents**:
+   - Default `isolation: "shared"` runs inside the parent's working tree. If the parent is sitting on `main` or `_release`, `release_git_guard.py` will block subagent commits, and parallel subagents will collide on the git index.
+   - Use `isolation: "worktree"` when parallel subagents write code, OR ensure the parent thread is already attached to a claimed feature worktree with disjoint file ownership before using `"shared"`.
+4. **Zero-Poll Reactive Wakeup (Never loop on `task_status` or `schedule_task`)**:
+   - After launching `delegate_task(mode="async")`, **stop calling tools to end your turn** once you have no more immediate local work. T3 Code automatically wakes the parent turn with `Delegated task <taskId> reached a terminal state` when each child finishes, at which point you call `task_status(taskId=...)` **once** to read the result.
+   - **NEVER** busy-poll `task_status` in a loop with `schedule` timers, and **NEVER** create recurring `schedule_task` intervals bound to your own thread as a "heartbeat" (which floods the thread queue with cancelled runs).
+
+### Path A: In-Session Native AGY Orchestration (Preferred inside AGY)
+
+Inside AGY, never shell out to `dispatch-worker`. Use native tools with the 80/20 Flash-First pattern:
+
+1. **Round 1 Implementation (80% Flash Default)**:
+   ```json
+   invoke_subagent(
+     TypeName: "self",
+     Role: "Task Implementer",
+     Model: "flash",
+     Workspace: "share",  // use "branch" for overlapping or risky surface files
+     Prompt: "Goal: Implement Task N from plan.md...\nFiles in scope: ...\nAcceptance criteria: ...\nVerify command: ..."
+   )
+   ```
+2. **Round 2 Fix Loop (Warm Continuity via `send_message`)**:
+   Instead of respawning a fresh subagent, send reviewer feedback directly to the idle implementer subagent's conversation ID:
+   ```json
+   send_message(
+     Recipient: "<implementer-conversation-id>",
+     Message: "Verification/Review failed with output: ... Please fix and re-verify."
+   )
+   ```
+3. **Round 3+ Escalation (Argon Frontier)**:
+   If Round 2 fails verification or review, terminate the Flash subagent (`manage_subagents(Action: "kill", ConversationIds: ["<implementer-conversation-id>"])`) and escalate to a fresh frontier subagent:
+   ```json
+   invoke_subagent(
+     TypeName: "self",
+     Role: "Escalated Implementer",
+     Model: "inherit",  // runs on gemini-4-argon
+     Workspace: "branch",
+     Prompt: "Escalated: Implement Task N from plan.md...\nReason for escalation: ..."
+   )
+   ```
+4. **Step 3 Adversarial Review Gate**:
+   Always run reviews on the Frontier Tier (`Model: "inherit"` / `gemini-4-argon`):
+   ```json
+   define_subagent(
+     name: "code-reviewer",
+     description: "Adversarial code reviewer",
+     system_prompt: "Adversarial code reviewer evaluating diffs against plan acceptance criteria...",
+     enable_write_tools: false
+   )
+   invoke_subagent(
+     TypeName: "code-reviewer",
+     Role: "Adversarial Reviewer",
+     Model: "inherit",
+     Prompt: "Review git diff for Task N against plan criteria..."
+   )
+   ```
+
+### Path B: External Cross-Harness CLI Dispatch (From Claude Code / Headless)
+
+#### 1. Synchronous or Detached Single Batch
 ```bash
 dispatch-worker --agent agy --detach \
   --task "Read brief: [BRIEF_FILE]. Implement exactly what is specified. Run tests and keep output." \
@@ -182,6 +317,10 @@ dispatch-worker --agent agy --detach \
 dispatch-worker --wait [job-id] --timeout 4200
 ```
 - If exit code is `0`: apply "Accepting a Result", then proceed to Gate 1 / Review Gate with the ≤ 15-line report as the test evidence.
+- If Round 2 fails, escalate to Argon on Round 3 via `--escalate`:
+  ```bash
+  dispatch-worker --agent agy --escalate --detach ...
+  ```
 - If exit code is `10`: Automatically fallback to internal subagent:
   ```
   Agent:
@@ -190,7 +329,7 @@ dispatch-worker --wait [job-id] --timeout 4200
     model: sonnet
   ```
 
-### 2. Multi-Task Parallel Execution (Optimal Tokenomics)
+#### 2. Multi-Task Parallel Execution (Optimal Tokenomics)
 Instead of spawning N separate Claude subagents (which burn ~70K cold-start tokens each), dispatch all tasks in a single batch call:
 ```bash
 dispatch-worker --agent agy \

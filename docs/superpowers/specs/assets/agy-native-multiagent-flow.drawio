@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="In-Session Native AGY Multi-Agent Pipeline" id="agy-native-flow">
+    <mxGraphModel dx="1440" dy="960" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1480" pageHeight="960" background="#0b0f17" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title Banner -->
+        <mxCell id="title" value="Flow A — 80/20 Flash-First Native AGY Multi-Agent Pipeline (Gemini 4 Argon + 3.8 Flash High)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#4ee39b;fontColor=#f6f8fb;fontStyle=1;fontSize=15;align=left;spacingLeft=16;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1400" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Swimlane 1: Thin Orchestrator -->
+        <mxCell id="lane-orch" value="1. Parent Thin Orchestrator (20% Frontier Tier: Gemini 4 Argon — Architecture, Synthesis &amp; Adjudication)" style="swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#4ee39b;fontColor=#4ee39b;fontStyle=1;fontSize=12;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="1400" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="orch-think" value="Inline Frontier Thinking&#xa;(Gemini 4 Argon)&#xa;Specs · Plans · Adjudication&#xa;(Zero External Thinker Tax)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-orch">
+          <mxGeometry x="30" y="50" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="orch-define" value="define_subagent&#xa;Register Custom Session Roles:&#xa;• code-reviewer (Argon inherit)&#xa;• simplifier / drawio (3.8 Flash)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-orch">
+          <mxGeometry x="360" y="50" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="orch-fanout" value="invoke_subagent (80/20 Tiering)&#xa;• 80% Model: &quot;flash&quot; (Research/R1-2/Drawio)&#xa;• 20% Model: &quot;inherit&quot; (Argon Review/R3)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-orch">
+          <mxGeometry x="690" y="50" width="280" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="orch-wake" value="Reactive Event Loop Wakeup&#xa;(Zero Polling / Zero sleep)&#xa;Consolidates ≤15-Line Summaries" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-orch">
+          <mxGeometry x="1060" y="50" width="300" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Swimlane 2: Parallel Subagent Execution Pool -->
+        <mxCell id="lane-pool" value="2. Parallel Native Subagent Pool (80% Fast 3.8 Flash Workhorses + 20% Frontier Argon Reviewers)" style="swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#74b0ff;fontColor=#74b0ff;fontStyle=1;fontSize=12;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="320" width="1400" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="sub-research" value="Discovery &amp; Diagram Worker&#xa;Model: &quot;flash&quot; (3.8-flash-high)&#xa;Graft Lookups · Draw.io XML · Render&#xa;Saves Argon from Coordinate Math" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#161b24;strokeColor=#4ed2c8;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-pool">
+          <mxGeometry x="30" y="60" width="280" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="sub-share" value="Round 1–2 Implementer (Disjoint)&#xa;Model: &quot;flash&quot; · Workspace: &quot;share&quot;&#xa;Executes Exact Plan + TDD Spans&#xa;Runs Step 2 Verify &amp; Step 4 Simplify" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-pool">
+          <mxGeometry x="380" y="60" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="sub-branch" value="Round 1–2 Implementer (Isolated)&#xa;Model: &quot;flash&quot; · Workspace: &quot;branch&quot;&#xa;Overlapping / Risky Surface Changes&#xa;3–5× Speed with Isolated Test Suite" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-pool">
+          <mxGeometry x="750" y="60" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="sub-review" value="Step 3 Adversarial Reviewer&#xa;TypeName: &quot;code-reviewer&quot;&#xa;Model: &quot;inherit&quot; (Gemini 4 Argon)&#xa;Frontier Audit of 3.8-Flash Code" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-pool">
+          <mxGeometry x="1120" y="60" width="250" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- Swimlane 3: Stateful Fix & Progressive Escalation Loop -->
+        <mxCell id="lane-fix" value="3. Rule 7 Phase Gate Split &amp; Progressive Escalation Loop (Flash R1–R2 → Argon R3+)" style="swimlane;startSize=32;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#ffc746;fontColor=#ffc746;fontStyle=1;fontSize=12;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="590" width="1400" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="fix-gate" value="Rule 7 Phase Gate Split&#xa;• Step 2 Verify &amp; Step 4 Simplify: Flash&#xa;• Step 3 Adversarial Review: Argon&#xa;• README.md + graft build Sync: Flash" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=11;" vertex="1" parent="lane-fix">
+          <mxGeometry x="380" y="55" width="280" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="fix-resume" value="Round 2 Fix: Warm Flash Resume&#xa;send_message(Recipient: convId)&#xa;Reuses 3.8-Flash Implementer Context&#xa;(Zero Cold-Start Token Tax)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-fix">
+          <mxGeometry x="750" y="55" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="fix-fresh" value="Round 3+ Auto-Escalation&#xa;manage_subagents(Action: &quot;kill&quot;)&#xa;invoke_subagent Model: &quot;inherit&quot; (Argon)&#xa;Frontier Takeover on R2 Failure" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2b1619;strokeColor=#ff6b6b;fontColor=#f6f8fb;fontSize=11;fontStyle=1;" vertex="1" parent="lane-fix">
+          <mxGeometry x="1120" y="55" width="250" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Legend Container -->
+        <mxCell id="legend" value="Legend (80/20 Allocation)" style="swimlane;startSize=24;rounded=1;whiteSpace=wrap;html=1;fillColor=#10141b;strokeColor=#2a3340;fontColor=#f6f8fb;fontStyle=1;fontSize=11;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="70" y="615" width="290" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="leg1" value="20% Frontier Argon Thinker (Green)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#162420;strokeColor=#4ee39b;fontColor=#f6f8fb;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="15" y="32" width="260" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="leg2" value="80% Fast 3.8-Flash Worker (Blue)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#142030;strokeColor=#74b0ff;fontColor=#f6f8fb;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="15" y="60" width="260" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="leg3" value="20% Argon Reviewer / Audit (Purple)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1d1829;strokeColor=#b288ff;fontColor=#f6f8fb;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="15" y="88" width="260" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="leg4" value="Warm Resume / R3 Escalation (Amber/Red)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#292112;strokeColor=#ffc746;fontColor=#f6f8fb;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="15" y="114" width="260" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Edges with explicit waypoints & labelBackgroundColor pills -->
+        <mxCell id="e1" value="1. Register Roles" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="orch-think" target="orch-define">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="360" y="185" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e2" value="2. Build Subagents[]" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="orch-define" target="orch-fanout">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="690" y="185" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e3" value="3. Yield Turn (Idle)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;dashed=1;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="orch-fanout" target="orch-wake">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1050" y="185" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Fan-out edges from orch-fanout to Pool -->
+        <mxCell id="e4" value="Model: flash (Research/Drawio)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ed2c8;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.2;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="orch-fanout" target="sub-research">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="786" y="280" />
+              <mxPoint x="210" y="280" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e5" value="Model: flash (share Lane)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.45;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="orch-fanout" target="sub-share">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="856" y="295" />
+              <mxPoint x="570" y="295" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e6" value="Model: flash (branch Lane)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#74b0ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="orch-fanout" target="sub-branch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="940" y="300" />
+              <mxPoint x="940" y="350" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Return / Gate edges -->
+        <mxCell id="e7" value="send_message (≤15 lines)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.8;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="sub-review" target="orch-wake">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1360" y="300" />
+              <mxPoint x="1250" y="300" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e8" value="4. Trigger Quality Gate" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4ee39b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="sub-share" target="fix-gate">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="570" y="560" />
+              <mxPoint x="560" y="560" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e9" value="5. R2 Findings? Resume Flash" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="fix-gate" target="fix-resume">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="740" y="695" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e10" value="send_message to convId" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ffc746;strokeWidth=2;dashed=1;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="fix-resume" target="sub-branch">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="940" y="560" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e11" value="6. R2 Failed → R3 Argon Escalation" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ff6b6b;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="fix-resume" target="fix-fresh">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1120" y="695" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e12" value="7. Re-Review Diff (Argon)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b288ff;strokeWidth=2;fontColor=#f6f8fb;labelBackgroundColor=#10141b;fontSize=10;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="fix-fresh" target="sub-review">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1285" y="560" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

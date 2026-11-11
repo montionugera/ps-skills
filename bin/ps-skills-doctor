@@ -91,6 +91,48 @@ def main():
                     else:
                         issues.append(f"Broken symlink in {name} skills: {item} -> {target}")
 
+    # 4b. Check duplicate slash commands/skills across ~/.claude/skills, ~/.agents/skills, and ~/.claude/commands
+    claude_skills_dir = home / ".claude" / "skills"
+    agents_skills_dir = home / ".agents" / "skills"
+    claude_commands_dir = home / ".claude" / "commands"
+    if claude_skills_dir.is_dir():
+        claude_skill_names = {
+            item.name for item in claude_skills_dir.iterdir()
+            if not item.name.startswith(".") and (item.exists() or item.is_symlink())
+        }
+        if agents_skills_dir.is_dir():
+            for item in sorted(agents_skills_dir.iterdir()):
+                if item.name in claude_skill_names:
+                    if args.fix:
+                        try:
+                            if item.is_symlink() or item.is_file():
+                                item.unlink()
+                            else:
+                                import shutil
+                                shutil.rmtree(item)
+                            fixed.append(f"Removed duplicate skill in ~/.agents/skills/{item.name} (already in ~/.claude/skills)")
+                        except Exception as e:
+                            issues.append(f"Failed to remove duplicate ~/.agents/skills/{item.name}: {e}")
+                    else:
+                        issues.append(
+                            f"Duplicate skill in ~/.agents/skills/{item.name} shadows ~/.claude/skills/{item.name} "
+                            f"(causes duplicate slash commands in Claude Code)"
+                        )
+        if claude_commands_dir.is_dir():
+            for cmd in sorted(claude_commands_dir.glob("*.md")):
+                stem = cmd.stem
+                if stem in claude_skill_names:
+                    if args.fix:
+                        try:
+                            cmd.unlink()
+                            fixed.append(f"Removed legacy duplicate command ~/.claude/commands/{cmd.name} (already in ~/.claude/skills/{stem})")
+                        except Exception as e:
+                            issues.append(f"Failed to remove duplicate command {cmd}: {e}")
+                    else:
+                        issues.append(
+                            f"Duplicate command ~/.claude/commands/{cmd.name} shadows skill ~/.claude/skills/{stem}"
+                        )
+
     # 5. Antigravity Skill Context Budget Audit
     gemini_skills_dir = home / ".gemini" / "config" / "skills"
     gemini_plugins_dir = home / ".gemini" / "config" / "plugins"
@@ -127,6 +169,42 @@ def main():
             f"    causing 'ps-*' and later skills to be dropped. Top plugins: {top_culprits}.\n"
             f"    Fix: run 'ps-plugin-bridge --sync' to prune disabled plugins."
         )
+
+    # 5b. T3 Code Antigravity Provider Hook Parity Check
+    t3_agy_root = home / ".t3" / "userdata" / "providers" / "antigravity"
+    gemini_hooks_dir = home / ".gemini" / "config" / "hooks"
+    if t3_agy_root.is_dir():
+        for t3_cfg in sorted(t3_agy_root.glob("*/config")):
+            if not t3_cfg.is_dir():
+                continue
+            t3_hooks_link = t3_cfg / "hooks"
+            t3_hooks_json = t3_cfg / "hooks.json"
+            if not t3_hooks_link.exists():
+                if args.fix and gemini_hooks_dir.is_dir():
+                    try:
+                        if t3_hooks_link.is_symlink():
+                            t3_hooks_link.unlink()
+                        t3_hooks_link.symlink_to(gemini_hooks_dir)
+                        fixed.append(f"Linked T3 Antigravity hooks dir: {t3_hooks_link} -> {gemini_hooks_dir}")
+                    except Exception as e:
+                        issues.append(f"Failed to link {t3_hooks_link}: {e}")
+                else:
+                    warnings.append(f"T3 Antigravity provider missing hooks symlink: {t3_hooks_link} (run with --fix)")
+            if not t3_hooks_json.is_file():
+                if args.fix:
+                    try:
+                        import json as _json
+                        t3_hooks_json.write_text(_json.dumps({
+                            "auto-handoff": {
+                                "PreInvocation": [{"command": f"python3 {gemini_hooks_dir}/auto-handoff-midturn.py", "timeout": 10, "type": "command"}],
+                                "Stop": [{"command": f"python3 {gemini_hooks_dir}/auto-handoff-stop.py", "timeout": 10, "type": "command"}],
+                            }
+                        }, indent=2) + "\n", encoding="utf-8")
+                        fixed.append(f"Created T3 Antigravity auto-handoff config: {t3_hooks_json}")
+                    except Exception as e:
+                        issues.append(f"Failed to create {t3_hooks_json}: {e}")
+                else:
+                    warnings.append(f"T3 Antigravity provider missing hooks.json: {t3_hooks_json} (run with --fix)")
 
     # Report
     print("=== ps-skills-doctor ===")

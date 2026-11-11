@@ -45,6 +45,8 @@ worktree — the release tree, not `main` — because the local DB may already b
 ahead of `main` by the release's own migrations. To deploy by hand after `--no-deploy`,
 run the script from a tree that is on `release/<v>` (the `_release` worktree is).
 
+Never hand-merge into `release/<v>`: it skips Gate 1 and the deploy (see lifecycle.md#guard-guarantees).
+
 ## Then
 
 Claim the next feature, or `psrw promote` when the release is full.

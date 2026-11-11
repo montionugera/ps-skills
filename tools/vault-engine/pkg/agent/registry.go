@@ -50,6 +50,7 @@ func (r *AgentRegistry) ValidateManifest(m *AgentManifest) error {
 	if m.RecruitedBy != "system" {
 		forbiddenTools := map[string]bool{
 			"define_subagent": true,
+			"invoke_subagent": true,
 			"agent_recruit":   true,
 			"run_command":     true,
 			"shell_exec":      true,

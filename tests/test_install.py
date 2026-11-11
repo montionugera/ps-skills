@@ -62,3 +62,20 @@ def test_installer_replaces_foreign_ps_work_only_with_force(tmp_path: Path) -> N
     assert installed.is_symlink()
     assert installed.resolve() == (REPO / "bin" / "ps-work").resolve()
     assert os.access(installed, os.X_OK)
+
+
+def test_installer_keeps_t3_antigravity_sessions_hook_free(tmp_path: Path) -> None:
+    # AGY harness bug: with any hook registered, killing a background task can
+    # kill the T3 session for good (see install.sh comment).
+    fresh = tmp_path / ".t3/userdata/providers/antigravity/fresh/config"
+    old = tmp_path / ".t3/userdata/providers/antigravity/old/config"
+    fresh.mkdir(parents=True)
+    old.mkdir(parents=True)
+    (old / "hooks.json").write_text('{"auto-handoff": {}}')
+
+    result = run_install(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not (fresh / "hooks.json").exists()
+    assert not (old / "hooks.json").exists()
+    assert (old / "hooks.json.disabled-agy-cancel-race").read_text() == '{"auto-handoff": {}}'

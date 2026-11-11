@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""progress-sync: Zero-context progress surface writer.
+
+Updates:
+1. File surface: atomically writes compact (<= 2 KB) status block to
+   <repo>/.superpowers/sdd/<plan-slug>/progress.md and maintains
+   <repo>/.superpowers/sdd/latest-progress.md symlink.
+2. Herdr sidebar badge: when HERDR_PANE_ID is set, reports metadata via
+   `herdr pane report-metadata <PANE_ID> --source sdd --state-label <STATUS=TEXT>`.
+"""
+import argparse
+import io
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Optional
+
+MAX_FILE_BYTES = 2048
+VALID_HERDR_STATUSES = {"idle", "working", "blocked", "done", "unknown"}
+
+
+def extract_state_label(text: str) -> Optional[str]:
+    """Attempt to extract a status/state label from markdown or plain text."""
+    m = re.search(r'(?mi)^\s*(?:\*{1,2})?(?:state|status)(?::(?:\*{1,2})?|(?:\*{1,2})?:)\s*(.+)$', text)
+    if m:
+        label = m.group(1).strip()
+        label = re.sub(r'^\*+|\*+$', '', label).strip()
+        label = re.sub(r'^`+|`+$', '', label).strip()
+        return label
+    return None
+
+
+def normalize_state_label(label: str) -> str:
+    """Normalize label to STATUS=TEXT for herdr pane report-metadata."""
+    # Strip optional leading 'State:' or 'Status:' prefix and markdown formatting
+    clean_label = re.sub(r'(?i)^\s*(?:state|status)\s*:\s*', '', label).strip()
+    clean_label = re.sub(r'^\*+|\*+$', '', clean_label).strip()
+    clean_label = re.sub(r'^`+|`+$', '', clean_label).strip()
+
+    if "=" in clean_label:
+        status, _ = clean_label.split("=", 1)
+        if status.strip().lower() in VALID_HERDR_STATUSES:
+            return clean_label
+
+    if ":" in clean_label:
+        status, text = clean_label.split(":", 1)
+        if status.strip().lower() in VALID_HERDR_STATUSES:
+            return f"{status.strip().lower()}={text.strip()}"
+
+    if clean_label.lower() in VALID_HERDR_STATUSES:
+        return f"{clean_label.lower()}={clean_label.lower()}"
+
+    return f"working={label}"
+
+
+def update_state_label_in_content(content: str, new_label: str) -> str:
+    """Update or insert state label in markdown content."""
+    clean_label = re.sub(r'(?i)^\s*(?:state|status)\s*:\s*', '', new_label).strip()
+    pattern = r'(?mi)^(\s*(?:\*{1,2})?(?:state|status)(?::(?:\*{1,2})?|(?:\*{1,2})?:)\s*)(?:.*)$'
+    if re.search(pattern, content):
+        def repl(m):
+            prefix = m.group(1)
+            sep = "" if prefix.endswith(" ") else " "
+            return f"{prefix}{sep}{clean_label}"
+        return re.sub(pattern, repl, content, count=1)
+    content = content.rstrip()
+    if content:
+        return f"{content}\n\n**State:** {clean_label}\n"
+    return f"# Progress\n\n**State:** {clean_label}\n"
+
+
+def resolve_symlink_path(target_path: Path) -> Optional[Path]:
+    """Find the sdd directory in ancestor chain and return latest-progress.md path."""
+    resolved = target_path.resolve()
+    sdd_dir = None
+    for p in target_path.parents:
+        if p.name == "sdd":
+            sdd_dir = p
+            break
+    if sdd_dir is not None:
+        symlink_path = sdd_dir / "latest-progress.md"
+    else:
+        symlink_path = target_path.parent / "latest-progress.md"
+
+    # Avoid symlink pointing to itself
+    try:
+        if symlink_path.resolve() == resolved:
+            return None
+    except OSError:
+        pass
+    return symlink_path
+
+
+def update_latest_symlink(target_path: Path, symlink_path: Path) -> None:
+    """Atomically create or update symlink to point to target_path."""
+    symlink_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        rel_target = os.path.relpath(target_path, symlink_path.parent)
+    except ValueError:
+        rel_target = str(target_path)
+
+    tmp_symlink = symlink_path.parent / f".latest-progress.tmp.{os.getpid()}"
+    try:
+        if tmp_symlink.is_symlink() or tmp_symlink.exists():
+            tmp_symlink.unlink()
+        os.symlink(rel_target, tmp_symlink)
+        os.replace(tmp_symlink, symlink_path)
+    except Exception as e:
+        if tmp_symlink.is_symlink() or tmp_symlink.exists():
+            try:
+                tmp_symlink.unlink()
+            except OSError:
+                pass
+        sys.stderr.write(f"warning: failed to update symlink {symlink_path}: {e}\n")
+
+
+def atomic_write_file(target_path: Path, content: str, refuse: bool = False, max_bytes: int = MAX_FILE_BYTES) -> bool:
+    """Atomically write content to target_path, enforcing max_bytes limit."""
+    raw_bytes = content.encode("utf-8")
+    if len(raw_bytes) > max_bytes:
+        if refuse:
+            sys.stderr.write(
+                f"error: content size ({len(raw_bytes)} bytes) exceeds limit of {max_bytes} bytes; write refused\n"
+            )
+            return False
+        # Truncate to max_bytes, keeping valid UTF-8
+        raw_bytes = raw_bytes[:max_bytes].decode("utf-8", errors="ignore").encode("utf-8")
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target_path.name}.tmp.", dir=str(target_path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw_bytes)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target_path)
+        return True
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def sync_herdr_sidebar(
+    pane_id: str,
+    state_label: Optional[str] = None,
+    clear: bool = False,
+    timeout: float = 1.0,
+) -> None:
+    """Invoke herdr pane report-metadata with 1-second timeout and fail-open behavior."""
+    herdr_cmd = os.environ.get("HERDR_CMD", "herdr")
+    cmd = [herdr_cmd, "pane", "report-metadata", pane_id, "--source", "sdd"]
+
+    if clear:
+        cmd.append("--clear-state-labels")
+    elif state_label:
+        cmd.extend(["--state-label", normalize_state_label(state_label)])
+    else:
+        return
+
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if res.returncode != 0:
+            err = (res.stderr or res.stdout or "").strip()
+            sys.stderr.write(f"warning: herdr report-metadata failed (exit {res.returncode}): {err}\n")
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(f"warning: herdr report-metadata timed out (>{timeout}s)\n")
+    except Exception as e:
+        sys.stderr.write(f"warning: failed to invoke herdr ({herdr_cmd}): {e}\n")
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="progress-sync",
+        description="Sync progress to .superpowers/sdd/progress.md and Herdr sidebar metadata.",
+    )
+    parser.add_argument(
+        "file_pos",
+        nargs="?",
+        metavar="FILE",
+        help="Target progress file (default: .superpowers/sdd/progress.md)",
+    )
+    parser.add_argument(
+        "--file", "-f",
+        dest="file_opt",
+        help="Target progress file",
+    )
+    parser.add_argument(
+        "--plan-slug",
+        help="Plan slug for .superpowers/sdd/<plan-slug>/progress.md",
+    )
+    parser.add_argument(
+        "--content", "-c",
+        help="Content to write (reads stdin if omitted and piped)",
+    )
+    parser.add_argument(
+        "--state-label", "-s",
+        help="State label for Herdr sidebar (e.g. 'Batch 1/2: working')",
+    )
+    parser.add_argument(
+        "--clear",
+        action="store_true",
+        help="Clear Herdr sidebar state labels",
+    )
+    parser.add_argument(
+        "--refuse",
+        action="store_true",
+        help="Refuse to write if content exceeds max bytes (default: truncate)",
+    )
+    parser.add_argument(
+        "--truncate",
+        action="store_true",
+        help="Explicitly truncate content if it exceeds max bytes (default)",
+    )
+    parser.add_argument(
+        "--max-bytes",
+        type=int,
+        default=MAX_FILE_BYTES,
+        help=f"Maximum allowed file size in bytes (default: {MAX_FILE_BYTES})",
+    )
+    parser.add_argument(
+        "--cwd",
+        default=None,
+        help="Working directory root for resolving relative paths",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    # (5) PROGRESS_SYNC=off exits 0 and does nothing.
+    if os.environ.get("PROGRESS_SYNC", "").strip().lower() == "off":
+        return 0
+
+    args = parse_args(argv)
+
+    cwd = Path(args.cwd).resolve() if args.cwd else Path.cwd()
+
+    # Determine target file
+    raw_file = args.file_opt or args.file_pos
+    if raw_file:
+        target_path = Path(raw_file)
+        if not target_path.is_absolute():
+            target_path = cwd / target_path
+    elif args.plan_slug:
+        target_path = cwd / ".superpowers" / "sdd" / args.plan_slug / "progress.md"
+    elif not args.clear:
+        target_path = cwd / ".superpowers" / "sdd" / "progress.md"
+    else:
+        target_path = None
+
+    # Determine content
+    content = args.content
+    if content is None and not args.clear:
+        try:
+            if sys.stdin and not sys.stdin.isatty():
+                piped = sys.stdin.read()
+                if piped:
+                    content = piped
+        except (io.UnsupportedOperation, OSError, AttributeError):
+            pass
+
+    # If content was not passed and target_path exists, read existing content and update label if provided
+    if content is None and target_path is not None and target_path.exists():
+        try:
+            existing = target_path.read_text(encoding="utf-8")
+            if args.state_label:
+                content = update_state_label_in_content(existing, args.state_label)
+            else:
+                content = existing
+        except OSError:
+            content = None
+
+    # If still no content, but state_label is provided, generate minimal status markdown
+    if content is None and target_path is not None and args.state_label:
+        content = update_state_label_in_content("", args.state_label)
+
+    # Write target file and update symlink if we have content and target path
+    if content is not None and target_path is not None:
+        ok = atomic_write_file(target_path, content, refuse=args.refuse, max_bytes=args.max_bytes)
+        if not ok:
+            return 1
+        symlink_path = resolve_symlink_path(target_path)
+        if symlink_path is not None:
+            update_latest_symlink(target_path, symlink_path)
+
+    # Sync with Herdr sidebar
+    pane_id = os.environ.get("HERDR_PANE_ID", "").strip()
+    if pane_id:
+        label = args.state_label
+        if not label and content:
+            label = extract_state_label(content)
+        sync_herdr_sidebar(pane_id, state_label=label, clear=args.clear)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

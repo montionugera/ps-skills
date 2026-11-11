@@ -3,11 +3,14 @@
 Unit tests for bin/dispatch-agy-worker and bin/dispatch-codex-worker
 """
 
+import io
+import itertools
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -113,6 +116,37 @@ class TestQuotaLogic(unittest.TestCase):
         self.assertFalse(eligible)
         self.assertIn("Failed to parse", msg)
 
+    def test_no_quota_visible_defaults_claude_and_agy_available_never_codex(self):
+        missing_default = str(Path(self.temp_dir.name) / "no-telemetry.json")
+        env_clean = {k: v for k, v in os.environ.items() if k not in ("AGY_QUOTA_STATE_FILE", "CODEX_QUOTA_STATE_FILE", "CLAUDE_QUOTA_STATE_FILE")}
+        with mock.patch.dict(os.environ, env_clean, clear=True), \
+             mock.patch.object(dispatch_mod, "DEFAULT_AGY_STATE", missing_default), \
+             mock.patch.object(dispatch_mod, "DEFAULT_CLAUDE_STATE", missing_default), \
+             mock.patch.object(dispatch_mod, "DEFAULT_CODEX_STATE", missing_default), \
+             mock.patch.object(sys, "argv", ["dispatch-agy-worker"]), \
+             mock.patch("shutil.which", return_value="/usr/local/bin/agent"):
+            el_cl, r5_cl, rw_cl, msg_cl = dispatch_mod.check_quota("claude")
+            self.assertEqual((el_cl, r5_cl, rw_cl), (True, 100.0, 100.0))
+            self.assertIn("no quota telemetry", msg_cl)
+
+            el_a, r5_a, rw_a, msg_a = dispatch_mod.check_quota("agy")
+            self.assertEqual((el_a, r5_a, rw_a), (True, 100.0, 100.0))
+            self.assertIn("no quota telemetry", msg_a)
+
+            el_c, r5_c, rw_c, _msg_c = dispatch_mod.check_quota("codex")
+            self.assertFalse(el_c)
+            self.assertFalse(dispatch_mod.should_prioritize_codex(r5_c, rw_c, el_c, rw_a, el_a))
+
+    def test_no_jev_available_fallback_classifier_handles_review_and_coding(self):
+        with mock.patch.dict(os.environ, {"JEV_GATE_BIN": "/nonexistent/jev-gate"}):
+            self.assertIsNone(dispatch_mod.route_with_jev("implement feature X"))
+        rev = dispatch_mod.fallback_classify_task("Run security-audit and code-review on auth module")
+        self.assertEqual(rev["route"], "agy_argon")
+        self.assertGreaterEqual(rev["is_reviewer_prob"], 0.50)
+        code = dispatch_mod.fallback_classify_task("Add unit test for parser helper")
+        self.assertEqual(code["route"], "agy_flash")
+        self.assertLess(code["is_reviewer_prob"], 0.50)
+
 
 class TestWindowRollover(unittest.TestCase):
     def setUp(self):
@@ -206,6 +240,98 @@ class TestWindowRollover(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertNotIn("stale", msg)
 
+    def _check_as_live_observation(self, refresh):
+        with mock.patch.object(dispatch_mod, "DEFAULT_AGY_STATE", str(self.state_file)), \
+                mock.patch.object(dispatch_mod, "refresh_agy_observation", refresh):
+            return dispatch_mod.check_quota("agy", str(self.state_file), min_5h=30.0, min_weekly=10.0)
+
+    def test_stale_live_observation_is_refreshed_before_deciding(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+
+        def refresh(path):
+            self._write_healthy_state(0, time.time())
+            return True, "refreshed"
+
+        eligible, _r5, _rw, msg = self._check_as_live_observation(refresh)
+        self.assertTrue(eligible)
+        self.assertNotIn("stale", msg)
+
+    def test_failed_refresh_fails_closed_and_names_the_refresh_command(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+        eligible, _r5, _rw, msg = self._check_as_live_observation(mock.Mock(return_value=(False, "boom")))
+        self.assertFalse(eligible)
+        self.assertIn("[stale: observation", msg)
+        self.assertIn("boom", msg)
+        self.assertIn("run `agy`", msg)
+
+    def test_refresh_that_leaves_the_file_stale_still_fails_closed(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+        eligible, _r5, _rw, msg = self._check_as_live_observation(mock.Mock(return_value=(True, "refreshed")))
+        self.assertFalse(eligible)
+        self.assertIn("stale", msg)
+
+    def test_fresh_live_observation_is_not_refreshed(self):
+        self._write_healthy_state(1, time.time())
+        refresh = mock.Mock()
+        eligible, _r5, _rw, _msg = self._check_as_live_observation(refresh)
+        self.assertTrue(eligible)
+        refresh.assert_not_called()
+
+    def test_non_live_state_file_is_never_refreshed(self):
+        self._write_healthy_state(dispatch_mod.STALE_OBSERVATION_MINUTES + 30, time.time())
+        with mock.patch.object(dispatch_mod, "refresh_agy_observation") as refresh:
+            eligible, _r5, _rw, _msg = dispatch_mod.check_quota("agy", str(self.state_file))
+        self.assertFalse(eligible)
+        refresh.assert_not_called()
+
+
+class TestAgyObservationRefresh(unittest.TestCase):
+    """Runs refresh_agy_observation against a fake agy, never the real one."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_file = Path(self.temp_dir.name) / "observation.json"
+        self.state_file.write_text("{}", encoding="utf-8")
+        old = time.time() - 7200
+        os.utime(self.state_file, (old, old))
+        self.pid_file = Path(self.temp_dir.name) / "agy.pid"
+        self.fake_agy = Path(self.temp_dir.name) / "agy"
+
+    def _install_fake_agy(self, body):
+        self.fake_agy.write_text(f"#!/bin/sh\necho $$ > '{self.pid_file}'\n{body}\n", encoding="utf-8")
+        self.fake_agy.chmod(0o755)
+        patcher = mock.patch.dict(os.environ, {"PATH": f"{self.temp_dir.name}:{os.environ['PATH']}"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _assert_fake_agy_is_gone(self):
+        pid = int(self.pid_file.read_text().strip())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_succeeds_once_the_statusline_rewrites_the_file_and_stops_agy(self):
+        self._install_fake_agy(f"sleep 1\ntouch '{self.state_file}'\nexec sleep 60")
+        started = time.monotonic()
+        refreshed, _detail = dispatch_mod.refresh_agy_observation(str(self.state_file), timeout=10)
+        self.assertTrue(refreshed)
+        self.assertLess(time.monotonic() - started, 6)
+        self._assert_fake_agy_is_gone()
+
+    def test_gives_up_at_the_timeout_and_stops_agy(self):
+        self._install_fake_agy("exec sleep 60")
+        refreshed, detail = dispatch_mod.refresh_agy_observation(str(self.state_file), timeout=3)
+        self.assertFalse(refreshed)
+        self.assertIn("within 3s", detail)
+        self._assert_fake_agy_is_gone()
+
+    def test_agy_that_exits_early_is_reported_not_waited_on(self):
+        self._install_fake_agy("exit 3")
+        started = time.monotonic()
+        refreshed, _detail = dispatch_mod.refresh_agy_observation(str(self.state_file), timeout=10)
+        self.assertFalse(refreshed)
+        self.assertLess(time.monotonic() - started, 5)
+
 
 @codex_enabled()
 class TestBestRunwayAutoRouting(unittest.TestCase):
@@ -266,6 +392,29 @@ class TestBestRunwayAutoRouting(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertEqual(r5, 90.0)
         self.assertIn("runway: 60.0", msg)
+
+    def test_prioritizes_codex_when_5h_gt_80_7d_ge_60_and_alt_7d_lt_30(self):
+        # Even if min_5h=65 makes agy's calculated runway (min(95-65=30, 28-10=18) = 18)
+        # slightly higher than codex's (min(82-65=17, 65-10=55) = 17),
+        # codex 5h > 80% and 7d >= 60% with agy 7d < 30% prioritizes codex.
+        self._write_quota(self.agy_file, 95.0, 28.0)
+        self._write_quota(self.codex_file, 82.0, 65.0)
+
+        agent, eligible, r5, rw, msg = dispatch_mod.route_best_agent(
+            min_5h=65.0, min_weekly=10.0,
+            agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file)
+        )
+        self.assertEqual(agent, "codex")
+        self.assertTrue(eligible)
+        self.assertEqual((r5, rw), (82.0, 65.0))
+        self.assertIn("prioritized", msg)
+
+    def test_avoids_codex_priority_when_codex_7d_below_60(self):
+        # Codex 5h=85% (>80%) but 7d=55% (<60%) -> do not prioritize codex over agy
+        self._write_quota(self.agy_file, 95.0, 28.0)
+        self._write_quota(self.codex_file, 85.0, 55.0)
+        self.assertFalse(dispatch_mod.should_prioritize_codex(85.0, 55.0, True, 28.0, True))
 
     def test_auto_fails_when_both_have_negative_runway(self):
         # agy: 5h=20 (surplus -10), weekly=50 -> runway = -10
@@ -755,6 +904,33 @@ class TestPriorityChainRouting(unittest.TestCase):
         self.assertEqual(agent, "codex")
         self.assertEqual(model, "gpt-5.6-terra")
 
+    @codex_enabled()
+    def test_waterfall_prioritizes_codex_when_agy_7d_below_30_and_codex_high(self):
+        # agy is technically above min_weekly=10 (7d=22% < 30%), codex has 5h=85% (>80%) and 7d=60% (>50%)
+        self.agy_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 90.0},
+                {"kind": "weekly", "remaining_percent": 22.0}
+            ]
+        }))
+        self.codex_file.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 85.0},
+                {"kind": "weekly", "remaining_percent": 60.0}
+            ]
+        }))
+        chain = dispatch_mod.parse_priority_chain("agy > codex")
+        agent, model, eligible, r5, rw, msg = dispatch_mod.route_priority_chain(
+            chain,
+            allow_on_demand=False,
+            agy_state_file=str(self.agy_file),
+            codex_state_file=str(self.codex_file)
+        )
+        self.assertTrue(eligible)
+        self.assertEqual(agent, "codex")
+        self.assertEqual(model, "gpt-6.1-terra")
+        self.assertIn("prioritized over agy", msg)
+
     def test_waterfall_all_exhausted_returns_not_eligible(self):
         self.agy_file.write_text(json.dumps({
             "windows": [
@@ -1166,6 +1342,50 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
         self.assertEqual(dispatch_mod.normalize_model_name("codex", "thinking"), "gpt-5.6-sol")
         self.assertEqual(dispatch_mod.normalize_model_name("claude", "opus"), "claude-opus-5-5")
 
+    def test_normalize_model_name_agy_aliases(self):
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "argon"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon-medium"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon-thinking"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("opus"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("claude-opus-5-5"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("sonnet"), "gemini-3.8-flash-high")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("claude-sonnet-5-5"), "gemini-3.8-flash-high")
+
+    def test_claude_quota_telemetry_yellow_and_red_zones(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfile = os.path.join(td, "claude-obs.json")
+            # 1. Green zone: 20% used -> 80% remaining (>= 50% yellow threshold)
+            with open(cfile, "w", encoding="utf-8") as f:
+                json.dump({"payload": {"rate_limits": {"seven_day": {"used_percentage": 20}}}}, f)
+            with mock.patch.dict(os.environ, {"CLAUDE_QUOTA_STATE_FILE": cfile}),                  mock.patch("shutil.which", return_value="/usr/local/bin/claude"):
+                el, r5, rw, msg = dispatch_mod.check_quota("claude")
+                self.assertTrue(el, msg)
+                self.assertEqual(rw, 80.0)
+
+            # 2. Yellow zone: 60% used -> 40% remaining (< 50% yellow threshold -> ineligible for background dispatch)
+            with open(cfile, "w", encoding="utf-8") as f:
+                json.dump({"payload": {"rate_limits": {"seven_day": {"used_percentage": 60}}}}, f)
+            with mock.patch.dict(os.environ, {"CLAUDE_QUOTA_STATE_FILE": cfile}),                  mock.patch("shutil.which", return_value="/usr/local/bin/claude"):
+                el2, r5_2, rw_2, msg2 = dispatch_mod.check_quota("claude")
+                self.assertFalse(el2, msg2)
+                self.assertEqual(rw_2, 40.0)
+
+            # 3. Red zone: 98% used -> 2% remaining -> priority chain falls back to agy:gemini-4-argon-medium
+            with open(cfile, "w", encoding="utf-8") as f:
+                json.dump({"payload": {"rate_limits": {"seven_day": {"used_percentage": 98}}}}, f)
+            afile = os.path.join(td, "agy-obs.json")
+            with open(afile, "w", encoding="utf-8") as f:
+                json.dump({"windows": [{"kind": "five_hour", "remaining_percent": 90.0}, {"kind": "weekly", "remaining_percent": 90.0}]}, f)
+            with mock.patch.dict(os.environ, {"CLAUDE_QUOTA_STATE_FILE": cfile, "AGY_QUOTA_STATE_FILE": afile}),                  mock.patch("shutil.which", return_value="/usr/local/bin/claude"):
+                agent, model, el3, _r5, _rw, _msg, _fb = dispatch_mod.route_thinker(
+                    agy_state_file=afile, priority="claude:claude-opus-5-5,agy:gemini-4-argon-medium"
+                )
+                self.assertEqual((agent, model, el3), ("agy", "gemini-4-argon-medium", True))
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "flash"), "gemini-3.8-flash-high")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "3.8-flash"), "gemini-3.8-flash-high")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-3.8-flash-high"), "gemini-3.8-flash-high")
+
     def test_wrap_prompt_contract_with_context_and_output(self):
         cfile = Path(self.temp_dir.name) / "spec.md"
         cfile.write_text("# Feature Spec\nMust implement auth endpoint.", encoding="utf-8")
@@ -1433,6 +1653,113 @@ class TestThinkerRouting(unittest.TestCase):
         attestation = json.loads((self.repo / ".thinker.json").read_text(encoding="utf-8"))
         self.assertEqual(attestation["effort"], "medium")
 
+    def test_gemini_4_argon_allowed_under_deep_design(self):
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--model", "gemini-4-argon")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_argon_alias_allowed_under_deep_design(self):
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--model", "argon")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_gemini_4_argon_allowed_under_plain_think(self):
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--model", "gemini-4-argon", capability=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_thinking_rejects_gemini_3_8_flash(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--model", "gemini-3.8-flash-high")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("gemini-3.8-flash-high", proc.stderr)
+
+    def test_thinking_rejects_sonnet(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--model", "sonnet")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("sonnet", proc.stderr)
+
+    def test_thinking_rejects_priority_with_non_think_model(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--priority", "agy:gemini-3.8-flash-high")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("gemini-3.8-flash-high", proc.stderr)
+
+    def test_thinking_rejects_cross_agent_model_mismatch(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--agent", "claude", "--model", "gemini-4-argon")
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("gemini-4-argon", proc.stderr)
+
+        proc2 = self._run("--dry-run", "--agent", "agy", "--model", "claude-opus-5-5")
+        self.assertEqual(proc2.returncode, 12)
+        self.assertIn("claude-opus-5-5", proc2.stderr)
+
+    def test_fallback_priority_picks_claude_when_available(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--priority", "claude:claude-opus-5-5,agy:gemini-4-argon")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+
+    def test_fallback_priority_picks_agy_when_claude_skipped(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        proc = self._run("--dry-run", "--priority", "claude:claude-opus-5-5,agy:gemini-4-argon",
+                         env_extra={"DISPATCH_THINKER_SKIP_CLAUDE": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_fallback_priority_both_unavailable_fails_closed_12(self):
+        self._fake("claude")
+        self._codex_quota(5.0, 5.0)
+        proc = self._run("--dry-run", "--priority", "claude:claude-opus-5-5,agy:gemini-4-argon",
+                         env_extra={"DISPATCH_THINKER_SKIP_CLAUDE": "1"})
+        self.assertEqual(proc.returncode, 12)
+        self.assertIn("Thinker unavailable", proc.stderr)
+
+    def test_escalate_flag_routes_to_gemini_4_argon(self):
+        self._codex_quota(100.0, 100.0)
+        proc = subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--escalate", "--state-file", str(self.codex_state),
+             "--cwd", str(self.repo), "--task", "x", "--dry-run"],
+            capture_output=True, text=True, env={"PATH": f"{self.fake_bin}:/usr/bin:/bin"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_dispatch_thinker_binary_dry_run_with_fallback(self):
+        self._fake("claude")
+        self._codex_quota(100.0, 100.0)
+        thinker_bin = BIN_DIR / "dispatch-thinker"
+        env = {k: v for k, v in os.environ.items() if "DISPATCH_THINKER_SKIP_CLAUDE" not in k}
+        env["PATH"] = f"{self.fake_bin}:/usr/bin:/bin"
+        proc = subprocess.run(
+            [str(thinker_bin), "--state-file", str(self.codex_state), "--cwd", str(self.repo),
+             "--task", "x", "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to claude with claude-opus-5-5", proc.stdout)
+
+        # And falls back to AGY when Claude is skipped
+        env["DISPATCH_THINKER_SKIP_CLAUDE"] = "1"
+        proc2 = subprocess.run(
+            [str(thinker_bin), "--state-file", str(self.codex_state), "--cwd", str(self.repo),
+             "--task", "x", "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertIn("to agy with gemini-4-argon", proc2.stdout)
+
 
 class TestEffortHelpers(unittest.TestCase):
     def test_normalize_effort_codex(self):
@@ -1457,11 +1784,13 @@ class TestEffortHelpers(unittest.TestCase):
         self.assertEqual(dispatch_mod.normalize_effort("claude", "max"), "max")
 
     def test_resolve_agent_effort_env_overrides(self):
-        with mock.patch.dict(os.environ, {"CLAUDE_THINK_EFFORT": "max", "CODEX_THINK_EFFORT": "medium"}):
+        with mock.patch.dict(os.environ, {"CLAUDE_THINK_EFFORT": "max", "CODEX_THINK_EFFORT": "medium", "AGY_THINK_EFFORT": "max"}):
             self.assertEqual(dispatch_mod.resolve_agent_effort("claude", "high", is_thinking=True), "max")
             self.assertEqual(dispatch_mod.resolve_agent_effort("codex", "high", is_thinking=True), "medium")
+            self.assertEqual(dispatch_mod.resolve_agent_effort("agy", "medium", is_thinking=True), "max")
             # Not in thinking mode, env overrides do not take effect:
             self.assertEqual(dispatch_mod.resolve_agent_effort("claude", "high", is_thinking=False), "high")
+            self.assertEqual(dispatch_mod.resolve_agent_effort("agy", "medium", is_thinking=False), "medium")
 
     @codex_enabled()
     def test_build_agent_command_effort_flags(self):
@@ -1515,7 +1844,9 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
 
     def _fake(self, name, exit_code=0, output="ok", body=""):
         path = self.fake_bin / name
-        path.write_text(f"#!/bin/sh\necho \"{name}\" >> '{self.calls_log}'\n{body}\necho '{output}'\nexit {exit_code}\n",
+        # agy streams: a clean run ends with a result event whose response is the output.
+        line = json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": output}}) if name == "agy" else output
+        path.write_text(f"#!/bin/sh\necho \"{name}\" >> '{self.calls_log}'\n{body}\necho '{line}'\nexit {exit_code}\n",
                         encoding="utf-8")
         path.chmod(0o755)
 
@@ -1597,7 +1928,8 @@ class TestExecutionRuntimeFallback(unittest.TestCase):
         self._quota(self.codex_state, 60.0, 60.0)
         self._fake("agy", exit_code=1, output="agy-boom")
         self._fake("codex", output="codex-ok")
-        proc = self._run("--agent", "auto", "--no-verify")
+        with mock.patch.dict(os.environ, {"DISPATCH_DISABLED_AGENTS": "codex"}):
+            proc = self._run("--agent", "auto", "--no-verify")
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(self._calls(), ["agy"])
 
@@ -1836,7 +2168,7 @@ class TestStats(unittest.TestCase):
 
 
 class TestCodexDisabled(unittest.TestCase):
-    """Codex is switched off in DISABLED_AGENTS: no route, mode or fallback may pick it."""
+    """When codex is switched off in DISPATCH_DISABLED_AGENTS: no route, mode or fallback may pick it."""
 
     WORKER_BIN = BIN_DIR / "dispatch-worker"
 
@@ -1849,8 +2181,11 @@ class TestCodexDisabled(unittest.TestCase):
         self.fake_bin.mkdir()
         self._quota(self.agy_state, 40.0, 80.0)
         self._quota(self.codex_state, 100.0, 100.0)
+        self._disabled_patch = mock.patch.object(dispatch_mod, "DISABLED_AGENTS", frozenset({"codex"}))
+        self._disabled_patch.start()
 
     def tearDown(self):
+        self._disabled_patch.stop()
         self.temp_dir.cleanup()
 
     def _quota(self, path, five_hour, weekly):
@@ -1866,6 +2201,7 @@ class TestCodexDisabled(unittest.TestCase):
         env.update({
             "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
             "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
+            "DISPATCH_DISABLED_AGENTS": "codex",
             "AGY_QUOTA_STATE_FILE": str(self.agy_state),
             "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
             "PATH": f"{self.fake_bin}:/usr/bin:/bin",
@@ -1881,6 +2217,75 @@ class TestCodexDisabled(unittest.TestCase):
 
     def test_codex_is_in_disabled_agents(self):
         self.assertIn("codex", dispatch_mod.DISABLED_AGENTS)
+        self.assertIn("codex", dispatch_mod.THINK_DISABLED_AGENTS)
+        self.assertEqual(dispatch_mod.DEFAULT_CODEX_MODEL, "gpt-6.1-terra")
+        self.assertEqual(dispatch_mod.DEFAULT_CODEX_EFFORT, "medium")
+
+    def test_auto_picks_codex_terra_medium_when_codex_quota_high(self):
+        # Codex 5h=93% (>80%), 7d=95% (>50%) and alternative (agy) 7d=20% (<30%) -> prioritize codex
+        self._quota(self.agy_state, 90.0, 20.0)
+        self._quota(self.codex_state, 93.0, 95.0)
+        env = {k: v for k, v in os.environ.items()
+               if "DISPATCH" not in k and k not in ("CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL")}
+        env.update({
+            "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
+            "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
+            "DISPATCH_AUTO_TERRA_ON_HIGH_CODEX": "1",
+            "DISPATCH_JEV_GATE": "0",
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "PATH": f"{self.fake_bin}:/usr/bin:/bin",
+        })
+        proc = subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--cwd", str(self.root), "--dry-run", "--task", "implement unit test"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Would dispatch to codex with gpt-6.1-terra (effort: medium)", proc.stdout)
+        self.assertIn("[Auto-Terra]", proc.stderr)
+
+    def test_keeps_agy_flash_when_alternative_7d_quota_is_at_least_30(self):
+        # Codex 5h=93% (>80%), 7d=95% (>50%) but alternative (agy) 7d=80% (>=30%) -> stay on agy flash
+        self._quota(self.agy_state, 90.0, 80.0)
+        self._quota(self.codex_state, 93.0, 95.0)
+        env = {k: v for k, v in os.environ.items()
+               if "DISPATCH" not in k and k not in ("CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL")}
+        env.update({
+            "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
+            "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
+            "DISPATCH_AUTO_TERRA_ON_HIGH_CODEX": "1",
+            "DISPATCH_JEV_GATE": "0",
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "PATH": f"{self.fake_bin}:/usr/bin:/bin",
+        })
+        proc = subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--cwd", str(self.root), "--dry-run", "--task", "implement unit test"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high", proc.stdout)
+
+    def test_falls_back_to_agy_flash_when_codex_quota_low(self):
+        self._quota(self.agy_state, 90.0, 20.0)
+        self._quota(self.codex_state, 75.0, 80.0)  # 5h <= 80% -> do not prioritize codex
+        env = {k: v for k, v in os.environ.items()
+               if "DISPATCH" not in k and k not in ("CLAUDE_THINK_MODEL", "CODEX_THINK_MODEL")}
+        env.update({
+            "DISPATCH_CONFIG_FILE": str(self.root / "no-config.env"),
+            "DISPATCH_EVENTS_FILE": str(self.root / "events.jsonl"),
+            "DISPATCH_AUTO_TERRA_ON_HIGH_CODEX": "1",
+            "DISPATCH_JEV_GATE": "0",
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "PATH": f"{self.fake_bin}:/usr/bin:/bin",
+        })
+        proc = subprocess.run(
+            [sys.executable, str(self.WORKER_BIN), "--cwd", str(self.root), "--dry-run", "--task", "implement unit test"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high", proc.stdout)
 
     # 1. auto and the default chain never pick codex
     def test_auto_route_ignores_codex_with_higher_runway(self):
@@ -2013,6 +2418,813 @@ class TestCodexDisabled(unittest.TestCase):
         proc = self._run("--help")
         self.assertEqual(proc.returncode, 0)
         self.assertNotIn("codex", proc.stdout.lower())
+
+
+    def test_thinker_auto_switches_to_agy_argon_when_claude_quota_is_low(self):
+        self._fake_claude()
+        claude_state = self.root / "claude_low.json"
+        claude_state.write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 5.0, "resets_at": 9999999999},
+                {"kind": "weekly", "remaining_percent": 8.0, "resets_at": 9999999999},
+            ]
+        }))
+        with mock.patch.dict(os.environ, {"CLAUDE_QUOTA_STATE_FILE": str(claude_state)}):
+            proc = self._run("--think", "--dry-run", "--task", "x")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("to agy with gemini-4-argon-medium", proc.stdout)
+        self.assertIn("AUTO-SWITCH claude->agy", proc.stdout)
+
+
+FAKE_AGY = """#!/usr/bin/env python3
+import json, os, sys, time
+plan = json.load(open(os.environ["FAKE_AGY_PLAN"]))
+log = os.environ["FAKE_AGY_LOG"]
+with open(log, "a") as fh:
+    fh.write(json.dumps(sys.argv[1:]) + "\\n")
+n = len(open(log).read().splitlines())
+actions = plan["calls"][min(n, len(plan["calls"])) - 1]
+for act in actions:
+    kind = act[0]
+    if kind == "event":
+        sys.stdout.write(json.dumps(act[1]) + "\\n"); sys.stdout.flush()
+    elif kind == "raw":
+        sys.stdout.write(act[1] + "\\n"); sys.stdout.flush()
+    elif kind == "sleep":
+        time.sleep(act[1])
+    elif kind == "steps":
+        end = time.time() + act[1]
+        while time.time() < end:
+            sys.stdout.write(json.dumps({"event": "step_update", "step_update": {"conversation_id": "c-1", "step_index": 1, "state": "RUNNING", "step_type": "TOOL"}}) + "\\n"); sys.stdout.flush()
+            time.sleep(0.1)
+    elif kind == "touch":
+        end = time.time() + act[1]
+        i = 0
+        while time.time() < end:
+            i += 1
+            open("touched%d.txt" % i, "w").write("x")
+            time.sleep(0.3)
+    elif kind == "write":
+        open(act[1], "w").write(act[2])
+    elif kind == "exit":
+        sys.exit(act[1])
+"""
+
+INIT = ["event", {"event": "init", "conversation_id": "c-1", "init": {}}]
+
+
+def RESULT(text="all done", status="SUCCESS"):
+    return ["event", {"event": "result", "result": {"conversation_id": "c-1", "status": status, "response": text,
+                                                    "duration_seconds": 1, "num_turns": 1, "usage": {}}}]
+
+
+class FakeAgyBase(unittest.TestCase):
+    """Runs the real command builder against a scripted fake `agy` first on PATH (no real model calls)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.temp_dir.name)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "i"],
+                       cwd=self.repo, check=True)
+        fake_bin = self.tmp / "bin"
+        fake_bin.mkdir()
+        (fake_bin / "agy").write_text(FAKE_AGY, encoding="utf-8")
+        (fake_bin / "agy").chmod(0o755)
+        self.plan = self.tmp / "plan.json"
+        self.calls_log = self.tmp / "calls.log"
+        self.events = self.tmp / "events.jsonl"
+        self.env = mock.patch.dict(os.environ, {
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}", "FAKE_AGY_PLAN": str(self.plan),
+            "FAKE_AGY_LOG": str(self.calls_log), "DISPATCH_EVENTS_FILE": str(self.events),
+            "DISPATCH_AGY_IDLE_SECONDS": "3", "DISPATCH_SLOT_DIR": str(self.tmp / "slots"),
+        })
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.temp_dir.cleanup()
+
+    def _plan(self, *calls):
+        self.plan.write_text(json.dumps({"calls": list(calls)}), encoding="utf-8")
+
+    def _calls(self):
+        if not self.calls_log.exists():
+            return []
+        return [json.loads(l) for l in self.calls_log.read_text(encoding="utf-8").splitlines()]
+
+    def _events(self, kind=None):
+        if not self.events.exists():
+            return []
+        evs = [json.loads(l) for l in self.events.read_text(encoding="utf-8").splitlines()]
+        return [e for e in evs if kind is None or e["event"] == kind]
+
+    def _run(self, task="implement the widget", timeout=30, cwd=None, **kw):
+        info = kw.pop("verify_info", {})
+        kw.setdefault("verify_opts", {"no_verify": True})
+        res = dispatch_mod.run_single_task(task, str(cwd or self.repo), "agy", "m1", timeout, verify_info=info, run_id="r1", **kw)
+        return res, info
+
+
+class TestAgyStreamParsing(FakeAgyBase):
+    def test_agy_command_always_streams_and_other_agents_do_not(self):
+        cmd = dispatch_mod.build_agent_command("agy", "m", "task", "/tmp")
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "stream-json")
+        self.assertNotIn("--conversation", cmd)
+        cmd = dispatch_mod.build_agent_command("agy", "m", "task", "/tmp", conversation_id="c-9")
+        self.assertEqual(cmd[cmd.index("--conversation") + 1], "c-9")
+        self.assertNotIn("stream-json", dispatch_mod.build_agent_command("cursor", "m", "task", "/tmp"))
+        self.assertNotIn("stream-json", dispatch_mod.build_agent_command("claude", "m", "task", "/tmp"))
+
+    def test_response_becomes_stdout_and_raw_events_stay_out_of_the_log(self):
+        self._plan([INIT, ["raw", "not json at all"], ["raw", "{broken"], RESULT("final text")])
+        log = self.tmp / "job.log"
+        (code, out, _err, _fc, _ds), info = self._run(log_path=str(log))
+        self.assertEqual((code, out), (0, "final text"))
+        self.assertEqual(info["conversation_id"], "c-1")
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("not json at all", text)
+        self.assertNotIn('"event"', text)
+
+    def test_exit_zero_without_result_event_is_not_success(self):
+        self._plan([INIT, ["event", {"event": "step_update", "step_update": {"step_index": 1}}]])
+        (code, _out, err, _fc, _ds), _info = self._run()
+        self.assertNotEqual(code, 0)
+        self.assertIn("result event", err)
+
+    def test_heartbeat_is_throttled(self):
+        self._plan([INIT, ["steps", 1.0], RESULT()])
+        log = self.tmp / "job.log"
+        with mock.patch.object(dispatch_mod, "HEARTBEAT_SECONDS", 30):
+            self._run(log_path=str(log))
+        beats = [l for l in log.read_text(encoding="utf-8").splitlines() if "step 1" in l and "TOOL" in l and "RUNNING" in l]
+        self.assertEqual(len(beats), 1)
+
+    def test_non_agy_agent_output_is_untouched(self):
+        with mock.patch.object(dispatch_mod, "build_agent_command", return_value=["sh", "-c", 'echo \'{"event":"result"}\''] ):
+            (code, out, _e, _f, _d), _info = (dispatch_mod.run_single_task(
+                "t", str(self.repo), "cursor", None, 30, verify_opts={"no_verify": True}, verify_info={}), None)
+        self.assertEqual((code, out), (0, '{"event":"result"}'))
+
+
+class TestAgyIdleAndResume(FakeAgyBase):
+    def setUp(self):
+        super().setUp()
+        self.stall = [INIT, ["sleep", 30]]
+
+    def test_conversation_id_is_saved_before_the_job_finishes(self):
+        self._plan([INIT, ["sleep", 2], RESULT()])
+        job_dir = str(self.tmp / "jobs")
+        dispatch_mod.save_job_state("j1", {"job_id": "j1", "agent": "agy", "task": "t", "cwd": str(self.repo),
+                                           "isolated": False, "timeout": 30, "no_verify": True}, job_dir=job_dir)
+        def _go():
+            try:
+                dispatch_mod.run_internal_job("j1", job_dir=job_dir)
+            except SystemExit:
+                pass
+        t = threading.Thread(target=_go)
+        t.start()
+        seen = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            st = dispatch_mod.load_job_state("j1", job_dir=job_dir) or {}
+            if st.get("conversation_id"):
+                seen = st
+                break
+            time.sleep(0.05)
+        t.join()
+        self.assertIsNotNone(seen)
+        self.assertEqual(seen["status"], "RUNNING")
+        self.assertEqual(dispatch_mod.load_job_state("j1", job_dir=job_dir)["conversation_id"], "c-1")
+        self.assertEqual(self._events("finish")[-1]["conversation_id"], "c-1")
+
+    def test_idle_kill_without_resume(self):
+        self._plan(self.stall)
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            start = time.monotonic()
+            (code, _o, err, _f, _d), info = self._run(timeout=60)
+        self.assertLess(time.monotonic() - start, 15)
+        self.assertEqual(code, 124)
+        self.assertIn("idle", err)
+        self.assertEqual(info["timeout_kind"], "idle")
+        self.assertEqual(len(self._events("idle_timeout")), 1)
+        self.assertEqual(len(self._calls()), 1)
+
+    def test_wall_clock_kill_is_distinct_from_idle(self):
+        self._plan([INIT, ["steps", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (code, _o, err, _f, _d), info = self._run(timeout=2)
+        self.assertEqual(code, 124)
+        self.assertEqual(info["timeout_kind"], "wall")
+        self.assertIn("timed out after 2s", err)
+        self.assertEqual(self._events("idle_timeout"), [])
+        self.assertEqual(len(self._events("timeout")), 1)
+
+    def test_single_resume_then_stop(self):
+        self._plan(self.stall, self.stall, self.stall)
+        (code, _o, err, _f, _d), info = self._run(timeout=60)
+        self.assertEqual(code, 124)
+        self.assertEqual(len(self._calls()), 2)  # never a third
+        self.assertEqual(len(self._events("resume")), 1)
+        self.assertTrue(info["resumed"])
+        self.assertIn("after resume", err)
+        self.assertEqual(dispatch_mod.derive_status(code, 0, info), "TIMEOUT_NO_PROGRESS")
+
+    def test_wall_clock_timeout_also_resumes(self):
+        self._plan([INIT, ["steps", 30]], [INIT, RESULT("finished")])
+        (code, out, _e, _f, _d), info = self._run(timeout=2)
+        self.assertEqual((code, out), (0, "finished"))
+        self.assertEqual(len(self._calls()), 2)
+        self.assertTrue(info["resumed"])
+
+    def test_resume_command_and_prompt(self):
+        self._plan(self.stall, [INIT, RESULT()])
+        self._run(task="UNIQUE-TASK-TEXT build the widget", timeout=60, output_file="out.md")
+        first, second = self._calls()
+        self.assertNotIn("--conversation", first)
+        self.assertEqual(second[second.index("--conversation") + 1], "c-1")
+        for flag in ("--model", "--effort"):
+            if flag in first:
+                self.assertEqual(second[second.index(flag) + 1], first[first.index(flag) + 1])
+        prompt = second[second.index("-p") + 1]
+        self.assertIn("UNIQUE-TASK-TEXT build the widget", prompt)
+        self.assertIn("out.md", prompt)  # the full contract is repeated, not just the brief
+        for phrase in ("killed", "Inspect", "do not ask"):
+            self.assertIn(phrase.lower(), prompt.lower())
+
+    def test_resume_budget_never_exceeds_the_job_timeout(self):
+        # The resume would get max(900, timeout/2); clamped to --timeout it is killed by the wall clock at 2s.
+        self._plan(self.stall, [INIT, ["steps", 30]])
+        start = time.monotonic()
+        (code, _o, err, _f, _d), _info = self._run(timeout=2)
+        self.assertLess(time.monotonic() - start, 20)
+        self.assertEqual(code, 124)
+        self.assertIn("timed out after 2s", err)
+        self.assertIn("after resume", err)
+
+    def test_result_then_hang_is_a_finished_run_not_a_timeout(self):
+        self._plan([INIT, RESULT("finished and lingering"), ["sleep", 30]], [INIT, RESULT("redone")])
+        (code, out, _e, _f, _d), info = self._run(timeout=60)
+        self.assertEqual((code, out), (0, "finished and lingering"))
+        self.assertEqual(len(self._calls()), 1)
+        self.assertFalse(info["resumed"])
+        self.assertEqual(self._events("idle_timeout") + self._events("resume") + self._events("timeout"), [])
+
+    def test_failed_result_then_hang_is_not_success(self):
+        self._plan([INIT, RESULT("nope", status="ERROR"), ["sleep", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (code, _o, _e, _f, _d), _info = self._run(timeout=60)
+        self.assertNotEqual(code, 0)
+
+    def test_silent_step_that_changes_files_is_not_killed(self):
+        self._plan([INIT, ["touch", 7], RESULT("built")])
+        (code, out, _e, files, _d), info = self._run(timeout=60)
+        self.assertEqual((code, out), (0, "built"))
+        self.assertGreaterEqual(files, 3)
+        self.assertEqual(self._events("idle_timeout"), [])
+
+    def test_silent_step_that_changes_nothing_is_killed(self):
+        self._plan([INIT, ["sleep", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (code, _o, _e, _f, _d), info = self._run(timeout=60)
+        self.assertEqual((code, info["timeout_kind"]), (124, "idle"))
+
+    def test_idle_check_survives_a_failing_git(self):
+        # Every later reading differs, so a check that ignored a None reading would reset the timer until the wall limit.
+        for first in (None, {"seen": 0}):
+            with self.subTest(first=first):
+                self._plan([INIT, ["sleep", 30]])
+                readings = itertools.chain([None, first], ({"seen": n} if first is None else None for n in itertools.count(1)))
+                with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}), \
+                        mock.patch.object(dispatch_mod, "git_baseline", side_effect=lambda _d: next(readings)) as git:
+                    (code, _o, _e, _f, _d), info = self._run(timeout=12)
+                self.assertEqual((code, info["timeout_kind"]), (124, "idle"))
+                self.assertEqual(git.call_count, 3)  # job baseline, watcher start, the one idle check: no timer reset
+
+    def test_killed_run_reports_its_last_step_and_error_events(self):
+        step = ["event", {"event": "step_update", "step_update": {"conversation_id": "c-1", "step_index": 7,
+                                                                   "state": "RUNNING", "step_type": "RUN_COMMAND"}}]
+        err_ev = ["event", {"event": "error", "error": {"message": "tool exploded"}}]
+        self._plan([INIT, step, err_ev, ["sleep", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (code, out, _e, _f, _d), _info = self._run(timeout=60)
+        self.assertEqual(code, 124)
+        self.assertIn("step 7 RUN_COMMAND", out)
+        self.assertIn("tool exploded", out)
+
+    def test_evidence_tail_is_bounded(self):
+        evs = [["event", {"event": "warn", "n": i, "pad": "x" * 1000}] for i in range(50)]
+        self._plan([INIT, *evs, ["sleep", 30]])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (_c, out, _e, _f, _d), _info = self._run(timeout=60)
+        self.assertLess(len(out), dispatch_mod.STREAM_NOTE_LINES * (dispatch_mod.STREAM_NOTE_CHARS + 5) + 300)
+        self.assertIn('"n": 49', out)
+        self.assertNotIn('"n": 0,', out)
+
+    def test_non_string_response_is_not_success(self):
+        self._plan([INIT, ["event", {"event": "result", "result": {"status": "SUCCESS", "response": {"a": 1}}}]])
+        (code, _o, err, _f, _d), _info = self._run()
+        self.assertNotEqual(code, 0)
+        self.assertIn("not a string", err)
+
+    def test_pathological_line_does_not_kill_the_reader(self):
+        self._plan([INIT, ["raw", "[" * 200000], ["event", {"event": "init", "conversation_id": 12345}], RESULT("ok")])
+        (code, out, _e, _f, _d), info = self._run()
+        self.assertEqual((code, out), (0, "ok"))
+        self.assertEqual(info["conversation_id"], "c-1")  # the non-string id was ignored
+
+    def test_resumed_run_with_no_file_evidence_is_no_changes_unverified(self):
+        self._plan(self.stall, [INIT, RESULT("claims done")])
+        (code, _o, _e, files, _d), info = self._run(timeout=60)
+        self.assertEqual((code, files), (0, 0))
+        self.assertEqual(dispatch_mod.derive_status(code, files, info), "NO_CHANGES_UNVERIFIED")
+
+    def test_resume_can_be_disabled(self):
+        self._plan(self.stall, [INIT, RESULT()])
+        with mock.patch.dict(os.environ, {"DISPATCH_AGY_RESUME": "0"}):
+            (code, _o, _e, _f, _d), info = self._run(timeout=60)
+        self.assertEqual(code, 124)
+        self.assertEqual(len(self._calls()), 1)
+        self.assertFalse(info.get("resumed"))
+
+    def test_no_resume_without_a_conversation_id(self):
+        self._plan([["sleep", 30]])
+        (code, _o, _e, _f, _d), _info = self._run(timeout=60)
+        self.assertEqual(code, 124)
+        self.assertEqual(len(self._calls()), 1)
+
+    def test_resumed_job_without_verify_is_resumed_unverified(self):
+        self._plan(self.stall, [INIT, ["write", "new.txt", "x"], RESULT("did it")])
+        (code, _o, _e, files, _d), info = self._run(timeout=60)
+        self.assertEqual(code, 0)
+        self.assertTrue(info["resumed"])
+        self.assertEqual(dispatch_mod.derive_status(code, files, info), "RESUMED_UNVERIFIED")
+
+    def test_resumed_job_with_passing_verify_is_success(self):
+        self._plan(self.stall, [INIT, ["write", "new.txt", "x"], RESULT("did it")])
+        (code, _o, _e, files, _d), info = self._run(timeout=60, verify_opts={"verify_cmd": "true"})
+        self.assertEqual(dispatch_mod.derive_status(code, files, info), "SUCCESS")
+        self.assertTrue(info["resumed"])
+
+    def test_resumed_run_ending_in_a_question_is_not_success(self):
+        self._plan(self.stall, [INIT, RESULT("Which file did you want me to edit?")])
+        (code, _o, err, _f, _d), info = self._run(timeout=60, verify_opts={"verify_cmd": "true"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("question", err)
+        self.assertNotEqual(dispatch_mod.derive_status(code, 0, info), "SUCCESS")
+
+    def test_resumed_exit_zero_without_result_is_not_success(self):
+        self._plan(self.stall, [INIT])
+        (code, _o, _e, _f, _d), info = self._run(timeout=60, verify_opts={"verify_cmd": "true"})
+        self.assertNotEqual(code, 0)
+        self.assertNotEqual(dispatch_mod.derive_status(code, 0, info), "SUCCESS")
+
+    def test_verify_retry_never_resumes_a_second_time(self):
+        verify = f"test -f '{self.repo}/ok'"
+        self._plan(self.stall, [INIT, RESULT()], self.stall, self.stall)
+        (code, _o, _e, _f, _d), info = self._run(timeout=60, verify_opts={"verify_cmd": verify})
+        self.assertEqual(len(self._calls()), 3)  # first, its one resume, the verify retry (which stalls and is not resumed)
+        self.assertEqual(len(self._events("resume")), 1)
+        self.assertEqual(code, 124)
+
+
+class TestResumedStatusConsumers(unittest.TestCase):
+    def test_derive_status_table(self):
+        d = dispatch_mod.derive_status
+        self.assertEqual(d(0, 2, {"resumed": True, "verified": "skipped"}), "RESUMED_UNVERIFIED")
+        self.assertEqual(d(0, 0, {"resumed": True, "verified": "skipped"}), "NO_CHANGES_UNVERIFIED")
+        self.assertEqual(d(0, 0, {"resumed": True, "verified": "skipped", "is_thinking": True}), "RESUMED_UNVERIFIED")
+        self.assertEqual(d(0, 0, {"resumed": True, "verified": "skipped", "has_artifact": True}), "RESUMED_UNVERIFIED")
+        self.assertEqual(d(0, 0, {"resumed": True, "verified": True}), "SUCCESS")
+        self.assertEqual(d(0, 2, {"resumed": True, "verified": True}), "SUCCESS")
+        self.assertEqual(d(0, 2, {"resumed": True, "verified": False}), "RESUMED_UNVERIFIED")
+        self.assertEqual(d(0, 2, {"verified": "skipped"}), "SUCCESS")
+        self.assertEqual(d(124, 2, {"resumed": True}), "TIMEOUT_PARTIAL_WORK")
+
+    def test_report_shows_status_resumed_and_shared(self):
+        rep = dispatch_mod.format_report("agy", "RESUMED_UNVERIFIED", 0, "/r", 4, "d", "out",
+                                         verify_info={"resumed": True, "files_changed_shared": True})
+        self.assertIn("Status: RESUMED_UNVERIFIED (exit 0)", rep)
+        self.assertIn("Resumed: true", rep)
+        self.assertIn("shared", rep)
+        self.assertLessEqual(len(rep.splitlines()), 15)
+
+    def test_batch_report_shows_the_status(self):
+        rep = dispatch_mod.format_batch_report([{"task": "t", "agent": "agy", "exit_code": 0, "status": "RESUMED_UNVERIFIED",
+                                                 "files_changed": 1, "diff_summary": "d"}])
+        self.assertIn("RESUMED_UNVERIFIED", rep)
+
+    def test_stats_do_not_count_resumed_unverified_as_ok_and_count_idle_timeouts(self):
+        now = time.time()
+        evs = [{"ts": now, "event": "finish", "agent": "agy", "status": "RESUMED_UNVERIFIED", "duration_s": 1},
+               {"ts": now, "event": "idle_timeout", "agent": "agy"}]
+        rep = dispatch_mod.format_stats_report(evs, now=now)
+        self.assertIn("0%", rep)
+        self.assertRegex(rep, r"agy\s+1\s+0%\s+1")
+
+
+class TestPerJobFileCounts(FakeAgyBase):
+    def _sh(self, script):
+        return mock.patch.object(dispatch_mod, "build_agent_command", return_value=["sh", "-c", script])
+
+    def test_preexisting_dirt_is_not_counted(self):
+        for i in range(3):
+            (self.repo / f"old{i}.txt").write_text("x")
+        with self._sh("echo n > mine.txt"):
+            (code, _o, _e, files, _d), _ = self._run()
+        self.assertEqual((code, files), (0, 1))
+
+    def test_editing_a_file_that_was_already_dirty_is_counted(self):
+        (self.repo / "old.txt").write_text("before")
+        with self._sh("echo after > old.txt"):
+            (_c, _o, _e, files, _d), _ = self._run()
+        self.assertEqual(files, 1)
+
+    def test_no_change_counts_zero_despite_dirt(self):
+        (self.repo / "old.txt").write_text("before")
+        with self._sh("true"):
+            (_c, _o, _e, files, _d), _ = self._run()
+        self.assertEqual(files, 0)
+
+    def test_committed_work_still_counts(self):
+        with self._sh("echo n > a.txt; git add a.txt; git -c user.email=a@b -c user.name=t commit -qm w"):
+            (_c, _o, _e, files, _d), _ = self._run()
+        self.assertEqual(files, 1)
+
+    def test_shared_flag_when_another_running_job_uses_the_cwd(self):
+        job_dir = str(self.tmp / "jobs")
+        base = {"agent": "agy", "task": "t", "cwd": str(self.repo), "isolated": False, "timeout": 30, "no_verify": True,
+                "model": None}
+        dispatch_mod.save_job_state("mine", {**base, "job_id": "mine"}, job_dir=job_dir)
+        dispatch_mod.save_job_state("other", {**base, "job_id": "other", "status": "RUNNING", "pid": os.getpid()}, job_dir=job_dir)
+        with self._sh("echo n > mine.txt"):
+            with self.assertRaises(SystemExit):
+                dispatch_mod.run_internal_job("mine", job_dir=job_dir)
+        st = dispatch_mod.load_job_state("mine", job_dir=job_dir)
+        self.assertTrue(st["files_changed_shared"])
+        self.assertEqual(st["files_changed"], 1)
+
+    def test_not_shared_when_alone(self):
+        job_dir = str(self.tmp / "jobs")
+        dispatch_mod.save_job_state("mine", {"job_id": "mine", "agent": "agy", "task": "t", "cwd": str(self.repo),
+                                             "isolated": False, "timeout": 30, "no_verify": True}, job_dir=job_dir)
+        with self._sh("echo n > mine.txt"):
+            with self.assertRaises(SystemExit):
+                dispatch_mod.run_internal_job("mine", job_dir=job_dir)
+        self.assertFalse(dispatch_mod.load_job_state("mine", job_dir=job_dir)["files_changed_shared"])
+
+
+class TestJobStateSidecar(unittest.TestCase):
+    def test_concurrent_saves_and_conversation_writes_never_corrupt_or_lose_the_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            errors = []
+            def saver():
+                try:
+                    for i in range(60):
+                        dispatch_mod.save_job_state("j", {"job_id": "j", "status": "RUNNING", "n": i}, job_dir=tmp)
+                except Exception as e:
+                    errors.append(e)
+            def reader():
+                try:
+                    for _ in range(120):
+                        st = dispatch_mod.load_job_state("j", job_dir=tmp)
+                        assert st is None or st["job_id"] == "j"
+                except Exception as e:
+                    errors.append(e)
+            dispatch_mod.save_job_state("j", {"job_id": "j", "status": "RUNNING"}, job_dir=tmp)
+            threads = [threading.Thread(target=saver) for _ in range(4)] + [threading.Thread(target=reader)]
+            for t in threads:
+                t.start()
+            dispatch_mod.save_conversation_id("j", "c-77", job_dir=tmp)
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+            self.assertEqual(dispatch_mod.load_job_state("j", job_dir=tmp)["conversation_id"], "c-77")
+            self.assertEqual([j["conversation_id"] for j in dispatch_mod.list_all_jobs(job_dir=tmp)], ["c-77"])
+            self.assertEqual([p.name for p in Path(tmp).glob("*.tmp")], [])
+
+    def test_persist_failure_warns_instead_of_vanishing(self):
+        err = io.StringIO()
+        script = ["python3", "-c", 'import json;print(json.dumps({"event":"init","conversation_id":"c-9"}))']
+        def boom(_cid):
+            raise OSError("disk full")
+        with mock.patch.object(sys, "stderr", err):
+            dispatch_mod.execute_worker_process(script, ".", 10, stream_state={}, on_conversation_id=boom)
+        self.assertIn("could not persist conversation_id", err.getvalue())
+
+
+class TestBaselineRobustness(FakeAgyBase):
+    def _sh(self, script):
+        return mock.patch.object(dispatch_mod, "build_agent_command", return_value=["sh", "-c", script])
+
+    def test_quoted_unicode_path_that_was_already_dirty_is_not_counted(self):
+        (self.repo / "wéird file.txt").write_text("x")
+        with self._sh("true"):
+            (_c, _o, _e, files, _d), _ = self._run()
+        self.assertEqual(files, 0)
+
+    def test_fifo_and_symlink_in_the_tree_do_not_hang_or_crash(self):
+        os.mkfifo(self.repo / "pipe")
+        os.symlink("/nonexistent", self.repo / "dangling")
+        with self._sh("echo n > mine.txt"):
+            (code, _o, _e, files, _d), _ = self._run()
+        self.assertEqual((code, files), (0, 1))
+
+    def _sub_with_dirty_files(self):
+        sub = self.repo / "sub"
+        sub.mkdir()
+        (sub / "tracked.txt").write_text("v1\n")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-q", "-m", "t"],
+                       cwd=self.repo, check=True)
+        (sub / "tracked.txt").write_text("v2\n")
+        (sub / "old.txt").write_text("already here\n")
+        return sub
+
+    def test_noop_run_from_a_subdirectory_counts_nothing(self):
+        sub = self._sub_with_dirty_files()
+        with self._sh("true"):
+            (_c, _o, _e, files, _d), _ = self._run(cwd=sub)
+        self.assertEqual(files, 0)
+
+    def test_edit_of_a_dirty_file_from_a_subdirectory_is_counted(self):
+        sub = self._sub_with_dirty_files()
+        with self._sh("echo more >> tracked.txt"):
+            (_c, _o, _e, files, _d), _ = self._run(cwd=sub)
+        self.assertEqual(files, 1)
+
+    def test_new_file_from_a_subdirectory_is_counted_once(self):
+        sub = self._sub_with_dirty_files()
+        with self._sh("echo n > new.txt"):
+            (_c, _o, _e, files, _d), _ = self._run(cwd=sub)
+        self.assertEqual(files, 1)
+
+    def test_baseline_taken_from_a_subdirectory_sees_an_edit(self):
+        sub = self._sub_with_dirty_files()
+        before = dispatch_mod.git_baseline(str(sub))
+        (sub / "tracked.txt").write_text("v3 is longer\n")
+        self.assertNotEqual(dispatch_mod.git_baseline(str(sub)), before)
+
+    def test_unavailable_baseline_is_reported_not_silent(self):
+        with self._sh("echo n > mine.txt"), mock.patch.object(dispatch_mod, "git_baseline", return_value=None):
+            (_c, _o, _e, files, _d), info = self._run()
+        self.assertTrue(info["baseline_unavailable"])
+        rep = dispatch_mod.format_report("agy", "SUCCESS", 0, "/r", files, "d", "out", verify_info=info)
+        self.assertIn("not baseline-adjusted", rep)
+
+
+class TestResumeThenRuntimeFallback(FakeAgyBase):
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "bin" / "claude").write_text(f"#!/bin/sh\necho claude >> '{self.tmp}/claude.log'\necho claude-ok\n")
+        (self.tmp / "bin" / "claude").chmod(0o755)
+        quota = {"windows": [{"kind": "five_hour", "remaining_percent": 95.0},
+                             {"kind": "weekly", "remaining_percent": 95.0}]}
+        self.agy_state = self.tmp / "agy.json"
+        self.claude_state = self.tmp / "claude.json"
+        for f in (self.agy_state, self.claude_state):
+            f.write_text(json.dumps(quota))
+        self.cenv = mock.patch.dict(os.environ, {
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state), "CLAUDE_QUOTA_STATE_FILE": str(self.claude_state),
+            "DISPATCH_CONFIG_FILE": str(self.tmp / "none.env")})
+        self.cenv.start()
+
+    def tearDown(self):
+        self.cenv.stop()
+        super().tearDown()
+
+    def _cli(self):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--priority", "agy > claude", "--no-verify", "--timeout", "60",
+             "--cwd", str(self.repo), "--task", "x"], capture_output=True, text=True, timeout=120)
+
+    def _claude_calls(self):
+        f = self.tmp / "claude.log"
+        return f.read_text().splitlines() if f.exists() else []
+
+    def test_two_stalls_without_changes_resume_once_then_fall_back(self):
+        stall = [INIT, ["sleep", 30]]
+        self._plan(stall, stall, stall)
+        proc = self._cli()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(len(self._calls()), 2)
+        self.assertEqual(self._claude_calls(), ["claude"])
+        kinds = [e["event"] for e in self._events()]
+        self.assertLess(kinds.index("resume"), kinds.index("fallback"))
+
+    def test_two_stalls_that_left_changes_refuse_the_fallback(self):
+        stall = [INIT, ["write", "half.txt", "x"], ["sleep", 30]]
+        self._plan(stall, stall, stall)
+        proc = self._cli()
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self._claude_calls(), [])
+        self.assertIn("refusing fallback", proc.stderr)
+
+
+class ForegroundJobRegistrationTests(unittest.TestCase):
+    """A foreground run must be visible to --status and must block a second worker in the same folder."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.jobs = str(Path(self._tmp.name) / "jobs")
+        self.cwd = str(Path(self._tmp.name) / "repo")
+        os.makedirs(self.cwd)
+
+    def _register(self, job_id="dw-1-aaaaaa", cwd=None, isolated=False):
+        return dispatch_mod.register_foreground_job(
+            job_id, cwd or self.cwd, "agy", None, "t", isolated, 60, job_dir=self.jobs)
+
+    def test_registered_run_shows_in_the_job_list_as_running(self):
+        self._register()
+        listed = dispatch_mod.list_all_jobs(job_dir=self.jobs)
+        self.assertEqual([(j["job_id"], j["status"]) for j in listed], [("dw-1-aaaaaa", "RUNNING")])
+        self.assertIn("dw-1-aaaaaa", dispatch_mod.format_status_report(listed))
+
+    def test_second_run_in_the_same_folder_sees_the_first_as_busy(self):
+        self._register("dw-1-aaaaaa")
+        self.assertEqual(dispatch_mod.busy_jobs_on("dw-2-bbbbbb", self.cwd, job_dir=self.jobs), ["dw-1-aaaaaa"])
+
+    def test_other_folder_and_finished_jobs_are_not_busy(self):
+        self._register("dw-1-aaaaaa")
+        self.assertEqual(dispatch_mod.busy_jobs_on("dw-2-bbbbbb", self._tmp.name, job_dir=self.jobs), [])
+        dispatch_mod.finish_foreground_job("dw-1-aaaaaa", "SUCCESS", 0, 1, "d", job_dir=self.jobs)
+        self.assertEqual(dispatch_mod.busy_jobs_on("dw-2-bbbbbb", self.cwd, job_dir=self.jobs), [])
+
+    def test_exit_hook_marks_a_cut_short_run_dead_but_keeps_a_finished_one(self):
+        self._register("dw-1-aaaaaa")
+        dispatch_mod.mark_foreground_job_ended("dw-1-aaaaaa", job_dir=self.jobs)
+        self.assertEqual(dispatch_mod.load_job_state("dw-1-aaaaaa", self.jobs)["status"], "FAILED_DIED")
+        self._register("dw-3-cccccc")
+        dispatch_mod.finish_foreground_job("dw-3-cccccc", "SUCCESS", 0, 1, "d", job_dir=self.jobs)
+        dispatch_mod.mark_foreground_job_ended("dw-3-cccccc", job_dir=self.jobs)
+        self.assertEqual(dispatch_mod.load_job_state("dw-3-cccccc", self.jobs)["status"], "SUCCESS")
+
+    def test_cli_refuses_a_second_run_in_a_busy_folder(self):
+        self._register("dw-1-aaaaaa")  # pid is this test process, so it counts as alive
+        # Healthy quota fixture: without it a host with no quota file exits 10 (FALLBACK_INTERNAL) before the busy check.
+        state = Path(self._tmp.name) / "agy.json"
+        state.write_text(json.dumps({"windows": [{"kind": "five_hour", "remaining_percent": 90.0},
+                                                 {"kind": "weekly", "remaining_percent": 90.0}]}))
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--agent", "agy", "--cwd", self.cwd, "--job-dir", self.jobs,
+             "--state-file", str(state), "--task", "noop"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, dispatch_mod.BUSY_FOLDER_EXIT_CODE, proc.stderr)
+        self.assertIn("REFUSED", proc.stderr)
+        self.assertIn("dw-1-aaaaaa", proc.stderr)
+
+
+class ScoutingRoutingTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.agy_state = self.tmp / "agy.json"
+        self.codex_state = self.tmp / "codex.json"
+        self.claude_state = self.tmp / "claude.json"
+        self.agy_state.write_text(json.dumps({
+            "windows": [{"kind": "five_hour", "remaining_percent": 90.0},
+                        {"kind": "weekly", "remaining_percent": 20.0}]
+        }))
+        self.codex_state.write_text(json.dumps({
+            "windows": [{"kind": "five_hour", "remaining_percent": 95.0},
+                        {"kind": "weekly", "remaining_percent": 80.0}]
+        }))
+        self.claude_state.write_text(json.dumps({
+            "windows": [{"kind": "five_hour", "remaining_percent": 95.0},
+                        {"kind": "weekly", "remaining_percent": 85.0}]
+        }))
+
+    def _env(self, **extra):
+        env = os.environ.copy()
+        # check_quota("claude") needs a `claude` binary on PATH; CI runners have none.
+        fake_bin = self.tmp / "fake-claude-bin"
+        fake_bin.mkdir(exist_ok=True)
+        fake_claude = fake_bin / "claude"
+        fake_claude.write_text("#!/bin/sh\nexit 0\n")
+        fake_claude.chmod(0o755)
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+        env.update({
+            "AGY_QUOTA_STATE_FILE": str(self.agy_state),
+            "CODEX_QUOTA_STATE_FILE": str(self.codex_state),
+            "CLAUDE_QUOTA_STATE_FILE": str(self.claude_state),
+            "DISPATCH_AUTO_TERRA_ON_HIGH_CODEX": "1",
+            "JEV_GATE_BIN": str(self.tmp / "missing-jev-gate"),
+        })
+        env.update(extra)
+        return env
+
+    def test_scout_flag_routes_agy_to_flash_with_low_effort_and_skips_codex_and_verify(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--agent", "agy", "--scout", "--dry-run",
+             "--task", "Locate all files referencing check_quota"],
+            env=self._env(), capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high (effort: low)", proc.stdout)
+        self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
+        self.assertNotIn("codex", proc.stdout.lower())
+
+    def test_scout_flag_routes_claude_to_haiku_with_low_effort(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--agent", "claude", "--scout", "--dry-run",
+             "--task", "Find where route_with_jev is defined"],
+            env=self._env(), capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to claude with haiku (effort: low)", proc.stdout)
+        self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
+
+    def test_multi_hop_scouting_uses_medium_effort(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--agent", "agy", "--dry-run",
+             "--task", "Read-only research: trace the call-chain and control-flow across modules from main() to check_quota()"],
+            env=self._env(), capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high (effort: medium)", proc.stdout)
+        self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
+
+    def test_graft_prefetch_injects_context_when_graft_dir_exists(self):
+        repo = self.tmp / "graft-repo"
+        (repo / "graft").mkdir(parents=True)
+        fake_bin = self.tmp / "fakebin"
+        fake_bin.mkdir(exist_ok=True)
+        fake_graft = fake_bin / "graft"
+        fake_graft.write_text("#!/bin/sh\necho 'node: bin/dispatch-agy-worker.md (lines 362-442)'\n")
+        fake_graft.chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}" }, clear=False):
+            os.environ.pop("FAKE_AGY_PLAN", None)
+            wrapped = dispatch_mod.wrap_prompt_contract(
+                "Update check_quota logic",
+                verify_cmd="./scripts/precheck.sh",
+                target_dir=str(repo),
+            )
+        self.assertIn("Pre-fetched Graft Context", wrapped)
+        self.assertIn("node: bin/dispatch-agy-worker.md (lines 362-442)", wrapped)
+        self.assertIn("graft ask", wrapped)
+
+    def test_agent_dispatch_reminder_hook_scouting_and_codex_waterfall(self):
+        hook = REPO_ROOT / "skills" / "agy-worker" / "hooks" / "agent-dispatch-reminder.sh"
+        # 1. Scouting subagent brief -> recommends Haiku / --scout with low/medium effort
+        scout_payload = json.dumps({
+            "tool_name": "Agent",
+            "tool_input": {
+                "subagent_type": "general-purpose",
+                "description": "Scout quota files",
+                "prompt": "Read-only scouting: locate all files referencing check_quota and do not edit any files"
+            }
+        })
+        res_scout = subprocess.run(
+            ["bash", str(hook)],
+            input=scout_payload,
+            env=self._env(JEV_DISPATCH_GATE="off"),
+            capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(res_scout.returncode, 0)
+        self.assertIn("dispatch-worker --scout", res_scout.stdout)
+        self.assertIn("graft ask", res_scout.stdout)
+
+        # 2. Bulk mechanical work when AGY 7d < 30% (20%) and Codex 5h=95%, 7d=80% (>=60%) -> recommends Codex gpt-6.1-terra medium
+        bulk_payload = json.dumps({
+            "tool_name": "Agent",
+            "tool_input": {
+                "subagent_type": "general-purpose",
+                "description": "Implement task 1",
+                "prompt": "Implement task 1 across all 6 files in the package and run the full test suite"
+            }
+        })
+        res_bulk = subprocess.run(
+            ["bash", str(hook)],
+            input=bulk_payload,
+            env=self._env(JEV_DISPATCH_GATE="off"),
+            capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(res_bulk.returncode, 0)
+        self.assertIn("dispatch-worker --agent codex --model gpt-6.1-terra --effort medium", res_bulk.stdout)
+
+
+class WarmVerifyRetryTests(FakeAgyBase):
+    def test_verify_failure_reinvokes_agy_with_warm_conversation_id(self):
+        marker = self.repo / "ok"
+        self._plan(
+            [INIT, ["write", "first.txt", "1"], RESULT("first pass")],
+            [INIT, ["write", "ok", "1"], RESULT("fixed on warm retry")],
+        )
+        (code, out, _err, _files, _diff), info = self._run(
+            timeout=60,
+            verify_opts={"verify_cmd": f"test -f '{marker}'"},
+        )
+        self.assertEqual(code, 0)
+        self.assertIs(info["verified"], True)
+        self.assertEqual(info["verify_attempts"], 2)
+        calls = self._calls()
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("--conversation", calls[0])
+        self.assertIn("--conversation", calls[1])
+        self.assertEqual(calls[1][calls[1].index("--conversation") + 1], "c-1")
 
 
 if __name__ == "__main__":

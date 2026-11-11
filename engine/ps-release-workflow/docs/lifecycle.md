@@ -27,6 +27,23 @@ back) — never the main checkout, whose script may differ (audit A5). A missing
 `precheck.sh` is a loud stderr warning, not an error, so repos without one keep
 working.
 
+*Opt-in pass cache (Gate 1 only).* With `"gate_cache": {"enabled": true, "ttl_hours": 24}`
+in `.release.json`, a precheck that already PASSED on an identical git tree
+(`HEAD^{tree}` + a hash of the precheck script) within the TTL is skipped with a
+`gate cache HIT` line; FAIL results are never cached. Absent => behaviour unchanged.
+Force a real run with `psrw ship|sync-main --no-gate-cache` or `PSRW_GATE_CACHE=off`.
+Never applies to Gate 2, integration or promote. The key also includes the commit of
+`origin/main` (else `main`, else `none`), so a moved main misses. A dirty tree (including
+assume-unchanged / skip-worktree edits), a tree that changes during the run, or an invalid
+`ttl_hours` (≤0, negative, non-numeric, bool, NaN/inf; only a *missing* key means 24h)
+disables caching and runs the gate.
+**Risks:** env drift on an unchanged tree; a skipped re-check; prechecks that compare
+against another ref (migration numbering, codegen drift, diffs vs a ref other than
+`origin/main`/`main`) give different answers for the same tree once that ref moves —
+`sync-main` and a re-ship are exactly that case; uninitialised submodules / LFS objects;
+files sourced from outside the tree. For any of those use `--no-gate-cache`. More in
+`lib/gate_cache.py`.
+
 **Gate 2 — `scripts/integration.sh`**, run by `promote` from the `_release` worktree,
 **on by default**. Opt out with `--no-gate2`. If the gate is requested and the script
 is missing, promote refuses — it never silently skips. `--allow-missing-gate2`
@@ -263,13 +280,22 @@ runs against the main checkout.
 ## Guard guarantees
 <a id="guard-guarantees"></a>
 
-The PreToolUse guard enforces exactly two things:
+The PreToolUse guard enforces exactly three things:
 
 1. **No edits on the main checkout of an opted-in repo.** Claim a feature and edit
    inside the worktree it creates. This keys off filesystem location, not branch name,
    so checking out a hotfix branch in the main checkout is still blocked.
 2. **Cross-machine claim safety.** A worktree claimed on another machine will not
    accept edits here.
+3. **No hand-run git writes on `release/<v>`.** `scripts/release_git_guard.py`, a Bash
+   PreToolUse hook, refuses `git merge|commit|cherry-pick|rebase|revert|reset|pull|am`
+   in a checkout on a `release/*` branch of an opted-in repo (directory from `git -C`,
+   the last `cd`, or the hook's cwd). Only psrw puts code there, because `ship` and
+   `sync-main` also run Gate 1, the catalog and the local deploy; a hand merge skipped
+   all three once and the owner's app never changed. psrw's own git runs as a child
+   process and is unaffected. `--abort`/`--quit` pass; for the exact command psrw prints
+   after a conflict, add `PSRW_ALLOW_RELEASE_GIT=1`. Work that is not a claimed feature
+   goes through idea, refine, claim and `ship`, or a hotfix PR to `main` then `sync-main`.
 
 It does **not** provide per-session isolation between two Claude sessions on the same
 machine: claims are created with a machine-cached fallback id, so local sessions
@@ -344,6 +370,11 @@ implements automated absorption from `main` into `release/<v>` under **Option D 
 - **`psrw sync-main`**: On-demand sync of `main` into `release/<v>` with Gate 1 verification and atomic rollback.
   Supports `--deploy` and `--strict`; refuses while the release is frozen for promote.
 - **`psrw sync`**: Generalizes `psrw epic sync` to allow any feature worktree to pull `release/<v>` into its branch.
+  `claim` and `claim --resume` print `needs_sync` (true when `release/<v>` has commits the
+  feature branch lacks, counted before the claim's own catalog commit), `release_ahead` (that count), `plan` (the feature's `plan.md` path)
+  and `next` in their JSON line, plus a `run psrw sync` warning only when `needs_sync` is
+  true. A fresh claim is cut from `main`, so its own spec and plan appear only after the
+  sync. `--reopen` always reports `needs_sync: false`.
 - **`psrw status`**: Checks cached ref (without network fetch) and warns if `release/<v>` is behind `origin/main`.
 - **`psrw hotfix`**: Checklist prints step 8 hint pointing to auto-sync and `psrw sync-main` when release is in progress.
 

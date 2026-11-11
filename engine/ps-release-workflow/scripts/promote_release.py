@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from lib.epic import (
 from lib.epic_gate import run_and_record
 from lib.gate_lock import gate_slot
 from lib.git_ops import (
-    GitError, _run as git_run, commit_all, is_dirty,
+    GitError, _run as git_run, commit_all, commit_paths, is_dirty,
     delete_branch_local, delete_branch_remote, push, remove_worktree,
 )
 from lib.hooks import resolve_hook
@@ -167,9 +168,33 @@ def _create_or_adopt_pr(repo: Path, release_branch: str, version: str,
     raise Gate2FailedError(f"gh pr create failed: {err or out}")
 
 
+# Right after `gh pr create`, GitHub has not registered any check yet, and
+# `gh pr checks --watch` exits 1 with "no checks reported" — not a CI failure.
+_CHECKS_REGISTER_TIMEOUT_S = 180
+_CHECKS_REGISTER_POLL_S = 10
+
+
 def _watch_pr_checks(repo: Path, ref: str, runner) -> int:
-    """`gh pr checks <ref> --watch` — streams to the terminal; returns exit code."""
-    return runner(["gh", "pr", "checks", ref, "--watch"], cwd=repo).returncode
+    """`gh pr checks <ref> --watch` — streams to the terminal; returns exit code.
+
+    "no checks reported" means GitHub has not registered the checks yet: wait
+    and watch again, up to _CHECKS_REGISTER_TIMEOUT_S, then give up (non-zero,
+    so the caller refuses to merge). Any other failure returns immediately.
+    stdout stays attached to the terminal; only stderr is captured (and echoed).
+    """
+    deadline = time.monotonic() + _CHECKS_REGISTER_TIMEOUT_S
+    while True:
+        cp = runner(["gh", "pr", "checks", ref, "--watch"], cwd=repo,
+                    stderr=subprocess.PIPE, text=True)
+        err = cp.stderr or ""
+        if err:
+            print(err, end="" if err.endswith("\n") else "\n", file=sys.stderr)
+        if cp.returncode == 0 or "no checks reported" not in err.lower():
+            return cp.returncode
+        if time.monotonic() >= deadline:
+            return cp.returncode
+        print(f"   waiting for GitHub to register checks on {ref}...", file=sys.stderr)
+        time.sleep(_CHECKS_REGISTER_POLL_S)
 
 
 def _merge_pr_squash(repo: Path, ref: str, runner) -> subprocess.CompletedProcess:
@@ -227,6 +252,9 @@ def _relevant_epics(refined_cat: Path, version: str) -> set[str]:
 # one directory: the epic catalog (the CAS-claim commit) and the E-NNN-<slug>/
 # folder the outcome check copies its output into (lib/epic_gate.py).
 _EPIC_BOOKKEEPING_PATHSPEC = ":(exclude).claude/epic_backlog"
+# Everything cleanup() writes in the main checkout.
+_CLEANUP_PATHS = (".release.json", ".claude/idea_backlog", ".claude/refined_backlog",
+                  ".claude/epic_backlog")
 
 
 def _verification_is_fresh(rel_wt: Path, verified_sha: str | None, head: str) -> bool:
@@ -1052,8 +1080,9 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
 
     # Commit any pending cleanup changes (archival, catalog, claims, and the
     # finalize above) regardless of the in_progress flag. No-op when clean.
-    if git_run(repo, "status", "--porcelain").stdout.strip():
-        commit_all(repo, f"chore(release): finalize {version} cleanup on main")
+    # Stage by name: the main checkout can hold build caches and other sessions'
+    # work, and `git add -A` here once swept 59,444 untracked files into main.
+    if commit_paths(repo, f"chore(release): finalize {version} cleanup on main", _CLEANUP_PATHS):
         if _has_origin(repo):
             try:
                 git_run(repo, "push", "origin", "main")
