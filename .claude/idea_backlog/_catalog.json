@@ -252,5 +252,11 @@
     "title": "vault recall precision: skip automated prompts, fix rule-only summaries, down-weight generic terms",
     "created_at": "2026-11-11T04:08:42.194124+00:00",
     "promoted_to": "F-028"
+  },
+  {
+    "id": "I-042",
+    "title": "vault-distill extractor: agy call fails on its flags and is not tool-less (found in go-live G4)",
+    "created_at": "2026-11-11T05:53:35.479283+00:00",
+    "promoted_to": null
   }
 ]
