@@ -83,10 +83,15 @@ class TestVaultRecall(unittest.TestCase):
         self.assertNotIn("CONCEPT-a", ctx)
         self.assertIn("CONCEPT-b", ctx)
 
-    def test_at_most_three_notes_per_prompt(self):
+    def test_task_notification_prompt_is_silent_and_creates_no_state(self):
+        self.query_file.write_text(block(note("CONCEPT-a")))
+        self.assertEqual(self.run_hook(prompt="<task-notification> Task finished with result"), "")
+        self.assertFalse(self.state.exists())
+
+    def test_at_most_two_notes_per_prompt(self):
         self.query_file.write_text(block(*[note(f"CONCEPT-{i}") for i in range(5)]))
         ctx = self.context_of(self.run_hook())
-        self.assertEqual(ctx.count("\n- "), 3)
+        self.assertEqual(ctx.count("\n- "), 2)
 
     def test_session_cap_of_2400_bytes_and_six_notes(self):
         total = 0
@@ -107,12 +112,12 @@ class TestVaultRecall(unittest.TestCase):
         self.assertLessEqual(state["bytes"], 2400)
 
     def test_session_cap_of_six_notes(self):
-        for i in range(2):
-            self.query_file.write_text(block(*[note(f"CONCEPT-{i}{j}") for j in range(3)]))
+        for i in range(3):
+            self.query_file.write_text(block(*[note(f"CONCEPT-{i}{j}") for j in range(2)]))
             out = self.run_hook(prompt=f"prompt number {i} about codex quota")
-            self.assertEqual(self.context_of(out).count("\n- "), 3)
+            self.assertEqual(self.context_of(out).count("\n- "), 2)
         self.query_file.write_text(block(note("CONCEPT-99")))
-        self.assertEqual(self.run_hook(prompt="a third prompt about codex quota"), "")
+        self.assertEqual(self.run_hook(prompt="a fourth prompt about codex quota"), "")
         self.assertEqual(len(json.loads((self.state / "s1.json").read_text())["ids"]), 6)
 
     def test_oversized_note_is_skipped_not_blocking(self):
@@ -135,7 +140,7 @@ class TestVaultRecall(unittest.TestCase):
         self.assertIn("CONCEPT-b", ctx)
         self.assertLessEqual(len(ctx.encode()), 1200)
 
-    def test_query_passes_limit_12(self):
+    def test_query_passes_limit_2(self):
         arg_file = self.dir / "args.json"
         engine = self.dir / "inspecting-engine"
         engine.write_text(f"""#!/usr/bin/env python3
@@ -147,7 +152,7 @@ open({repr(str(arg_file))}, "w").write(json.dumps(sys.argv[1:]))
         args = json.loads(arg_file.read_text())
         self.assertIn("--limit", args)
         idx = args.index("--limit")
-        self.assertEqual(args[idx + 1], "12")
+        self.assertEqual(args[idx + 1], "2")
 
     def test_slow_engine_times_out_silently(self):
         slow = self.dir / "slow-engine"
