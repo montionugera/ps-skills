@@ -34,6 +34,15 @@ ACTIVE_SECONDS = 30 * 60
 EXTRACT_AT = 0.85
 DROP_AT = 0.15
 PENDING = {"jev-failed", "unsure-pending", "extract-pending"}
+DRAFT_MAX = 1500
+JUNK_BELOW = 0.5
+SAME_AT = 0.85
+HIGH_STAKES_AT = 0.85
+SAME_MAX = 5
+CANDIDATE_DAYS = 60
+JEV_RULES_MAX = 20000
+EXTRACT_MODEL = "gemini-3.8-flash-high"
+REVIEW_MODEL = "gemini-4-argon-low"
 # Own copy of bin/ps-skills-sync SECRET_RE without the home-path rule (R11); a test keeps them in step.
 # The literal is split so this public file does not trip ps-skills-sync's scan of itself.
 SECRET_RE = re.compile(r"""ghp_[A-Za-z0-9]{20}|github""" r"""_pat_|sk-[A-Za-z0-9_-]{20}|xox[bpas]-|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|(password|passwd|api[_-]?key|secret|token)["' ]*[:=]["' ]*[A-Za-z0-9/+_-]{12,}""")
@@ -368,10 +377,392 @@ def run_batch(run):
 
 
 def run_extractions(run, queue):
-    """Slice 2, Task 2: extraction is wired in Task 3. Until then a selected session waits as extract-pending."""
-    for p, session in queue:
+    """R9-R10f and R19: extract up to VAULT_DISTILL_MAX sessions, gate each draft, then one review call."""
+    queue.sort(key=lambda item: -item[0])
+    cap = env_int("VAULT_DISTILL_MAX", 20)
+    if run.dry:
+        run.counts["extracted"] += min(len(queue), cap)
+        return
+    run.ledger = load_ledger(run)
+    rescore_unscored(run)
+    for i, (p, session) in enumerate(queue):
+        if i >= cap:
+            run.mark(session, "extract-pending", p=p)  # over the nightly cap: first in line tomorrow
+            continue
         run.counts["extracted"] += 1
-        run.mark(session, "extract-pending", p=p)
+        state, draft = extract_session(run, session)
+        run.mark(session, state, offset=session["end"], p=p, draft=draft)
+        save_ledger(run)
+    expire_candidates(run)
+    review(run)
+    for entry in run.ledger.values():
+        run.counts["candidates_waiting"] += entry["state"] in ("candidate", "ready", "would-publish")
+        run.counts["ready"] += entry["state"] == "ready"
+    save_ledger(run)
+
+
+def load_ledger(run):
+    try:
+        data = json.loads((run.state / "drafts.json").read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_ledger(run):
+    atomic_write(run.state / "drafts.json", json.dumps(run.ledger, indent=1) + "\n")
+
+
+def engine(run, *args):
+    try:
+        return subprocess.run([engine_bin(), *args], capture_output=True, text=True, timeout=20,
+                              env={**os.environ, "VAULT_ROOT": str(run.vault)})
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def related_notes(run, query):
+    proc = engine(run, "context", "--query", query[:2000], "--limit", "3")
+    return proc.stdout if proc is not None and proc.returncode == 0 else ""
+
+
+def repo_scope(run, cwd):
+    """project_ids of project notes whose release_repo is the session's repo, else the repo:<name> tag."""
+    root = os.path.realpath(repo_root(cwd)) if cwd else ""
+    ids = []
+    try:
+        lines = (run.vault / "_meta" / "indexes" / "projects.jsonl").read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("release_repo") and os.path.realpath(entry["release_repo"]) == root:
+            ids.append(entry["id"])
+    return (ids, []) if ids else ([], [f"repo:{os.path.basename(root)}"] if root else [])
+
+
+def prompts_of(digest):
+    return " ".join(line[6:] for line in digest.splitlines() if line.startswith("user: "))
+
+
+def extract_session(run, session):
+    """Returns (session state, draft key or None)."""
+    project_ids, tags = repo_scope(run, session["cwd"])
+    request = {"session_id": session["sid"], "digest_path": session["digest_path"], "out_dir": str(run.distill),
+               "project_ids": project_ids, "tags": tags,
+               "related": related_notes(run, prompts_of(session["digest"]) or session["digest"][:2000])}
+    cmd = shlex.split(os.environ.get("VAULT_DISTILL_EXTRACT_CMD", "")) or [sys.executable, str(Path(__file__).resolve()), "--extract-default"]
+    run.bytes["extract"] += len(session["digest"].encode()) + len(request["related"].encode())  # what the model reads
+    out = run.call("extract", cmd, json.dumps(request), timeout=360)
+    if not isinstance(out, dict):
+        run.counts["invalid"] += 1
+        return "invalid", None  # R9f: the worker failed
+    if not out.get("path"):
+        run.counts["no_lesson"] += 1
+        return "no-lesson", None
+    draft = Path(out["path"]).resolve()
+    if run.distill.resolve() not in draft.parents or not draft.is_file():
+        run.counts["invalid"] += 1
+        return "invalid", None
+    key = str(draft.relative_to(run.distill.resolve()))
+    entry = {"sid": session["sid"], "sessions": [session["sid"]], "digest": session["digest_path"],
+             "created": int(time.time()), "state": "new", "scores": {}}
+    run.ledger[key] = entry
+    admit_draft(run, key, entry)
+    return "extracted", key
+
+
+def admit_draft(run, key, entry):
+    path = run.distill / key
+    text = path.read_text(errors="replace")
+    proc = engine(run, "validate", str(path))
+    if len(text.encode()) > DRAFT_MAX or proc is None or proc.returncode != 0:
+        entry["state"] = "invalid"  # R9f: stays in the inbox marked invalid
+        run.counts["invalid"] += 1
+    elif SECRET_RE.search(text):
+        quarantine(run, f"draft-{entry['sid']}", text)
+        path.unlink()  # a credential must not stay in a synced inbox path; the copy is in _inbox/private/
+        entry["state"] = "private"
+        run.counts["private"] += 1
+    elif not evidence_ok(text, Path(entry["digest"]).read_text(errors="replace")):
+        entry["state"] = "no-evidence"  # R9c: script check, no model
+        run.counts["no_evidence"] += 1
+    else:
+        score_draft(run, key, entry)
+
+
+def evidence_ok(text, digest):
+    """R9c: at least one quoted Evidence line (8+ characters) is a substring of the digest."""
+    m = re.search(r"^## Evidence[ \t]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    if not m:
+        return False
+    quotes = [ln.strip()[2:].strip().strip("`\"'") for ln in m.group(1).splitlines() if ln.strip()[:2] in ("- ", "> ")]
+    return any(len(q) >= 8 and q in digest for q in quotes)
+
+
+def title_of(text):
+    m = re.search(r'^title:\s*"?(.*?)"?\s*$', text, re.M)
+    return m.group(1) if m else ""
+
+
+def score_draft(run, key, entry):
+    """R9d: Jev scores specific, novel and high_stakes; below 0.5 on either of the first two is junk."""
+    path = run.distill / key
+    text = path.read_text(errors="replace")
+    digest = Path(entry["digest"]).read_text(errors="replace") if Path(entry["digest"]).exists() else ""
+    related = related_notes(run, title_of(text))
+    related_path = run.state / "related" / f"{entry['sid']}.txt"
+    atomic_write(related_path, related)
+    claude_md = Path.home() / ".claude" / "CLAUDE.md"
+    run.bytes["score"] += min(JEV_RULES_MAX, size_or_zero(claude_md))  # jev-gate reads it itself
+    out = run.jev("score", "score-draft", ["--draft", str(path), "--digest", entry["digest"], "--related", str(related_path)],
+                  text + "\n" + digest + "\n" + related)
+    if out is None:
+        entry["state"] = "unscored"  # R9df: scored again on the next run
+        run.counts["unscored"] += 1
+        return
+    entry["scores"] = {k: float(out.get(k, 0.0)) for k in ("specific", "novel", "high_stakes")}
+    if entry["scores"]["specific"] < JUNK_BELOW or entry["scores"]["novel"] < JUNK_BELOW:
+        entry["state"] = "junk"
+        run.counts["junk"] += 1
+        return
+    become_candidate(run, key, entry)
+
+
+def rescore_unscored(run):
+    for key, entry in list(run.ledger.items()):
+        if entry["state"] == "unscored" and (run.distill / key).exists():
+            score_draft(run, key, entry)
+
+
+def terms(text):
+    return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) >= 4}
+
+
+def keyword_score(query, text):
+    """R2's field weights (title 3, tag 2, body 1) over a candidate file.
+    shortcut: no engine stop-word list and no score floor; it only orders at most 5 Jev comparisons."""
+    title = terms(title_of(text))
+    tag_line = re.search(r"^tags:(.*)$", text, re.M)
+    tags = terms(tag_line.group(1)) if tag_line else set()
+    body = terms(text)
+    return sum(3 if t in title else 2 if t in tags else 1 if t in body else 0 for t in query)
+
+
+def become_candidate(run, key, entry):
+    """R19: a candidate goes to review on recurrence in another session or on high_stakes >= 0.85."""
+    src = run.distill / key
+    dest = run.distill / "candidates" / src.name
+    if dest.exists():
+        dest = dest.with_name(f"{dest.stem}-{entry['sid'][:8]}.md")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dest)
+    new_key = str(dest.relative_to(run.distill))
+    run.ledger.pop(key, None)
+    run.ledger[new_key] = entry
+    entry["state"] = "candidate"
+    text = dest.read_text(errors="replace")
+    query = terms(title_of(text) + " " + text)
+    others = [(keyword_score(query, (run.distill / k).read_text(errors="replace")), k)
+              for k, e in run.ledger.items()
+              if k != new_key and e["state"] in ("candidate", "ready") and entry["sid"] not in e["sessions"]
+              and (run.distill / k).exists()]
+    for _, other in sorted(others, reverse=True)[:SAME_MAX]:
+        other_text = (run.distill / other).read_text(errors="replace")
+        out = run.jev("same_lesson", "same-lesson", ["--a", str(dest), "--b", str(run.distill / other)],
+                      text + "\n---\n" + other_text)
+        if out is not None and float(out.get("same", 0.0)) >= SAME_AT:
+            merge(run, other, new_key)
+            return
+    if entry["scores"].get("high_stakes", 0.0) >= HIGH_STAKES_AT:
+        entry["state"] = "ready"
+
+
+def merge(run, keep_key, new_key):
+    """Recurrence: the older candidate cites both sessions; the newer file moves to merged/."""
+    keep, new = run.ledger[keep_key], run.ledger[new_key]
+    keep["sessions"] = sorted(set(keep["sessions"]) | set(new["sessions"]))
+    keep["state"] = "ready"
+    with open(run.distill / keep_key, "a") as handle:
+        handle.write("\n## Also seen in\n" + "".join(f"- session `{s}`\n" for s in new["sessions"]))
+    src = run.distill / new_key
+    dest = run.distill / "merged" / src.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dest)
+    run.ledger.pop(new_key)
+    run.ledger[str(dest.relative_to(run.distill))] = {**new, "state": "merged", "into": keep_key}
+    run.counts["recurred"] += 1
+
+
+def expire_candidates(run):
+    """R19: a candidate with no match after 60 days leaves the queue; moved to expired/, never deleted."""
+    cutoff = time.time() - CANDIDATE_DAYS * 86400
+    for key, entry in list(run.ledger.items()):
+        if entry["state"] == "candidate" and entry["created"] < cutoff and (run.distill / key).exists():
+            dest = run.distill / "expired" / Path(key).name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(run.distill / key, dest)
+            run.ledger.pop(key)
+            run.ledger[str(dest.relative_to(run.distill))] = {**entry, "state": "expired"}
+            run.counts["expired"] += 1
+            run.notes.append(f"expired: {key}")
+
+
+def review(run):
+    """R10: one review call for every ready candidate. Shadow mode: a publish verdict is recorded as would-publish."""
+    ready = [k for k, e in run.ledger.items() if e["state"] == "ready" and (run.distill / k).exists()]
+    if not ready:
+        return
+    items = [{"draft": k, "sessions": run.ledger[k]["sessions"], "scores": run.ledger[k]["scores"],
+              "text": (run.distill / k).read_text(errors="replace")} for k in ready]
+    cmd = shlex.split(os.environ.get("VAULT_DISTILL_REVIEW_CMD", "")) or [sys.executable, str(Path(__file__).resolve()), "--review-default"]
+    out = run.call("review", cmd, json.dumps(items), timeout=360)
+    if not isinstance(out, list):
+        if out is not None:
+            run.failures["review"] += 1
+        return  # R10f: nothing changes, every candidate stays ready for tomorrow
+    for verdict in out:
+        if not isinstance(verdict, dict) or verdict.get("draft") not in ready:
+            continue
+        entry = run.ledger[verdict["draft"]]
+        entry["reason"] = str(verdict.get("reason", ""))[:300]
+        if verdict.get("verdict") == "publish":
+            entry["state"] = "would-publish"
+            run.counts["would_publish"] += 1
+            run.notes.append(f"would publish: {verdict['draft']} ({entry['reason']})")
+        elif verdict.get("verdict") == "reject":
+            entry["state"] = "rejected"
+            run.counts["rejected"] += 1
+            run.notes.append(f"rejected: {verdict['draft']} ({entry['reason']})")
+
+
+# --- default extractor and reviewer: one agy print-mode call each, no tools, no workspace ---
+EXTRACT_SCHEMA = {
+    "type": "object", "required": ["lesson"],
+    "properties": {
+        "lesson": {"type": "boolean"},
+        "title": {"type": "string", "maxLength": 80},
+        "summary": {"type": "string", "maxLength": 160},
+        "when": {"type": "string", "maxLength": 300},
+        "rule": {"type": "string", "maxLength": 300},
+        "why": {"type": "string", "maxLength": 300},
+        "scope": {"enum": ["repo", "global"]},
+        "existing_note_id": {"type": "string"},
+        "evidence": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 160}},
+    },
+}
+EXTRACT_PROMPT = """You turn one finished agent session into at most one reusable lesson for a knowledge vault.
+Answer with JSON only, matching the schema. Use no tools.
+- lesson: false when the session holds no trap, fix, decision or rule that would help a future session.
+- title: a short name for the lesson. summary: one sentence. when / rule / why: one or two sentences each.
+- scope: "global" when the rule applies in every repo, else "repo".
+- existing_note_id: when one of the existing notes below already covers this lesson, its id (the draft then
+  becomes a proposed addition to that note); otherwise leave it out.
+- evidence: 1 to 3 strings copied exactly from the digest (an error message, a command or a file path).
+
+Existing notes (id | title | path | matched | summary):
+{related}
+
+Session digest:
+{digest}
+"""
+REVIEW_SCHEMA = {
+    "type": "object", "required": ["verdicts"],
+    "properties": {"verdicts": {"type": "array", "items": {
+        "type": "object", "required": ["draft", "verdict", "reason"],
+        "properties": {"draft": {"type": "string"}, "verdict": {"enum": ["publish", "reject"]},
+                       "reason": {"type": "string", "maxLength": 200}}}}},
+}
+REVIEW_PROMPT = """You review candidate knowledge notes written automatically from agent sessions.
+For each candidate return publish or reject with a one-sentence reason. Publish only a rule that is specific,
+correct as far as the text shows, useful in a future session, and not a one-off. Answer with JSON only. Use no tools.
+
+Candidates (JSON):
+"""
+
+
+def parse_json(text):
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except ValueError:
+        return None
+
+
+def ask_agy(model, prompt, schema):
+    """One print-mode turn: no --add-dir, no --dangerously-skip-permissions, plan mode, empty cwd."""
+    cmd = ["agy", "-p", prompt, "--model", model, "--mode", "plan", "--disable-slash-commands",
+           "--sandbox", "--json-schema", json.dumps(schema), "--output-format", "text", "--print-timeout", "300s"]
+    with tempfile.TemporaryDirectory() as empty:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=330, cwd=empty,
+                                  env={**os.environ, "CLAUDE_VAULT_SUMMARY": "0"})
+        except (OSError, subprocess.SubprocessError):
+            return None
+    return parse_json(proc.stdout) if proc.returncode == 0 else None
+
+
+def one_line(value, limit):
+    return " ".join(str(value or "").split())[:limit]
+
+
+def render_draft(answer, request):
+    sid = request["session_id"]
+    title = one_line(answer.get("title"), 80) or "Untitled lesson"
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60] or "lesson"
+    today = datetime.date.today().isoformat()
+    scope_global = answer.get("scope") == "global"
+    fm = {"schema": "knowledge/v1", "id": f"KNOW-{slug}", "kind": "knowledge", "title": title, "status": "draft",
+          "category": "rule", "author": "agent-distiller", "created": today, "updated": today,
+          "tags": ["auto-distilled"] + (["global"] if scope_global else list(request.get("tags", []))),
+          "project_ids": [] if scope_global else list(request.get("project_ids", [])),
+          "source_sessions": [sid]}
+    if answer.get("existing_note_id"):
+        fm["proposed_addition_to"] = one_line(answer["existing_note_id"], 120)
+    lines = ["---"] + [f"{k}: {json.dumps(v)}" for k, v in fm.items()] + ["---", "",
+             one_line(answer.get("summary"), 160), "",
+             "## When this applies", one_line(answer.get("when"), 300), "",
+             "## Rule", one_line(answer.get("rule"), 300), "",
+             "## Why", one_line(answer.get("why"), 300), "",
+             "## Source", f"- session `{sid}`", "",
+             "## Evidence"] + [f"- {one_line(q, 160)}" for q in (answer.get("evidence") or [])[:3]]
+    return slug, "\n".join(lines) + "\n"
+
+
+def extract_default():
+    request = json.loads(sys.stdin.read())
+    digest = Path(request["digest_path"]).read_text(errors="replace")
+    answer = ask_agy(EXTRACT_MODEL, EXTRACT_PROMPT.format(related=request.get("related") or "(none)", digest=digest),
+                     EXTRACT_SCHEMA)
+    if not isinstance(answer, dict):
+        return 1
+    if not answer.get("lesson"):
+        print(json.dumps({"path": None, "reason": "no-lesson"}))
+        return 0
+    slug, text = render_draft(answer, request)
+    path = Path(request["out_dir"]) / f"{slug}--{request['session_id'][:8]}.md"
+    atomic_write(path, text)
+    print(json.dumps({"path": str(path)}))
+    return 0
+
+
+def review_default():
+    items = sys.stdin.read()
+    answer = ask_agy(REVIEW_MODEL, REVIEW_PROMPT + items, REVIEW_SCHEMA)
+    if not isinstance(answer, dict) or not isinstance(answer.get("verdicts"), list):
+        return 1
+    print(json.dumps(answer["verdicts"]))
+    return 0
 
 
 # --- report and exit code (R12, R16) ---
@@ -444,7 +835,13 @@ def main():
     parser = argparse.ArgumentParser(description="Nightly knowledge distillation from agent sessions (shadow mode).")
     parser.add_argument("--dry-run", action="store_true", help="call Jev only; record, extract and review nothing")
     parser.add_argument("--report", action="store_true", help="print the last run's report")
+    parser.add_argument("--extract-default", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--review-default", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.extract_default:
+        return extract_default()
+    if args.review_default:
+        return review_default()
     if os.environ.get("VAULT_DISTILL") == "0":
         return 0
     if args.report:
