@@ -332,8 +332,9 @@
     "title": "Jev-gated auto knowledge extraction: classify-lesson lens on Stop-hook session summaries, cheap flash extractor drafts to _inbox, Argon review before publish-knowledge",
     "from_idea": "I-039",
     "created_at": "2026-11-11T02:55:19.522053+00:00",
-    "claimed_by": null,
-    "status": "open",
-    "release_version": null
+    "claimed_by": "claude-a6c35399",
+    "status": "claimed",
+    "release_version": null,
+    "claimed_at": "2026-11-11T02:55:23.421165+00:00"
   }
 ]
