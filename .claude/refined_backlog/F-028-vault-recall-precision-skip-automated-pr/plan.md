@@ -139,3 +139,13 @@ ps-skills-doctor --strict
 ```
 
 Expected from the simulation: recall 21/25, precision 15/17 = 88.2%.
+
+## Audit trail
+
+- 2026-11-11 implementation: one worker (`88c1b22`..`9c99580`). The built engine on the private sets: recall 21/25, precision 15/17 = 88.2%, the same as the simulation.
+- 2026-11-11 whole-branch review (code-reviewer, Opus): SHIP, no Critical or High. No fix round.
+  - Parked (Medium, backlog): `TestContext_RarityWeightsOn20Notes` also passes on the old scorer, because its other 19 notes score 3 there. Put two shared words in every title so the old scorer would return all 20.
+  - Parked (Low, backlog):
+    - `--limit 2` has no fallback: when the top 2 notes are already injected or demoted, a third qualifying note is not offered (P3h as written; no hook test covers it);
+    - an unclosed code fence gives an empty summary, and a prose line that starts with three backticks opens a fence;
+    - rules written with spaces (`- - -`, `* * *`) are still taken as the summary.
