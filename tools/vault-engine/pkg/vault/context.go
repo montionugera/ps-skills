@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,11 +17,34 @@ import (
 // ContextHit is one note selected for injection into an agent session.
 type ContextHit struct {
 	Entry   IndexEntry
-	Score   int
+	Score   float64
 	Matched []string
 }
 
-const contextThreshold = 4
+const (
+	contextThreshold = 4   // flat score, used while the index is small
+	rarityThreshold  = 2.5 // rarity-weighted score, chosen on a labelled prompt set (F-028)
+	rarityMinNotes   = 20  // below this, note rarity says nothing
+	longQueryTerms   = 80
+	longQueryHead    = 20
+)
+
+// shortcut: fixed list from the owner's prompt history on 2026-11-11, regenerate when precision_eval.sh drops under 80%.
+var queryNoise = map[string]bool{
+	"action": true, "agent": true, "already": true, "asset": true, "audits": true, "auto": true,
+	"bash": true, "begin": true, "between": true, "branch": true, "build": true, "claim": true,
+	"claude": true, "command": true, "conduct": true, "constraints": true, "context": true, "continue": true,
+	"create": true, "data": true, "date": true, "decisions": true, "deploy": true, "design": true,
+	"document": true, "dont": true, "echo": true, "epic": true, "execute": true, "file": true,
+	"first": true, "focus": true, "full": true, "handoff": true, "help": true, "historical": true,
+	"image": true, "immediate": true, "improve": true, "inline": true, "instructions": true, "lines": true,
+	"local": true, "logs": true, "main": true, "next": true, "null": true, "objective": true,
+	"original": true, "override": true, "owner": true, "past": true, "pasted": true, "picture": true,
+	"plan": true, "quant": true, "read": true, "release": true, "repos": true, "review": true,
+	"section": true, "ship": true, "spec": true, "steps": true, "stop": true, "studio": true,
+	"task": true, "test": true, "text": true, "toward": true, "transitioning": true, "user": true,
+	"users": true, "without": true, "work": true, "workspace": true, "worktree": true,
+}
 
 var termSplit = regexp.MustCompile(`[^a-z0-9]+`)
 
@@ -52,11 +76,48 @@ func Terms(s string) []string {
 	return out
 }
 
+// queryTerms is Terms for a prompt: a long prompt keeps only its opening terms (a long text matches some
+// title word of almost every note), then numbers and words typed in most prompts are dropped.
+func queryTerms(query string) []string {
+	terms := Terms(query)
+	if len(terms) > longQueryTerms {
+		terms = terms[:longQueryHead]
+	}
+	var out []string
+	for _, t := range terms {
+		if !queryNoise[t] && strings.Trim(t, "0123456789") != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func isHorizontalRule(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	c := s[0]
+	if c != '-' && c != '*' && c != '_' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] != c {
+			return false
+		}
+	}
+	return true
+}
+
 // SummaryLine is the first non-heading, non-empty body line, cut to 120 bytes on a rune boundary.
 func SummaryLine(body string) string {
+	inFence := false
 	for _, line := range strings.Split(body, "\n") {
 		l := strings.TrimSpace(line)
-		if l == "" || strings.HasPrefix(l, "#") {
+		if strings.HasPrefix(l, "```") || strings.HasPrefix(l, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if inFence || l == "" || strings.HasPrefix(l, "#") || isHorizontalRule(l) {
 			continue
 		}
 		if len(l) > 120 {
@@ -138,37 +199,81 @@ func toSet(terms []string) map[string]bool {
 	return set
 }
 
+type activeEntry struct {
+	entry IndexEntry
+	title map[string]bool
+	tags  map[string]bool
+	body  map[string]bool
+}
+
 // ContextByQuery scores every knowledge note against the query and returns up to limit notes at or above the threshold.
 func (v *VaultEngine) ContextByQuery(query string, limit int) []ContextHit {
-	qTerms := Terms(query)
+	qTerms := queryTerms(query)
 	if len(qTerms) == 0 {
 		return nil
 	}
-	var hits []ContextHit
+	var active []activeEntry
 	for _, e := range v.loadIndex("knowledge.jsonl") {
 		if e.Status != "active" {
 			continue
 		}
-		title, tags, body := toSet(Terms(e.Title)), toSet(Terms(strings.Join(e.Tags, " "))), toSet(e.Terms)
-		hit := ContextHit{Entry: e}
-		strong := false // a title or tag match; body-only overlap on common words is noise
-		for _, q := range qTerms {
-			w := 0
-			switch {
-			case title[q]:
-				w = 3
-			case tags[q]:
-				w = 2
-			case body[q]:
-				w = 1
-			}
-			if w > 0 {
-				hit.Score += w
-				hit.Matched = append(hit.Matched, q)
-				strong = strong || w >= 2
+		active = append(active, activeEntry{
+			entry: e,
+			title: toSet(Terms(e.Title)),
+			tags:  toSet(Terms(strings.Join(e.Tags, " "))),
+			body:  toSet(e.Terms),
+		})
+	}
+	n := len(active)
+	if n == 0 {
+		return nil
+	}
+
+	df := make(map[string]int, len(qTerms))
+	var top float64
+	if n >= rarityMinNotes {
+		for _, ae := range active {
+			for _, q := range qTerms {
+				if ae.title[q] || ae.tags[q] || ae.body[q] {
+					df[q]++
+				}
 			}
 		}
-		if hit.Score >= contextThreshold && strong {
+		top = math.Log(float64(n+1) / 0.5)
+	}
+
+	threshold := float64(contextThreshold)
+	if n >= rarityMinNotes {
+		threshold = rarityThreshold
+	}
+
+	var hits []ContextHit
+	for _, ae := range active {
+		hit := ContextHit{Entry: ae.entry}
+		strong := false // a title or tag match; body-only overlap on common words is noise
+		for _, q := range qTerms {
+			w := 0.0
+			isTitleOrTag := false
+			switch {
+			case ae.title[q]:
+				w = 3.0
+				isTitleOrTag = true
+			case ae.tags[q]:
+				w = 2.0
+				isTitleOrTag = true
+			case ae.body[q]:
+				w = 1.0
+			}
+			if w > 0 {
+				if n >= rarityMinNotes {
+					w *= math.Log(float64(n+1)/(float64(df[q])+0.5)) / top
+				}
+				hit.Score += w
+				hit.Matched = append(hit.Matched, q)
+				strong = strong || isTitleOrTag
+			}
+		}
+		if hit.Score >= threshold && strong {
 			hits = append(hits, hit)
 		}
 	}
