@@ -121,6 +121,34 @@ class TestVaultRecall(unittest.TestCase):
         self.assertNotIn("CONCEPT-big", ctx)
         self.assertIn("CONCEPT-small", ctx)
 
+    def test_additional_context_bytes_capped_at_1200(self):
+        # A note of size 1180 would fit if used starts at 0 (1180 <= 1200),
+        # but with the 33-byte wrapper it produces a 1212-byte block (> 1200).
+        # Starting used at 33 ensures it is skipped (33 + 1180 = 1213 > 1200).
+        # Prefix length for CONCEPT-a is 89 bytes; pad 1090 makes line 1179 bytes, size 1180 bytes.
+        near_limit_oversized = note("CONCEPT-a", pad=1090)
+        fits = note("CONCEPT-b", pad=500)
+        self.query_file.write_text(block(near_limit_oversized, fits))
+        out = self.run_hook()
+        ctx = self.context_of(out)
+        self.assertNotIn("CONCEPT-a", ctx)
+        self.assertIn("CONCEPT-b", ctx)
+        self.assertLessEqual(len(ctx.encode()), 1200)
+
+    def test_query_passes_limit_12(self):
+        arg_file = self.dir / "args.json"
+        engine = self.dir / "inspecting-engine"
+        engine.write_text(f"""#!/usr/bin/env python3
+import json, sys
+open({repr(str(arg_file))}, "w").write(json.dumps(sys.argv[1:]))
+""")
+        engine.chmod(engine.stat().st_mode | stat.S_IEXEC)
+        self.run_hook(engine=engine)
+        args = json.loads(arg_file.read_text())
+        self.assertIn("--limit", args)
+        idx = args.index("--limit")
+        self.assertEqual(args[idx + 1], "12")
+
     def test_slow_engine_times_out_silently(self):
         slow = self.dir / "slow-engine"
         slow.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n")

@@ -77,8 +77,8 @@ def main() -> int:
             # First prompt of the session: count what the SessionStart hook already injected.
             seed = note_lines(run_engine(["--cwd", data.get("cwd") or os.getcwd()]))
             state = {"ids": [note_id(line) for line in seed], "bytes": sum(size(line) for line in seed)}
-        used = 0
-        for line in note_lines(run_engine(["--query", prompt[:2000]])):
+        used = 33
+        for line in note_lines(run_engine(["--query", prompt[:2000], "--limit", "12"])):
             nid = note_id(line)
             if nid in state["ids"] or nid in demoted:
                 continue
