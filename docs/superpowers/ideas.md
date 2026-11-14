@@ -1,1 +1,4 @@
 - herdr-board leftovers: board binaries are gone, but the plugin entry, herdr keybinding, skill and source folder remain (2026-11-01).
+- main CI red since 72a69ea: test_handoff_bash_guard, test_jev_gate and the ps-release-workflow engine job fail on GitHub; test_agent_concurrency_guard::test_swap_deny_beats_everything fails locally (2026-11-15).
+- dispatch batch report stops at 15 lines, so items past #14 of a big batch never show their status (2026-11-15).
+- dispatch tests still write throwaway jobs (task "x") into the real ~/.local/state/dispatch/jobs, so `--status` shows them as real failures (2026-11-15).
