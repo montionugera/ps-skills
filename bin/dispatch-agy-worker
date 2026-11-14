@@ -321,17 +321,27 @@ def note_agy_auth_failure(result):
     return True
 
 
+AGY_AUTH_RETRY_SECONDS = 600  # agy builds since 2026-11-13 keep no token file: with none, a failure blocks this long, then one run may try again
+
+
 def agy_auth_blocked():
-    """True while the last agy login failure is newer than the token file, or the token is gone."""
-    if not os.path.exists(AGY_TOKEN_FILE):
-        return os.path.isdir(os.path.dirname(AGY_TOKEN_FILE))  # no agy install dir: not ours to judge
+    """True while the last agy login failure stands: newer than the token file, or, where
+    agy keeps no token file, younger than AGY_AUTH_RETRY_SECONDS. A missing token file
+    alone says nothing: a logged-in agy may have none."""
     try:
-        if os.path.getmtime(AGY_TOKEN_FILE) > os.path.getmtime(AGY_AUTH_MARKER):
-            os.remove(AGY_AUTH_MARKER)  # a fresh login since the failure clears it
-            return False
-        return True
+        failed = os.path.getmtime(AGY_AUTH_MARKER)
     except OSError:
-        return False
+        return False  # no failure on record
+    try:
+        cleared = os.path.getmtime(AGY_TOKEN_FILE) > failed  # a fresh login since the failure
+    except OSError:
+        cleared = time.time() - failed > AGY_AUTH_RETRY_SECONDS
+    if cleared:
+        try:
+            os.remove(AGY_AUTH_MARKER)
+        except OSError:
+            pass
+    return not cleared
 
 
 def _is_live_agy_observation(path):
