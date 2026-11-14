@@ -15,6 +15,7 @@ def run_install(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
         CLAUDE_HOME=str(home / ".claude"),
         AGENTS_HOME=str(home / ".agents"),
         GEMINI_HOME=str(home / ".gemini"),
+        CODEX_HOME=str(home / ".codex"),
         CURSOR_HOME=str(home / ".cursor"),
         BIN_HOME=str(home / ".local" / "bin"),
         PATH="/usr/bin:/bin",
@@ -43,6 +44,10 @@ def test_installer_links_ps_work(tmp_path: Path) -> None:
     assert os.access(installed, os.X_OK)
     command = subprocess.run([str(installed), "--help"], capture_output=True, text=True)
     assert command.returncode == 0, command.stderr
+    for agent_dir in (".claude", ".gemini", ".codex", ".cursor"):
+        handoff_link = home / agent_dir / "skills" / "handoff"
+        assert handoff_link.is_symlink(), f"missing symlink: {handoff_link}"
+        assert handoff_link.resolve() == (REPO / "skills" / "handoff").resolve()
 
 
 def test_installer_replaces_foreign_ps_work_only_with_force(tmp_path: Path) -> None:

@@ -9,13 +9,15 @@
 # Env: AGENT_MAX_WORKERS (default 8), T3_MAX_THREADS (default 4), AGENT_SWAP_DENY (default 0.85 of swap total),
 #      AGENT_SWAP_WARN (default 0.70), AGENT_CONCURRENCY_GUARD=off to disable,
 #      AGENT_GUARD_PS_CMD / AGENT_GUARD_SWAP_CMD (tests: fake ps / fake sysctl).
+#      AGENT_MEM_FREE_MIN (default 20): swap alone never denies; macOS keeps swap allocated after pressure ends,
+#      so deny only when free memory % (memory_pressure) is also below this. AGENT_GUARD_MEMFREE_CMD fakes it in tests.
 set -u
 [ "${AGENT_CONCURRENCY_GUARD:-on}" = "off" ] && exit 0
 MAXW="${AGENT_MAX_WORKERS:-8}"; MAXT3="${T3_MAX_THREADS:-4}"; DENY="${AGENT_SWAP_DENY:-0.85}"; WARN="${AGENT_SWAP_WARN:-0.70}"
 PS_CMD="${AGENT_GUARD_PS_CMD:-ps -Ao pid,ppid,command}"; SWAP_CMD="${AGENT_GUARD_SWAP_CMD:-sysctl -n vm.swapusage}"
 INPUT="$(head -c 65536 2>/dev/null || true)"
 TOOL="$(printf '%s' "$INPUT" | sed -nE 's/.*"tool_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)"
-case "$TOOL" in Agent|Task|delegate_task|mcp__t3-code__t3_thread_launch) ;; *) exit 0 ;; esac
+case "$TOOL" in Agent|Task|delegate_task|mcp__t3-code__delegate_task|mcp__t3-code__t3_thread_launch) ;; *) exit 0 ;; esac
 read -r WORKERS T3COUNT <<<"$($PS_CMD 2>/dev/null | awk '
   NR==1 && $1=="PID" {next}
   { pid=$1; ppid=$2; $1=""; $2=""; cmd=substr($0,3); cmds[pid]=cmd
@@ -28,9 +30,18 @@ read -r WORKERS T3COUNT <<<"$($PS_CMD 2>/dev/null | awk '
 # swap: "total = 10240.00M  used = 9108.94M ..." (sysctl vm.swapusage); ratio used/total
 SWAPR="$($SWAP_CMD 2>/dev/null | awk '{ for(i=1;i<=NF;i++){ if($i=="total"){t=$(i+2)} if($i=="used"){u=$(i+2)} } gsub(/M/,"",t); gsub(/M/,"",u); if(t+0>0) printf "%.2f", u/t; else print "0" }')"
 deny(){ printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$1"; exit 0; }
-awk -v r="$SWAPR" -v d="$DENY" 'BEGIN{exit !(r+0>=d+0)}' && deny "Agent budget: swap is ${SWAPR} full (deny at ${DENY}). The machine is already paging; another agent will freeze it. Wait for running work to finish or close idle sessions before dispatching. Override: AGENT_SWAP_DENY."
+# Rule 8: Opus thinkers run at effort medium unless the user named another effort in this task.
+case "$TOOL" in delegate_task|mcp__t3-code__delegate_task)
+  OPUS_EFFORT="$(printf '%s' "$INPUT" | jq -r 'select((.tool_input.target.model // "") | test("opus")) | (.tool_input.target.options | if type=="array" then (map(select(.id=="effort") | .value) | first) else .effort end) // empty' 2>/dev/null || true)"
+  if [ -n "$OPUS_EFFORT" ] && [ "$OPUS_EFFORT" != "medium" ] && [ "${AGENT_OPUS_EFFORT_GUARD:-on}" != "off" ]; then
+    deny "Rule 8: Opus 5.5 runs at effort medium (got ${OPUS_EFFORT}). Re-send with effort medium, or set AGENT_OPUS_EFFORT_GUARD=off if the user asked for ${OPUS_EFFORT}."
+  fi ;;
+esac
+MEMFREE_CMD="${AGENT_GUARD_MEMFREE_CMD:-memory_pressure}"; MEMMIN="${AGENT_MEM_FREE_MIN:-20}"
+MEMFREE="$($MEMFREE_CMD 2>/dev/null | awk -F: '/free percentage/{gsub(/[ %]/,"",$2); print $2}')"; [ -n "$MEMFREE" ] || MEMFREE=0
+awk -v r="$SWAPR" -v d="$DENY" -v f="$MEMFREE" -v m="$MEMMIN" 'BEGIN{exit !(r+0>=d+0 && f+0<m+0)}' && deny "Agent budget: swap is ${SWAPR} full (deny at ${DENY}) and only ${MEMFREE}% memory free (min ${MEMMIN}). The machine is already paging; another agent will freeze it. Wait for running work to finish or close idle sessions before dispatching. Override: AGENT_SWAP_DENY."
 [ "$WORKERS" -ge "$MAXW" ] && deny "Agent budget: ${WORKERS} worker agents already run machine-wide (limit ${MAXW}, AGENT_MAX_WORKERS). Wait for one to finish with a single blocking wait, then dispatch."
-case "$TOOL" in delegate_task|mcp__t3-code__t3_thread_launch) [ "$T3COUNT" -ge "$MAXT3" ] && deny "T3 concurrency cap: ${T3COUNT} T3 Code agent threads already run (limit ${MAXT3}, T3_MAX_THREADS). Block once on t3_thread_wait, then launch." ;; esac
+case "$TOOL" in delegate_task|mcp__t3-code__delegate_task|mcp__t3-code__t3_thread_launch) [ "$T3COUNT" -ge "$MAXT3" ] && deny "T3 concurrency cap: ${T3COUNT} T3 Code agent threads already run (limit ${MAXT3}, T3_MAX_THREADS). Block once on t3_thread_wait, then launch." ;; esac
 # subagents/*.meta.json gains "finished":true when an agent ends; a crashed agent never does, so a log idle for
 # 30 min no longer counts. Reviewers fanned out in one message race the meta files, so a stamp of the last allowed reviewer
 # catches them. A kernel flock (python3 fcntl) serializes the read and write: a mkdir lock let two reviewers through on
@@ -77,4 +88,4 @@ with open(p + ".lock", "a") as lk:
 }
 review_cap
 NOTE=""; awk -v r="$SWAPR" -v w="$WARN" 'BEGIN{exit !(r+0>=w+0)}' && NOTE=" Swap is ${SWAPR} full: keep this to one agent and no screenshots."
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Agent budget: %s/%s workers machine-wide, %s/%s T3 threads, swap %s full.%s Brief must carry the subagent budget; block once on the result instead of ending the turn with work pending."}}\n' "$WORKERS" "$MAXW" "$T3COUNT" "$MAXT3" "$SWAPR" "$NOTE"
+printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Agent budget: %s/%s workers machine-wide, %s/%s T3 threads, swap %s full.%s Brief must carry the subagent budget; for T3 delegate_task use mode=async and end your turn immediately so the conversation stays unblocked."}}\n' "$WORKERS" "$MAXW" "$T3COUNT" "$MAXT3" "$SWAPR" "$NOTE"

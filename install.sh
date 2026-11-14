@@ -30,6 +30,7 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 GEMINI_HOME="${GEMINI_HOME:-$HOME/.gemini/config}"
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 CURSOR_HOME="${CURSOR_HOME:-$HOME/.cursor}"
 BIN_HOME="${BIN_HOME:-$HOME/.local/bin}"
 MODE="symlink"
@@ -53,12 +54,12 @@ while (($#)); do
   shift
 done
 
-mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$GEMINI_HOME/skills" "$CURSOR_HOME/skills" "$BIN_HOME"
+mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$GEMINI_HOME/skills" "$CODEX_HOME/skills" "$CURSOR_HOME/skills" "$BIN_HOME"
 
 replace_destination() {  # dest
   local dest="$1"
   case "$dest" in
-    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$GEMINI_HOME/hooks/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/jev-gate"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
+    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$GEMINI_HOME/hooks/"*|"$CODEX_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/jev-gate"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
     *) echo "refuse unsafe destination: $dest" >&2; return 1 ;;
   esac
   rm -rf -- "$dest"
@@ -90,6 +91,7 @@ link() {  # src dest
 for d in "$REPO"/skills/*/; do
   link "${d%/}" "$CLAUDE_HOME/skills/$(basename "$d")"
   link "${d%/}" "$GEMINI_HOME/skills/$(basename "$d")"
+  link "${d%/}" "$CODEX_HOME/skills/$(basename "$d")"
   link "${d%/}" "$CURSOR_HOME/skills/$(basename "$d")"
 done
 mkdir -p "$GEMINI_HOME/hooks"
@@ -465,7 +467,7 @@ EOF
 configure_dispatch
 
 echo
-echo "Installed into $CLAUDE_HOME, $GEMINI_HOME, and $CURSOR_HOME. Restart Claude Code, Codex, Cursor, and Antigravity to pick up new skills."
+echo "Installed into $CLAUDE_HOME, $CODEX_HOME, $GEMINI_HOME, and $CURSOR_HOME. Restart Claude Code, Codex, Cursor, and Antigravity to pick up new skills."
 echo "ps-commu-explain is self-contained; ps-release-workflow-* use $CLAUDE_HOME/ps-release-workflow."
 
 if [[ -x "$REPO/bin/ps-skills-doctor" ]]; then

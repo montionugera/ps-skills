@@ -66,3 +66,52 @@ def test_hotfix_cli_omits_the_release_hint_when_no_release(tmp_repo_with_release
     assert main() == 0
     out = capsys.readouterr().out
     assert "is in progress" not in out and "sync-main" not in out
+
+
+# --- --cleanup ---------------------------------------------------------------
+import scripts.hotfix as hotfix_mod
+
+
+def _fake_gh(monkeypatch, state):
+    real = hotfix_mod._run
+
+    def run(cmd, cwd):
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{state}\n", stderr="")
+        if cmd[:2] == ["git", "fetch"] or cmd[:3] == ["git", "ls-remote", "--exit-code"]:
+            return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="")  # no remote
+        return real(cmd, cwd)
+
+    monkeypatch.setattr(hotfix_mod, "_run", run)
+
+
+def test_cleanup_refuses_unless_pr_is_merged(tmp_repo_with_release, monkeypatch):
+    create_hotfix_worktree(tmp_repo_with_release, "keepme")
+    _fake_gh(monkeypatch, "OPEN")
+    with pytest.raises(hotfix_mod.HotfixCleanupError):
+        hotfix_mod.cleanup_hotfix(tmp_repo_with_release, "keepme")
+    wt = tmp_repo_with_release.parent / f"{tmp_repo_with_release.name}-hotfix-keepme"
+    assert wt.is_dir(), "nothing may be removed when the PR is not merged"
+
+
+def test_cleanup_removes_worktree_and_branch_when_merged(tmp_repo_with_release, monkeypatch):
+    create_hotfix_worktree(tmp_repo_with_release, "gone")
+    _fake_gh(monkeypatch, "MERGED")
+    done = hotfix_mod.cleanup_hotfix(tmp_repo_with_release, "gone")
+    wt = tmp_repo_with_release.parent / f"{tmp_repo_with_release.name}-hotfix-gone"
+    assert not wt.exists()
+    branches = subprocess.run(["git", "branch", "--list", "hotfix/gone"], cwd=tmp_repo_with_release,
+                              capture_output=True, text=True).stdout
+    assert branches.strip() == ""
+    assert any("worktree removed" in d for d in done)
+
+
+def test_cleanup_keeps_a_dirty_worktree(tmp_repo_with_release, monkeypatch):
+    result = create_hotfix_worktree(tmp_repo_with_release, "dirty")
+    (Path(result["worktree"]) / "untracked.txt").write_text("x")
+    (Path(result["worktree"]) / "tracked.txt").write_text("x")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=result["worktree"])
+    _fake_gh(monkeypatch, "MERGED")
+    with pytest.raises(hotfix_mod.HotfixCleanupError):
+        hotfix_mod.cleanup_hotfix(tmp_repo_with_release, "dirty")
+    assert Path(result["worktree"]).is_dir()

@@ -37,15 +37,19 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from handoff_usage import (
+    BYTES_PER_TOKEN,
+    active_transcript_bytes,
     dirty_tree,
     env_int,
+    is_agy_payload,
+    is_delegated_subagent,
     parse_transcript_usage_and_tasks,
+    resolve_agy_app_dirs,
+    resolve_agy_transcript_and_bytes,
     safe_point_blocked,
     stop_thresholds,
     usage_context,
 )
-
-BYTES_PER_TOKEN = 4
 
 # Antigravity (AGY) Stop hook sends camelCase terminationReason values.
 # Natural model stops in AGY emit "NO_TOOL_CALL" (or legacy "model_stop");
@@ -56,171 +60,6 @@ ALLOWED_AGY_TERMINATION_REASONS = (
     "MAX_INVOCATIONS",
     "model_stop",
 )
-
-
-def is_agy_payload(data):
-    """Detect Antigravity (AGY) Stop payload (camelCase keys) vs Claude Code (snake_case)."""
-    return any(
-        k in data
-        for k in (
-            "conversationId",
-            "terminationReason",
-            "workspacePaths",
-            "transcriptPath",
-            "fullyIdle",
-        )
-    )
-
-
-def resolve_agy_app_dirs():
-    """Return candidate Antigravity appDataDir roots for transcript / DB lookup."""
-    override = os.environ.get("AGY_APP_DATA_DIR") or os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
-    if override:
-        return [pathlib.Path(override).expanduser()]
-    dirs = []
-    gemini_home = os.environ.get("GEMINI_HOME")
-    if gemini_home:
-        gh_acp = pathlib.Path(gemini_home).expanduser() / "antigravity-acp"
-        if gh_acp.is_dir():
-            dirs.append(gh_acp)
-    dirs.extend([
-        pathlib.Path("~/.gemini/antigravity-cli").expanduser(),
-        pathlib.Path("~/.gemini/antigravity").expanduser(),
-    ])
-    t3_prov = pathlib.Path("~/.t3/userdata/providers/antigravity").expanduser()
-    if t3_prov.is_dir():
-        for sub in sorted(t3_prov.glob("*/antigravity-acp")):
-            if sub.is_dir() and sub not in dirs:
-                dirs.append(sub)
-    return dirs
-
-
-def active_transcript_bytes(path):
-    """Return active bytes after the last compaction CHECKPOINT line in a JSONL transcript."""
-    try:
-        raw = pathlib.Path(path).read_bytes()
-    except OSError:
-        return 0
-    total = len(raw)
-    if total == 0:
-        return 0
-    if b"CHECKPOINT" not in raw and b"# Resuming from a compaction" not in raw:
-        return total
-    offset = 0
-    last_reset_end = 0
-    for line in raw.splitlines(keepends=True):
-        offset += len(line)
-        if (b"CHECKPOINT" in line and b"type" in line) or b"# Resuming from a compaction" in line:
-            last_reset_end = offset
-    return max(0, total - last_reset_end)
-
-
-def is_delegated_subagent(data, transcript=None, session_id=None):
-    """True when invoked inside a native subagent or a T3 Code delegate_task child run."""
-    if os.environ.get("T3_DELEGATED_TASK") == "1":
-        return True
-    if data.get("agent_id") or data.get("parentConversationId"):
-        return True
-    if transcript and os.path.isfile(transcript):
-        try:
-            with open(transcript, "rb") as f:
-                head = f.read(16384).decode("utf-8", "replace")
-            if "Act as the " in head and "sub-agent for this task." in head:
-                return True
-        except OSError:
-            pass
-    if session_id and session_id != "unknown" and len(session_id) >= 8:
-        t3_db = os.environ.get("T3_STATE_DB") or os.path.expanduser("~/.t3/userdata/statev2.sqlite")
-        if os.path.isfile(t3_db):
-            try:
-                import sqlite3
-                uri = f"file:{t3_db}?mode=ro"
-                with sqlite3.connect(uri, uri=True, timeout=0.2) as conn:
-                    cur = conn.cursor()
-                    pat = f"%{session_id}%"
-                    cur.execute(
-                        "SELECT 1 FROM orchestration_v2_projection_provider_threads "
-                        "WHERE (thread_id LIKE 'thread:delegated-task:%' OR thread_id LIKE 'thread:provider:%') "
-                        "AND (provider_thread_id LIKE ? OR payload_json LIKE ?) LIMIT 1",
-                        (pat, pat),
-                    )
-                    if cur.fetchone():
-                        return True
-            except Exception:
-                pass
-    return False
-
-
-def resolve_agy_transcript_and_bytes(data, conversation_id):
-    """Resolve (transcript_file_or_None, total_bytes) for an AGY conversation.
-
-    Checks:
-      1. Explicit `transcriptPath` / `transcript_path` in hook payload.
-      2. `<appDataDir>/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl`
-         and `transcript.jsonl` (counting only post-CHECKPOINT bytes).
-      3. `<appDataDir>/conversations/<conversationId>.db` (+ `.db-wal`) ONLY as a fallback
-         when no JSONL transcript file exists yet.
-    """
-    explicit = data.get("transcriptPath") or data.get("transcript_path") or ""
-    explicit_db_root = None
-    if explicit and os.path.isfile(explicit):
-        if str(explicit).endswith((".db", ".sqlite", ".sqlite3")):
-            # Antigravity passes conversations/<id>.db as transcriptPath; use its parent
-            # appDataDir to locate brain/<id>/.system_generated/logs/transcript.jsonl first.
-            explicit_db_root = pathlib.Path(explicit).resolve().parent.parent
-        else:
-            try:
-                return explicit, active_transcript_bytes(explicit)
-            except OSError:
-                pass
-
-    if not conversation_id or conversation_id == "unknown":
-        return None, 0
-
-    best_transcript = None
-    best_raw_size = 0
-    best_bytes = 0
-    app_dirs = resolve_agy_app_dirs()
-    if explicit_db_root and explicit_db_root.is_dir() and explicit_db_root not in app_dirs:
-        app_dirs = [explicit_db_root] + app_dirs
-
-    for root in app_dirs:
-        logs_dir = root / "brain" / conversation_id / ".system_generated" / "logs"
-        # Prefer compact transcript.jsonl (actual model context with truncated large outputs)
-        # over transcript_full.jsonl (which stores untruncated raw tool dumps).
-        for name in ("transcript.jsonl", "transcript_full.jsonl"):
-            candidate = logs_dir / name
-            if candidate.is_file():
-                try:
-                    raw_sz = candidate.stat().st_size
-                    if raw_sz > 0:
-                        if raw_sz > best_raw_size:
-                            best_raw_size = raw_sz
-                            best_bytes = active_transcript_bytes(candidate)
-                            best_transcript = str(candidate)
-                        # A non-empty compact transcript is this root's answer, even when
-                        # another spelling of the same root already chose it.
-                        break
-                except OSError:
-                    pass
-
-    if best_transcript is None:
-        for root in app_dirs:
-            conv_dir = root / "conversations"
-            db_file = conv_dir / f"{conversation_id}.db"
-            wal_file = conv_dir / f"{conversation_id}.db-wal"
-            db_bytes = 0
-            for fpath in (db_file, wal_file):
-                if fpath.is_file():
-                    try:
-                        db_bytes += fpath.stat().st_size
-                    except OSError:
-                        pass
-            if db_bytes > best_bytes:
-                best_bytes = db_bytes
-
-    return best_transcript, best_bytes
-
 
 REFIRE_STEP = env_int("CLAUDE_AUTO_HANDOFF_REFIRE_STEP", 25000)
 LOG = os.environ.get("CLAUDE_AUTO_HANDOFF_LOG") or os.path.expanduser("~/.claude/logs/auto-handoff.log")
@@ -351,10 +190,7 @@ def main():
             emit_noop(True)
             return
         usage, running, last_text, banner = parse_transcript_usage_and_tasks(transcript)
-        if usage:
-            context = usage_context(usage)
-        else:
-            context = total_bytes // BYTES_PER_TOKEN
+        context = (usage_context(usage) if usage else 0) or (total_bytes // BYTES_PER_TOKEN)
         if context <= 0:
             emit_noop(True)
             return
@@ -502,30 +338,30 @@ def main():
         reason = (
             f"AUTO-HANDOFF: this conversation's context reached ~{context} tokens "
             f"(threshold {threshold}). Do not continue the current task. "
-            "Execute the handoff skill now: compact this session into "
-            "/tmp/handoff-<YYYY-MM-DD-HHMMSS>-<slug>.md following the handoff skill "
+            "Execute the handoff skill now: write "
+            "/tmp/handoff-<YYYY-MM-DD-HHMMSS>-<slug>.md with the Write tool following the handoff skill "
             "template (MUST include Section 1 Main Context: Original User Objective, "
             "Governing Spec/Plan/Epic path, and Key User Decisions/Corrections so the "
             "new session does not lose the big picture), then run "
             f"{HANDOFF_SCRIPT} "
-            "\"<doc-path>\" --kind agy --prompt \"auto-handoff: continue the work in "
-            f"the new tab\" {running_hint} (absolute path).{running_note} If running inside T3 Code with t3_thread_launch "
+            "\"<doc-path>\" --kind agy --mode plan --prompt \"auto-handoff: continue the work in "
+            f"the new tab\" {running_hint} (absolute path).{running_note} Run herdr-handoff.sh as a single standalone command (no | tail, no 2>&1, no &&, no --no-yolo, no --allow-subdir). (Pass --mode plan to stay on Gemini 4 Argon for orchestration/specs/epics; only pass --mode code for a pure single-lane mechanical task.) If running inside T3 Code with t3_thread_launch "
             "available, also call t3_thread_launch with the generated .prompt.txt content "
-            "and matching workspaceStrategy. Report the handoff file path and Herdr/T3 "
+            "and workspaceStrategy=\"root\" (never spawn into a subfolder or .claude/worktrees/*). Report the handoff file path and Herdr/T3 "
             "target, then stop."
         )
     else:
         reason = (
             f"AUTO-HANDOFF: this session's context reached {context} tokens "
             f"(threshold {threshold}). Do not continue the current task. "
-            "Execute the handoff skill now: compact this session into "
-            "/tmp/handoff-<YYYY-MM-DD-HHMMSS>-<slug>.md following the handoff skill "
+            "Execute the handoff skill now: write "
+            "/tmp/handoff-<YYYY-MM-DD-HHMMSS>-<slug>.md with the Write tool following the handoff skill "
             "template (MUST include Section 1 Main Context: Original User Objective, "
             "Governing Spec/Plan/Epic path, and Key User Decisions/Corrections so the "
             "new session does not lose the big picture), then run "
             f"{HANDOFF_SCRIPT} "
             "\"<doc-path>\" --kind claude --mode <code|plan> --prompt \"auto-handoff: "
-            f"continue the work in the new tab\" {running_hint}.{running_note} Pick --mode code (starts Sonnet) when "
+            f"continue the work in the new tab\" {running_hint}.{running_note} Run herdr-handoff.sh as a single standalone command (no | tail, no 2>&1, no &&, no --no-yolo, no --allow-subdir). Pick --mode code (starts Sonnet) when "
             "the Immediate Next Action is implementation: editing code, running/fixing "
             "tests, or executing tasks of an already-approved plan. Pick --mode plan "
             "(default model) for brainstorming, specs, plans, research, review/audit, "

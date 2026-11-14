@@ -77,14 +77,38 @@ STALE_OBSERVATION_MINUTES = 60
 DEFAULT_CODEX_MODEL = os.environ.get("CODEX_WORKER_MODEL", "gpt-6.1-terra")
 DEFAULT_CODEX_EFFORT = os.environ.get("CODEX_WORKER_EFFORT", "medium")
 DEFAULT_CODEX_THINK_MODEL = os.environ.get("CODEX_THINK_MODEL", "gpt-5.6-sol")
-DEFAULT_AGY_WORKER_MODEL = os.environ.get("AGY_WORKER_MODEL", "gemini-3.8-flash-high")
+DEFAULT_AGY_WORKER_MODEL = os.environ.get("AGY_WORKER_MODEL", "gemini-4-hydrogen-high")
 DEFAULT_AGY_THINK_MODEL = os.environ.get("AGY_THINK_MODEL", "gemini-4-argon-medium")
+DEFAULT_AGY_CARBON_MODEL = os.environ.get("AGY_CARBON_MODEL", "gemini-4-carbon-medium")
 CODEX_HIGH_5H_QUOTA = float(os.environ.get("CODEX_HIGH_5H_QUOTA", "80.0"))
 CODEX_HIGH_WEEKLY_QUOTA = float(os.environ.get("CODEX_HIGH_WEEKLY_QUOTA", "60.0"))
 CODEX_MIN_AUTO_QUOTA = float(os.environ.get("CODEX_MIN_AUTO_QUOTA", "60.0"))
 CODEX_MIN_5H_QUOTA = float(os.environ.get("CODEX_MIN_5H_QUOTA", "60.0"))
 ALT_LOW_WEEKLY_QUOTA = float(os.environ.get("ALT_LOW_WEEKLY_QUOTA", "30.0"))
-AGY_THINK_MODEL_NAMES = ("gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon", "argon", "gemini-4-argon-thinking")
+AGY_THINK_MODEL_NAMES = (
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+    "gemini-4-argon-low",
+    "gemini-4-argon",
+    "argon",
+    "argon-low",
+    "argon-medium",
+    "argon-high",
+    "gemini-4-argon-thinking",
+    "gemini-4-carbon-medium",
+    "gemini-4-carbon-high",
+    "gemini-4-carbon-low",
+    "gemini-4-carbon",
+    "carbon",
+    "carbon-low",
+    "carbon-medium",
+    "carbon-high",
+    "gemini-pro-orchestrator",
+    "gemini-pro-orchestrator-argon",
+    "orchestrator",
+    "orchestrator-carbon",
+    "orchestrator-argon",
+)
 
 CLAUDE_TO_AGY_MODEL_MAP = {
     "opus": DEFAULT_AGY_THINK_MODEL,
@@ -304,9 +328,11 @@ AGY_REFRESH_HINT = "to refresh by hand, run `agy` in a terminal for a few second
 CODEX_REFRESH_TIMEOUT_SECONDS = 10
 CODEX_REFRESH_HINT = "to refresh by hand, run `codex` in a terminal or check `codex app-server`"
 
-AGY_TOKEN_FILE = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
+_DEFAULT_AGY_TOKEN_FILE = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
+AGY_TOKEN_FILE = os.environ.get("AGY_TOKEN_FILE", _DEFAULT_AGY_TOKEN_FILE)
 # Quota telemetry stays "healthy" after the OAuth login lapses; a failed run drops this marker so later checks refuse.
-AGY_AUTH_MARKER = os.path.expanduser("~/.local/state/dispatch/agy-auth-failed")
+_DEFAULT_AGY_AUTH_MARKER = os.path.expanduser("~/.local/state/dispatch/agy-auth-failed")
+AGY_AUTH_MARKER = os.environ.get("AGY_AUTH_MARKER", _DEFAULT_AGY_AUTH_MARKER)
 AGY_LOGIN_HINT = "[AGY] not logged in: run `agy -p hi` in a real terminal (not `!` in chat), finish the Google login, then retry"
 
 
@@ -610,9 +636,13 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
         except Exception as err:
             return False, 0.0, 0.0, f"Failed checking cursor-agent status: {err}"
 
-    if agent == "agy" and agy_auth_blocked():
-        return False, 0.0, 0.0, AGY_LOGIN_HINT
     target_file = state_file or get_state_file(agent)
+    if agent == "agy" and (
+        _is_live_agy_observation(target_file)
+        or AGY_TOKEN_FILE != _DEFAULT_AGY_TOKEN_FILE
+        or AGY_AUTH_MARKER != _DEFAULT_AGY_AUTH_MARKER
+    ) and agy_auth_blocked():
+        return False, 0.0, 0.0, AGY_LOGIN_HINT
     # Headless agy never fires the statusLine hook, so long runs go stale with healthy quota.
     if agent == "agy" and target_file == DEFAULT_AGY_STATE and shutil.which("agy-quota-refresh"):
         try:
@@ -814,12 +844,33 @@ def normalize_model_name(agent, model):
         if clean.lower() in ("sonnet", "claude-sonnet-5-5"):
             return "claude-sonnet-5-5"
     if agent == "agy":
-        if clean.lower() in ("argon", "gemini-4-argon", "gemini-4-argon-medium", "gemini-4-argon-thinking"):
+        low = clean.lower()
+        if low in ("argon", "argon-medium", "gemini-4-argon", "gemini-4-argon-medium", "gemini-4-argon-thinking"):
             return DEFAULT_AGY_THINK_MODEL
-        if clean.lower() == "gemini-4-argon-high":
+        if low in ("argon-high", "gemini-4-argon-high"):
             return "gemini-4-argon-high"
-        if clean.lower() in ("flash", "3.8-flash", "gemini-3.8-flash", "gemini-3.8-flash-high"):
-            return DEFAULT_AGY_WORKER_MODEL
+        if low in ("argon-low", "gemini-4-argon-low"):
+            return "gemini-4-argon-low"
+        if low in ("carbon", "carbon-medium", "gemini-4-carbon", "gemini-4-carbon-medium"):
+            return DEFAULT_AGY_CARBON_MODEL
+        if low in ("carbon-high", "gemini-4-carbon-high"):
+            return "gemini-4-carbon-high"
+        if low in ("carbon-low", "gemini-4-carbon-low"):
+            return "gemini-4-carbon-low"
+        if low in ("hydrogen", "hydrogen-high", "gemini-4-hydrogen", "gemini-4-hydrogen-high"):
+            return "gemini-4-hydrogen-high"
+        if low in ("hydrogen-medium", "gemini-4-hydrogen-medium"):
+            return "gemini-4-hydrogen-medium"
+        if low in ("hydrogen-low", "gemini-4-hydrogen-low"):
+            return "gemini-4-hydrogen-low"
+        if low in ("hydrogen-xhigh", "gemini-4-hydrogen-xhigh"):
+            return "gemini-4-hydrogen-xhigh"
+        if low in ("orchestrator", "orchestrator-carbon", "gemini-pro-orchestrator"):
+            return "gemini-pro-orchestrator"
+        if low in ("orchestrator-argon", "gemini-pro-orchestrator-argon"):
+            return "gemini-pro-orchestrator-argon"
+        if low in ("flash", "3.8-flash", "gemini-3.8-flash", "gemini-3.8-flash-high"):
+            return "gemini-3.8-flash-high"
     return clean
 
 
@@ -833,9 +884,7 @@ def normalize_effort(agent, effort):
             return "high"
         return clean
     if agent == "agy":
-        # agy CLI supports low, medium, high, max
-        if clean == "xhigh":
-            return "high"
+        # agy CLI 1.5.8+ supports low, medium, high, xhigh, max
         return clean
     if agent == "cursor":
         # cursor-agent CLI does not have an effort option
@@ -3156,8 +3205,8 @@ def main():
     think_disabled = DISABLED_AGENTS | THINK_DISABLED_AGENTS
     if is_deep_design:
         args.think = True
-        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 and Gemini 4 Argon
-        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus", "gemini-4-argon-medium", "gemini-4-argon", "argon", "gemini-4-argon-thinking"]
+        # Capability deep-design-v1 strictly restricts allowed models to Claude Opus 5.5 and Gemini 4 Argon / Carbon / Orchestrator
+        ALLOWED_DEEP_DESIGN_MODELS = ["claude-opus-5-5", "opus"] + list(AGY_THINK_MODEL_NAMES)
         if "codex" not in think_disabled:
             ALLOWED_DEEP_DESIGN_MODELS += ["gpt-5.6-sol", "sol"]
         if chosen_model and chosen_model.lower() not in ALLOWED_DEEP_DESIGN_MODELS:
@@ -3390,7 +3439,9 @@ def main():
     elif chosen_agent == "agy":
         if args.think or is_deep_design:
             chosen_model = normalize_model_name("agy", chosen_model) or DEFAULT_AGY_THINK_MODEL
-        elif not chosen_model:
+        elif chosen_model:
+            chosen_model = normalize_model_name("agy", chosen_model)
+        else:
             chosen_model = DEFAULT_AGY_WORKER_MODEL
 
     if args.check_quota:

@@ -24,6 +24,10 @@ CODEX_SCRIPT_PATH = BIN_DIR / "dispatch-codex-worker"
 # Keep every in-process and CLI test run out of the user's real ~/.local/state/dispatch/events.jsonl.
 _EVENTS_TMP = tempfile.TemporaryDirectory()
 os.environ["DISPATCH_EVENTS_FILE"] = str(Path(_EVENTS_TMP.name) / "events.jsonl")
+_TEST_AGY_TOKEN = Path(_EVENTS_TMP.name) / "antigravity-oauth-token"
+_TEST_AGY_TOKEN.write_text("{}", encoding="utf-8")
+os.environ["AGY_TOKEN_FILE"] = str(_TEST_AGY_TOKEN)
+os.environ["AGY_AUTH_MARKER"] = str(Path(_EVENTS_TMP.name) / "agy-auth-failed")
 
 import importlib.machinery
 import importlib.util
@@ -1388,13 +1392,25 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
 
     def test_normalize_model_name_agy_aliases(self):
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "argon"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "argon-low"), "gemini-4-argon-low")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "argon-high"), "gemini-4-argon-high")
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon"), "gemini-4-argon-medium")
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon-medium"), "gemini-4-argon-medium")
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon-thinking"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "carbon"), "gemini-4-carbon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "carbon-low"), "gemini-4-carbon-low")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "carbon-high"), "gemini-4-carbon-high")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-carbon"), "gemini-4-carbon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "hydrogen"), "gemini-4-hydrogen-high")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "hydrogen-low"), "gemini-4-hydrogen-low")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "hydrogen-medium"), "gemini-4-hydrogen-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "hydrogen-xhigh"), "gemini-4-hydrogen-xhigh")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "orchestrator"), "gemini-pro-orchestrator")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "orchestrator-argon"), "gemini-pro-orchestrator-argon")
         self.assertEqual(dispatch_mod.map_claude_to_agy_model("opus"), "gemini-4-argon-medium")
         self.assertEqual(dispatch_mod.map_claude_to_agy_model("claude-opus-5-5"), "gemini-4-argon-medium")
-        self.assertEqual(dispatch_mod.map_claude_to_agy_model("sonnet"), "gemini-3.8-flash-high")
-        self.assertEqual(dispatch_mod.map_claude_to_agy_model("claude-sonnet-5-5"), "gemini-3.8-flash-high")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("sonnet"), "gemini-4-hydrogen-high")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("claude-sonnet-5-5"), "gemini-4-hydrogen-high")
 
     def test_claude_quota_telemetry_yellow_and_red_zones(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1685,9 +1701,11 @@ class TestThinkerRouting(unittest.TestCase):
 
     def test_claude_fable_model_is_strictly_forbidden(self):
         self._fake("claude")
-        proc = self._run("--dry-run", "--model", "claude-fable-5-1")
-        self.assertEqual(proc.returncode, 12)
-        self.assertIn("strictly forbidden", proc.stderr)
+        for m in ("claude-fable-5-1", "claude-fable-5-2"):
+            with self.subTest(model=m):
+                proc = self._run("--dry-run", "--model", m)
+                self.assertEqual(proc.returncode, 12)
+                self.assertIn("strictly forbidden", proc.stderr)
 
     def test_attestation_records_effort(self):
         self._fake("claude")
@@ -1708,6 +1726,13 @@ class TestThinkerRouting(unittest.TestCase):
         proc = self._run("--dry-run", "--model", "argon")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_carbon_and_orchestrator_allowed_under_deep_design(self):
+        self._codex_quota(100.0, 100.0)
+        for m, expected in (("carbon", "gemini-4-carbon-medium"), ("gemini-4-carbon-high", "gemini-4-carbon-high"), ("gemini-pro-orchestrator", "gemini-pro-orchestrator")):
+            proc = self._run("--dry-run", "--model", m)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn(f"to agy with {expected}", proc.stdout)
 
     def test_gemini_4_argon_allowed_under_plain_think(self):
         self._codex_quota(100.0, 100.0)
@@ -1818,7 +1843,7 @@ class TestEffortHelpers(unittest.TestCase):
         self.assertEqual(dispatch_mod.normalize_effort("agy", "medium"), "medium")
         self.assertEqual(dispatch_mod.normalize_effort("agy", "high"), "high")
         self.assertEqual(dispatch_mod.normalize_effort("agy", "max"), "max")
-        self.assertEqual(dispatch_mod.normalize_effort("agy", "xhigh"), "high")
+        self.assertEqual(dispatch_mod.normalize_effort("agy", "xhigh"), "xhigh")
 
     def test_normalize_effort_cursor(self):
         self.assertIsNone(dispatch_mod.normalize_effort("cursor", "high"))
@@ -2308,7 +2333,7 @@ class TestCodexDisabled(unittest.TestCase):
             capture_output=True, text=True, env=env,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high", proc.stdout)
+        self.assertIn("Would dispatch to agy with gemini-4-hydrogen-high", proc.stdout)
 
     def test_falls_back_to_agy_flash_when_codex_quota_low(self):
         self._quota(self.agy_state, 90.0, 20.0)
@@ -2329,7 +2354,7 @@ class TestCodexDisabled(unittest.TestCase):
             capture_output=True, text=True, env=env,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high", proc.stdout)
+        self.assertIn("Would dispatch to agy with gemini-4-hydrogen-high", proc.stdout)
 
     # 1. auto and the default chain never pick codex
     def test_auto_route_ignores_codex_with_higher_runway(self):
@@ -3167,7 +3192,7 @@ class ScoutingRoutingTests(unittest.TestCase):
             env=self._env(), capture_output=True, text=True, timeout=30
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high (effort: low)", proc.stdout)
+        self.assertIn("Would dispatch to agy with gemini-4-hydrogen-high (effort: low)", proc.stdout)
         self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
         self.assertNotIn("codex", proc.stdout.lower())
 
@@ -3188,7 +3213,7 @@ class ScoutingRoutingTests(unittest.TestCase):
             env=self._env(), capture_output=True, text=True, timeout=30
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high (effort: medium)", proc.stdout)
+        self.assertIn("Would dispatch to agy with gemini-4-hydrogen-high (effort: medium)", proc.stdout)
         self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
 
     def test_graft_prefetch_injects_context_when_graft_dir_exists(self):

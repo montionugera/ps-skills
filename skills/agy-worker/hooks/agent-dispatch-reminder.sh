@@ -158,15 +158,15 @@ ADVISORY="$(printf '%s' "$INPUT_JSON" | jq -c \
 
   | select($is_scout or $is_bulk or ($is_review_or_aios and ($wk == null or $w_low)))
 
-  | (if $model == "opus" then " (this call is on Opus -> maps to gemini-4-argon-medium)"
-     elif $model == "sonnet" then " (this call is on Sonnet -> maps to gemini-3.8-flash-high)"
+  | (if $model == "opus" then " (this call is on Opus -> maps to gemini-4-argon-medium / gemini-4-carbon-medium)"
+     elif $model == "sonnet" then " (this call is on Sonnet -> maps to gemini-4-hydrogen-high)"
      elif $model == "" then " (no model set: inherits parent)"
      else "" end) as $note
 
   | (if $prefer_codex then
        "dispatch-worker --agent codex --model gpt-6.1-terra --effort medium"
      else
-       "dispatch-worker --agent agy --model gemini-3.8-flash-high"
+       "dispatch-worker --agent agy --model gemini-4-hydrogen-high"
      end) as $worker_cmd
 
   | if ($is_scout and ($is_review_or_aios | not) and ($is_bulk | not)) then

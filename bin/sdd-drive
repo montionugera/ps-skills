@@ -91,6 +91,32 @@ def parse_tasks_from_plan(plan_path: Path) -> List[int]:
     return tasks
 
 
+def parse_batch_groups(plan_path: Path, tasks: List[int], cli_batches: Optional[List[str]] = None) -> List[List[int]]:
+    raw_specs = list(cli_batches or [])
+    if not raw_specs:
+        in_fence = False
+        for line in plan_path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("```"):
+                in_fence = not in_fence
+            elif not in_fence:
+                m = re.match(r'^\s*(?:Batch|<!--\s*sdd-batch)\s*:\s*([0-9,\s]+)', line, re.IGNORECASE)
+                if m:
+                    raw_specs.append(m.group(1))
+    claimed, spec_map = set(), {}
+    for spec in raw_specs:
+        ids = [int(x) for x in re.findall(r'\d+', spec) if int(x) in tasks and int(x) not in claimed]
+        if ids:
+            claimed.update(ids)
+            spec_map[ids[0]] = ids
+    groups = []
+    for t in tasks:
+        if t in spec_map:
+            groups.append(spec_map[t])
+        elif t not in claimed:
+            groups.append([t])
+    return groups
+
+
 def read_ledger(progress_file: Path, default_plan: str, base_sha: str) -> Dict[str, Any]:
     if progress_file.exists():
         text = progress_file.read_text(encoding="utf-8")
@@ -303,6 +329,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--cwd", default=".")
     parser.add_argument("--timeout", type=float, default=None)
     parser.add_argument("--verify-cmd")
+    parser.add_argument("--batch", action="append", default=[], help="Comma-separated task IDs to batch into one worker + review gate (e.g. --batch 1,2)")
     parser.add_argument("--no-drive", action="store_true")
     args = parser.parse_args(argv)
 
@@ -352,14 +379,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         return new_b
 
     dispatch_worker_bin = os.environ.get("DISPATCH_WORKER_BIN") or "dispatch-worker"
+    task_groups = parse_batch_groups(plan_path, tasks, args.batch)
 
-    for task_id in tasks:
-        batch = get_batch(task_id)
-        if batch.get("status") in ("complete", "approved"):
+    for group in task_groups:
+        task_id = group[0]
+        group_batches = [get_batch(tid) for tid in group]
+        if all(b.get("status") in ("complete", "approved") for b in group_batches):
             continue
+        batch = group_batches[0]
+        slug = "_".join(str(tid) for tid in group)
+        label = ", ".join(str(tid) for tid in group)
 
         base_sha = git_rev("HEAD", cwd) or "HEAD"
-        batch["round"], batch["blocker"] = 0, None
+        for b in group_batches:
+            b["round"], b["blocker"] = 0, None
 
         try:
             set_working(progress_file, ledger, cwd, task_id, "implementing")
@@ -367,23 +400,29 @@ def main(argv: Optional[List[str]] = None) -> int:
             sys.stderr.write(f"error: {exc}\n")
             return 1
 
-        brief_file = workspace / f"task-{task_id}-brief.md"
-        extract_brief(plan_path, task_id, brief_file)
+        brief_file = workspace / f"task-{slug}-brief.md"
+        brief_parts, verify_cmds = [], []
+        for tid in group:
+            single_brief = workspace / f"task-{tid}-brief.md"
+            extract_brief(plan_path, tid, single_brief)
+            brief_parts.append(single_brief.read_text(encoding="utf-8"))
+            vcmd = extract_verify_cmd(single_brief)
+            if not vcmd:
+                return set_blocked(progress_file, ledger, get_batch(tid), cwd, tid, "missing_verify_cmd",
+                                   f"Task {tid} stopped: missing explicit Verify-Cmd in brief\n", 3)
+            vcmd, gate_error = register_acceptance_tests(plan_path, tid, cwd, workspace, vcmd)
+            if gate_error:
+                return set_blocked(progress_file, ledger, get_batch(tid), cwd, tid, "acceptance_failed",
+                                   f"Task {tid} stopped: acceptance tests rejected: {gate_error}\n", 3)
+            verify_cmds.append(vcmd)
+        if len(group) > 1:
+            brief_file.write_text("\n\n".join(brief_parts), encoding="utf-8")
+        verify_cmd = " && ".join(verify_cmds)
 
-        verify_cmd = extract_verify_cmd(brief_file)
-        if not verify_cmd:
-            return set_blocked(progress_file, ledger, batch, cwd, task_id, "missing_verify_cmd",
-                               f"Task {task_id} stopped: missing explicit Verify-Cmd in brief\n", 3)
-
-        verify_cmd, gate_error = register_acceptance_tests(plan_path, task_id, cwd, workspace, verify_cmd)
-        if gate_error:
-            return set_blocked(progress_file, ledger, batch, cwd, task_id, "acceptance_failed",
-                               f"Task {task_id} stopped: acceptance tests rejected: {gate_error}\n", 3)
-
-        report_file = workspace / f"task-{task_id}-report.md"
+        report_file = workspace / f"task-{slug}-report.md"
         worker_cmd = [
             dispatch_worker_bin, "--agent", "agy", "--model", WORKER_MODEL, "--cwd", str(cwd),
-            "--task", f"Read brief: {brief_file} and implement Task {task_id}",
+            "--task", f"Read brief: {brief_file} and implement Task {label}",
             "--acceptance-file", str(brief_file), "--output-file", str(report_file),
             "--verify-cmd", verify_cmd,
         ]
@@ -392,14 +431,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             return set_blocked(progress_file, ledger, batch, cwd, task_id, err_status, err_msg, err_code)
 
         head_sha = git_rev("HEAD", cwd) or base_sha
-        batch["head_sha"] = head_sha
+        for b in group_batches:
+            b["head_sha"] = head_sha
 
         set_working(progress_file, ledger, cwd, task_id, "reviewing")
 
         diff_file = workspace / f"review-{base_sha[:7]}..{head_sha[:7]}.diff"
         create_review_package(base_sha, head_sha, diff_file, cwd)
         tier = triage_diff_with_jev(diff_file, base_sha, head_sha, cwd)
-        review_file = workspace / f"task-{task_id}-review.md"
+        review_file = workspace / f"task-{slug}-review.md"
 
         verdict, rev_err = run_review(task_id, brief_file, diff_file, review_file, cwd, tier, task_timeout)
         if rev_err == "timeout":
@@ -411,13 +451,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                                f"Task {task_id} stopped: {rev_err}\n", 6)
 
         if verdict == "Needs fixes":
-            batch["round"] = 1
+            for b in group_batches:
+                b["round"] = 1
             set_working(progress_file, ledger, cwd, task_id, "fix round 1")
 
-            fix_report_file = workspace / f"task-{task_id}-report-fix1.md"
+            fix_report_file = workspace / f"task-{slug}-report-fix1.md"
             fix_cmd = [
                 dispatch_worker_bin, "--agent", "agy", "--model", WORKER_MODEL, "--cwd", str(cwd),
-                "--task", f"Fix issues identified in review {review_file} for Task {task_id}",
+                "--task", f"Fix issues identified in review {review_file} for Task {label}",
                 "--acceptance-file", str(brief_file), "--output-file", str(fix_report_file),
                 "--verify-cmd", verify_cmd,
             ]
@@ -427,11 +468,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                                    f"Task {task_id} fix worker failed: {ferr_st}\n", 3)
 
             fix_head = git_rev("HEAD", cwd) or head_sha
-            batch["head_sha"] = fix_head
+            for b in group_batches:
+                b["head_sha"] = fix_head
 
             fix_diff_file = workspace / f"review-{head_sha[:7]}..{fix_head[:7]}.diff"
             create_review_package(head_sha, fix_head, fix_diff_file, cwd)
-            rereview_file = workspace / f"task-{task_id}-review-round1.md"
+            rereview_file = workspace / f"task-{slug}-review-round1.md"
 
             re_verdict, re_err = run_review(
                 task_id, brief_file, fix_diff_file, rereview_file, cwd, tier, task_timeout,
@@ -444,7 +486,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return set_blocked(progress_file, ledger, batch, cwd, task_id, "needs_fixes",
                                    f"Task {task_id} review unresolved after round 1; report path: {rereview_file}\n", 5)
 
-        batch["status"] = "complete"
+        for b in group_batches:
+            b["status"] = "complete"
         set_working(progress_file, ledger, cwd, task_id, "approved")
 
     done_label = f"done=All {len(tasks)} tasks approved"

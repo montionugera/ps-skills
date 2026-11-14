@@ -83,7 +83,7 @@ AGY_TOOL_MAPPING_BANNER = """<!-- AGY Harness Tool-Mapping Banner:
 - SendMessage <-> send_message(Recipient: "<conversation-id>")
 - ListAgents / TaskStop <-> manage_subagents(Action: "list" | "kill" | "kill_all")
 - EnterWorktree <-> invoke_subagent(..., Workspace: "branch" | "share")
-- Model tiers: 80% Fast Worker = Model: "flash" (gemini-3.8-flash-high); 20% Frontier Thinker/Reviewer = Model: "inherit" (gemini-4-argon)
+- Model tiers: 80% Fast Worker = Model: "flash" (gemini-4-hydrogen-high / gemini-3.8-flash-high); 20% Frontier Thinker/Reviewer = Model: "inherit" (gemini-4-argon / gemini-4-carbon)
 -->
 """
 

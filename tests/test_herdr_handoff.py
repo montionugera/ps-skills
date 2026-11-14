@@ -39,7 +39,9 @@ echo "$*" >> "$FAKE_LOG"
 case "$1 $2" in
   "status server") echo "${FAKE_SERVER_STATUS:-status: running}" ;;
   "pane current")
-    [ -n "${FAKE_CALLER_WS:-}" ] && echo '{"result":{"pane":{"pane_id":"p1","tab_id":"'"$FAKE_CALLER_TAB"'","workspace_id":"'"$FAKE_CALLER_WS"'"}}}'
+    if [ -n "${FAKE_CALLER_WS:-}" ] || [ -n "${FAKE_CALLER_CWD:-}" ]; then
+      echo '{"result":{"pane":{"pane_id":"p1","tab_id":"'"${FAKE_CALLER_TAB:-}"'","workspace_id":"'"${FAKE_CALLER_WS:-}"'","cwd":"'"${FAKE_CALLER_CWD:-}"'"}}}'
+    fi
     ;;
   "tab get") echo '{"result":{"tab":{"tab_id":"'"$3"'","label":"'"${FAKE_SOURCE_LABEL:-zsh}"'","focused":'"${FAKE_SOURCE_FOCUSED:-true}"'}}}' ;;
   "tab create")
@@ -54,10 +56,13 @@ case "$1 $2" in
   "tab list") if [ -n "${FAKE_TAB_LIST:-}" ]; then echo "$FAKE_TAB_LIST"; else echo '{"result":{"tabs":[]}}'; fi ;;
   "pane list") echo '{"result":{"panes":[{"pane_id":"p9"}]}}' ;;
   "pane run")
-    [ -n "${FAKE_RUN_FAIL:-}" ] && exit 1
+    [ -n "${FAKE_RUN_FAIL:-}" ] && { [ -n "${FAKE_RUN_ERR:-}" ] && echo "$FAKE_RUN_ERR" >&2; exit 1; }
     [ -z "${FAKE_NO_CLAIM:-}" ] && [ -n "${FAKE_CLAIM_DIR:-}" ] && mkdir -p "$FAKE_CLAIM_DIR"
     ;;
   "pane get") echo '{"result":{"pane":{"agent":"claude","agent_status":"'"$FAKE_STATUS"'"}}}' ;;
+  "pane read")
+    [ -n "${FAKE_PANE_READ:-}" ] && printf '%s\n' "$FAKE_PANE_READ"
+    ;;
 esac
 exit 0
 """
@@ -147,6 +152,12 @@ class HerdrHandoffTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("--running", r.stderr)
 
+    def test_trailing_option_without_value_reports_reason_instead_of_unbound_variable(self):
+        r = self.run_script("--mode")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Reason: Option --mode requires a value.", r.stderr)
+        self.assertNotIn("unbound variable", r.stderr)
+
     def test_no_flag_states_the_count_is_unknown_and_never_says_safe(self):
         r = self.run_script()
         self.assertIn("count unknown", r.stdout)
@@ -230,7 +241,7 @@ class HerdrHandoffTest(unittest.TestCase):
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         log_text = self.log.read_text()
-        self.assertIn("agy --dangerously-skip-permissions --model gemini-3.8-flash-high -i", log_text)
+        self.assertIn("agy --dangerously-skip-permissions --model gemini-4-hydrogen-high -i", log_text)
 
     def test_auto_uses_free_cloud_session_credits_from_claude_config(self):
         quota_dir = Path(self.tmp.name) / "quota_cloud"
@@ -487,7 +498,7 @@ class HerdrHandoffTest(unittest.TestCase):
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         log_text = self.log.read_text()
-        self.assertIn("agy --dangerously-skip-permissions --model gemini-3.8-flash-high -i", log_text)
+        self.assertIn("agy --dangerously-skip-permissions --model gemini-4-hydrogen-high -i", log_text)
 
     def test_no_jev_available_still_switches_agy_to_codex_when_agy_low_and_codex_high(self):
         quota_dir = Path(self.tmp.name) / "quota_no_jev"
@@ -694,13 +705,42 @@ class HerdrHandoffTest(unittest.TestCase):
         r = self.run_script("--running", "0", extra_env={"FAKE_CREATE_FAIL": "1"})
         self.assertEqual(r.returncode, 1)
         self.assertIn("❌", r.stderr)
+        self.assertIn("Reason:", r.stderr)
+        self.assertIn("boom: no", r.stderr)
         self.assertIn(str(self.doc), r.stderr)
+        row = self.ledger_rows()[0]
+        self.assertEqual(row["outcome"], "tab_create_failed")
+        self.assertIn("boom: no", row["reason"])
 
     def test_a_failed_pane_run_reports_the_doc_and_exits_1(self):
-        r = self.run_script("--running", "0", extra_env={"FAKE_RUN_FAIL": "1"})
+        r = self.run_script(
+            "--running", "0",
+            extra_env={"FAKE_RUN_FAIL": "1", "FAKE_RUN_ERR": "argument 4 is not valid UTF-8"},
+        )
         self.assertEqual(r.returncode, 1)
         self.assertIn("❌", r.stderr)
+        self.assertIn("Reason:", r.stderr)
+        self.assertIn("argument 4 is not valid UTF-8", r.stderr)
         self.assertNotIn("Closing THIS tab", r.stdout)
+        row = self.ledger_rows()[0]
+        self.assertEqual(row["outcome"], "pane_run_failed")
+        self.assertIn("argument 4 is not valid UTF-8", row["reason"])
+
+    def test_unclaimed_handoff_captures_child_pane_output_and_logs_reason(self):
+        r = self.run_script(
+            "--running", "0", status="blocked", timeout=1,
+            extra_env={
+                "FAKE_NO_CLAIM": "1",
+                "FAKE_PANE_READ": "Allow Bash(mkdir /tmp/handoff.claim)? [y/N]\nWaiting for permission",
+            },
+        )
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Reason:", r.stdout)
+        self.assertIn("Child pane output", r.stdout)
+        self.assertIn("Waiting for permission", r.stdout)
+        row = self.ledger_rows()[0]
+        self.assertEqual(row["outcome"], "unclaimed")
+        self.assertIn("Waiting for permission", row["reason"])
 
     def run_without_cwd(self, *args, extra_env=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
@@ -739,6 +779,270 @@ class HerdrHandoffTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.doc.write_text(f"# Handoff: x\n**Worktree:** `{value}`\n")
                 self.assertIn("TARGET_CWD=/\n", self.run_without_cwd().stdout)
+
+    # --- root-folder hoisting (never spawn into a subfolder / worktree) ---
+
+    def _init_git_repo(self, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        git = lambda *a: subprocess.run(["git", "-C", str(path), *a], check=True, capture_output=True, text=True)
+        git("init", "-q")
+        (path / "README.md").write_text("# repo\n")
+        git("-c", "user.email=t@t", "-c", "user.name=t", "add", ".")
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+        return path
+
+    def test_doc_nested_claude_worktree_hoists_to_main_repo_root_and_notes_active_subdir(self):
+        repo = self._init_git_repo(Path(self.tmp.name) / "joy-quest")
+        wt = repo / ".claude" / "worktrees" / "F-021-maple-quarter"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feat/F-021", str(wt)],
+            check=True, capture_output=True, text=True,
+        )
+        self.doc.write_text(f"# Handoff: Build F-021\n**Worktree:** `{wt}` | **Branch:** `feat/F-021`\n## 1. Main\n## 4. Next\n")
+        r = self.run_without_cwd()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={repo}\n", r.stdout)
+        self.assertNotIn(f"TARGET_CWD={wt}", r.stdout)
+        prompt_txt = self.doc.with_suffix(".prompt.txt").read_text()
+        self.assertIn(str(wt), prompt_txt)
+        self.assertIn(f'cd "{wt}"', prompt_txt)
+
+    def test_doc_git_subdirectory_hoists_to_main_repo_root(self):
+        repo = self._init_git_repo(Path(self.tmp.name) / "joy-quest")
+        sub = repo / "web" / "src"
+        sub.mkdir(parents=True)
+        self.doc.write_text(f"# Handoff: UI fix\n**Worktree:** `{sub}` | **Branch:** `main`\n## 1. Main\n## 4. Next\n")
+        r = self.run_without_cwd()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={repo}\n", r.stdout)
+        prompt_txt = self.doc.with_suffix(".prompt.txt").read_text()
+        self.assertIn(f'cd "{sub}"', prompt_txt)
+
+    def test_explicit_cwd_in_git_subfolder_or_worktree_also_hoists_to_repo_root(self):
+        repo = self._init_git_repo(Path(self.tmp.name) / "ps-skills")
+        wt = repo / ".claude" / "worktrees" / "_release"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "release/1.12", str(wt)],
+            check=True, capture_output=True, text=True,
+        )
+        r = self.run_without_cwd("--cwd", str(wt))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={repo}\n", r.stdout)
+        prompt_txt = self.doc.with_suffix(".prompt.txt").read_text()
+        self.assertIn(f'cd "{wt}"', prompt_txt)
+
+    def test_sibling_git_worktree_hoists_to_main_repo_root(self):
+        repo = self._init_git_repo(Path(self.tmp.name) / "ps-skills")
+        hotfix_wt = Path(self.tmp.name) / "ps-skills-hotfix-trust"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "hotfix/trust", str(hotfix_wt)],
+            check=True, capture_output=True, text=True,
+        )
+        self.doc.write_text(f"# Handoff: Hotfix\n**Worktree:** `{hotfix_wt}` | **Branch:** `hotfix/trust`\n## 1. Main\n## 4. Next\n")
+        r = self.run_without_cwd()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={repo.resolve()}\n", r.stdout.replace(str(repo), str(repo.resolve())))
+        prompt_txt = self.doc.with_suffix(".prompt.txt").read_text()
+        self.assertIn(f'cd "{hotfix_wt}"', prompt_txt)
+
+    def test_parent_herdr_pane_workspace_repos_stops_at_child_git_repo_root(self):
+        ws_root = Path(self.tmp.name) / "workspace" / "repos"
+        child_repo = self._init_git_repo(ws_root / "joy-companion")
+        wt = child_repo / ".claude" / "worktrees" / "F-162"
+        subprocess.run(
+            ["git", "-C", str(child_repo), "worktree", "add", "-q", "-b", "feat/F-162", str(wt)],
+            check=True, capture_output=True, text=True,
+        )
+        self.doc.write_text(f"# Handoff: Companion\n**Worktree:** `{wt}` | **Branch:** `feat/F-162`\n## 1. Main\n## 4. Next\n")
+        r = self.run_without_cwd(extra_env={
+            "HERDR_PANE_ID": "p1",
+            "FAKE_CALLER_WS": "w3",
+            "FAKE_CALLER_TAB": "t1",
+            "FAKE_CALLER_CWD": str(ws_root),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # Must stop at the child Git repo root (trusted across Codex/Claude/AGY), never over-hoisting to workspace/repos.
+        self.assertIn(f"TARGET_CWD={child_repo}\n", r.stdout)
+        prompt_txt = self.doc.with_suffix(".prompt.txt").read_text()
+        self.assertIn(f'cd "{wt}"', prompt_txt)
+
+    def test_non_git_parent_herdr_pane_hoists_non_git_subfolder_unless_cross_workspace(self):
+        proj = Path(self.tmp.name) / "non-git-vault"
+        sub = proj / "inbox" / "drafts"
+        sub.mkdir(parents=True)
+        self.doc.write_text(f"# Handoff: Vault\n**Worktree:** `{sub}`\n## 1. Main\n## 4. Next\n")
+        r = self.run_without_cwd(extra_env={
+            "HERDR_PANE_ID": "p1",
+            "FAKE_CALLER_WS": "w3",
+            "FAKE_CALLER_TAB": "t1",
+            "FAKE_CALLER_CWD": str(proj),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={proj}\n", r.stdout)
+        # Cross-workspace override (`HANDOFF_WORKSPACE`) must NOT let caller pane cwd swallow unrelated non-git folder
+        r_cross = self.run_without_cwd(extra_env={
+            "HERDR_PANE_ID": "p1",
+            "FAKE_CALLER_WS": "w3",
+            "FAKE_CALLER_TAB": "t1",
+            "FAKE_CALLER_CWD": str(proj),
+            "HANDOFF_WORKSPACE": "other",
+        })
+        self.assertEqual(r_cross.returncode, 0, r_cross.stderr)
+        self.assertIn(f"TARGET_CWD={sub}\n", r_cross.stdout)
+
+    def test_explicit_cwd_repo_root_preserves_doc_worktree_and_retry_after_claim_injection(self):
+        repo = self._init_git_repo(Path(self.tmp.name) / "joy-quest")
+        wt = repo / ".claude" / "worktrees" / "F-021-maple-quarter"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feat/F-021", str(wt)],
+            check=True, capture_output=True, text=True,
+        )
+        # Simulate a doc that ALREADY had the 9-line Section 0 Claim block injected before **Worktree:**
+        self.doc.write_text(
+            "# Handoff: Retry F-021\n\n"
+            "## 0. Claim This Handoff (run this FIRST, before reading further)\n"
+            "```bash\n"
+            f'mkdir "{self.doc}.claim" 2>/dev/null && echo CLAIMED\n'
+            "```\n"
+            "If it prints `ALREADY CLAIMED`: STOP.\n"
+            "If it prints `CLAIMED`: proceed to section 1.\n\n"
+            f"**Worktree:** `{wt}` | **Branch:** `feat/F-021`\n"
+            "## 1. Main\n## 4. Next\n"
+        )
+        r = self.run_without_cwd("--cwd", str(repo))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={repo}\n", r.stdout)
+        prompt_txt = self.doc.with_suffix(".prompt.txt").read_text()
+        self.assertIn(f'cd "{wt}"', prompt_txt)
+
+    def test_non_git_nested_claude_marker_walks_up_to_outermost_project_root(self):
+        proj = Path(self.tmp.name) / "non-git-studio"
+        sub = proj / "phase0" / "renders"
+        (proj / "phase0" / ".claude").mkdir(parents=True)
+        sub.mkdir(parents=True)
+        (proj / "CLAUDE.md").write_text("# outer studio\n")
+        self.doc.write_text(f"# Handoff: Render\n**Worktree:** `{sub}`\n## 1. Main\n## 4. Next\n")
+        r = self.run_without_cwd()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={proj}\n", r.stdout)
+
+    def test_relative_cwd_and_cdpath_normalize_cleanly_to_repo_root(self):
+        repo = self._init_git_repo(Path(self.tmp.name) / "joy-quest")
+        sub = repo / "web" / "src"
+        sub.mkdir(parents=True)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}", "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working", "T3CODE_HOME": self.tmp.name, "FAKE_CLAIM_DIR": f"{self.doc}.claim",
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2", "HERDR_HANDOFF_LEDGER": str(self.ledger),
+            "CDPATH": f"/tmp:{self.tmp.name}",
+        })
+        self.doc.write_text("# Handoff: Rel\n## 1. Main\n## 4. Next\n")
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "plan",
+             "--multiplexer", "herdr", "--dry-run", "--cwd", "web/src"],
+            capture_output=True, text=True, env=env, timeout=60, cwd=str(repo),
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={repo.resolve()}\n", r.stdout)
+        prompt_txt = self.doc.with_suffix(".prompt.txt").read_text()
+        self.assertIn(f'cd "{sub.resolve()}"', prompt_txt)
+
+    def test_graft_seed_only_runs_for_linked_worktree_not_plain_repo_subdirectory(self):
+        repo = self._init_git_repo(Path(self.tmp.name) / "joy-quest")
+        (repo / "graft").mkdir()
+        sub = repo / "web" / "src"
+        sub.mkdir(parents=True)
+        wt = repo / ".claude" / "worktrees" / "F-021"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "feat/F-021", str(wt)],
+            check=True, capture_output=True, text=True,
+        )
+        (wt / "web" / "src").mkdir(parents=True)
+        graft_log = Path(self.tmp.name) / "graft.log"
+        fake_graft = Path(self.tmp.name) / "bin" / "graft"
+        fake_graft.write_text(f"#!/usr/bin/env bash\npwd >> '{graft_log}'\n")
+        fake_graft.chmod(0o755)
+
+        # Case 1: plain subdirectory inside main repo -> must NOT run graft build
+        self.doc.write_text(f"# Handoff: Plain sub\n**Worktree:** `{sub}`\n## 1. Main\n## 4. Next\n")
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}", "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working", "HERDR_TAB_ID": "t1", "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2", "FAKE_CLAIM_DIR": f"{self.doc}.claim",
+            "HERDR_HANDOFF_LEDGER": str(self.ledger),
+        })
+        r1 = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "plan",
+             "--multiplexer", "herdr", "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60, cwd="/",
+        )
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        self.assertNotIn("Seeding graft", r1.stdout)
+        self.assertFalse(graft_log.exists())
+
+        # Case 2: subdirectory inside a linked worktree lacking graft/ -> seeds at worktree top-level
+        shutil.rmtree(f"{self.doc}.claim", ignore_errors=True)
+        self.doc.write_text(f"# Handoff: WT sub\n**Worktree:** `{wt / 'web' / 'src'}`\n## 1. Main\n## 4. Next\n")
+        r2 = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "plan",
+             "--multiplexer", "herdr", "--running", "1"],
+            capture_output=True, text=True, env=env, timeout=60, cwd="/",
+        )
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("Seeding graft", r2.stdout)
+
+    def test_parent_herdr_pane_stuck_in_claude_worktree_self_heals_to_main_repo_root(self):
+        repo = self._init_git_repo(Path(self.tmp.name) / "joy-quest")
+        wt_old = repo / ".claude" / "worktrees" / "F-020"
+        wt_new = repo / ".claude" / "worktrees" / "F-021"
+        for b, w in (("feat/F-020", wt_old), ("feat/F-021", wt_new)):
+            subprocess.run(
+                ["git", "-C", str(repo), "worktree", "add", "-q", "-b", b, str(w)],
+                check=True, capture_output=True, text=True,
+            )
+        self.doc.write_text(f"# Handoff: F-021\n**Worktree:** `{wt_new}` | **Branch:** `feat/F-021`\n## 1. Main\n## 4. Next\n")
+        r = self.run_without_cwd(extra_env={
+            "HERDR_PANE_ID": "p1",
+            "FAKE_CALLER_WS": "wG",
+            "FAKE_CALLER_TAB": "tX",
+            "FAKE_CALLER_CWD": str(wt_old),
+        })
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={repo}\n", r.stdout)
+
+    def test_parent_herdr_pane_at_home_or_slash_does_not_swallow_repo_root(self):
+        repo = self._init_git_repo(Path(self.tmp.name) / "joy-quest")
+        self.doc.write_text(f"# Handoff: Root\n**Repo:** `{repo}` | **Branch:** `main`\n## 1. Main\n## 4. Next\n")
+        for generic_parent in ("/", os.path.expanduser("~"), "/tmp"):
+            with self.subTest(generic_parent=generic_parent):
+                r = self.run_without_cwd(extra_env={
+                    "HERDR_PANE_ID": "p1",
+                    "FAKE_CALLER_WS": "wG",
+                    "FAKE_CALLER_TAB": "t1",
+                    "FAKE_CALLER_CWD": generic_parent,
+                })
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn(f"TARGET_CWD={repo}\n", r.stdout)
+
+    def test_non_git_subfolder_with_workspace_marker_hoists_to_project_root(self):
+        proj = Path(self.tmp.name) / "non-git-studio"
+        sub = proj / "phase0" / "renders"
+        sub.mkdir(parents=True)
+        (proj / "CLAUDE.md").write_text("# studio\n")
+        self.doc.write_text(f"# Handoff: Render\n**Worktree:** `{sub}`\n## 1. Main\n## 4. Next\n")
+        r = self.run_without_cwd()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={proj}\n", r.stdout)
+
+    def test_allow_subdir_preserves_subfolder_when_explicitly_opted_in(self):
+        repo = self._init_git_repo(Path(self.tmp.name) / "joy-quest")
+        sub = repo / "web"
+        sub.mkdir()
+        r = self.run_without_cwd("--cwd", str(sub), "--allow-subdir")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"TARGET_CWD={sub}\n", r.stdout)
 
     def test_doc_lint_warns_on_stderr_but_never_blocks(self):
         self.doc.write_text("# Handoff: x\n" + "y" * 13000 + "\n")

@@ -299,6 +299,60 @@ class MidturnTest(unittest.TestCase):
         out = self.run_agy(800_000)  # 200,000 tokens >= 192,000 hard cap
         self.assertIn("end your turn", out["injectSteps"][0]["ephemeralMessage"])
 
+    def test_agy_turn0_preallocated_db_wal_without_transcript_is_silent(self):
+        conv_id = f"agy-turn0-{uuid.uuid4().hex}"
+        app_dir = self.dir / "agy-app-turn0"
+        conv_dir = app_dir / "conversations"
+        conv_dir.mkdir(parents=True)
+        # 557,056 bytes SQLite WAL pre-allocation before transcript.jsonl exists (was 139,264 fake tokens)
+        (conv_dir / f"{conv_id}.db").write_bytes(b"d" * 32_768)
+        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 524_288)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_AUTO_HANDOFF", "AGY_AUTO_HANDOFF"))}
+        env.update({"CLAUDE_AUTO_HANDOFF_STATE_DIR": str(self.dir), "CLAUDE_AUTO_HANDOFF_LOG": str(self.log),
+                    "AGY_APP_DATA_DIR": str(app_dir)})
+        payload = {"conversationId": conv_id, "transcriptPath": str(conv_dir / f"{conv_id}.db"), "workspacePaths": [str(self.dir)]}
+        r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {})
+        self.assertFalse(self.log.exists())
+
+    def test_agy_planner_response_exact_tokens_beat_byte_estimate(self):
+        conv_id = f"agy-exact-{uuid.uuid4().hex}"
+        app_dir = self.dir / "agy-app-exact"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        user_step = json.dumps({"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "hi" + ("x" * 600_000)})
+        planner_step = json.dumps({"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
+                                   "input_tokens": 15_000, "cache_read_tokens": 25_000, "output_tokens": 400})
+        (logs_dir / "transcript.jsonl").write_text(user_step + "\n" + planner_step + "\n")
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_AUTO_HANDOFF", "AGY_AUTO_HANDOFF"))}
+        env.update({"CLAUDE_AUTO_HANDOFF_STATE_DIR": str(self.dir), "CLAUDE_AUTO_HANDOFF_LOG": str(self.log),
+                    "AGY_APP_DATA_DIR": str(app_dir)})
+        payload = {"conversationId": conv_id, "workspacePaths": [str(self.dir)]}
+        r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {})
+
+    def test_agy_invoke_subagent_transcript_ignored(self):
+        conv_id = f"agy-sub-{uuid.uuid4().hex}"
+        app_dir = self.dir / "agy-app-sub"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        sys_step = json.dumps({
+            "step_index": 0, "source": "SYSTEM", "type": "SYSTEM_MESSAGE",
+            "content": "The following is a <SYSTEM_MESSAGE>\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-13T00:00:00Z sender=a45d85c1-13bc-4768-9bf9-1f68a4b94ae4 priority=MESSAGE_PRIORITY_HIGH content=Audit this",
+        })
+        planner_step = json.dumps({"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
+                                   "input_tokens": 100_000, "cache_read_tokens": 80_000, "output_tokens": 500})
+        (logs_dir / "transcript.jsonl").write_text(sys_step + "\n" + planner_step + "\n")
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_AUTO_HANDOFF", "AGY_AUTO_HANDOFF"))}
+        env.update({"CLAUDE_AUTO_HANDOFF_STATE_DIR": str(self.dir), "CLAUDE_AUTO_HANDOFF_LOG": str(self.log),
+                    "AGY_APP_DATA_DIR": str(app_dir)})
+        payload = {"conversationId": conv_id, "workspacePaths": [str(self.dir)]}
+        r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {})
+
     def run_agy(self, nbytes):
         conv_id = f"agy-c-{uuid.uuid4().hex}"
         app_dir = self.dir / "agy-app-c"

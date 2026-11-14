@@ -127,12 +127,12 @@ def cmd_classify_task(args: argparse.Namespace) -> int:
 
         cli_map = {
             "agy_flash": (
-                f"dispatch-worker --scout --effort {recommended_effort} --agent agy --model gemini-3.8-flash-high"
+                f"dispatch-worker --scout --effort {recommended_effort} --agent agy --model gemini-4-hydrogen-high"
                 if (is_scout_prob >= 0.65 and is_rev_prob < 0.50 and risky_prob < 0.35)
-                else "dispatch-worker --agent agy --model gemini-3.8-flash-high"
+                else "dispatch-worker --agent agy --model gemini-4-hydrogen-high"
             ),
             "agy_argon": "dispatch-thinker --agent agy --model gemini-4-argon-medium",
-            "claude_opus": "dispatch-thinker --agent agy --model gemini-4-argon-medium (or native claude-opus-5-5 if quota >50%)",
+            "claude_opus": "dispatch-thinker --agent agy --model gemini-4-argon-medium (or gemini-4-carbon-medium / native claude-opus-5-5 if quota >50%)",
         }
         out = {
             "model": res.model,

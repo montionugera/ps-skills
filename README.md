@@ -24,7 +24,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 | **ps-release-workflow-hotfix** | Cut the sibling worktree for an urgent fix straight to `main`, bypassing the release branch. |
 | **ps-release-workflow-status** | Read-only one-screen report of the release, features, claims, and what to do next. |
 | **ps-release-workflow-unclaim** | Abandon a claimed feature: remove its worktree and clear the claim (keeps the branch). |
-| **handoff** | Compact the session into an action-first handoff doc and spawn a fresh agent tab in Herdr; ships an optional Stop hook (`hooks/auto-handoff-stop.py`) that triggers it when context grows large. |
+| **handoff** | Compact the session into an action-first handoff doc and spawn a fresh agent tab in Herdr or T3 Code at the trusted repo root (never subfolders/worktrees); ships optional auto-handoff hooks (`hooks/auto-handoff-stop.py`, `hooks/auto-handoff-midturn.py`). |
 | **agy-worker** | Two-mode execution: (1) native in-session AGY multi-agent orchestration (`invoke_subagent`, `define_subagent`, `send_message`, `Workspace: "share"|"branch"`) with 80/20 Flash (`gemini-3.8-flash-high`) vs Frontier Argon (`gemini-4-argon`) tiering; (2) external CLI dispatch via `dispatch-worker --agent agy` with quota guarding and verify gates. Binaries: `dispatch-agy-worker`, `dispatch-cursor-worker`, `dispatch-worker`. |
 | **url-state-resilience** | Enforces URL-as-State, deep-linking, and reload resilience across web dashboards and SPAs; provides `check-url-state.sh` linter and `url-state-guard.py` hook for non-regression. |
 | **macos-audio-hud** | Engineering standards for macOS native floating HUDs and real-time CoreAudio/AVFoundation voice companion clients (`AUVoiceProcessing`, channel 0 extraction, dynamic converters, NSRecursiveLock, floating `NSPanel`, Carbon hotkeys). |
@@ -58,7 +58,7 @@ Requires a [Claude Code](https://claude.com/claude-code), Codex, or [Google Anti
 ```bash
 git clone https://github.com/montionugera/ps-skills.git
 cd ps-skills
-./install.sh           # symlink skills into ~/.claude and ~/.gemini/config
+./install.sh           # symlink skills into ~/.claude, ~/.codex, ~/.gemini/config, and ~/.cursor
 # or
 ./install.sh --parity  # reconcile full parity: mirror Claude skills into Gemini & archive junk
 # or
