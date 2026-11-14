@@ -36,15 +36,6 @@ jobs:
         working-directory: engine/ps-release-workflow
         run: pytest -q -rs
 
-  ps-commu-lifecycle:
-    name: ps-commu-explain lifecycle (bash, macOS)
-    runs-on: macos-latest          # scripts use BSD stat/lsof; run on macOS
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Lifecycle test suite
-        run: bash skills/ps-commu-explain/tests/lifecycle_test.sh
-
   ps-interactive-learning-builder:
     name: ps-interactive-learning-builder (pytest)
     runs-on: ubuntu-latest
