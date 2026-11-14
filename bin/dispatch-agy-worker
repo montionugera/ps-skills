@@ -300,6 +300,38 @@ def _parse_resets_at(val):
 
 AGY_REFRESH_TIMEOUT_SECONDS = 20
 AGY_REFRESH_HINT = "to refresh by hand, run `agy` in a terminal for a few seconds, quit it, and retry"
+AGY_TOKEN_FILE = os.path.expanduser("~/.gemini/antigravity-cli/antigravity-oauth-token")
+# Quota telemetry stays "healthy" after the OAuth login lapses; a failed run drops this marker so later checks refuse.
+AGY_AUTH_MARKER = os.path.expanduser("~/.local/state/dispatch/agy-auth-failed")
+AGY_LOGIN_HINT = "[AGY] not logged in: run `agy -p hi` in a real terminal (not `!` in chat), finish the Google login, then retry"
+
+
+def note_agy_auth_failure(result):
+    """Drops AGY_AUTH_MARKER when an agy result says its login failed. Returns True if it did."""
+    if not isinstance(result, dict) or result.get("status") == "SUCCESS":
+        return False
+    if "authenticat" not in str(result.get("error") or "").lower():
+        return False
+    try:
+        os.makedirs(os.path.dirname(AGY_AUTH_MARKER), exist_ok=True)
+        with open(AGY_AUTH_MARKER, "w") as fh:
+            fh.write(str(result.get("error")))
+    except OSError:
+        pass
+    return True
+
+
+def agy_auth_blocked():
+    """True while the last agy login failure is newer than the token file, or the token is gone."""
+    if not os.path.exists(AGY_TOKEN_FILE):
+        return os.path.isdir(os.path.dirname(AGY_TOKEN_FILE))  # no agy install dir: not ours to judge
+    try:
+        if os.path.getmtime(AGY_TOKEN_FILE) > os.path.getmtime(AGY_AUTH_MARKER):
+            os.remove(AGY_AUTH_MARKER)  # a fresh login since the failure clears it
+            return False
+        return True
+    except OSError:
+        return False
 
 
 def _is_live_agy_observation(path):
@@ -458,6 +490,8 @@ def check_quota(agent="agy", state_file=None, min_5h=DEFAULT_MIN_5H, min_weekly=
         except Exception as err:
             return False, 0.0, 0.0, f"Failed checking cursor-agent status: {err}"
 
+    if agent == "agy" and agy_auth_blocked():
+        return False, 0.0, 0.0, AGY_LOGIN_HINT
     target_file = state_file or get_state_file(agent)
     # Headless agy never fires the statusLine hook, so long runs go stale with healthy quota.
     if agent == "agy" and target_file == DEFAULT_AGY_STATE and shutil.which("agy-quota-refresh"):
@@ -1407,6 +1441,8 @@ def _execute_worker_process_inner(cmd, target_dir, timeout_seconds, agent_name="
                     print(f"[dispatch-worker] warning: could not persist conversation_id: {e}", file=sys.stderr)
         if kind == "result":
             stream_state["result"] = payload
+            if note_agy_auth_failure(payload):
+                _log(f"{AGY_LOGIN_HINT}\n")
             _log(f"[agy] result status={payload.get('status')} turns={payload.get('num_turns')}\n")
             return
         if kind == "step_update":
