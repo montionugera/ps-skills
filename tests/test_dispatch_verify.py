@@ -23,6 +23,9 @@ SCRIPT_PATH = REPO_ROOT / "bin" / "dispatch-agy-worker"
 # Keep test runs out of the user's real ~/.local/state/dispatch/events.jsonl.
 _EVENTS_TMP = tempfile.TemporaryDirectory()
 os.environ["DISPATCH_EVENTS_FILE"] = str(Path(_EVENTS_TMP.name) / "events.jsonl")
+# Keep tests off the machine-wide worker slots (live workers hold them) and skip the launch spacing delay.
+os.environ["DISPATCH_SLOT_DIR"] = str(Path(_EVENTS_TMP.name) / "slots")
+os.environ["DISPATCH_LAUNCH_GAP"] = "0"
 
 import importlib.machinery
 import importlib.util
