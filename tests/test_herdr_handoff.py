@@ -102,6 +102,42 @@ class HerdrHandoffTest(unittest.TestCase):
     def tab_create_line(self):
         return next(l for l in self.log.read_text().splitlines() if l.startswith("tab create"))
 
+    def fake_session(self, *models, effort="medium"):
+        """A calling Claude Code session whose transcript lists these main-thread models in order."""
+        cfg = Path(self.tmp.name) / "cfg"
+        proj = cfg / "projects" / "-repo"
+        proj.mkdir(parents=True)
+        lines = [json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": m}}) for m in models]
+        lines.append(json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": "<synthetic>"}}))
+        (proj / "sid-1.jsonl").write_text("\n".join(lines) + "\n")
+        return {"CLAUDE_CONFIG_DIR": str(cfg), "CLAUDE_CODE_SESSION_ID": "sid-1", "CLAUDE_EFFORT": effort}
+
+    def run_isolated(self, *args, extra_env=None):
+        return self.run_script("--running", "1", "--no-jev", "--no-cloud", "--no-quota-switch", *args,
+                               extra_env=extra_env)
+
+    def test_new_tab_keeps_the_calling_sessions_model_and_effort(self):
+        # 2026-11-11: a Fable session handed off with --mode plan and no --model; the tab came up on the default.
+        r = self.run_isolated(extra_env=self.fake_session("claude-opus-5-5", "claude-fable-5-2", effort="high"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log = self.log.read_text()
+        self.assertIn("--model claude-fable-5-2 --effort high --name", log)
+        self.assertIn("**Model:** `claude-fable-5-2`", self.doc.read_text())
+        prompt = Path(str(self.doc).replace(".md", ".prompt.txt")).read_text()
+        self.assertIn("This handoff expects model `claude-fable-5-2`", prompt)
+        self.assertLess(prompt.index("expects model"), prompt.index("Section 0 Claim"))
+
+    def test_an_explicit_model_beats_the_calling_sessions_model(self):
+        r = self.run_isolated("--model", "sonnet", extra_env=self.fake_session("claude-fable-5-2"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--model sonnet --effort medium --name", self.log.read_text())
+
+    def test_the_docs_model_line_beats_the_calling_sessions_model(self):
+        self.doc.write_text("# Handoff\n**Model:** `claude-opus-5-5`\n## 1. Main Context\n## 4. Next\n")
+        r = self.run_isolated(extra_env=self.fake_session("claude-fable-5-2"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--model claude-opus-5-5 ", self.log.read_text())
+
     def test_new_tab_is_pinned_to_the_callers_workspace(self):
         r = self.run_script("--running", "1", extra_env={"HERDR_WORKSPACE_ID": "w7"})
         self.assertEqual(r.returncode, 0, r.stderr)

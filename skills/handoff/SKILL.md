@@ -60,6 +60,7 @@ The `# Handoff:` title becomes the tab name when `--topic` is not given, so star
 ```markdown
 # Handoff: <Task Title / Slug>
 **Worktree:** `<path>` | **Branch:** `<branch>` | **HEAD:** `<commit-hash> <commit-msg>`
+**Model:** `<your exact model id from your system prompt, or the model the user named for the handoff>`
 
 ## 0. Claim This Handoff (run this FIRST, before reading further)
 ```bash
@@ -157,6 +158,7 @@ All handoffs launch with permission-skipping enabled by default (`--dangerously-
 - `code` → new session starts on **Sonnet** locally (or auto-switches to local `codex` `gpt-6.1-terra` `medium` when local Claude quota is low and Codex quota is high). Use when the Immediate Next Action is implementation: editing code, running/fixing tests, executing tasks of an already-approved plan.
 - `plan` → new session starts on the **default model** locally (or auto-switches to local `agy` `gemini-4-argon-medium` when local Claude quota is low). Use for brainstorming, specs, plans, research, review/audit, or debugging with an unknown root cause.
 - Unsure → `plan`. `--model <name>` overrides both.
+- **Model carry-over (claude):** the new tab keeps the owner's model. Order: `--model`, else the doc's `**Model:**` line, else the calling session's own model (last main-thread model in `~/.claude/projects/*/$CLAUDE_CODE_SESSION_ID.jsonl`). Only when none is known do the `--mode` defaults above apply. Effort carries the same way (`--effort`, else `$CLAUDE_EFFORT`). If the user's handoff request names a model, pass it as `--model`. The script writes the resolved `**Model:**` into the doc and tells the new tab to compare it with its own model before claiming, and to stop with one line if they differ.
 - **Mechanical Free-Credit + Jev `cloud_compatible` Gate**: `herdr-handoff.sh` first mechanically checks `~/.claude.json` (`cachedUsageUtilization.utilization.iguana_necktie` / promo credit buckets) for `remaining_dollars > 0`. Only when free credits exist **AND** Jev System-1 confirms the task is strictly read-only review/research (`cloud_compatible >= 0.85` and `is_reviewer >= 0.50`, with zero references to `.superpowers/`, `orbstack`, `kubectl`, `deploy-local`, `shoot.mjs`, `psrw ship`, `dispatch-worker`, or `.claude/worktrees/`), `--kind claude` auto-routes to `CCR_ENABLE_BUNDLE=1 claude --cloud` and immediately chains `claude --teleport <session_id>` so the terminal stays attached. All coding, SDD worktree, and local-cluster tasks stay 100% local on Mac (`claude` -> `codex` / `agy` fallback).
 
 ### Supported Agent Kinds (`--kind`):

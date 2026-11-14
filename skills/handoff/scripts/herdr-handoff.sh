@@ -42,7 +42,7 @@ Options:
   --prompt <text>             Custom prompt override
   --mode <code|plan>          Handoff type (claude: code->sonnet, plan->default; agy: code->gemini-3.8-flash-high, plan->gemini-4-argon-medium)
   --model <name>              Explicit model for claude, codex, or agy; overrides --mode
-  --effort <level>            Reasoning effort for codex (low, medium, high; default: medium)
+  --effort <level>            Reasoning effort for codex (default: medium) and claude (default: the calling session's $CLAUDE_EFFORT)
   --cloud / --no-cloud        Force or disable claude --cloud (default: auto; checks free credit > $0 first, then requires Jev cloud_compatible >= 0.85 & read-only review/research)
   --jev / --no-jev            Enable or disable TypeSafe Jev System-1 task routing assist (default: auto)
   --no-quota-switch           Do not auto-switch low-quota claude handoffs to cloud/codex/agy
@@ -104,6 +104,7 @@ CONFIRM_TIMEOUT="${HERDR_HANDOFF_CONFIRM_TIMEOUT:-90}"
 YOLO=true
 QUOTA_SWITCH="${HERDR_HANDOFF_QUOTA_SWITCH:-true}"
 DRY_RUN=false
+EFFORT_EXPLICIT=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -146,6 +147,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --effort)
       CODEX_EFFORT="$2"
+      EFFORT_EXPLICIT=true
       shift 2
       ;;
     --cloud)
@@ -268,6 +270,54 @@ case "$HANDOFF_MODE" in
     exit 1
     ;;
 esac
+
+# The calling Claude Code session's current model: the last main-thread model in its transcript.
+session_model() {
+  local f
+  [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] || return 0
+  f=$(ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$CLAUDE_CODE_SESSION_ID".jsonl 2>/dev/null | head -n 1)
+  [[ -n "$f" ]] || return 0
+  python3 - "$f" <<'PY' 2>/dev/null || true
+import json, sys
+model = ""
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    if '"assistant"' not in line:
+        continue
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    m = (d.get("message") or {}).get("model") or ""
+    if d.get("type") == "assistant" and not d.get("isSidechain") and m and not m.startswith("<"):
+        model = m
+print(model)
+PY
+}
+
+# A claude handoff keeps the model the owner chose: --model, else the doc's **Model:** line,
+# else the calling session's own model. Only when none is known do --mode defaults apply.
+MODEL_SOURCE=""
+CLAUDE_EFFORT_LEVEL=""
+if [[ "$AGENT_KIND" == "claude" ]]; then
+  [[ -n "$CLAUDE_MODEL" ]] && MODEL_SOURCE="--model"
+  if [[ -z "$CLAUDE_MODEL" ]]; then
+    CLAUDE_MODEL=$(sed -n '1,10p' "$HANDOFF_PATH" | sed -nE 's/.*\*\*Model:\*\* `([^`]+)`.*/\1/p' | sed -n '1p')
+    [[ -n "$CLAUDE_MODEL" ]] && MODEL_SOURCE="doc"
+  fi
+  if [[ -z "$CLAUDE_MODEL" ]]; then
+    CLAUDE_MODEL=$(session_model)
+    [[ -n "$CLAUDE_MODEL" ]] && MODEL_SOURCE="calling session"
+  fi
+  if [[ "$EFFORT_EXPLICIT" == "true" ]]; then
+    CLAUDE_EFFORT_LEVEL="$CODEX_EFFORT"
+  else
+    CLAUDE_EFFORT_LEVEL="${CLAUDE_EFFORT:-}"
+  fi
+  if [[ -n "$CLAUDE_EFFORT_LEVEL" && ! "$CLAUDE_EFFORT_LEVEL" =~ ^[a-z]+$ ]]; then
+    echo "Error: invalid --effort '$CLAUDE_EFFORT_LEVEL'." >&2
+    exit 1
+  fi
+fi
 
 # --------------------------------------------------------------------------
 # Free-credit, low-quota & Jev System-1 auto-routing:
@@ -678,6 +728,10 @@ if [[ -n "$CLAUDE_MODEL" ]]; then
   fi
   CLAUDE_MODEL_FLAG="--model $CLAUDE_MODEL "
 fi
+CLAUDE_EFFORT_FLAG=""
+if [[ "$AGENT_KIND" == "claude" && -n "$CLAUDE_EFFORT_LEVEL" ]]; then
+  CLAUDE_EFFORT_FLAG="--effort $CLAUDE_EFFORT_LEVEL "
+fi
 
 # The doc says where the work lives; the calling shell may be somewhere else.
 if [[ "$CWD_EXPLICIT" != "true" ]]; then
@@ -717,6 +771,20 @@ $(claim_section)
 
 $DOC_REST"
 fi
+# Record the intended model in the doc, so a retry spawns the same one and the new tab can check it.
+MODEL_CHECK=""
+if [[ "$AGENT_KIND" == "claude" && -n "$CLAUDE_MODEL" ]]; then
+  if ! sed -n '1,10p' <<<"$HANDOFF_CONTENT" | grep -q '\*\*Model:\*\* `'; then
+    DOC_FIRST_LINE="${HANDOFF_CONTENT%%$'\n'*}"
+    DOC_REST=""
+    [[ "$HANDOFF_CONTENT" == *$'\n'* ]] && DOC_REST="${HANDOFF_CONTENT#*$'\n'}"
+    HANDOFF_CONTENT="$DOC_FIRST_LINE
+**Model:** \`$CLAUDE_MODEL\`${CLAUDE_EFFORT_LEVEL:+ | **Effort:** \`$CLAUDE_EFFORT_LEVEL\`}
+$DOC_REST"
+  fi
+  MODEL_CHECK="0. Model check, before anything else (even the claim): This handoff expects model \`$CLAUDE_MODEL\`. Compare it with the model id in your own system prompt (an alias such as \`opus\` matches any id that contains it). If they differ, do not claim or do any work: reply to the user in one line, \"Model mismatch: this handoff expects $CLAUDE_MODEL but I am running <your model id>. Switch with /model $CLAUDE_MODEL and resend.\", then end your turn.
+"
+fi
 if [[ "$HANDOFF_CONTENT" != "$ORIGINAL_CONTENT" && "$DRY_RUN" != "true" ]]; then
   printf '%s\n' "$HANDOFF_CONTENT" > "$HANDOFF_PATH"
 fi
@@ -733,7 +801,7 @@ if [[ -n "$CUSTOM_PROMPT" ]]; then
 Task override / focus: $CUSTOM_PROMPT
 
 Instructions:
-1. Run the Section 0 Claim command first.
+${MODEL_CHECK}1. Run the Section 0 Claim command first.
 2. Internalize Section 1 (Main Context: Original User Objective, Governing Spec/Plan/Epic, and Key User Decisions/Constraints) so you preserve the full big picture.
 3. Execute Section 4 (Immediate Next Action) and continue driving toward the Section 1 objective (consulting the Governing Spec/Plan file when transitioning between steps, without doing unfocused historical audits).
 
@@ -744,7 +812,7 @@ else
   FINAL_PROMPT="Handoff file: $HANDOFF_PATH
 
 Instructions:
-1. Run the Section 0 Claim command first.
+${MODEL_CHECK}1. Run the Section 0 Claim command first.
 2. Internalize Section 1 (Main Context: Original User Objective, Governing Spec/Plan/Epic, and Key User Decisions/Constraints) so you preserve the full big picture.
 3. Execute Section 4 (Immediate Next Action) and continue driving toward the Section 1 objective (consulting the Governing Spec/Plan file when transitioning between steps, without doing unfocused historical audits).
 
@@ -845,6 +913,8 @@ if [[ "$DRY_RUN" == "true" ]]; then
   echo "CLAUDE_CLOUD=$CLAUDE_CLOUD"
   echo "CLOUD_CREDIT_DOLLARS=${CLOUD_CREDIT_DOLLARS:-0}"
   echo "RESOLVED_MODEL=${CLAUDE_MODEL:-default}"
+  echo "MODEL_SOURCE=${MODEL_SOURCE:-default}"
+  echo "RESOLVED_EFFORT=${CLAUDE_EFFORT_LEVEL:-default}"
   echo "TARGET_CWD=$TARGET_CWD"
   echo "HANDOFF_PATH=$HANDOFF_PATH"
   echo "PROMPT_FILE=$PROMPT_FILE"
@@ -1111,10 +1181,10 @@ elif [[ "$AGENT_KIND" == "claude" ]]; then
     fi
     CLOUD_LOG="${HANDOFF_PATH%.md}.cloud.log"
     QUOTED_CLOUD_LOG=$(printf '%q' "$CLOUD_LOG")
-    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $QUOTED_TAB_LABEL --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\" 2>&1 | tee $QUOTED_CLOUD_LOG; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; _sid=\$(grep -Eo 'session_[A-Za-z0-9]+' $QUOTED_CLOUD_LOG | head -n 1); if [[ -n \"\$_sid\" ]]; then claude --teleport \"\$_sid\"; fi; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-argon-medium})...\" >&2; $FALLBACK_CMD; fi"
+    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}${CLAUDE_EFFORT_FLAG}--name $QUOTED_TAB_LABEL --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\" 2>&1 | tee $QUOTED_CLOUD_LOG; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; _sid=\$(grep -Eo 'session_[A-Za-z0-9]+' $QUOTED_CLOUD_LOG | head -n 1); if [[ -n \"\$_sid\" ]]; then claude --teleport \"\$_sid\"; fi; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-argon-medium})...\" >&2; $FALLBACK_CMD; fi"
   else
-    echo "🧠 Claude model: ${CLAUDE_MODEL:-default}"
-    LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $QUOTED_TAB_LABEL \"\$(cat $QUOTED_PROMPT_FILE)\""
+    echo "🧠 Claude model: ${CLAUDE_MODEL:-default}${MODEL_SOURCE:+ (from $MODEL_SOURCE)}${CLAUDE_EFFORT_LEVEL:+, effort $CLAUDE_EFFORT_LEVEL}"
+    LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}${CLAUDE_EFFORT_FLAG}--name $QUOTED_TAB_LABEL \"\$(cat $QUOTED_PROMPT_FILE)\""
   fi
 elif [[ "$AGENT_KIND" == "codex" ]]; then
   CODEX_YOLO_FLAG=""
