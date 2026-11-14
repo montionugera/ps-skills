@@ -1178,3 +1178,88 @@ def test_promote_babysit_race_aborts_if_main_advances_during_ci(
                         babysit=True, gh_runner=racing_gh)
     assert "while PR checks were running" in str(exc_info.value)
 
+
+
+# ── protected main: finalize via PR; babysit merge-race retry ──────────────────
+
+def _protect_origin_main(repo: Path) -> None:
+    """Make the bare origin reject pushes to main the way GitHub branch protection does."""
+    origin = Path(subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo, check=True,
+                                 capture_output=True, text=True).stdout.strip())
+    hook = origin / "hooks" / "pre-receive"
+    hook.write_text('#!/bin/sh\nwhile read old new ref; do\n'
+                    '  if [ "$ref" = refs/heads/main ]; then\n'
+                    '    echo "remote: error: GH006: Protected branch update failed for refs/heads/main." >&2\n'
+                    '    exit 1\n  fi\ndone\n')
+    hook.chmod(0o755)
+
+
+def _rev(repo: Path, ref: str) -> str:
+    return subprocess.run(["git", "rev-parse", ref], cwd=repo, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _cleanup_on_protected_main(repo: Path, gh: FakeGh) -> None:
+    _scaffold_gates(repo, integration=False)
+    new_release(repo, version="1.1")
+    promote_release(repo, run_gate2=False, run_deploy=False, push=False, keep=True, use_pr=False)
+    (repo / ".claude" / "refined_backlog" / "_catalog.json").write_text("[]\n")
+    _protect_origin_main(repo)
+    cleanup(repo, version="1.1", gh_runner=gh)
+
+
+def test_cleanup_on_protected_main_finalizes_through_a_pr(tmp_repo_with_release: Path, fixed_owner: str):
+    repo = tmp_repo_with_release
+    gh = FakeGh({"view": (1, "", "no pull requests found")})
+    _cleanup_on_protected_main(repo, gh)
+    assert gh.calls[-3:] == ["create", "checks", "merge"]
+    create = next(c for c in gh.commands if c[2] == "create")
+    assert create[create.index("--head") + 1] == "chore/release-1.1-finalize"
+    # The finalize commit travelled on the branch; local main was reset to origin/main.
+    assert _rev(repo, "refs/remotes/origin/chore/release-1.1-finalize") != _rev(repo, "origin/main")
+    assert _rev(repo, "main") == _rev(repo, "origin/main")
+
+
+def test_cleanup_on_protected_main_admin_merges_when_checks_never_start(
+        tmp_repo_with_release: Path, fixed_owner: str, monkeypatch, capsys):
+    import scripts.promote_release as pr_mod
+    now = [0.0]
+    monkeypatch.setattr(pr_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(pr_mod.time, "sleep", lambda s: now.__setitem__(0, now[0] + s))
+    gh = FakeGh({"view": (1, "", "no pull requests found"),
+                 "checks": (1, "", "no checks reported on the 'chore/release-1.1-finalize' branch")})
+    _cleanup_on_protected_main(tmp_repo_with_release, gh)
+    merge = next(c for c in gh.commands if c[2] == "merge")
+    assert "--admin" in merge
+    assert "--admin" in capsys.readouterr().err
+
+
+def test_cleanup_on_protected_main_red_checks_do_not_merge(tmp_repo_with_release: Path, fixed_owner: str):
+    gh = FakeGh({"view": (1, "", "no pull requests found"),
+                 "checks": (1, "", "X some checks were not successful")})
+    with pytest.raises(Gate2FailedError, match="NOT merging"):
+        _cleanup_on_protected_main(tmp_repo_with_release, gh)
+    assert "merge" not in gh.calls
+
+
+class _BaseModifiedGh(FakeGh):
+    """First `gh pr merge` fails with the GraphQL base-moved error; later ones succeed."""
+
+    def __call__(self, cmd, **kwargs):
+        if cmd[2] == "merge" and "merge" not in self.calls:
+            self.calls.append("merge")
+            self.commands.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="GraphQL: Base branch was modified. Review and try the merge again.")
+        return super().__call__(cmd, **kwargs)
+
+
+def test_promote_babysit_retries_merge_once_after_base_branch_modified(
+        tmp_repo_with_release: Path, fixed_owner: str, monkeypatch):
+    feat = _setup_and_ship_feature(tmp_repo_with_release, fixed_owner)
+    gh = _BaseModifiedGh()
+    _record_cleanup(monkeypatch, gh, delegate=False)
+    result = promote_release(tmp_repo_with_release, run_gate2=False, run_deploy=False,
+                             babysit=True, gh_runner=gh)
+    assert result["merged"] is True
+    assert gh.calls == ["create", "checks", "merge", "checks", "merge", "cleanup"]
