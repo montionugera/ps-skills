@@ -47,6 +47,7 @@ import hashlib
 import json
 import os
 import pty
+import re
 import select
 import shutil
 import signal
@@ -1510,6 +1511,51 @@ def inspect_git_changes(target_dir, initial_head=None, baseline=None):
     return files_changed, diff_summary, commit_count
 
 
+def space_worker_launch(slot_dir):
+    """Keeps worker starts DISPATCH_LAUNCH_GAP seconds apart machine-wide (default 2, 0 turns it off).
+
+    49 agy workers started inside 2 s pushed a 14-core Mac to load 86; their own sign-in and model-list calls
+    timed out and 27 exited 1 at startup (2026-11-15). A lone job starts at once: only the time still owed
+    since the previous launch is slept. Never raises.
+    """
+    try:
+        gap = float(os.environ.get("DISPATCH_LAUNCH_GAP", "2"))
+    except ValueError:
+        gap = 2.0
+    if gap <= 0:
+        return
+    try:
+        fd = os.open(Path(slot_dir) / "launch.lock", os.O_CREAT | os.O_RDWR)
+    except OSError:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            last = float(os.read(fd, 64) or 0)
+        except ValueError:
+            last = 0.0
+        owed = last + gap - time.time()
+        if 0 < owed <= gap:  # a stamp from the future (clock change) is ignored, not waited out
+            time.sleep(owed)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, repr(time.time()).encode())
+    except OSError:
+        pass
+    finally:
+        os.close(fd)  # closing the descriptor releases the lock
+
+
+def failure_reason(stderr, stdout="", limit=200):
+    """Last non-empty line of a failed worker's output, for one-line reports and the event log."""
+    for text in (stderr, stdout):
+        lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+        if lines:
+            # The event log is a file on disk: a credential on the worker's last line must not land in it.
+            return re.sub(r"(?i)(bearer\s+|(?:key|token|secret|password)=)\S+", r"\1<redacted>", lines[-1])[:limit]
+    return ""
+
+
 @contextlib.contextmanager
 def worker_concurrency_slot(label="worker", poll=0.25):
     """Machine-wide counting lock so detached/batch worker storms cannot OOM the host."""
@@ -1544,6 +1590,7 @@ def worker_concurrency_slot(label="worker", poll=0.25):
             try:
                 os.ftruncate(fd, 0)
                 os.write(fd, f"{os.getpid()} {label}\n".encode())
+                space_worker_launch(slot_dir)
                 yield i
             finally:
                 try:
@@ -2655,7 +2702,8 @@ def format_batch_report(results):
         fc = r.get("files_changed", 0)
         ds = r.get("diff_summary", "no diff")
         verified = {True: "true", False: "false"}.get(r.get("verified", "skipped"), "skipped")
-        lines.append(f"#{idx} [{agent}] {status_icon}: {fc} files ({ds}) verified={verified} - '{task_preview}'")
+        why = f" | why: {r['error'][:120]}" if r.get("exit_code") != 0 and r.get("error") else ""
+        lines.append(f"#{idx} [{agent}] {status_icon}: {fc} files ({ds}) verified={verified} - '{task_preview}'{why}")
 
     failed_tasks = [r.get("task", "") for r in results if r.get("exit_code") != 0 and r.get("task")]
     if failed_tasks and len(lines) < 14:
@@ -2962,9 +3010,10 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
         except Exception as e:
             exit_code, stdout, stderr, files_changed, diff_summary = 1, "", str(e), 0, "error"
         t_status = derive_status(exit_code, files_changed, t_verify_info)
+        t_error = failure_reason(stderr, stdout) if exit_code != 0 else ""
         emit_event("finish", run_id=t_run_id, agent=t_agent, model=t_model, status=t_status,
                    exit_code=exit_code, duration_s=round(time.time() - t_started, 1), files_changed=files_changed,
-                   **verify_event_fields(t_verify_info))
+                   **({"error": t_error} if t_error else {}), **verify_event_fields(t_verify_info))
 
         results[idx] = {
             "task": t_task,
@@ -2974,6 +3023,7 @@ def execute_batch_parallel(tasks, base_repo_dir, chosen_agent, chosen_model, tim
             "exit_code": exit_code,
             "files_changed": files_changed,
             "diff_summary": diff_summary,
+            "error": t_error,
             "tail_output": (stderr or stdout or "none") if exit_code == VERIFY_FAILED_EXIT_CODE else (stdout if stdout else (stderr or "none")),
             "verified": t_verify_info.get("verified", "skipped"),
             "verify_cmd": t_verify_info.get("verify_cmd"),

@@ -24,6 +24,9 @@ CODEX_SCRIPT_PATH = BIN_DIR / "dispatch-codex-worker"
 # Keep every in-process and CLI test run out of the user's real ~/.local/state/dispatch/events.jsonl.
 _EVENTS_TMP = tempfile.TemporaryDirectory()
 os.environ["DISPATCH_EVENTS_FILE"] = str(Path(_EVENTS_TMP.name) / "events.jsonl")
+# Keep tests off the machine-wide worker slots (live workers hold them) and skip the launch spacing delay.
+os.environ["DISPATCH_SLOT_DIR"] = str(Path(_EVENTS_TMP.name) / "slots")
+os.environ["DISPATCH_LAUNCH_GAP"] = "0"
 _TEST_AGY_TOKEN = Path(_EVENTS_TMP.name) / "antigravity-oauth-token"
 _TEST_AGY_TOKEN.write_text("{}", encoding="utf-8")
 os.environ["AGY_TOKEN_FILE"] = str(_TEST_AGY_TOKEN)
@@ -3294,6 +3297,120 @@ class WarmVerifyRetryTests(FakeAgyBase):
         self.assertNotIn("--conversation", calls[0])
         self.assertIn("--conversation", calls[1])
         self.assertEqual(calls[1][calls[1].index("--conversation") + 1], "c-1")
+
+
+class TestLaunchSpacing(unittest.TestCase):
+    """Worker starts are spaced machine-wide so a big batch cannot starve its own startup calls."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.slot_dir = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _launch_times(self, count, gap):
+        times, lock = [], threading.Lock()
+
+        def launch():
+            dispatch_mod.space_worker_launch(self.slot_dir)
+            with lock:
+                times.append(time.monotonic())
+
+        with mock.patch.dict(os.environ, {"DISPATCH_LAUNCH_GAP": gap}):
+            threads = [threading.Thread(target=launch) for _ in range(count)]
+            start = time.monotonic()
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+        return start, sorted(times)
+
+    # Margins are wide on purpose: these run on machines that are busy with real workers.
+    def test_simultaneous_launches_are_spaced_by_the_gap(self):
+        start, times = self._launch_times(3, "1.0")
+        for earlier, later in zip(times, times[1:]):
+            self.assertGreaterEqual(later - earlier, 0.7)
+        self.assertGreaterEqual(times[-1] - start, 1.9)
+
+    def test_gap_zero_turns_spacing_off(self):
+        start, times = self._launch_times(4, "0")
+        self.assertLess(times[-1] - start, 2)
+        self.assertFalse((self.slot_dir / "launch.lock").exists())
+
+    def test_first_launch_and_a_launch_after_the_gap_do_not_wait(self):
+        with mock.patch.dict(os.environ, {"DISPATCH_LAUNCH_GAP": "30"}):
+            start = time.monotonic()
+            dispatch_mod.space_worker_launch(self.slot_dir)  # nothing launched before
+            (self.slot_dir / "launch.lock").write_text(repr(time.time() - 31), encoding="utf-8")
+            dispatch_mod.space_worker_launch(self.slot_dir)  # previous launch is older than the gap
+        self.assertLess(time.monotonic() - start, 5)
+
+    def test_stamp_from_the_future_or_garbage_is_not_waited_out(self):
+        for stamp in (repr(time.time() + 3600), "not-a-number"):
+            (self.slot_dir / "launch.lock").write_text(stamp, encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DISPATCH_LAUNCH_GAP": "30"}):
+                start = time.monotonic()
+                dispatch_mod.space_worker_launch(self.slot_dir)
+            self.assertLess(time.monotonic() - start, 5, stamp)
+
+    def test_slot_holder_goes_through_launch_spacing(self):
+        with mock.patch.dict(os.environ, {"DISPATCH_SLOT_DIR": str(self.slot_dir), "DISPATCH_LAUNCH_GAP": "0.3"}):
+            start = time.monotonic()
+            for _ in range(3):
+                with dispatch_mod.worker_concurrency_slot(label="t"):
+                    pass
+        self.assertGreaterEqual(time.monotonic() - start, 0.55)
+
+
+class TestBatchFailureReason(unittest.TestCase):
+    """A failed batch item says why, in the report line and in its finish event."""
+
+    def test_failure_reason_is_the_last_non_empty_line(self):
+        self.assertEqual(dispatch_mod.failure_reason("boot\nError: not logged in\n\n", "ignored"), "Error: not logged in")
+        self.assertEqual(dispatch_mod.failure_reason("", "out line\n"), "out line")
+        self.assertEqual(dispatch_mod.failure_reason(None, None), "")
+        self.assertEqual(len(dispatch_mod.failure_reason("x" * 500)), 200)
+
+    def test_failure_reason_redacts_credentials(self):
+        reason = dispatch_mod.failure_reason("GET https://x/y?key=AIzaSECRET failed: Authorization: Bearer ya29.SECRET")
+        self.assertNotIn("SECRET", reason)
+        self.assertIn("key=<redacted>", reason)
+        self.assertIn("Bearer <redacted>", reason)
+
+    def test_report_line_carries_the_reason_only_for_failures(self):
+        rep = dispatch_mod.format_batch_report([
+            {"task": "ok task", "agent": "agy", "exit_code": 0, "files_changed": 1, "diff_summary": "ok", "error": ""},
+            {"task": "bad task", "agent": "agy", "exit_code": 1, "files_changed": 0, "diff_summary": "err",
+             "error": "Error: You are not logged into Antigravity."},
+        ])
+        lines = rep.splitlines()
+        self.assertNotIn("why:", lines[1])
+        self.assertIn("| why: Error: You are not logged into Antigravity.", lines[2])
+
+    def test_failed_batch_item_finish_event_has_the_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, events = Path(tmp) / "repo", Path(tmp) / "events.jsonl"
+            repo.mkdir()
+            for cmd in (["git", "init", "-q"], ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                                                 "--allow-empty", "-m", "init"]):
+                subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+
+            def failing_task(task_text, target_dir, *_a, **_k):
+                if "bad" in task_text:
+                    return 1, "", "starting\nError: You are not logged into Antigravity.\n", 0, "no git diff"
+                return 0, "done", "", 0, "no git diff"
+
+            with mock.patch.dict(os.environ, {"DISPATCH_EVENTS_FILE": str(events)}), \
+                    mock.patch.object(dispatch_mod, "run_single_task", failing_task):
+                results = dispatch_mod.execute_batch_parallel(
+                    [{"task": "good"}, {"task": "bad"}], base_repo_dir=str(repo), chosen_agent="agy",
+                    chosen_model=None, timeout_seconds=30, max_parallel=2)
+            finishes = {e["run_id"][-2:]: e for e in map(json.loads, events.read_text().splitlines())
+                        if e["event"] == "finish"}
+            self.assertEqual(results[1]["error"], "Error: You are not logged into Antigravity.")
+            self.assertEqual(finishes["-2"]["error"], "Error: You are not logged into Antigravity.")
+            self.assertNotIn("error", finishes["-1"])
 
 
 if __name__ == "__main__":
