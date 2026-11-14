@@ -1,0 +1,23 @@
+name: ps-commu-explain lifecycle
+
+# macOS minutes cost ~10x Linux; run only when this skill (or this file) changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "skills/ps-commu-explain/**"
+      - ".github/workflows/ps-commu-lifecycle.yml"
+  pull_request:
+    paths:
+      - "skills/ps-commu-explain/**"
+      - ".github/workflows/ps-commu-lifecycle.yml"
+
+jobs:
+  ps-commu-lifecycle:
+    name: ps-commu-explain lifecycle (bash, macOS)
+    runs-on: macos-latest          # scripts use BSD stat/lsof; run on macOS
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lifecycle test suite
+        run: bash skills/ps-commu-explain/tests/lifecycle_test.sh

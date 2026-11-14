@@ -64,9 +64,20 @@ class TestAgyAuth(unittest.TestCase):
         self.assertFalse(self.marker.exists())
         self.assertFalse(mod.agy_auth_blocked())
 
-    def test_missing_token_blocks(self):
+    def test_missing_token_alone_does_not_block(self):
+        # agy builds since 2026-11-13 keep no token file while logged in
         self.token.unlink()
+        self.assertFalse(mod.agy_auth_blocked())
+
+    def test_missing_token_blocks_after_a_failure_then_retries(self):
+        self.token.unlink()
+        self.marker.parent.mkdir(parents=True)
+        self.marker.write_text("x")
         self.assertTrue(mod.agy_auth_blocked())
+        old = time.time() - mod.AGY_AUTH_RETRY_SECONDS - 5
+        os.utime(self.marker, (old, old))
+        self.assertFalse(mod.agy_auth_blocked())
+        self.assertFalse(self.marker.exists())
 
 
 if __name__ == "__main__":
