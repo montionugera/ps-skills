@@ -52,6 +52,12 @@ A Claude Code Stop hook runs this skill end to end once context reaches `CLAUDE_
    - ❌ **NEVER** reference raw `transcript.jsonl` or `.system_generated/logs/` paths in the handoff doc — summarize subagent verdicts in `## Late results` instead (reading raw JSONL dumps burns +50K tokens in Turn 1).
    - 🎯 **Target doc size ≤ 4 KB - 6 KB:** The new session pays for the entire handoff doc in Turn 0 prompt tokens.
    - ⚡ **Turn-1 budget ≤ 15K tokens:** On Turn 1, run Section 0's claim command + Section 4.1's immediate command ONLY. Do NOT speculatively bulk-read Governing Specs, SKILL.md files, or Section 6 Target Files on Turn 1 — Sections 1-5 already carry the live frontier.
+7. **Session Core Note travels with every handoff (mandatory, added 2026-11-19):**
+   - A handoff doc is rewritten at every hop, so the owner's goal, design frames and checklist get paraphrased away (observed 2026-11-19: a child session asked the owner a design question they had already answered two hops earlier). The fix is one durable file per **work stream** that is never rewritten from memory: `~/.local/state/handoff/core-notes/<repo>--<stream-slug>.md`.
+   - It holds only three things: **Goal** (the owner's objective, verbatim, with date), **Key** (standing decisions, frames and corrections from the owner, one dated line each, with where it was said), **Checklist** (`- [ ]` / `- [x]` items toward the goal). Target ≤ 60 lines; it is not a log and not a status report.
+   - Every handoff doc carries the line `**Core note:** <absolute path>` under the `**Worktree:**` line. `herdr-handoff.sh` pastes the file into the child prompt (and warns when the line or file is missing), so the child needs no extra read.
+   - **Rules that stop sessions clashing:** (a) **one stream, one file, one path** — the path is chosen once when the stream starts and is copied unchanged into every later handoff; never create a second note for a stream that already has one, never copy the note; (b) **different streams get different files** — a session that starts unrelated work starts a new note, it does not append to the one it inherited; (c) **only the session that holds the handoff claim writes**; subagents and side sessions report back and the owner session edits; (d) **Goal and Key are append-only** — add a dated line, strike a superseded one with `~~...~~ (superseded <date>)`, never delete or reword the owner's words; checklist items are ticked, not removed; (e) edit with the Edit tool on the exact line (no whole-file rewrite from memory); (f) write a Key line in the same turn the owner states the decision, not at handoff time.
+   - No core note yet when you hand off: create it first from the session (Goal verbatim, the owner's decisions, the open checklist), then write the handoff doc.
 
 ---
 
@@ -68,6 +74,7 @@ The `# Handoff:` title becomes the tab name when `--topic` is not given, so star
 ```markdown
 # Handoff: <Task Title / Slug>
 **Worktree:** `<path>` | **Branch:** `<branch>` | **HEAD:** `<commit-hash> <commit-msg>`
+**Core note:** `<absolute path under ~/.local/state/handoff/core-notes/ — the SAME path this stream already uses>`
 
 ## 0. Claim This Handoff (run in Turn 1 — may batch read-only checks, before any edits)
 ```bash

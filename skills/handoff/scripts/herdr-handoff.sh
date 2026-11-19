@@ -1430,6 +1430,23 @@ if [[ -n "$ACTIVE_SUBDIR" ]]; then
   SUBDIR_NOTE="
 Working directory note: This session was launched at workspace/repo root \`$TARGET_CWD\` (never a subfolder, so Claude/Codex/AGY preserve folder trust without prompting). Active target directory/worktree: \`$ACTIVE_SUBDIR\` — ALWAYS prefix shell/git/test commands with \`cd \"$ACTIVE_SUBDIR\" && ...\` and use paths under \`$ACTIVE_SUBDIR\` (do NOT edit the root checkout directly when a worktree is active)."
 fi
+# Session core note (2026-11-19): one durable file per work stream holding the owner's goal,
+# standing decisions and checklist. A handoff doc is rewritten every hop and loses them; this
+# file is not, so it is pasted whole into every child prompt. The doc names it on a
+# `**Core note:** <path>` line. Capped so a runaway note cannot blow the turn-0 budget.
+CORE_NOTE_PATH="$(sed -n 's/^\*\*Core note:\*\*[[:space:]]*`\{0,1\}\([^`]*[^`[:space:]]\)`\{0,1\}[[:space:]]*$/\1/p' <<<"$HANDOFF_CONTENT" | head -1)"
+CORE_NOTE_PATH="${CORE_NOTE_PATH/#\~/$HOME}"
+CORE_NOTE_BLOCK=""
+if [[ -n "$CORE_NOTE_PATH" && -s "$CORE_NOTE_PATH" ]]; then
+  CORE_NOTE_BLOCK="
+
+--- BEGIN SESSION CORE NOTE ($CORE_NOTE_PATH) ---
+The owner's goal, standing decisions and checklist for this work stream. Follow it. When the owner adds or changes one, edit THIS file (never a copy) and keep the same path in your own handoff.
+$(head -c 6144 "$CORE_NOTE_PATH")
+--- END SESSION CORE NOTE ---"
+else
+  echo "⚠️  Handoff doc has no '**Core note:** <path>' line pointing at a non-empty file — the owner's goal, decisions and checklist will not travel with this handoff (see SKILL.md rule 7)." >&2
+fi
 FOCUS_LINE=""
 [[ -n "$CUSTOM_PROMPT" ]] && FOCUS_LINE="
 Task override / focus: $CUSTOM_PROMPT"
@@ -1443,7 +1460,7 @@ Turn-1 Cold-Start Discipline (keep Turn-1 growth <= 15K tokens):
 
 --- BEGIN HANDOFF DOCUMENT ($HANDOFF_PATH) ---
 $HANDOFF_CONTENT
---- END HANDOFF DOCUMENT ---"
+--- END HANDOFF DOCUMENT ---${CORE_NOTE_BLOCK}"
 PROMPT_FILE="${HANDOFF_PATH%.md}.prompt.txt"
 printf '%s\n' "$FINAL_PROMPT" > "$PROMPT_FILE"
 

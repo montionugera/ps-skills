@@ -642,6 +642,36 @@ class HerdrHandoffTest(unittest.TestCase):
         self.assertIn("TARGET_WORKSPACE=wP", r.stdout)
         self.assertFalse(self.log.exists() and self.create_args())
 
+    def prompt_text(self):
+        return Path(str(self.doc)[:-3] + ".prompt.txt").read_text()
+
+    def test_core_note_named_in_the_doc_is_pasted_into_the_child_prompt(self):
+        note = Path(self.tmp.name) / "core-notes" / "repo--stream.md"
+        note.parent.mkdir()
+        note.write_text("## Goal\n- owner said: keep the frame\n## Checklist\n- [ ] step 4\n")
+        self.doc.write_text(f"# Handoff: x\n**Core note:** `{note}`\n## 1\n## 4\n")
+        r = self.run_script("--running", "1")
+        self.assertNotIn("no '**Core note:**", r.stderr)
+        prompt = self.prompt_text()
+        self.assertIn(f"BEGIN SESSION CORE NOTE ({note})", prompt)
+        self.assertIn("owner said: keep the frame", prompt)
+        self.assertGreater(prompt.index("BEGIN SESSION CORE NOTE"), prompt.index("END HANDOFF DOCUMENT"))
+
+    def test_missing_core_note_line_or_file_warns_and_adds_nothing(self):
+        for body in ("# Handoff: x\n## 1\n## 4\n", "# Handoff: x\n**Core note:** `/nonexistent/note.md`\n## 1\n## 4\n"):
+            self.reset_claim()
+            self.doc.write_text(body)
+            r = self.run_script("--running", "1")
+            self.assertIn("no '**Core note:** <path>' line", r.stderr)
+            self.assertNotIn("SESSION CORE NOTE", self.prompt_text())
+
+    def test_oversized_core_note_is_capped_in_the_prompt(self):
+        note = Path(self.tmp.name) / "big.md"
+        note.write_text("k" * 9000 + "TAIL")
+        self.doc.write_text(f"# Handoff: x\n**Core note:** {note}\n## 1\n## 4\n")
+        self.run_script("--running", "1")
+        self.assertNotIn("TAIL", self.prompt_text())
+
     def test_doc_larger_than_6144_bytes_emits_warning(self):
         self.doc.write_text("# Handoff: x\n## 1\n## 4\n" + ("x" * 6500) + "\n")
         r = self.run_script("--running", "1")
