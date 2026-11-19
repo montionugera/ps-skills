@@ -134,103 +134,105 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertFalse(self.flag.exists(), "a waiting hook must not use up its one shot")
 
     def test_under_threshold_is_silent(self):
-        self.assertWaits(self.run_hook(199_999))
+        # Both old 200k/250k thresholds and 319_999 stay silent under bumped 320k default
+        self.assertWaits(self.run_hook(250_000))
+        self.assertWaits(self.run_hook(319_999))
 
     def test_over_threshold_at_a_safe_point_fires(self):
-        self.assertFires(self.run_hook(200_000))
+        self.assertFires(self.run_hook(320_000))
 
     def test_fires_once_per_session(self):
-        self.assertFires(self.run_hook(200_000))
-        self.assertIsNone(self.run_hook(210_000))
+        self.assertFires(self.run_hook(320_000))
+        self.assertIsNone(self.run_hook(330_000))
 
     def test_waits_while_a_background_agent_is_running(self):
-        self.assertWaits(self.run_hook(210_000, [LAUNCH_AGENT]))
+        self.assertWaits(self.run_hook(330_000, [LAUNCH_AGENT]))
 
     def test_waits_while_a_background_command_is_running(self):
-        self.assertWaits(self.run_hook(210_000, [LAUNCH_BASH]))
+        self.assertWaits(self.run_hook(330_000, [LAUNCH_BASH]))
 
     def test_fires_once_background_work_has_finished(self):
         texts = [LAUNCH_AGENT, LAUNCH_BASH, notification("a1b2c3d4e5"), notification("bj91cspfy")]
-        self.assertFires(self.run_hook(210_000, texts))
+        self.assertFires(self.run_hook(330_000, texts))
 
     def test_waits_when_only_some_background_work_has_finished(self):
-        self.assertWaits(self.run_hook(210_000, [LAUNCH_AGENT, LAUNCH_BASH, notification("a1b2c3d4e5")]))
+        self.assertWaits(self.run_hook(330_000, [LAUNCH_AGENT, LAUNCH_BASH, notification("a1b2c3d4e5")]))
 
     def test_waits_on_uncommitted_tracked_changes(self):
         (self.repo / "tracked.txt").write_text("two\n")
-        self.assertWaits(self.run_hook(210_000))
+        self.assertWaits(self.run_hook(330_000))
 
     def test_untracked_files_do_not_block(self):
         (self.repo / "scratch.html").write_text("x")
-        self.assertFires(self.run_hook(210_000))
+        self.assertFires(self.run_hook(330_000))
 
     def test_hard_cap_fires_even_when_not_at_a_safe_point(self):
         (self.repo / "tracked.txt").write_text("two\n")
-        self.assertFires(self.run_hook(300_000, [LAUNCH_AGENT]))
+        self.assertFires(self.run_hook(480_000, [LAUNCH_AGENT]))
 
     def test_just_under_the_hard_cap_still_waits(self):
-        self.assertWaits(self.run_hook(299_999, [LAUNCH_AGENT]))
+        self.assertWaits(self.run_hook(479_999, [LAUNCH_AGENT]))
 
     def test_hard_cap_follows_env(self):
-        env = {"CLAUDE_AUTO_HANDOFF_HARD_CAP": "220000"}
-        self.assertFires(self.run_hook(220_000, [LAUNCH_AGENT], env))
+        env = {"CLAUDE_AUTO_HANDOFF_HARD_CAP": "340000"}
+        self.assertFires(self.run_hook(340_000, [LAUNCH_AGENT], env))
 
     def test_a_foreground_agent_result_is_not_background_work(self):
-        self.assertFires(self.run_hook(210_000, [FOREGROUND_AGENT]))
+        self.assertFires(self.run_hook(330_000, [FOREGROUND_AGENT]))
 
     def test_waits_on_a_command_moved_to_the_background_by_its_timeout(self):
-        self.assertWaits(self.run_hook(210_000, [MOVED_BASH]))
-        self.assertFires(self.run_hook(210_000, [MOVED_BASH, notification("b8kyw9n9a")]))
+        self.assertWaits(self.run_hook(330_000, [MOVED_BASH]))
+        self.assertFires(self.run_hook(330_000, [MOVED_BASH, notification("b8kyw9n9a")]))
 
     def test_a_failed_or_killed_task_counts_as_finished(self):
         texts = [LAUNCH_AGENT, LAUNCH_BASH, notification("a1b2c3d4e5", "failed"), notification("bj91cspfy", "killed")]
-        self.assertFires(self.run_hook(210_000, texts))
+        self.assertFires(self.run_hook(330_000, texts))
 
     def test_a_hyphenated_task_id_is_matched_whole(self):
         launch = LAUNCH_BASH.replace("bj91cspfy", "bj91-cspfy")
-        self.assertWaits(self.run_hook(210_000, [launch, notification("bj91")]))
-        self.assertFires(self.run_hook(210_000, [launch, notification("bj91-cspfy")]))
+        self.assertWaits(self.run_hook(330_000, [launch, notification("bj91")]))
+        self.assertFires(self.run_hook(330_000, [launch, notification("bj91-cspfy")]))
 
     def test_a_cwd_that_is_not_a_git_checkout_does_not_block(self):
         plain = Path(self.tmp.name) / "plain"
         plain.mkdir()
-        self.assertFires(self.run_hook(210_000, cwd=str(plain)))
+        self.assertFires(self.run_hook(330_000, cwd=str(plain)))
 
     def test_a_missing_cwd_does_not_block(self):
-        self.assertFires(self.run_hook(210_000, cwd=str(Path(self.tmp.name) / "gone")))
+        self.assertFires(self.run_hook(330_000, cwd=str(Path(self.tmp.name) / "gone")))
 
     def test_non_numeric_settings_fall_back_to_the_defaults(self):
         env = {"CLAUDE_AUTO_HANDOFF_THRESHOLD": "abc", "CLAUDE_AUTO_HANDOFF_HARD_CAP": "xyz"}
-        self.assertWaits(self.run_hook(199_999, env=env))
-        self.assertWaits(self.run_hook(299_999, [LAUNCH_AGENT], env))
-        self.assertFires(self.run_hook(300_000, [LAUNCH_AGENT], env))
+        self.assertWaits(self.run_hook(319_999, env=env))
+        self.assertWaits(self.run_hook(479_999, [LAUNCH_AGENT], env))
+        self.assertFires(self.run_hook(480_000, [LAUNCH_AGENT], env))
 
     def test_disabled(self):
-        self.assertIsNone(self.run_hook(400_000, env={"CLAUDE_AUTO_HANDOFF": "0"}))
+        self.assertIsNone(self.run_hook(600_000, env={"CLAUDE_AUTO_HANDOFF": "0"}))
 
     def test_notices_off_by_default_writes_log_and_emits_nothing_new(self):
         # Over threshold, but background task running: safe point not reached.
         # With default settings (CLAUDE_AUTO_HANDOFF_NOTICES not set to 1),
         # no message should be emitted (result is None), but a log entry is written.
-        res = self.run_hook(210_000, [LAUNCH_AGENT])
+        res = self.run_hook(330_000, [LAUNCH_AGENT])
         self.assertIsNone(res)
         self.assertFalse(self.flag.exists())
         logs = self.read_log()
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["decision"], "drain-notice")
         self.assertEqual(logs[0]["session"], self.session)
-        self.assertEqual(logs[0]["context"], 210_000)
+        self.assertEqual(logs[0]["context"], 330_000)
         self.assertIn("background=1", logs[0]["why"])
 
         # Running again with background work still pending emits nothing and does not log again
-        res2 = self.run_hook(215_000, [LAUNCH_AGENT])
+        res2 = self.run_hook(335_000, [LAUNCH_AGENT])
         self.assertIsNone(res2)
         logs2 = self.read_log()
         self.assertEqual(len(logs2), 1)
 
     def test_notices_on_emits_drain_notice_once_only(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
-        res = self.run_hook(210_000, [LAUNCH_AGENT], env=env)
+        res = self.run_hook(330_000, [LAUNCH_AGENT], env=env)
         self.assertIsNotNone(res)
         self.assertEqual(res["decision"], "block")
         self.assertIn("AUTO-HANDOFF pending", res["reason"])
@@ -238,19 +240,19 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertFalse(self.flag.exists())
 
         # Calling again while still pending: silent
-        res2 = self.run_hook(220_000, [LAUNCH_AGENT], env=env)
+        res2 = self.run_hook(340_000, [LAUNCH_AGENT], env=env)
         self.assertIsNone(res2)
 
         # Once background work finishes, handoff fires
         texts = [LAUNCH_AGENT, notification("a1b2c3d4e5")]
-        res3 = self.run_hook(225_000, texts, env=env)
+        res3 = self.run_hook(345_000, texts, env=env)
         self.assertFires(res3)
-        self.assertIn("reached 225000 tokens", res3["reason"])
+        self.assertIn("reached 345000 tokens", res3["reason"])
 
     def test_drain_notice_on_dirty_tree(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
         (self.repo / "tracked.txt").write_text("modified\n")
-        res = self.run_hook(210_000, env=env)
+        res = self.run_hook(330_000, env=env)
         self.assertIsNotNone(res)
         self.assertEqual(res["decision"], "block")
         self.assertIn("AUTO-HANDOFF pending", res["reason"])
@@ -260,48 +262,48 @@ class AutoHandoffStopTest(unittest.TestCase):
     def test_reminder_repeats_per_25000_growth_and_not_more_often(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
         # Initial handoff fire at safe point
-        res = self.run_hook(205_000, env=env)
+        res = self.run_hook(325_000, env=env)
         self.assertFires(res)
 
         # Context grows but less than REFIRE_STEP (25,000): silent
-        self.assertIsNone(self.run_hook(215_000, env=env))
-        self.assertIsNone(self.run_hook(229_999, env=env))
+        self.assertIsNone(self.run_hook(335_000, env=env))
+        self.assertIsNone(self.run_hook(349_999, env=env))
 
-        # Context reaches 230,000 (+25,000): retired reminder emitted
-        res2 = self.run_hook(230_000, env=env)
+        # Context reaches 350,000 (+25,000): retired reminder emitted
+        res2 = self.run_hook(350_000, env=env)
         self.assertIsNotNone(res2)
         self.assertEqual(res2["decision"], "block")
         self.assertIn("retired", res2["reason"])
-        self.assertIn("grown to 230000 tokens", res2["reason"])
+        self.assertIn("grown to 350000 tokens", res2["reason"])
 
         # Growth since last fire is less than 25,000: silent
-        self.assertIsNone(self.run_hook(240_000, env=env))
-        self.assertIsNone(self.run_hook(254_999, env=env))
+        self.assertIsNone(self.run_hook(360_000, env=env))
+        self.assertIsNone(self.run_hook(374_999, env=env))
 
-        # Next step at 255,000 (+25,000 since 230,000): reminder emitted again
-        res3 = self.run_hook(255_000, env=env)
+        # Next step at 375,000 (+25,000 since 350,000): reminder emitted again
+        res3 = self.run_hook(375_000, env=env)
         self.assertIsNotNone(res3)
         self.assertEqual(res3["decision"], "block")
         self.assertIn("retired", res3["reason"])
-        self.assertIn("grown to 255000 tokens", res3["reason"])
+        self.assertIn("grown to 375000 tokens", res3["reason"])
 
     def test_reminder_follows_refire_step_env(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1", "CLAUDE_AUTO_HANDOFF_REFIRE_STEP": "10000"}
-        res = self.run_hook(200_000, env=env)
+        res = self.run_hook(320_000, env=env)
         self.assertFires(res)
 
         # +9,000 is under 10,000: silent
-        self.assertIsNone(self.run_hook(209_000, env=env))
+        self.assertIsNone(self.run_hook(329_000, env=env))
 
         # +10,000: reminder emitted
-        res2 = self.run_hook(210_000, env=env)
+        res2 = self.run_hook(330_000, env=env)
         self.assertIsNotNone(res2)
         self.assertIn("retired", res2["reason"])
 
     def test_rearm_after_compaction(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
         # Initial handoff fire at safe point
-        res = self.run_hook(206_000, env=env)
+        res = self.run_hook(326_000, env=env)
         self.assertFires(res)
         self.assertTrue(self.flag.exists())
 
@@ -311,27 +313,27 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertFalse(self.flag.exists())
 
         # Next crossing over threshold at safe point: handoff fires again!
-        res_rearm = self.run_hook(206_000, env=env)
+        res_rearm = self.run_hook(326_000, env=env)
         self.assertFires(res_rearm)
-        self.assertIn("reached 206000 tokens", res_rearm["reason"])
+        self.assertIn("reached 326000 tokens", res_rearm["reason"])
 
     def test_no_rearm_after_compaction_with_switch_unset(self):
-        self.assertFires(self.run_hook(206_000))
+        self.assertFires(self.run_hook(326_000))
         self.assertIsNone(self.run_hook(40_000))
         self.assertTrue(self.flag.exists())
-        self.assertIsNone(self.run_hook(206_000))
+        self.assertIsNone(self.run_hook(326_000))
 
     def test_original_fire_behaviour_unchanged_with_switch_on_and_off(self):
         # 1. At threshold on safe point, notices OFF (default)
-        res_off = self.run_hook(205_000)
+        res_off = self.run_hook(325_000)
         self.assertFires(res_off)
         reason_off = res_off["reason"]
-        self.assertIn("reached 205000 tokens (threshold 200000)", reason_off)
+        self.assertIn("reached 325000 tokens (threshold 320000)", reason_off)
 
         # 2. Reset session and check notices ON
         self.session = f"test-{uuid.uuid4().hex}"
         self.flag = self.state_dir / f"claude-auto-handoff-{self.session}.flag"
-        res_on = self.run_hook(205_000, env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"})
+        res_on = self.run_hook(325_000, env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"})
         self.assertFires(res_on)
         self.assertEqual(res_on["reason"], reason_off)
 
@@ -339,14 +341,14 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.session = f"test-{uuid.uuid4().hex}"
         self.flag = self.state_dir / f"claude-auto-handoff-{self.session}.flag"
         (self.repo / "tracked.txt").write_text("dirty\n")
-        res_cap_off = self.run_hook(300_000)
+        res_cap_off = self.run_hook(480_000)
         self.assertFires(res_cap_off)
         cap_reason = res_cap_off["reason"]
 
         # 4. Hard cap with dirty tree, notices ON
         self.session = f"test-{uuid.uuid4().hex}"
         self.flag = self.state_dir / f"claude-auto-handoff-{self.session}.flag"
-        res_cap_on = self.run_hook(300_000, env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"})
+        res_cap_on = self.run_hook(480_000, env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"})
         self.assertFires(res_cap_on)
         self.assertEqual(res_cap_on["reason"], cap_reason)
 
@@ -359,9 +361,9 @@ class AutoHandoffStopTest(unittest.TestCase):
     def test_decision_log_never_contains_transcript_text(self):
         secret1 = "SECRET_CANARY_DRAIN_881928"
         secret2 = "SECRET_CANARY_HANDOFF_337281"
-        self.run_hook(210_000, [LAUNCH_AGENT, secret1])
+        self.run_hook(330_000, [LAUNCH_AGENT, secret1])
         texts = [LAUNCH_AGENT, notification("a1b2c3d4e5"), secret2]
-        self.run_hook(220_000, texts)
+        self.run_hook(340_000, texts)
         self.assertTrue(self.log_path.exists())
         log_content = self.log_path.read_text()
         self.assertNotIn(secret1, log_content)
@@ -369,45 +371,45 @@ class AutoHandoffStopTest(unittest.TestCase):
 
     def test_leaving_notices_off_sends_live_drain_notice(self):
         # First call with notices off logs drain notice and emits nothing
-        res_off = self.run_hook(210_000, [LAUNCH_AGENT], env={"CLAUDE_AUTO_HANDOFF_NOTICES": "0"})
+        res_off = self.run_hook(330_000, [LAUNCH_AGENT], env={"CLAUDE_AUTO_HANDOFF_NOTICES": "0"})
         self.assertIsNone(res_off)
 
         # Later turn on same session with notices on emits the live drain notice
-        res_on = self.run_hook(212_000, [LAUNCH_AGENT], env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"})
+        res_on = self.run_hook(332_000, [LAUNCH_AGENT], env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"})
         self.assertIsNotNone(res_on)
         self.assertIn("AUTO-HANDOFF pending", res_on["reason"])
 
     def test_drain_continuation_still_unsafe_stays_silent(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
-        self.assertEqual(self.run_hook(210_000, [LAUNCH_AGENT], env)["decision"], "block")
-        self.assertIsNone(self.run_hook(212_000, [LAUNCH_AGENT], env, stop_hook_active=True))
+        self.assertEqual(self.run_hook(330_000, [LAUNCH_AGENT], env)["decision"], "block")
+        self.assertIsNone(self.run_hook(332_000, [LAUNCH_AGENT], env, stop_hook_active=True))
         self.assertFalse(self.flag.exists())
 
     def test_drain_continuation_that_reaches_a_clean_stop_hands_off(self):
         # The drain notice promises "the handoff runs at the next clean stop"; that stop is
         # the continuation itself and carries stop_hook_active=true.
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
-        self.assertEqual(self.run_hook(210_000, [LAUNCH_AGENT], env)["decision"], "block")
+        self.assertEqual(self.run_hook(330_000, [LAUNCH_AGENT], env)["decision"], "block")
         texts = [LAUNCH_AGENT, notification("a1b2c3d4e5")]
-        self.assertFires(self.run_hook(220_000, texts, env, stop_hook_active=True))
+        self.assertFires(self.run_hook(340_000, texts, env, stop_hook_active=True))
 
     def test_own_drain_block_does_not_silence_a_later_stop_blocked_by_another_hook(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
-        res = self.run_hook(210_000, [LAUNCH_AGENT], env)  # our drain notice blocks
+        res = self.run_hook(330_000, [LAUNCH_AGENT], env)  # our drain notice blocks
         self.assertEqual(res["decision"], "block")
         # The continuation stops while the agent still runs: unsafe and .drain exists, so silent.
-        self.assertIsNone(self.run_hook(210_000, [LAUNCH_AGENT], env, stop_hook_active=True))
+        self.assertIsNone(self.run_hook(330_000, [LAUNCH_AGENT], env, stop_hook_active=True))
         # Later the agent reported and another Stop hook blocks; the stale .drain must not mute us.
-        self.assertFires(self.run_hook(250_000, [], env, stop_hook_active=True))
+        self.assertFires(self.run_hook(370_000, [], env, stop_hook_active=True))
 
     def test_interrupted_drain_continuation_does_not_mute_a_later_other_hook_block(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
-        res = self.run_hook(210_000, [LAUNCH_AGENT], env)  # our drain notice blocks
+        res = self.run_hook(330_000, [LAUNCH_AGENT], env)  # our drain notice blocks
         self.assertEqual(res["decision"], "block")
         # The owner interrupts the continuation: the next Stop is a plain one, not stop_hook_active.
-        self.assertIsNone(self.run_hook(210_000, [LAUNCH_AGENT], env))
+        self.assertIsNone(self.run_hook(330_000, [LAUNCH_AGENT], env))
         # Later another Stop hook blocks; the leftover marker must not mute the handoff.
-        self.assertFires(self.run_hook(250_000, [], env, stop_hook_active=True))
+        self.assertFires(self.run_hook(370_000, [], env, stop_hook_active=True))
 
     def test_stop_hook_active_stays_silent_when_state_cannot_be_written(self):
         # Without writable markers (full disk) nothing bounds a repeat block, so the
@@ -416,22 +418,22 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.state_dir.write_text("not a dir")
         self.addCleanup(self.state_dir.mkdir)
         self.addCleanup(self.state_dir.unlink)
-        self.assertIsNone(self.run_hook(250_000, stop_hook_active=True))
+        self.assertIsNone(self.run_hook(370_000, stop_hook_active=True))
 
     def test_stop_hook_active_from_another_hook_still_hands_off(self):
         # Another Stop hook (mesh guard, prompt-type verify) blocked the stop: the
         # continuation's next Stop carries stop_hook_active=true but no drain marker of ours.
-        res = self.run_hook(250_000, stop_hook_active=True)
+        res = self.run_hook(370_000, stop_hook_active=True)
         self.assertFires(res)
 
     def test_stop_hook_active_after_handoff_does_not_refire_within_step(self):
-        self.assertFires(self.run_hook(250_000))
-        self.assertIsNone(self.run_hook(255_000, stop_hook_active=True))
+        self.assertFires(self.run_hook(370_000))
+        self.assertIsNone(self.run_hook(375_000, stop_hook_active=True))
 
     def test_stop_hook_active_ignores_dry_drain_marker(self):
         # A .drain.dry marker never blocked anything (notices off), so it is not our block.
-        (self.state_dir / f"claude-auto-handoff-{self.session}.drain.dry").write_text("212000")
-        res = self.run_hook(250_000, stop_hook_active=True)
+        (self.state_dir / f"claude-auto-handoff-{self.session}.drain.dry").write_text("332000")
+        res = self.run_hook(370_000, stop_hook_active=True)
         self.assertFires(res)
 
     def test_agy_stop_accepts_no_tool_call_and_resolves_brain_transcript(self):
@@ -439,8 +441,8 @@ class AutoHandoffStopTest(unittest.TestCase):
         app_dir = Path(self.tmp.name) / "agy-app"
         logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
         logs_dir.mkdir(parents=True)
-        # 600,000 bytes -> ~150,000 estimated tokens (> default 128,000 AGY threshold)
-        (logs_dir / "transcript_full.jsonl").write_text("x" * 600_000)
+        # 1,600,000 bytes -> ~400,000 estimated tokens (> default 380,000 AGY threshold)
+        (logs_dir / "transcript_full.jsonl").write_text("x" * 1_600_000)
 
         payload = {
             "conversationId": conv_id,
@@ -457,15 +459,38 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertEqual(res["decision"], "continue")
         self.assertIn("AUTO-HANDOFF", res["reason"])
         self.assertIn("--kind agy", res["reason"])
+        self.assertIn("--mode <code|plan>", res["reason"])
+        self.assertIn("Never reference raw transcript.jsonl paths", res["reason"])
         self.assertTrue((self.state_dir / f"agy-auto-handoff-{conv_id}.flag").exists())
+
+    def test_agy_stop_150k_tokens_is_silent(self):
+        conv_id = f"agy-150k-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-150k"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        # 1,000,000 bytes -> ~250,000 tokens (< default 380,000 AGY threshold)
+        (logs_dir / "transcript_full.jsonl").write_text("x" * 1_000_000)
+
+        payload = {
+            "conversationId": conv_id,
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir)},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), {})
 
     def test_agy_stop_resolves_conversation_db_and_wal_bytes(self):
         conv_id = f"agy-db-{uuid.uuid4().hex}"
         app_dir = Path(self.tmp.name) / "agy-app-db"
         conv_dir = app_dir / "conversations"
         conv_dir.mkdir(parents=True)
-        (conv_dir / f"{conv_id}.db").write_bytes(b"d" * 300_000)
-        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 300_000)
+        (conv_dir / f"{conv_id}.db").write_bytes(b"d" * 800_000)
+        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 800_000)
 
         payload = {
             "conversationId": conv_id,
@@ -480,7 +505,7 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         res = json.loads(out.stdout)
         self.assertEqual(res["decision"], "continue")
-        self.assertIn("150000 tokens", res["reason"])
+        self.assertIn("400000 tokens", res["reason"])
 
     def test_agy_stop_ignores_error_termination_reason(self):
         conv_id = f"agy-err-{uuid.uuid4().hex}"
@@ -528,18 +553,18 @@ class AutoHandoffStopTest(unittest.TestCase):
 
     def test_waits_for_an_agent_resumed_after_it_reported(self):
         texts = [LAUNCH_AGENT, notification("a1b2c3d4e5"), resume_result("a1b2c3d4e5")]
-        self.assertWaits(self.run_hook(210_000, texts))
+        self.assertWaits(self.run_hook(330_000, texts))
         drain = [r for r in self.read_log() if r["decision"] == "drain-notice"]
         self.assertEqual(len(drain), 1)
         self.assertIn("background=1", drain[0]["why"])
 
     def test_fires_once_the_resumed_agent_reports_again(self):
         texts = [LAUNCH_AGENT, notification("a1b2c3d4e5"), resume_result("a1b2c3d4e5"), notification("a1b2c3d4e5")]
-        self.assertFires(self.run_hook(210_000, texts))
+        self.assertFires(self.run_hook(330_000, texts))
 
     def test_a_notification_copy_in_an_api_request_blob_is_not_an_event(self):
         texts = [LAUNCH_AGENT, {"type": "api-request-blob", "body": notification("a1b2c3d4e5")}]
-        self.assertWaits(self.run_hook(210_000, texts))
+        self.assertWaits(self.run_hook(330_000, texts))
 
     # --- context counts the last message iteration ---
 
@@ -552,21 +577,21 @@ class AutoHandoffStopTest(unittest.TestCase):
     # --- the handoff instruction carries the hook's own count ---
 
     def test_handoff_instruction_carries_running_count(self):
-        out = self.run_hook(300_000, [LAUNCH_AGENT, LAUNCH_BASH])
+        out = self.run_hook(480_000, [LAUNCH_AGENT, LAUNCH_BASH])
         self.assertFires(out)
         self.assertIn("--running 2", out["reason"])
 
     def test_handoff_instruction_says_running_zero_at_a_safe_point(self):
-        out = self.run_hook(200_000)
+        out = self.run_hook(320_000)
         self.assertIn("--running 0", out["reason"])
 
     # --- .draining marker: the retired reminder tells the old tab to relay ---
 
     def reminder_after_handoff(self, second_texts):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
-        self.assertFires(self.run_hook(300_000, [LAUNCH_AGENT], env=env))
+        self.assertFires(self.run_hook(480_000, [LAUNCH_AGENT], env=env))
         marker = self.state_dir / f"claude-auto-handoff-{self.session}.draining"
-        return marker, self.run_hook(330_000, second_texts, env=env)
+        return marker, self.run_hook(510_000, second_texts, env=env)
 
     def test_handoff_with_running_agents_writes_draining_marker_and_reminder_says_relay(self):
         marker, out = self.reminder_after_handoff([LAUNCH_AGENT])
@@ -583,18 +608,18 @@ class AutoHandoffStopTest(unittest.TestCase):
 
     def test_relay_done_reminder_comes_once_without_waiting_for_growth(self):
         env = {"CLAUDE_AUTO_HANDOFF_NOTICES": "1"}
-        self.assertFires(self.run_hook(300_000, [LAUNCH_AGENT], env=env))
-        out = self.run_hook(300_100, [LAUNCH_AGENT, notification("a1b2c3d4e5")], env=env)
+        self.assertFires(self.run_hook(480_000, [LAUNCH_AGENT], env=env))
+        out = self.run_hook(480_100, [LAUNCH_AGENT, notification("a1b2c3d4e5")], env=env)
         self.assertIn("last agent reported", out["reason"])
-        self.assertIsNone(self.run_hook(300_200, [LAUNCH_AGENT, notification("a1b2c3d4e5")], env=env))
+        self.assertIsNone(self.run_hook(480_200, [LAUNCH_AGENT, notification("a1b2c3d4e5")], env=env))
 
     def test_running_hint_has_no_parentheses_inside_the_command(self):
-        out = self.run_hook(300_000, [LAUNCH_AGENT])
+        out = self.run_hook(480_000, [LAUNCH_AGENT])
         self.assertIn("--running 1.", out["reason"])
         self.assertNotIn("--running 1 (", out["reason"])
 
     def test_drain_notice_states_the_precedence_rule(self):
-        out = self.run_hook(210_000, [LAUNCH_AGENT], env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"})
+        out = self.run_hook(330_000, [LAUNCH_AGENT], env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"})
         self.assertIn("A newer owner instruction wins", out["reason"])
 
     # --- claim guard (F8) ---
@@ -650,7 +675,7 @@ class AutoHandoffStopTest(unittest.TestCase):
         app_dir = Path(self.tmp.name) / "agy-app-sub"
         logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
         logs_dir.mkdir(parents=True)
-        (logs_dir / "transcript_full.jsonl").write_text("x" * 600_000)
+        (logs_dir / "transcript_full.jsonl").write_text("x" * 1_000_000)
 
         # Subagent stop with parentConversationId must be ignored
         sub_out = self.run_hook_raw(
@@ -669,7 +694,7 @@ class AutoHandoffStopTest(unittest.TestCase):
         sanitized_id = "escapedconv"
         esc_logs = app_dir / "brain" / sanitized_id / ".system_generated" / "logs"
         esc_logs.mkdir(parents=True)
-        (esc_logs / "transcript_full.jsonl").write_text("x" * 600_000)
+        (esc_logs / "transcript_full.jsonl").write_text("x" * 1_600_000)
         esc_out = self.run_hook_raw(
             json.dumps({
                 "conversationId": "../../escaped/conv",
@@ -692,11 +717,11 @@ class AutoHandoffStopTest(unittest.TestCase):
             "workState": "working",
         })
         # While T3 delegate_task is running, hook must wait at safe point
-        self.assertWaits(self.run_hook(210_000, [launch_line]))
+        self.assertWaits(self.run_hook(330_000, [launch_line]))
 
         # When wakeup notification arrives ("Delegated task <id> reached a terminal state"), hook fires
         wakeup_line = f"Delegated task {task_id} reached a terminal state."
-        self.assertFires(self.run_hook(210_000, [launch_line, wakeup_line]))
+        self.assertFires(self.run_hook(330_000, [launch_line, wakeup_line]))
 
         # Or when task_status returns status="completed", hook also fires
         self.session = f"test-{uuid.uuid4().hex}"
@@ -706,24 +731,24 @@ class AutoHandoffStopTest(unittest.TestCase):
             "status": "completed",
             "workState": "result_available",
         })
-        res = self.run_hook(210_000, [launch_line, done_line])
+        res = self.run_hook(330_000, [launch_line, done_line])
         self.assertFires(res)
         self.assertIn("Main Context", res["reason"])
 
     def test_waits_while_agy_background_task_is_running_and_fires_when_finished(self):
         agy_task_id = "ace8d432-102c/task-69"
         launch_line = "Tool is running as a " + f"background task with task id: {agy_task_id}"
-        self.assertWaits(self.run_hook(210_000, [launch_line]))
+        self.assertWaits(self.run_hook(330_000, [launch_line]))
 
         done_line = f'Task id "{agy_task_id}" finished with result:'
-        self.assertFires(self.run_hook(210_000, [launch_line, done_line]))
+        self.assertFires(self.run_hook(330_000, [launch_line, done_line]))
 
     def test_agy_workspace_paths_prefers_project_repo_over_skills_dirs(self):
         conv_id = f"agy-ws-{uuid.uuid4().hex}"
         app_dir = Path(self.tmp.name) / "agy-app-ws"
         logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
         logs_dir.mkdir(parents=True)
-        (logs_dir / "transcript_full.jsonl").write_text("x" * 600_000)
+        (logs_dir / "transcript_full.jsonl").write_text("x" * 1_600_000)
 
         # Make repo dirty, and pass a fake /skills path first in workspacePaths
         (self.repo / "tracked.txt").write_text("dirty-in-repo\n")
@@ -748,20 +773,189 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertIn("dirty_tree=True", res["reason"])
         self.assertFalse((self.state_dir / f"agy-auto-handoff-{conv_id}.flag").exists())
 
+    def test_agy_work_delta_blocked_below_hard_cap_waits_quietly(self):
+        conv_id = f"agy-delta-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-delta"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        t_path = logs_dir / "transcript.jsonl"
+        t_path.write_text(
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 380_000}}}) + "\n" +
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 390_000}}}) + "\n"
+        )
+        payload = {
+            "conversationId": conv_id,
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir), "AGY_AUTO_HANDOFF_NOTICES": "1"},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        # Asserts emit_noop ({} for AGY)
+        self.assertEqual(json.loads(out.stdout), {})
+        self.assertFalse((self.state_dir / f"agy-auto-handoff-{conv_id}.flag").exists())
+        self.assertFalse((self.state_dir / f"agy-auto-handoff-{conv_id}.drain").exists())
+        self.assertTrue((self.state_dir / f"agy-auto-handoff-{conv_id}.deltawait").exists())
+
+        # Check log has decision == "delta-wait" and NO "drain-notice"
+        logs = self.read_log()
+        delta_waits = [r for r in logs if r.get("decision") == "delta-wait"]
+        self.assertEqual(len(delta_waits), 1)
+        self.assertIn("work_delta=10000<100000", delta_waits[0]["why"])
+        drain_notices = [r for r in logs if r.get("decision") == "drain-notice"]
+        self.assertEqual(len(drain_notices), 0)
+
+        # Repeated turn under delta does not spam log
+        out_rep = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir), "AGY_AUTO_HANDOFF_NOTICES": "1"},
+        )
+        self.assertEqual(json.loads(out_rep.stdout), {})
+        self.assertEqual(len([r for r in self.read_log() if r.get("decision") == "delta-wait"]), 1)
+
+        # Once delta reaches 105k (first 380k -> 485k), handoff fires!
+        t_path.write_text(
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 380_000}}}) + "\n" +
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 485_000}}}) + "\n"
+        )
+        out2 = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir), "AGY_AUTO_HANDOFF_NOTICES": "1"},
+        )
+        self.assertEqual(out2.returncode, 0, out2.stderr)
+        res2 = json.loads(out2.stdout)
+        self.assertEqual(res2["decision"], "continue")
+        self.assertIn("AUTO-HANDOFF", res2["reason"])
+        self.assertTrue((self.state_dir / f"agy-auto-handoff-{conv_id}.flag").exists())
+        handoff_logs = [r for r in self.read_log() if r.get("decision") == "handoff"]
+        self.assertEqual(len(handoff_logs), 1)
+
+    def test_claude_work_delta_blocked_below_hard_cap_waits_quietly(self):
+        t_path = Path(self.tmp.name) / f"claude-delta-{uuid.uuid4().hex}.jsonl"
+        t_path.write_text(
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 320_000}}}) + "\n" +
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 330_000}}}) + "\n"
+        )
+        sess = f"s-delta-{uuid.uuid4().hex}"
+        payload = {
+            "session_id": sess,
+            "transcript_path": str(t_path),
+            "cwd": str(self.repo),
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"CLAUDE_AUTO_HANDOFF_NOTICES": "1"},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        # Claude emit_noop is empty stdout ""
+        self.assertEqual(out.stdout, "")
+        self.assertFalse((self.state_dir / f"claude-auto-handoff-{sess}.flag").exists())
+        self.assertFalse((self.state_dir / f"claude-auto-handoff-{sess}.drain").exists())
+        self.assertTrue((self.state_dir / f"claude-auto-handoff-{sess}.deltawait").exists())
+        logs = [r for r in self.read_log() if r.get("session") == sess and r.get("decision") == "delta-wait"]
+        self.assertEqual(len(logs), 1)
+        self.assertIn("work_delta=10000<100000", logs[0]["why"])
+
+    def test_checkpoint_and_compaction_in_tool_result_does_not_reset_stop_hook(self):
+        conv_id = f"agy-chk-stop-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-chk-stop"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        t_path = logs_dir / "transcript.jsonl"
+        # Turn 1: 380k
+        l1 = json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 380_000}}})
+        # Turn 2: tool result mentioning CHECKPOINT and # Resuming from a compaction in code
+        l2 = json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": "git diff\n+CHECKPOINT\n+# Resuming from a compaction"}]}})
+        # Turn 3: 490k (delta = 110k >= 100k)
+        l3 = json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 490_000}}})
+        t_path.write_text("\n".join([l1, l2, l3]) + "\n")
+
+        payload = {
+            "conversationId": conv_id,
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir), "AGY_AUTO_HANDOFF_NOTICES": "1"},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        res = json.loads(out.stdout)
+        self.assertEqual(res.get("decision"), "continue")
+        self.assertIn("AUTO-HANDOFF", res.get("reason", ""))
+        self.assertTrue((self.state_dir / f"agy-auto-handoff-{conv_id}.flag").exists())
+
+    def test_agy_hard_cap_overrides_work_delta(self):
+        conv_id = f"agy-hc-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-hc"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        t_path = logs_dir / "transcript.jsonl"
+        # First turn: 515k, Second turn: 525k (delta = 10k < 100k), but past 520k hard cap
+        t_path.write_text(
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 515_000}}}) + "\n" +
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 525_000}}}) + "\n"
+        )
+        payload = {
+            "conversationId": conv_id,
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir), "AGY_AUTO_HANDOFF_NOTICES": "1"},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        res = json.loads(out.stdout)
+        self.assertEqual(res["decision"], "continue")
+        self.assertIn("AUTO-HANDOFF", res["reason"])
+        self.assertTrue((self.state_dir / f"agy-auto-handoff-{conv_id}.flag").exists())
+
+    def test_agy_max_token_budget_exceeded_overrides_work_delta(self):
+        conv_id = f"agy-budget-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-budget"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        t_path = logs_dir / "transcript.jsonl"
+        t_path.write_text(
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 380_000}}}) + "\n" +
+            json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 390_000}}}) + "\n"
+        )
+        payload = {
+            "conversationId": conv_id,
+            "terminationReason": "MAX_TOKEN_BUDGET_EXCEEDED",
+            "fullyIdle": True,
+            "workspacePaths": [str(self.repo)],
+        }
+        out = self.run_hook_raw(
+            json.dumps(payload),
+            env={"AGY_APP_DATA_DIR": str(app_dir), "AGY_AUTO_HANDOFF_NOTICES": "1"},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        res = json.loads(out.stdout)
+        self.assertEqual(res["decision"], "continue")
+        self.assertIn("AUTO-HANDOFF", res["reason"])
+        self.assertTrue((self.state_dir / f"agy-auto-handoff-{conv_id}.flag").exists())
+
 
     def test_agy_transcript_jsonl_takes_precedence_over_preallocated_db_wal(self):
         conv_id = f"agy-prec-{uuid.uuid4().hex}"
         app_dir = Path(self.tmp.name) / "agy-app-prec"
         logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
         logs_dir.mkdir(parents=True)
-        # 40 KB compact transcript (~10,000 tokens, well below 128k threshold)
+        # 40 KB compact transcript (~10,000 tokens, well below 380k threshold)
         (logs_dir / "transcript.jsonl").write_text("x" * 40_000)
-        # 800 KB full transcript (untruncated tool dumps) and 600 KB SQLite WAL pre-allocation
-        (logs_dir / "transcript_full.jsonl").write_text("f" * 800_000)
+        # 1.6 MB full transcript (untruncated tool dumps) and 1.2 MB SQLite WAL pre-allocation
+        (logs_dir / "transcript_full.jsonl").write_text("f" * 1_600_000)
         conv_dir = app_dir / "conversations"
         conv_dir.mkdir(parents=True)
-        (conv_dir / f"{conv_id}.db").write_bytes(b"d" * 600_000)
-        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 600_000)
+        (conv_dir / f"{conv_id}.db").write_bytes(b"d" * 900_000)
+        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 900_000)
 
         payload = {
             "conversationId": conv_id,
@@ -788,8 +982,8 @@ class AutoHandoffStopTest(unittest.TestCase):
             "Tool is running as a "
             "background task with task id: conv-1/task-12"
         )
-        checkpoint_line = '{"step_index":50,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE"}'
-        res = self.run_hook(210_000, [orphan_before_checkpoint, checkpoint_line, timer_line])
+        checkpoint_line = {"step_index": 50, "source": "SYSTEM", "type": "CHECKPOINT", "status": "DONE"}
+        res = self.run_hook(330_000, [orphan_before_checkpoint, checkpoint_line, timer_line])
         self.assertFires(res)
 
 
@@ -798,20 +992,20 @@ class AutoHandoffStopTest(unittest.TestCase):
             "type": "queue-operation",
             "content": "Act as the implementation sub-agent for this task.\n\nImplement Wave 1.",
         })
-        self.assertIsNone(self.run_hook(350_000, [header]))
+        self.assertIsNone(self.run_hook(500_000, [header]))
 
     def test_agy_checkpoint_resets_active_bytes_in_stop_hook(self):
         conv_id = f"agy-stop-chk-{uuid.uuid4().hex}"
         app_dir = Path(self.tmp.name) / "agy-app-stop-chk"
         logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
         logs_dir.mkdir(parents=True)
-        pre_chk = ("x" * 800_000) + "\n"
+        pre_chk = ("x" * 1_600_000) + "\n"
         chk = '{"step_index":42,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE"}\n'
         post_chk = ("y" * 16_000) + "\n"
         (logs_dir / "transcript.jsonl").write_text(pre_chk + chk + post_chk)
         conv_dir = app_dir / "conversations"
         conv_dir.mkdir(parents=True)
-        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 900_000)
+        (conv_dir / f"{conv_id}.db-wal").write_bytes(b"w" * 1_800_000)
 
         payload = {
             "conversationId": conv_id,
@@ -842,8 +1036,16 @@ class AutoHandoffStopTest(unittest.TestCase):
     }
 
     def test_multi_iteration_record_is_not_double_counted(self):
+        usage = {
+            "input_tokens": 4, "cache_creation_input_tokens": 5147, "cache_read_input_tokens": 380_000,
+            "iterations": [
+                {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 190_000},
+                {"type": "advisor_message", "input_tokens": 195_000},
+                {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 195_000},
+            ],
+        }
         transcript = Path(self.tmp.name) / "multi.jsonl"
-        transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": self.MULTI_ITERATION_USAGE}}) + "\n")
+        transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": usage}}) + "\n")
         out = self.run_hook_raw(json.dumps({"transcript_path": str(transcript), "session_id": self.session,
                                             "cwd": str(self.repo)}))
         self.assertEqual(out.returncode, 0, out.stderr)
@@ -851,9 +1053,9 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertFalse(self.flag.exists())
 
     def test_multi_iteration_record_over_threshold_reports_the_real_context(self):
-        usage = {"input_tokens": 4, "cache_read_input_tokens": 420_000, "iterations": [
-            {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 205_000},
-            {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 210_000},
+        usage = {"input_tokens": 4, "cache_read_input_tokens": 660_000, "iterations": [
+            {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 325_000},
+            {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 330_000},
         ]}
         transcript = Path(self.tmp.name) / "multi2.jsonl"
         transcript.write_text(json.dumps({"type": "assistant", "message": {"usage": usage}}) + "\n")
@@ -862,7 +1064,7 @@ class AutoHandoffStopTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         result = json.loads(out.stdout)
         self.assertFires(result)
-        self.assertIn("210002 tokens", result["reason"])
+        self.assertIn("330002 tokens", result["reason"])
 
     def test_agy_multi_iteration_usage_is_not_double_counted(self):
         conv_id = f"agy-iter-{uuid.uuid4().hex}"
@@ -878,6 +1080,41 @@ class AutoHandoffStopTest(unittest.TestCase):
                                                           "AGY_AUTO_HANDOFF_THRESHOLD": "150000"})
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(json.loads(out.stdout), {})
+
+    def test_auto_handoff_stop_carries_active_session_model_for_agy_and_claude(self):
+        conv_id = f"agy-carbon-{uuid.uuid4().hex}"
+        app_dir = Path(self.tmp.name) / "agy-app-carbon"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        (logs_dir / "transcript.jsonl").write_text(
+            json.dumps({"type": "PLANNER_RESPONSE", "model": "gemini-4-carbon-medium", "input_tokens": 150_000}) + "\n" +
+            json.dumps({"type": "PLANNER_RESPONSE", "model": "gemini-4-carbon-medium", "input_tokens": 400_000}) + "\n"
+        )
+        payload = {"conversationId": conv_id, "terminationReason": "NO_TOOL_CALL", "fullyIdle": True,
+                   "workspacePaths": [str(self.repo)]}
+        out = self.run_hook_raw(json.dumps(payload), env={"AGY_APP_DATA_DIR": str(app_dir)})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        res = json.loads(out.stdout)
+        self.assertEqual(res["decision"], "continue")
+        self.assertIn("--kind agy", res["reason"])
+        self.assertIn("--model gemini-4-carbon-medium", res["reason"])
+
+        # Claude session with active model in transcript
+        c_transcript = Path(self.tmp.name) / "claude-opus.jsonl"
+        c_transcript.write_text(
+            json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": "claude-opus-5-5", "usage": {"input_tokens": 150_000}}}) + "\n" +
+            json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": "claude-opus-5-5", "usage": {"input_tokens": 340_000}}}) + "\n"
+        )
+        c_out = self.run_hook_raw(json.dumps({
+            "transcript_path": str(c_transcript),
+            "session_id": f"c-{uuid.uuid4().hex}",
+            "cwd": str(self.repo),
+        }))
+        self.assertEqual(c_out.returncode, 0, c_out.stderr)
+        c_res = json.loads(c_out.stdout)
+        self.assertEqual(c_res["decision"], "block")
+        self.assertIn("--kind claude", c_res["reason"])
+        self.assertIn("--model claude-opus-5-5", c_res["reason"])
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ argument-hint: "[agent-kind (e.g. opencode, claude, codex, gemini, agy, t3code)]
 
 ## Overview
 
-When an agent session grows large (>100k tokens), attention degrades and reasoning degrades.
+When an agent session grows very large (>320k–380k tokens), attention and reasoning begin to degrade.
 The **Handoff** skill solves this by:
 1. Compacting the current session into a high-density, self-contained **Frontier Capsule** (zero pointer indirection).
 2. Saving it to the OS temporary directory (`/tmp/handoff-<timestamp>-<slug>.md`).
@@ -17,13 +17,13 @@ The **Handoff** skill solves this by:
 ### Scope Boundary: In-Session AGY Subagents vs Herdr Handoff
 - **Inside AGY (In-Session)**: For parallel feature slices, research lookups, and adversarial reviews within the same session, use AGY's native `invoke_subagent` (`Workspace: "share"`/`"branch"`, `Model: "flash"`/`"inherit"`) and `send_message` for reactive wakeup. Do NOT spawn new Herdr tabs or file handoffs for standard in-session task delegation.
 - **When to Use Handoff**: Reserve this skill for:
-  1. **Context Window Exhaustion**: When the primary orchestrator session reaches >100k–200k tokens and needs a clean slate.
+  1. **Context Window Exhaustion**: When the primary orchestrator session reaches >320k–380k tokens and needs a clean slate.
   2. **Cross-Harness Transfers**: Handing off work between different agent harnesses (Claude Code $\leftrightarrow$ AGY $\leftrightarrow$ OpenCode).
   3. **Cross-Terminal / Cross-Repo**: Long-running background handoffs across separate terminal panes or detached repositories.
 
 ### Auto-Trigger
 
-A Claude Code Stop hook runs this skill end to end once context reaches `CLAUDE_AUTO_HANDOFF_THRESHOLD` (default `200000`; disable with `CLAUDE_AUTO_HANDOFF=0`). It waits for a safe point, and AGY has equivalent native hooks. Read [`references/auto-handoff-hooks.md`](references/auto-handoff-hooks.md) only when installing or debugging them.
+A Claude Code Stop hook runs this skill end to end once context reaches `CLAUDE_AUTO_HANDOFF_THRESHOLD` / `AGY_AUTO_HANDOFF_THRESHOLD` (default `320000` for Claude, `380000` for AGY; hard cap `480000` for Claude, `520000` for AGY; min work delta `100000`; disable with `CLAUDE_AUTO_HANDOFF=0` or `AGY_AUTO_HANDOFF=0`). It waits for a safe point, and AGY has equivalent native hooks. Read [`references/auto-handoff-hooks.md`](references/auto-handoff-hooks.md) only when installing or debugging them.
 
 ---
 
@@ -48,6 +48,10 @@ A Claude Code Stop hook runs this skill end to end once context reaches `CLAUDE_
    - **Claude Code, Codex, and Antigravity (`agy`) store folder trust by exact startup `cwd` path** — they do NOT inherit trust to subfolders or `.claude/worktrees/<F-NNN>`. Opening a child tab inside a subfolder or linked worktree triggers an interactive **"Do you trust this folder?"** dialog that stalls unattended handoffs across all three agents.
    - `herdr-handoff.sh` automatically hoists `TARGET_CWD` up to the **main Git repository root** (via `--git-common-dir`, never above a Git repo root into an untrusted parent folder; or for non-git directories, the outermost project/workspace root), and injects a `Working directory note` into `$PROMPT_FILE` naming the active worktree/subfolder.
    - Never pass `--allow-subdir`. When working inside `.claude/worktrees/<F-NNN>` or a subfolder, record that path in `**Worktree:**` and ALWAYS prefix Section 4 shell commands with `cd "<worktree>" && ...` so commands run in the worktree while the agent tab stays at the trusted root.
+6. **No Raw Transcript Logs & Turn-1 Cold-Start Discipline (mandatory, added 2026-11-15):**
+   - ❌ **NEVER** reference raw `transcript.jsonl` or `.system_generated/logs/` paths in the handoff doc — summarize subagent verdicts in `## Late results` instead (reading raw JSONL dumps burns +50K tokens in Turn 1).
+   - 🎯 **Target doc size ≤ 4 KB - 6 KB:** The new session pays for the entire handoff doc in Turn 0 prompt tokens.
+   - ⚡ **Turn-1 budget ≤ 15K tokens:** On Turn 1, run Section 0's claim command + Section 4.1's immediate command ONLY. Do NOT speculatively bulk-read Governing Specs, SKILL.md files, or Section 6 Target Files on Turn 1 — Sections 1-5 already carry the live frontier.
 
 ---
 
@@ -137,8 +141,9 @@ Always pass `--running N`: your own count, or the larger of it and the `--runnin
   - **NEVER** pass `--no-yolo` or `--allow-subdir` on agent handoffs (`--no-yolo` stalls on Section-0 `.claim`; `--allow-subdir` triggers subfolder Trust prompts across AGY, Codex, and Claude).
 
 ```bash
-/Users/pasitnusso/.claude/skills/handoff/scripts/herdr-handoff.sh "/tmp/handoff-<timestamp>-<slug>.md" --kind <agent-kind> --mode <code|plan> --topic "<2-5 words on what the next session does>" --prompt "<immediate next steps>" --running <N>
+/Users/pasitnusso/.claude/skills/handoff/scripts/herdr-handoff.sh "/tmp/handoff-<timestamp>-<slug>.md" --mode <code|plan> --topic "<2-5 words on what the next session does>" --prompt "<immediate next steps>" --running <N>
 ```
+*(By default, `herdr-handoff.sh` automatically derives both `--kind` and `--model` / `--effort` from the calling session — e.g., `agy` on `Gemini 4 Carbon (Medium)` spawns `agy --model gemini-4-carbon-medium`, and `claude` on `claude-fable-5-2` spawns `claude --model claude-fable-5-2`. **NEVER** pass `--model claude-opus-5-5` or switch/downgrade the active session's model on handoff unless the user explicitly asked for a different model — owner-chosen session carry-over overrides general subagent routing rules.)*
 
 The script ends with a banner — `✅ HANDOFF CONFIRMED` followed by `⛔ KEEP THIS TAB OPEN — N agents still running` (N ≥ 1), `🚪 Closing THIS tab in 20s` (0 running), `🟢 SAFE TO CLOSE` (0 running, no tab id to close) or `⚠️ agents running: count unknown` (no `--running`); or `⚠️ new tab started, status unknown` / `⛔ DO NOT CLOSE` (no agent confirmed after 60s; exit 1). **Only the handoff's `.claim` directory confirms** (typically 5-15s, `HERDR_HANDOFF_CONFIRM_TIMEOUT` default 90): it proves the agent got its prompt and ran the first command. A pane that merely shows an agent proves neither, since it can be stuck on a dialog, so the parent never closes on status alone. An already-claimed doc is refused before any tab opens.
 
@@ -160,10 +165,15 @@ Each handoff appends one line to `~/.local/state/handoff/ledger.jsonl` (parent a
 ### YOLO Mode (Default):
 All handoffs launch with permission-skipping enabled by default (`--dangerously-skip-permissions` for `claude`, `agy`, and `gemini`), ensuring the incoming agent never gets stalled on interactive permission prompts. Pass `--no-yolo` to disable.
 
-### Choosing `--mode` (always pass it for `--kind claude`):
-- `code` → new session starts on **Sonnet** locally (or auto-switches to local `codex` `gpt-6.1-terra` `medium` when local Claude quota is low and Codex quota is high). Use when the Immediate Next Action is implementation: editing code, running/fixing tests, executing tasks of an already-approved plan.
-- `plan` → new session starts on the **default model** locally (or auto-switches to local `agy` `gemini-4-argon-medium` when local Claude quota is low). Use for brainstorming, specs, plans, research, review/audit, or debugging with an unknown root cause.
-- Unsure → `plan`. `--model <name>` overrides both.
+### Agent & Model Carry-Over (Default = Calling Session) + `--mode` Fallbacks:
+- **Default carry-over (all harnesses — `agy`, `claude`, `codex`, including `claude-fable-5-2`):** By default, the new session inherits **both the calling session's agent (`--kind`) and its active model + effort (`--model` / `--effort`)** from the live session transcript, Herdr pane metadata, or process args (e.g., `agy` on `Gemini 4 Carbon (Medium)` → `agy --model gemini-4-carbon-medium`; `claude` on `claude-fable-5-2` → `claude --model claude-fable-5-2`; `claude` on `claude-opus-5-5` → `claude --model claude-opus-5-5`; `codex` on `gpt-5.4` → `codex -c model="gpt-5.4"`). Never downgrade a `claude-fable-5-2` session to Opus/Sonnet on handoff unless the user explicitly requested it.
+- **Precedence order:**
+  1. Explicit CLI flags: `--kind <agent>`, `--model <name>`, `--effort <level>` (AGY also accepts human display names like `"Carbon Medium"` or `"Gemini 4 Carbon (Medium)"`).
+  2. Handoff doc header: optional `**Agent:** \`<kind>\` | **Model:** \`<model>\` | **Effort:** \`<level>\`` on line 2-3.
+  3. Calling session's live agent + model + effort (when keeping the same agent family).
+  4. `--mode <code|plan>` fallback defaults (used only when no session model / `--model` is known, or on cross-harness handoffs):
+     - `code` → **Sonnet** on `claude`, `gemini-4-hydrogen-high` on `agy` (or auto-switches low-quota `claude` coding handoffs to `codex` `gpt-6.1-terra` `medium` when Codex quota is high). Use for editing code, running/fixing tests, or executing tasks of an already-approved plan.
+     - `plan` → **default model** on `claude`, `gemini-4-argon-medium` on `agy` (or auto-switches low-quota `claude` plan handoffs to `agy` `gemini-4-argon-medium`). Use for brainstorming, specs, plans, research, review/audit, or debugging with an unknown root cause.
 - **Mechanical Free-Credit + Jev `cloud_compatible` Gate**: `herdr-handoff.sh` first mechanically checks `~/.claude.json` (`cachedUsageUtilization.utilization.iguana_necktie` / promo credit buckets) for `remaining_dollars > 0`. Only when free credits exist **AND** Jev System-1 confirms the task is strictly read-only review/research (`cloud_compatible >= 0.85` and `is_reviewer >= 0.50`, with zero references to `.superpowers/`, `orbstack`, `kubectl`, `deploy-local`, `shoot.mjs`, `psrw ship`, `dispatch-worker`, or `.claude/worktrees/`), `--kind claude` auto-routes to `CCR_ENABLE_BUNDLE=1 claude --cloud` and immediately chains `claude --teleport <session_id>` so the terminal stays attached. All coding, SDD worktree, and local-cluster tasks stay 100% local on Mac (`claude` -> `codex` / `agy` fallback).
 
 ### Supported Agent Kinds (`--kind`):

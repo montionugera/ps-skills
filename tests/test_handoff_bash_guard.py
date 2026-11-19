@@ -32,11 +32,12 @@ class HandoffBashGuardTest(unittest.TestCase):
         self.doc.write_text("# Handoff: Test\n## 1. Main\n## 4. Next\n")
         self.guard_log = Path(self.tmp.name) / "guard.jsonl"
 
-    def run_guard(self, command: str, cwd: str = None, extra_env: dict = None, out_mode: str = "claude"):
+    def run_guard(self, command: str, cwd: str = None, extra_env: dict = None, out_mode: str = "claude", transcript_path: str = None):
         env = dict(os.environ)
         env.pop("HANDOFF_BASH_GUARD", None)
         env.pop("HERDR_HANDOFF_ALLOW_NO_YOLO", None)
         env.pop("HERDR_HANDOFF_ALLOW_SUBDIR", None)
+        env.pop("HERDR_HANDOFF_ALLOW_MODEL_SWITCH", None)
         env["HERDR_HANDOFF_GUARD_LOG"] = str(self.guard_log)
         if extra_env:
             env.update(extra_env)
@@ -46,6 +47,8 @@ class HandoffBashGuardTest(unittest.TestCase):
             "tool_name": "Bash",
             "tool_input": {"command": command},
         }
+        if transcript_path:
+            payload["transcript_path"] = transcript_path
         cmd = [sys.executable, str(GUARD)]
         if out_mode != "claude":
             cmd.extend(["--out", out_mode])
@@ -204,6 +207,50 @@ class HandoffBashGuardTest(unittest.TestCase):
         res = self.run_guard(cmd, out_mode="agy")
         self.assertEqual(res.get("decision"), "deny")
         self.assertIn("HANDOFF GUARD", res.get("reason", ""))
+
+    def test_fable_session_unasked_opus_downgrade_is_denied_and_stripped_unless_user_asked(self):
+        tfile = Path(self.tmp.name) / "fable-sess.jsonl"
+        # Include a realistic `isMeta=True` `/handoff` SKILL.md expansion containing `claude-opus-5-5` and `Sonnet`!
+        tfile.write_text(
+            json.dumps({"type": "user", "message": {"content": "earlier we talked about opus vs sonnet"}}) + "\n" +
+            json.dumps({"type": "user", "message": {"content": "<command-name>/handoff</command-name>\n<system-reminder>AVOID FABLE: use claude-opus-5-5</system-reminder>"}}) + "\n" +
+            json.dumps({"type": "user", "isMeta": True, "message": {"content": "# Handoff\nNever pass --model claude-opus-5-5 or Sonnet unless asked."}}) + "\n" +
+            json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": "claude-fable-5-2"}}) + "\n"
+        )
+        # 1) Unasked `--model claude-opus-5-5` from a Fable 5.2 session is denied even after `isMeta=True` SKILL.md load
+        cmd_downgrade = f'{CANONICAL} "{self.doc}" --kind claude --mode plan --model claude-opus-5-5 --running 0'
+        reason = self.assertDeniedWithReason(
+            self.run_guard(cmd_downgrade, transcript_path=str(tfile)),
+            "unasked model switch from claude-fable-5-2 to claude-opus-5-5",
+            f"{CANONICAL} {self.doc} --kind claude --mode plan --running 0",
+        )
+        self.assertNotIn("--model claude-opus-5-5", reason.splitlines()[-1])
+
+        # 1b) Unasked `**Model:** \`claude-opus-5-5\`` inside the handoff doc is ALSO caught!
+        self.doc.write_text("# Handoff: Test\n**Model:** `claude-opus-5-5`\n## 1. Main\n## 4. Next\n")
+        self.assertDeniedWithReason(
+            self.run_guard(f'{CANONICAL} "{self.doc}" --kind claude --mode plan --running 0', transcript_path=str(tfile)),
+            "unasked model switch from claude-fable-5-2 to claude-opus-5-5",
+            "remove **Model:** `claude-opus-5-5`",
+        )
+        self.doc.write_text("# Handoff: Test\n## 1. Main\n## 4. Next\n")
+
+        # 2) Omitting `--model` or passing `--model claude-fable-5-2` is allowed silently
+        self.assertAllowedSilently(
+            self.run_guard(f'{CANONICAL} "{self.doc}" --kind claude --mode plan --running 0', transcript_path=str(tfile))
+        )
+        self.assertAllowedSilently(
+            self.run_guard(f'{CANONICAL} "{self.doc}" --kind claude --mode plan --model claude-fable-5-2 --running 0', transcript_path=str(tfile))
+        )
+
+        # 3) When user explicitly asked "handoff to opus", `--model claude-opus-5-5` is allowed silently
+        tfile.write_text(
+            json.dumps({"type": "user", "message": {"content": "please handoff to opus for the next slice"}}) + "\n" +
+            json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": "claude-fable-5-2"}}) + "\n"
+        )
+        self.assertAllowedSilently(
+            self.run_guard(cmd_downgrade, transcript_path=str(tfile))
+        )
 
 
 if __name__ == "__main__":
