@@ -107,6 +107,7 @@ class TestJevGate(unittest.TestCase):
                 [PY_BIN, str(JEV_GATE), "triage-diff", "--diff-file", diff_path],
                 capture_output=True,
                 text=True,
+                env=STUB_ENV,
             )
             self.assertEqual(res.returncode, 0)
             data = json.loads(res.stdout)
@@ -142,6 +143,7 @@ class TestJevGate(unittest.TestCase):
                 [PY_BIN, str(JEV_GATE), "triage-diff", "--diff-file", diff_path],
                 capture_output=True,
                 text=True,
+                env=STUB_ENV,
             )
             self.assertEqual(res.returncode, 0)
             data = json.loads(res.stdout)
