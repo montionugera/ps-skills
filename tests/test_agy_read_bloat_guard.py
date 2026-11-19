@@ -8,7 +8,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from PIL import Image
+try:
+    from PIL import Image
+except ImportError:  # CI installs only pytest; the image tests need macOS sips anyway
+    Image = None
+
+HAS_IMG = Image is not None and bool(shutil.which("sips"))
 
 HOOK = Path(__file__).resolve().parent.parent / "skills" / "handoff" / "hooks" / "agy-read-bloat-guard.py"
 
@@ -157,8 +162,8 @@ class AgyReadBloatGuardTest(unittest.TestCase):
         self.assertEqual(r.stdout, "")
 
     def test_oversized_image_is_downscaled_and_overwritten(self):
-        if not shutil.which("sips"):
-            self.skipTest("sips not available on this system")
+        if not HAS_IMG:
+            self.skipTest("needs Pillow and macOS sips")
 
         img_path = self.dir / "large_screenshot.png"
         img = Image.new("RGB", (2000, 1500), color="blue")
@@ -193,8 +198,8 @@ class AgyReadBloatGuardTest(unittest.TestCase):
         self.assertEqual(res2["overwrite"].get("Path"), overwritten_path)
 
     def test_cached_image_dynamic_path_key_view_file_then_read_file(self):
-        if not shutil.which("sips"):
-            self.skipTest("sips not available on this system")
+        if not HAS_IMG:
+            self.skipTest("needs Pillow and macOS sips")
 
         img_path = self.dir / "dynamic_key.png"
         Image.new("RGB", (1800, 1200), color="purple").save(img_path)
@@ -228,8 +233,8 @@ class AgyReadBloatGuardTest(unittest.TestCase):
         self.assertEqual(res2["overwrite"]["Path"], cached_file)
 
     def test_image_within_budget_is_not_downscaled(self):
-        if not shutil.which("sips"):
-            self.skipTest("sips not available on this system")
+        if not HAS_IMG:
+            self.skipTest("needs Pillow and macOS sips")
 
         img_path = self.dir / "small_icon.png"
         img = Image.new("RGB", (400, 300), color="red")
@@ -250,7 +255,7 @@ class AgyReadBloatGuardTest(unittest.TestCase):
         r_guard = self.run_guard({"toolCall": {"name": "read_file", "args": {"Path": str(t)}}}, env={"AGY_READ_GUARD": "0"})
         self.assertEqual(r_guard.stdout, "")
 
-        if shutil.which("sips"):
+        if HAS_IMG:
             img_path = self.dir / "large.png"
             Image.new("RGB", (2000, 1500), color="green").save(img_path)
             r_img = self.run_guard({"toolCall": {"name": "read_file", "args": {"Path": str(img_path)}}}, env={"AGY_IMAGE_DOWNSCALE": "0"})
