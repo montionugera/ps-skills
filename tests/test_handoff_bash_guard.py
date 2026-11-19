@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 
 GUARD = Path(__file__).resolve().parent.parent / "skills" / "handoff" / "hooks" / "handoff-bash-guard.py"
-CANONICAL = "/Users/pasitnusso/.claude/skills/handoff/scripts/herdr-handoff.sh"
+CANONICAL = os.path.expanduser("~/.claude/skills/handoff/scripts/herdr-handoff.sh")
 
 
 class HandoffBashGuardTest(unittest.TestCase):
