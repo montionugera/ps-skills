@@ -219,9 +219,9 @@ class HerdrHandoffTest(unittest.TestCase):
             capture_output=True, text=True, env=env, timeout=60,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("Auto-switching handoff to agy (yolo, model: gemini-4-argon-medium)", r.stdout)
+        self.assertIn("Auto-switching handoff to agy (yolo, model: gemini-4-neon-medium)", r.stdout)
         log_text = self.log.read_text()
-        self.assertIn("agy --dangerously-skip-permissions --model gemini-4-argon-medium -i", log_text)
+        self.assertIn("agy --dangerously-skip-permissions --model gemini-4-neon-medium -i", log_text)
 
     def test_agy_code_mode_uses_flash_high_model(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
@@ -382,7 +382,7 @@ class HerdrHandoffTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Jev System-1 assist: route=agy_argon", r.stdout)
         self.assertIn("escalating mode to plan", r.stdout)
-        self.assertIn("Auto-switching handoff to claude --cloud (fallback: agy/gemini-4-argon-medium)", r.stdout)
+        self.assertIn("Auto-switching handoff to claude --cloud (fallback: agy/gemini-4-neon-medium)", r.stdout)
         log_text = self.log.read_text()
         self.assertIn("CCR_ENABLE_BUNDLE=1 claude --dangerously-skip-permissions --model opus", log_text)
 
@@ -434,7 +434,7 @@ class HerdrHandoffTest(unittest.TestCase):
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("claude --cloud", r.stdout)
-        self.assertIn("Auto-switching handoff to agy (yolo, model: gemini-4-argon-medium)", r.stdout)
+        self.assertIn("Auto-switching handoff to agy (yolo, model: gemini-4-neon-medium)", r.stdout)
 
     def test_jev_assist_switches_agy_coding_handoff_to_codex_terra_when_codex_quota_high(self):
         quota_dir = Path(self.tmp.name) / "quota_jev_code"
@@ -1462,7 +1462,7 @@ class HerdrHandoffTest(unittest.TestCase):
         )
         self.assertEqual(rqs.returncode, 0, rqs.stderr)
         self.assertIn("AGENT_KIND=agy\n", rqs.stdout)
-        self.assertIn("RESOLVED_MODEL=gemini-4-argon-medium\n", rqs.stdout)
+        self.assertIn("RESOLVED_MODEL=gemini-4-neon-medium\n", rqs.stdout)
         self.assertIn("MODEL_SOURCE=quota-switch\n", rqs.stdout)
         self.assertIn("RESOLVED_EFFORT=default\n", rqs.stdout)
 
