@@ -12,15 +12,18 @@
 #
 # Env overrides:
 #   CLAUDE_AUTO_HANDOFF_THRESHOLD / AGY_AUTO_HANDOFF_THRESHOLD
-#       token threshold (default 200000 for Claude, 128000 for AGY)
+#       token threshold (default 320000 for Claude, 380000 for AGY)
 #   CLAUDE_AUTO_HANDOFF_HARD_CAP / AGY_AUTO_HANDOFF_HARD_CAP
-#       fire regardless of the safe point (default 1.5 x threshold)
+#       fire regardless of the safe point (default 1.5 x threshold for Claude, 520000 for AGY)
+#   CLAUDE_AUTO_HANDOFF_MIN_DELTA / AGY_AUTO_HANDOFF_MIN_DELTA
+#       minimum active session growth before auto-handoff fires (default 100000)
 #   CLAUDE_AUTO_HANDOFF=0 / AGY_AUTO_HANDOFF=0
 #       disable entirely
 #   CLAUDE_AUTO_HANDOFF_REFIRE_STEP
 #       remind again after this much growth past the last fire (default 25000)
 #   CLAUDE_AUTO_HANDOFF_NOTICES=1 / AGY_AUTO_HANDOFF_NOTICES=1
-#       send the two intermediate messages (drain notice, retired reminder); default 0 (log only)
+#       send the two intermediate messages (drain notice, retired reminder);
+#       in AGY defaults ON (!= "0"), in Claude defaults OFF (== "1", log only)
 #   CLAUDE_AUTO_HANDOFF_LOG
 #       decision log (default ~/.claude/logs/auto-handoff.log)
 #   CLAUDE_AUTO_HANDOFF_STATE_DIR
@@ -38,16 +41,17 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from handoff_usage import (
     BYTES_PER_TOKEN,
-    active_transcript_bytes,
+    compute_work_delta_blocked,
     dirty_tree,
     env_int,
     is_agy_payload,
     is_delegated_subagent,
-    parse_transcript_usage_and_tasks,
-    resolve_agy_app_dirs,
+    min_work_delta,
     resolve_agy_transcript_and_bytes,
     safe_point_blocked,
+    scan_transcript,
     stop_thresholds,
+    transcript_last_model,
     usage_context,
 )
 
@@ -138,14 +142,6 @@ def emit_noop(is_agy):
         print("{}")
 
 
-
-# Text that tells the owner a handoff is happening (checked only when none ran).
-HANDOFF_CLAIM = re.compile(
-    r"(?:next step|work) (?:happens|continues|moved) in the new tab|handing off now",
-    re.I,
-)
-
-
 def main():
     try:
         data = json.load(sys.stdin)
@@ -171,9 +167,9 @@ def main():
             emit_noop(True)
             return
         threshold, hard_cap = stop_thresholds(is_agy=True)
-        notices = (
-            os.environ.get("AGY_AUTO_HANDOFF_NOTICES") != "0"
-            and os.environ.get("CLAUDE_AUTO_HANDOFF_NOTICES") != "0"
+        notices = os.environ.get("AGY_AUTO_HANDOFF_NOTICES") != "0" and (
+            "AGY_AUTO_HANDOFF_NOTICES" in os.environ
+            or os.environ.get("CLAUDE_AUTO_HANDOFF_NOTICES") != "0"
         )
         raw_session_id = data.get("conversationId") or data.get("session_id") or "unknown"
         session_id = "".join(c for c in str(raw_session_id) if c.isalnum() or c in "-_") or "unknown"
@@ -189,7 +185,7 @@ def main():
         if is_delegated_subagent(data, transcript=transcript, session_id=session_id):
             emit_noop(True)
             return
-        usage, running, last_text, banner = parse_transcript_usage_and_tasks(transcript)
+        usage, running, last_text, banner, first_ctx, usage_count, is_handoff_boot = scan_transcript(transcript)
         context = (usage_context(usage) if usage else 0) or (total_bytes // BYTES_PER_TOKEN)
         if context <= 0:
             emit_noop(True)
@@ -206,7 +202,7 @@ def main():
             return
         if is_delegated_subagent(data, transcript=transcript, session_id=session_id):
             return
-        usage, running, last_text, banner = parse_transcript_usage_and_tasks(transcript)
+        usage, running, last_text, banner, first_ctx, usage_count, is_handoff_boot = scan_transcript(transcript)
         if not usage:
             return
         context = usage_context(usage)
@@ -245,6 +241,9 @@ def main():
             STATE_DIR / f"{prefix}-{session_id}.drain.dry",
             STATE_DIR / f"{prefix}-{session_id}.refire",
             STATE_DIR / f"{prefix}-{session_id}.refire.dry",
+            STATE_DIR / f"{prefix}-{session_id}.deltawait",
+            STATE_DIR / f"{prefix}-{session_id}.midturn",
+            STATE_DIR / f"{prefix}-{session_id}.midturn.dry",
         ):
             try:
                 p.unlink()
@@ -298,9 +297,22 @@ def main():
             emit_noop(is_agy)
         return
 
+    min_delta = min_work_delta(is_agy)
+    delta_blocked, first_ctx, delta = compute_work_delta_blocked(context, min_delta, first_ctx, usage_count, is_handoff_boot)
+    term_reason = data.get("terminationReason") or data.get("termination_reason") or ""
+    budget_exceeded = bool(is_agy and term_reason == "MAX_TOKEN_BUDGET_EXCEEDED")
+
+    if delta_blocked and context < hard_cap and not budget_exceeded:
+        deltawait = STATE_DIR / f"{prefix}-{session_id}.deltawait"
+        if not deltawait.exists():
+            mark(deltawait, context)
+            log(session_id, context, "delta-wait", f"work_delta={delta}<{min_delta}", notices=False)
+        emit_noop(is_agy)
+        return
+
     agy_not_idle = is_agy and (data.get("fullyIdle") is False)
     dirty = dirty_tree(cwd)
-    if safe_point_blocked(context, hard_cap, pending, dirty, agy_not_idle):
+    if (not budget_exceeded) and safe_point_blocked(context, hard_cap, pending, dirty, agy_not_idle):
         if drain.exists():
             emit_noop(is_agy)
             return
@@ -327,7 +339,11 @@ def main():
     n_running = len(pending) + (1 if agy_not_idle and not pending else 0)
     if n_running:
         mark(draining, context)
-    log(session_id, context, "handoff", "hard-cap" if (pending or agy_not_idle or dirty) else "safe-point", notices=notices)
+    (STATE_DIR / f"{prefix}-{session_id}.deltawait").unlink(missing_ok=True)
+    handoff_why = "budget-exceeded" if budget_exceeded else ("hard-cap" if (context >= hard_cap or pending or agy_not_idle or dirty or delta_blocked) else "safe-point")
+    log(session_id, context, "handoff", handoff_why, notices=notices)
+    active_model = transcript_last_model(transcript, is_agy=is_agy)
+    model_flag = f" --model {active_model}" if active_model else ""
     running_hint = f"--running {n_running}"
     running_note = (
         " That N is this hook's count; raise it if your own check in handoff skill step 3a "
@@ -335,6 +351,11 @@ def main():
     )
 
     if is_agy:
+        model_guidance = (
+            f"Keep --model {active_model} so the new tab inherits this session's model by default; only change --model if the user explicitly asked."
+            if active_model
+            else "herdr-handoff.sh inherits this session's current AGY model by default; pass --mode plan or --mode code for fallback routing."
+        )
         reason = (
             f"AUTO-HANDOFF: this conversation's context reached ~{context} tokens "
             f"(threshold {threshold}). Do not continue the current task. "
@@ -344,13 +365,18 @@ def main():
             "Governing Spec/Plan/Epic path, and Key User Decisions/Corrections so the "
             "new session does not lose the big picture), then run "
             f"{HANDOFF_SCRIPT} "
-            "\"<doc-path>\" --kind agy --mode plan --prompt \"auto-handoff: continue the work in "
-            f"the new tab\" {running_hint} (absolute path).{running_note} Run herdr-handoff.sh as a single standalone command (no | tail, no 2>&1, no &&, no --no-yolo, no --allow-subdir). (Pass --mode plan to stay on Gemini 4 Argon for orchestration/specs/epics; only pass --mode code for a pure single-lane mechanical task.) If running inside T3 Code with t3_thread_launch "
+            f"\"<doc-path>\" --kind agy --mode <code|plan>{model_flag} --prompt \"auto-handoff: continue the work in "
+            f"the new tab\" {running_hint} (absolute path).{running_note} Run herdr-handoff.sh as a single standalone command (no | tail, no 2>&1, no &&, no --no-yolo, no --allow-subdir). ({model_guidance}) Never reference raw transcript.jsonl paths in the handoff doc (summarize subagent findings in ## Late results). If running inside T3 Code with t3_thread_launch "
             "available, also call t3_thread_launch with the generated .prompt.txt content "
             "and workspaceStrategy=\"root\" (never spawn into a subfolder or .claude/worktrees/*). Report the handoff file path and Herdr/T3 "
             "target, then stop."
         )
     else:
+        claude_model_guidance = (
+            f"Keep --model {active_model} so the new tab inherits this session's model by default (still pass --mode code for implementation or --mode plan for specs/reviews/debugging)."
+            if active_model
+            else "Pick --mode code (starts Sonnet when no session model is set) when the Immediate Next Action is implementation: editing code, running/fixing tests, or executing tasks of an already-approved plan. Pick --mode plan (default model) for brainstorming, specs, plans, research, review/audit, or debugging with an unknown root cause; if unsure, pick plan."
+        )
         reason = (
             f"AUTO-HANDOFF: this session's context reached {context} tokens "
             f"(threshold {threshold}). Do not continue the current task. "
@@ -360,12 +386,8 @@ def main():
             "Governing Spec/Plan/Epic path, and Key User Decisions/Corrections so the "
             "new session does not lose the big picture), then run "
             f"{HANDOFF_SCRIPT} "
-            "\"<doc-path>\" --kind claude --mode <code|plan> --prompt \"auto-handoff: "
-            f"continue the work in the new tab\" {running_hint}.{running_note} Run herdr-handoff.sh as a single standalone command (no | tail, no 2>&1, no &&, no --no-yolo, no --allow-subdir). Pick --mode code (starts Sonnet) when "
-            "the Immediate Next Action is implementation: editing code, running/fixing "
-            "tests, or executing tasks of an already-approved plan. Pick --mode plan "
-            "(default model) for brainstorming, specs, plans, research, review/audit, "
-            "or debugging with an unknown root cause; if unsure, pick plan. "
+            f"\"<doc-path>\" --kind claude --mode <code|plan>{model_flag} --prompt \"auto-handoff: "
+            f"continue the work in the new tab\" {running_hint}.{running_note} Run herdr-handoff.sh as a single standalone command (no | tail, no 2>&1, no &&, no --no-yolo, no --allow-subdir). {claude_model_guidance} "
             "Report the handoff file path, Herdr tab id, and chosen mode, then stop."
         )
     emit_decision(is_agy, reason)

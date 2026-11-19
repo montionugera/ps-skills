@@ -270,6 +270,8 @@ def extract_handoff_args(script_args):
     has_help_or_dry_run = False
     has_no_yolo = False
     has_allow_subdir = False
+    kind_val = None
+    model_val = None
     clean_args = []
 
     i = 0
@@ -288,7 +290,12 @@ def extract_handoff_args(script_args):
         elif arg in OPTIONS_WITH_VALUE:
             clean_args.append(arg)
             if i + 1 < len(script_args):
-                clean_args.append(script_args[i + 1])
+                val = script_args[i + 1]
+                if arg == "--kind":
+                    kind_val = val
+                elif arg == "--model":
+                    model_val = val
+                clean_args.append(val)
                 i += 2
             else:
                 i += 1
@@ -308,8 +315,78 @@ def extract_handoff_args(script_args):
         "has_help_or_dry_run": has_help_or_dry_run,
         "has_no_yolo": has_no_yolo,
         "has_allow_subdir": has_allow_subdir,
+        "kind_val": kind_val,
+        "model_val": model_val,
         "clean_args": clean_args,
     }
+
+
+def _strip_option_with_value(args_list, flag_name):
+    out = []
+    i = 0
+    while i < len(args_list):
+        if args_list[i] == flag_name:
+            i += 2 if (i + 1 < len(args_list)) else 1
+        else:
+            out.append(args_list[i])
+            i += 1
+    return out
+
+
+def _transcript_caller_model_and_last_user_text(transcript_path):
+    """Read (last_main_assistant_model, last_human_user_text) from a Claude JSONL transcript.
+
+    Skips `isMeta=True` skill expansions (e.g. `/handoff` injecting `SKILL.md`, which mentions
+    `opus`/`sonnet`), `<task-notification>` wakeups, and Turn-0 `Handoff file:` bootstrap prompts,
+    while capturing genuine human prompts and `AskUserQuestion` answers.
+    """
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return "", ""
+    caller_model = ""
+    last_user_text = ""
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"assistant"' not in line and '"user"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(entry, dict) or entry.get("isSidechain") or entry.get("isMeta"):
+                    continue
+                etype = entry.get("type")
+                msg = entry.get("message") or {}
+                if etype == "assistant" and isinstance(msg, dict):
+                    m = str(msg.get("model") or "").strip()
+                    if m and not m.startswith("<"):
+                        caller_model = m
+                elif etype == "user" and isinstance(msg, dict):
+                    c = msg.get("content")
+                    candidate = ""
+                    if isinstance(c, str) and c.strip():
+                        candidate = c.strip()
+                    elif isinstance(c, list):
+                        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
+                            for b in c:
+                                if isinstance(b, dict) and b.get("type") == "tool_result":
+                                    rc = b.get("content")
+                                    rtxt = rc if isinstance(rc, str) else json.dumps(rc) if rc else ""
+                                    if "User has answered your questions" in rtxt:
+                                        candidate = rtxt
+                        else:
+                            parts = [b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"]
+                            candidate = " ".join(parts).strip()
+                    if not candidate:
+                        continue
+                    cleaned = re.sub(r"<system-reminder>[\s\S]*?</system-reminder>", " ", candidate, flags=re.I)
+                    cleaned = re.sub(r"<task-notification>[\s\S]*?</task-notification>", " ", cleaned, flags=re.I).strip()
+                    if not cleaned or cleaned.startswith("Handoff file:") or "--- BEGIN HANDOFF DOCUMENT" in cleaned:
+                        continue
+                    last_user_text = cleaned
+    except OSError:
+        return "", ""
+    return caller_model, last_user_text
 
 
 def format_clean_command(clean_args):
@@ -317,7 +394,7 @@ def format_clean_command(clean_args):
     return " ".join(quoted)
 
 
-def check_command(command: str, cwd: str = None):
+def check_command(command: str, cwd: str = None, transcript_path: str = None):
     """Return None if allowed, or a detailed permissionDecisionReason string if denied."""
     if os.environ.get("HANDOFF_BASH_GUARD") == "0":
         return None
@@ -381,10 +458,15 @@ def check_command(command: str, cwd: str = None):
         or os.environ.get("HERDR_HANDOFF_ALLOW_SUBDIR")
         or ""
     ).lower() in ("1", "true")
+    allow_model_switch_env = str(
+        target["env_vars"].get("HERDR_HANDOFF_ALLOW_MODEL_SWITCH")
+        or os.environ.get("HERDR_HANDOFF_ALLOW_MODEL_SWITCH")
+        or ""
+    ).lower() in ("1", "true")
     non_exempt_env = {
         k: v
         for k, v in target["env_vars"].items()
-        if k not in ("HERDR_HANDOFF_ALLOW_NO_YOLO", "HERDR_HANDOFF_ALLOW_SUBDIR")
+        if k not in ("HERDR_HANDOFF_ALLOW_NO_YOLO", "HERDR_HANDOFF_ALLOW_SUBDIR", "HERDR_HANDOFF_ALLOW_MODEL_SWITCH")
     }
     if target["script_tok"] not in ALLOWED_SCRIPT_PATHS or target["wrappers"] or non_exempt_env:
         short_codes.append("non-canonical script invocation")
@@ -414,6 +496,7 @@ def check_command(command: str, cwd: str = None):
     # Check 5: Handoff file must exist on disk before invoking `herdr-handoff.sh`
     handoff_path = arg_info["handoff_path"]
     base_cwd = cwd or os.getcwd()
+    resolved_doc = None
     if not handoff_path:
         short_codes.append("missing handoff file argument")
         reasons.append(
@@ -429,10 +512,53 @@ def check_command(command: str, cwd: str = None):
                 "using the `Write` tool FIRST, then run `herdr-handoff.sh` in the next tool call."
             )
 
+    # Check 4c: Prevent unasked downgrade/switch from an active `claude-fable*` session (via CLI `--model`
+    # OR doc header `**Model:**` when the owner opened this session on Fable 5.2).
+    strip_unasked_model = False
+    req_model = (arg_info["model_val"] or "").strip()
+    req_kind = (arg_info["kind_val"] or "").strip().lower()
+    doc_model = ""
+    if resolved_doc and os.path.isfile(resolved_doc):
+        try:
+            with open(resolved_doc, "r", encoding="utf-8", errors="replace") as df:
+                head_lines = "".join(df.readline() for _ in range(25))
+            m_doc = re.search(r"\*\*Model:\*\*\s*`([^`<]+)`", head_lines)
+            if m_doc:
+                doc_model = m_doc.group(1).strip()
+        except OSError:
+            pass
+    effective_override = req_model or doc_model
+    if effective_override and not allow_model_switch_env and req_kind in ("", "claude") and "fable" not in effective_override.lower():
+        caller_model, last_user_text = _transcript_caller_model_and_last_user_text(transcript_path)
+        if "fable" in caller_model.lower():
+            user_lc = last_user_text.lower()
+            eff_lc = effective_override.lower()
+            model_tokens = {eff_lc}
+            for alias in ("opus", "sonnet", "haiku"):
+                if alias in eff_lc:
+                    model_tokens.add(alias)
+            if not any(re.search(r"\b" + re.escape(tok) + r"\b", user_lc) for tok in model_tokens):
+                if req_model:
+                    strip_unasked_model = True
+                short_codes.append(f"unasked model switch from {caller_model} to {effective_override}")
+                doc_fix_note = (
+                    f" Also remove **Model:** `{doc_model}` from `{handoff_path}` (or set it to `{caller_model}`)."
+                    if (doc_model and "fable" not in doc_model.lower())
+                    else ""
+                )
+                reasons.append(
+                    f"This session is running on `{caller_model}`, and the user did not ask to switch models. "
+                    f"Do NOT switch to `{effective_override}` on handoff (handoff preserves the owner's chosen session model, "
+                    f"including `{caller_model}`, overriding general subagent routing rules). Omit `--model` so "
+                    f"`herdr-handoff.sh` inherits `{caller_model}` automatically.{doc_fix_note}"
+                )
+
     if not reasons:
         return None
 
     clean_args = list(arg_info["clean_args"])
+    if strip_unasked_model:
+        clean_args = _strip_option_with_value(clean_args, "--model")
     if not handoff_path:
         clean_args = ["/tmp/handoff-<YYYY-MM-DD-HHMMSS>-<slug>.md"] + clean_args
     clean_cmd = format_clean_command(clean_args)
@@ -496,8 +622,13 @@ def main() -> int:
 
     command = tool_input.get("command") or tool_input.get("CommandLine") or ""
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    transcript_path = (
+        payload.get("transcript_path")
+        if isinstance(payload.get("transcript_path"), str)
+        else (payload.get("transcriptPath") if isinstance(payload.get("transcriptPath"), str) else None)
+    )
 
-    reason_msg = check_command(command, cwd=cwd)
+    reason_msg = check_command(command, cwd=cwd, transcript_path=transcript_path)
     if not reason_msg:
         return 0
 

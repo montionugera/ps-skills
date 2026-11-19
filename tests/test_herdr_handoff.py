@@ -39,8 +39,8 @@ echo "$*" >> "$FAKE_LOG"
 case "$1 $2" in
   "status server") echo "${FAKE_SERVER_STATUS:-status: running}" ;;
   "pane current")
-    if [ -n "${FAKE_CALLER_WS:-}" ] || [ -n "${FAKE_CALLER_CWD:-}" ]; then
-      echo '{"result":{"pane":{"pane_id":"p1","tab_id":"'"${FAKE_CALLER_TAB:-}"'","workspace_id":"'"${FAKE_CALLER_WS:-}"'","cwd":"'"${FAKE_CALLER_CWD:-}"'"}}}'
+    if [ -n "${FAKE_CALLER_WS:-}" ] || [ -n "${FAKE_CALLER_CWD:-}" ] || [ -n "${FAKE_CALLER_AGENT:-}" ] || [ -n "${FAKE_CALLER_SESSION:-}" ]; then
+      echo '{"result":{"pane":{"pane_id":"p1","tab_id":"'"${FAKE_CALLER_TAB:-}"'","workspace_id":"'"${FAKE_CALLER_WS:-}"'","cwd":"'"${FAKE_CALLER_CWD:-}"'","agent":"'"${FAKE_CALLER_AGENT:-}"'","agent_session":{"agent":"'"${FAKE_CALLER_AGENT:-}"'","kind":"id","value":"'"${FAKE_CALLER_SESSION:-}"'"}}}}'
     fi
     ;;
   "tab get") echo '{"result":{"tab":{"tab_id":"'"$3"'","label":"'"${FAKE_SOURCE_LABEL:-zsh}"'","focused":'"${FAKE_SOURCE_FOCUSED:-true}"'}}}' ;;
@@ -86,7 +86,7 @@ class HerdrHandoffTest(unittest.TestCase):
         self.ledger = d / "state" / "ledger.jsonl"
 
     def run_script(self, *args, status="working", timeout=2, extra_env=None):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE", "ANTIGRAVITY", "AGY", "CODEX", "OPENCODE", "CURSOR", "GEMINI"))}
         env.update({
             "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}", "FAKE_LOG": str(self.log),
             "FAKE_STATUS": status, "HERDR_TAB_ID": "t1", "T3CODE_HOME": self.tmp.name,
@@ -642,6 +642,57 @@ class HerdrHandoffTest(unittest.TestCase):
         self.assertIn("TARGET_WORKSPACE=wP", r.stdout)
         self.assertFalse(self.log.exists() and self.create_args())
 
+    def prompt_text(self):
+        return Path(str(self.doc)[:-3] + ".prompt.txt").read_text()
+
+    def test_core_note_named_in_the_doc_is_pasted_into_the_child_prompt(self):
+        note = Path(self.tmp.name) / "core-notes" / "repo--stream.md"
+        note.parent.mkdir()
+        note.write_text("## Goal\n- owner said: keep the frame\n## Checklist\n- [ ] step 4\n")
+        self.doc.write_text(f"# Handoff: x\n**Core note:** `{note}`\n## 1\n## 4\n")
+        r = self.run_script("--running", "1")
+        self.assertNotIn("no '**Core note:**", r.stderr)
+        prompt = self.prompt_text()
+        self.assertIn(f"BEGIN SESSION CORE NOTE ({note})", prompt)
+        self.assertIn("owner said: keep the frame", prompt)
+        self.assertGreater(prompt.index("BEGIN SESSION CORE NOTE"), prompt.index("END HANDOFF DOCUMENT"))
+
+    def test_missing_core_note_line_or_file_warns_and_adds_nothing(self):
+        for body in ("# Handoff: x\n## 1\n## 4\n", "# Handoff: x\n**Core note:** `/nonexistent/note.md`\n## 1\n## 4\n"):
+            self.reset_claim()
+            self.doc.write_text(body)
+            r = self.run_script("--running", "1")
+            self.assertIn("no '**Core note:** <path>' line", r.stderr)
+            self.assertNotIn("SESSION CORE NOTE", self.prompt_text())
+
+    def test_oversized_core_note_is_capped_in_the_prompt(self):
+        note = Path(self.tmp.name) / "big.md"
+        note.write_text("k" * 9000 + "TAIL")
+        self.doc.write_text(f"# Handoff: x\n**Core note:** {note}\n## 1\n## 4\n")
+        self.run_script("--running", "1")
+        self.assertNotIn("TAIL", self.prompt_text())
+
+    def test_doc_larger_than_6144_bytes_emits_warning(self):
+        self.doc.write_text("# Handoff: x\n## 1\n## 4\n" + ("x" * 6500) + "\n")
+        r = self.run_script("--running", "1")
+        self.assertIn("⚠️  Handoff doc is", r.stderr)
+        self.assertIn("target <= 4096-6144", r.stderr)
+
+    def test_doc_referencing_raw_transcript_jsonl_emits_warning(self):
+        self.doc.write_text("# Handoff: x\n## 1\n## 4\nCheck logs in ~/.gemini/antigravity-cli/brain/123/.system_generated/logs/transcript.jsonl\n")
+        r = self.run_script("--running", "1")
+        self.assertIn("⚠️  Handoff doc references raw transcript JSONL logs", r.stderr)
+
+    def test_prompt_txt_contains_turn_1_cold_start_discipline(self):
+        self.doc.write_text("# Handoff: x\n## 1\n## 4\n")
+        self.run_script("--running", "1")
+        prompt = self.doc.with_suffix(".prompt.txt").read_text()
+        self.assertIn("Turn-1 Cold-Start Discipline (keep Turn-1 growth <= 15K tokens):", prompt)
+        self.assertIn("1. Run Section 0's claim command + Section 4.1's immediate command ONLY in Turn 1.", prompt)
+        self.assertIn("2. Do NOT speculatively bulk-read Governing Specs, SKILL.md files, or Section 6 Target Files on Turn 1", prompt)
+        self.assertIn("3. NEVER call read_file/Read on raw transcript*.jsonl logs", prompt)
+        self.assertIn("4. Use 'graft ask' / 'graft skeleton' and bounded line ranges before opening source files", prompt)
+
     # --- claim normalisation -----------------------------------------------
 
     def test_placeholder_is_filled_in_the_doc_and_the_prompt(self):
@@ -743,7 +794,7 @@ class HerdrHandoffTest(unittest.TestCase):
         self.assertIn("Waiting for permission", row["reason"])
 
     def run_without_cwd(self, *args, extra_env=None):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE"))}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR", "T3", "CLAUDE", "ANTIGRAVITY", "AGY", "CODEX", "OPENCODE", "CURSOR", "GEMINI"))}
         env.update({
             "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}", "FAKE_LOG": str(self.log),
             "FAKE_STATUS": "working", "T3CODE_HOME": self.tmp.name, "FAKE_CLAIM_DIR": f"{self.doc}.claim",
@@ -1210,6 +1261,283 @@ class HerdrHandoffTest(unittest.TestCase):
         r = self.run_script("--running", "1", extra_env={"HERDR_HANDOFF_LEDGER": f"{blocker}/x/ledger.jsonl"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("HANDOFF CONFIRMED", r.stdout)
+
+    # --- session agent + model + effort derivation -------------------------
+
+    def _clean_env(self, extra_env=None):
+        stripped_prefixes = ("HERDR", "T3", "CLAUDE", "ANTIGRAVITY", "AGY", "CODEX", "OPENCODE", "CURSOR", "GEMINI")
+        env = {k: v for k, v in os.environ.items() if not k.startswith(stripped_prefixes)}
+        empty_quota = Path(self.tmp.name) / "isolated_quota"
+        empty_quota.mkdir(parents=True, exist_ok=True)
+        env.update({
+            "PATH": f"{Path(self.tmp.name) / 'bin'}:{env['PATH']}",
+            "FAKE_LOG": str(self.log),
+            "FAKE_STATUS": "working",
+            "HERDR_TAB_ID": "t1",
+            "T3CODE_HOME": self.tmp.name,
+            "HERDR_HANDOFF_CONFIRM_TIMEOUT": "2",
+            "FAKE_CLAIM_DIR": f"{self.doc}.claim",
+            "HERDR_HANDOFF_LEDGER": str(self.ledger),
+            "HERDR_PLUGIN_STATE_DIR": str(empty_quota),
+            "CLAUDE_CONFIG_FILE": str(empty_quota / "no-claude.json"),
+            "JEV_GATE_BIN": str(empty_quota / "no-jev"),
+            "HERDR_HANDOFF_TEST_SESSION": "1",
+        })
+        env.update(extra_env or {})
+        return env
+
+    def _make_agy_session(self, conv_id="conv-carbon-1", planner_models=("gemini-4-carbon-medium",), settings_change=None):
+        app_dir = Path(self.tmp.name) / "agy-app"
+        logs_dir = app_dir / "brain" / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "<USER_REQUEST>hello</USER_REQUEST>"})]
+        for m in planner_models:
+            lines.append(json.dumps({"type": "PLANNER_RESPONSE", "source": "MODEL", "model": m, "input_tokens": 1000}))
+        if settings_change:
+            lines.append(json.dumps({
+                "type": "USER_INPUT",
+                "source": "USER_EXPLICIT",
+                "content": (
+                    "<USER_REQUEST>handoff</USER_REQUEST>\n"
+                    "<USER_SETTINGS_CHANGE>\n"
+                    f"The user changed setting `Model Selection` from None to {settings_change}. "
+                    "No need to comment on this change if the user doesn't ask about it. "
+                    "If reporting what model you are, please use a human readable name instead of the exact string.\n"
+                    "</USER_SETTINGS_CHANGE>"
+                ),
+            }))
+        (logs_dir / "transcript.jsonl").write_text("\n".join(lines) + "\n")
+        return {
+            "ANTIGRAVITY_AGENT": "1",
+            "ANTIGRAVITY_APP_DATA_DIR": str(app_dir),
+            "ANTIGRAVITY_CONVERSATION_ID": conv_id,
+        }
+
+    def test_agy_session_carbon_medium_derives_agent_and_model_by_default(self):
+        agy_env = self._make_agy_session(planner_models=("gemini-4-argon-medium", "gemini-4-carbon-medium"))
+        # Also simulate high codex quota to verify active AGY Carbon Medium session is NOT hijacked to codex
+        quota_dir = Path(self.tmp.name) / "isolated_quota"
+        quota_dir.mkdir(parents=True, exist_ok=True)
+        (quota_dir / "codex-app-server.json").write_text(json.dumps({
+            "windows": [
+                {"kind": "five_hour", "remaining_percent": 95.0, "resets_at": 9999999999},
+                {"kind": "weekly", "remaining_percent": 95.0, "resets_at": 9999999999},
+            ],
+        }))
+        # Run with NO --kind, NO --mode, NO --model: must derive agy + gemini-4-carbon-medium!
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=self._clean_env(agy_env), timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log_text = self.log.read_text()
+        self.assertIn("agy --dangerously-skip-permissions --model gemini-4-carbon-medium -i", log_text)
+        self.assertIn("from calling session", r.stdout)
+
+        # Even when --mode plan or --mode code is passed without --model, calling session's Carbon Medium wins!
+        for mode in ("plan", "code"):
+            with self.subTest(mode=mode):
+                self.reset_claim()
+                self.log.unlink(missing_ok=True)
+                rm = subprocess.run(
+                    ["bash", str(SCRIPT), str(self.doc), "--kind", "agy", "--mode", mode,
+                     "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+                    capture_output=True, text=True, env=self._clean_env(agy_env), timeout=60,
+                )
+                self.assertEqual(rm.returncode, 0, rm.stderr)
+                self.assertIn("agy --dangerously-skip-permissions --model gemini-4-carbon-medium -i", self.log.read_text())
+
+    def test_agy_human_display_names_and_settings_change_normalize_cleanly(self):
+        # 1) <USER_SETTINGS_CHANGE> after last planner turn wins and normalizes "Gemini 4 Carbon (Medium)"
+        agy_env = self._make_agy_session(
+            planner_models=("gemini-4-argon-medium",),
+            settings_change="Gemini 4 Carbon (Medium)",
+        )
+        r1 = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--multiplexer", "herdr", "--cwd", self.tmp.name, "--dry-run"],
+            capture_output=True, text=True, env=self._clean_env(agy_env), timeout=30,
+        )
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        self.assertIn("AGENT_KIND=agy\n", r1.stdout)
+        self.assertIn("RESOLVED_MODEL=gemini-4-carbon-medium\n", r1.stdout)
+        self.assertIn("MODEL_SOURCE=calling session\n", r1.stdout)
+
+        # 2) Explicit human-readable --model "Carbon Medium" normalizes to gemini-4-carbon-medium
+        r2 = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "agy", "--model", "Carbon Medium",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--dry-run"],
+            capture_output=True, text=True, env=self._clean_env(), timeout=30,
+        )
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("RESOLVED_MODEL=gemini-4-carbon-medium\n", r2.stdout)
+        self.assertIn("MODEL_SOURCE=--model\n", r2.stdout)
+
+        # 3) Dotted display names ("Gemini 3.8 Flash (High)", "Claude Opus 5.5 (Medium)") do not truncate at '.'
+        for display, expected in (
+            ("Gemini 3.8 Flash (High)", "gemini-3.8-flash-high"),
+            ("Claude Opus 5.5 (Medium)", "claude-opus-5-5-medium"),
+        ):
+            with self.subTest(display=display):
+                env_dot = self._make_agy_session(planner_models=("gemini-4-carbon-medium",), settings_change=display)
+                rd = subprocess.run(
+                    ["bash", str(SCRIPT), str(self.doc), "--multiplexer", "herdr", "--cwd", self.tmp.name, "--dry-run"],
+                    capture_output=True, text=True, env=self._clean_env(env_dot), timeout=30,
+                )
+                self.assertEqual(rd.returncode, 0, rd.stderr)
+                self.assertIn(f"RESOLVED_MODEL={expected}\n", rd.stdout)
+
+    def test_fable_carries_over_and_shell_unsafe_effort_is_blocked_and_agy_effort_carries_over(self):
+        # 1) Active claude-fable-5-2 session carries over claude-fable-5-2 (and explicit --model "Claude Fable 5.2" works)
+        cfg = Path(self.tmp.name) / "claude-fable-cfg"
+        proj = cfg / "projects" / "-repo"
+        proj.mkdir(parents=True)
+        sid = "sid-fable-1"
+        (proj / f"{sid}.jsonl").write_text(
+            json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": "claude-opus-5-5"}}) + "\n" +
+            json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": "claude-fable-5-2"}}) + "\n"
+        )
+        env_c = self._clean_env({"CLAUDE_CONFIG_DIR": str(cfg), "CLAUDE_CODE_SESSION_ID": sid, "CLAUDE_EFFORT": "medium"})
+        rc = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env_c, timeout=60,
+        )
+        self.assertEqual(rc.returncode, 0, rc.stderr)
+        self.assertIn("claude --dangerously-skip-permissions --model claude-fable-5-2 --effort medium --name", self.log.read_text())
+
+        rf = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--model", "Claude Fable 5.2",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--dry-run"],
+            capture_output=True, text=True, env=self._clean_env(), timeout=30,
+        )
+        self.assertEqual(rf.returncode, 0, rf.stderr)
+        self.assertIn("RESOLVED_MODEL=claude-fable-5-2\n", rf.stdout)
+
+        # 2) Shell-unsafe --effort or doc **Effort:** is rejected cleanly
+        self.reset_claim()
+        self.log.unlink(missing_ok=True)
+        re_bad = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "codex", "--effort", 'high"; touch /tmp/pwn #',
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--dry-run"],
+            capture_output=True, text=True, env=self._clean_env(), timeout=30,
+        )
+        self.assertEqual(re_bad.returncode, 1)
+        self.assertIn("Invalid --effort", re_bad.stderr)
+
+        # 3) AGY_EFFORT carries over to `agy --effort`
+        agy_env = self._make_agy_session(planner_models=("gemini-pro-orchestrator",))
+        agy_env["AGY_EFFORT"] = "high"
+        ra = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=self._clean_env(agy_env), timeout=60,
+        )
+        self.assertEqual(ra.returncode, 0, ra.stderr)
+        self.assertIn("agy --dangerously-skip-permissions --model gemini-pro-orchestrator --effort high -i", self.log.read_text())
+
+        # 4) Cross-agent --kind codex ignores doc **Agent:** `agy` | **Model:** `gemini-4-carbon-medium`
+        self.doc.write_text("# Handoff: x\n**Agent:** `agy` | **Model:** `gemini-4-carbon-medium`\n## 1. Main\n## 4. Next\n")
+        rx = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "codex", "--multiplexer", "herdr", "--cwd", self.tmp.name, "--dry-run"],
+            capture_output=True, text=True, env=self._clean_env(), timeout=30,
+        )
+        self.assertEqual(rx.returncode, 0, rx.stderr)
+        self.assertIn("RESOLVED_MODEL=gpt-6.1-terra\n", rx.stdout)
+
+        # 5) Quota auto-switch from claude (CLAUDE_EFFORT=auto) -> agy clears incompatible effort & sets MODEL_SOURCE=quota-switch
+        quota_dir = Path(self.tmp.name) / "quota_eff_switch"
+        quota_dir.mkdir(parents=True, exist_ok=True)
+        (quota_dir / "claude-statusline.json").write_text(json.dumps({
+            "provider": "claude",
+            "windows": [{"kind": "weekly", "remaining_percent": 2.0, "resets_at": 9999999999}],
+        }))
+        env_qs = self._clean_env({
+            "CLAUDE_CONFIG_DIR": str(cfg),
+            "CLAUDE_CODE_SESSION_ID": sid,
+            "CLAUDE_EFFORT": "auto",
+            "HERDR_PLUGIN_STATE_DIR": str(quota_dir),
+        })
+        rqs = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "claude", "--mode", "plan",
+             "--multiplexer", "herdr", "--cwd", self.tmp.name, "--dry-run"],
+            capture_output=True, text=True, env=env_qs, timeout=30,
+        )
+        self.assertEqual(rqs.returncode, 0, rqs.stderr)
+        self.assertIn("AGENT_KIND=agy\n", rqs.stdout)
+        self.assertIn("RESOLVED_MODEL=gemini-4-argon-medium\n", rqs.stdout)
+        self.assertIn("MODEL_SOURCE=quota-switch\n", rqs.stdout)
+        self.assertIn("RESOLVED_EFFORT=default\n", rqs.stdout)
+
+    def test_claude_session_derives_agent_model_and_effort_via_herdr_pane_or_env(self):
+        cfg = Path(self.tmp.name) / "claude-cfg"
+        proj = cfg / "projects" / "-repo"
+        proj.mkdir(parents=True)
+        sid = "51fd63d4-d46d-4b80-9ae5-4255e7704be5"
+        (proj / f"{sid}.jsonl").write_text(
+            json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": "claude-sonnet-5-5"}}) + "\n" +
+            json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": "claude-opus-5-5"}}) + "\n" +
+            json.dumps({"type": "assistant", "isSidechain": False, "message": {"model": "<synthetic>"}}) + "\n"
+        )
+        # Case A: CLAUDE_CODE_SESSION_ID is NOT set, derived via Herdr live pane agent_session!
+        env_pane = self._clean_env({
+            "CLAUDE_CONFIG_DIR": str(cfg),
+            "CLAUDE_EFFORT": "medium",
+            "HERDR_PANE_ID": "p1",
+            "FAKE_CALLER_WS": "w3",
+            "FAKE_CALLER_TAB": "t1",
+            "FAKE_CALLER_AGENT": "claude",
+            "FAKE_CALLER_SESSION": sid,
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env_pane, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("claude --dangerously-skip-permissions --model claude-opus-5-5 --effort medium --name", self.log.read_text())
+
+    def test_codex_session_derives_agent_model_and_effort_by_default(self):
+        codex_dir = Path(self.tmp.name) / "codex-sessions" / "2026" / "11" / "17"
+        codex_dir.mkdir(parents=True)
+        tid = "01a1e572-ca2e-7ee0-9ecb-1a9db3fbc48c"
+        (codex_dir / f"rollout-2026-11-17T00-41-07-{tid}.jsonl").write_text(
+            json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.4", "effort": "high"}}) + "\n"
+        )
+        env_codex = self._clean_env({
+            "CODEX_THREAD_ID": tid,
+            "CODEX_SESSIONS_DIR": str(Path(self.tmp.name) / "codex-sessions"),
+        })
+        r = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--multiplexer", "herdr", "--cwd", self.tmp.name, "--running", "1"],
+            capture_output=True, text=True, env=env_codex, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('codex --dangerously-bypass-approvals-and-sandbox -c model="gpt-5.4" -c model_reasoning_effort="high"', self.log.read_text())
+
+    def test_precedence_explicit_beats_doc_beats_session_and_cross_agent_does_not_leak_model(self):
+        agy_env = self._make_agy_session(planner_models=("gemini-4-carbon-medium",))
+        # Doc **Model:** beats calling session
+        self.doc.write_text("# Handoff: x\n**Agent:** `agy` | **Model:** `gemini-4-argon-high`\n## 1. Main\n## 4. Next\n")
+        r_doc = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--multiplexer", "herdr", "--cwd", self.tmp.name, "--dry-run"],
+            capture_output=True, text=True, env=self._clean_env(agy_env), timeout=30,
+        )
+        self.assertIn("RESOLVED_MODEL=gemini-4-argon-high\n", r_doc.stdout)
+        self.assertIn("MODEL_SOURCE=doc\n", r_doc.stdout)
+
+        # Explicit --model beats doc **Model:**
+        r_exp = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--model", "carbon-low", "--multiplexer", "herdr", "--cwd", self.tmp.name, "--dry-run"],
+            capture_output=True, text=True, env=self._clean_env(agy_env), timeout=30,
+        )
+        self.assertIn("RESOLVED_MODEL=gemini-4-carbon-low\n", r_exp.stdout)
+        self.assertIn("MODEL_SOURCE=--model\n", r_exp.stdout)
+
+        # Cross-agent (--kind codex from an agy session, with plain doc) does NOT leak gemini-4-carbon-medium to codex
+        self.doc.write_text("# Handoff: x\n## 1. Main\n## 4. Next\n")
+        r_cross = subprocess.run(
+            ["bash", str(SCRIPT), str(self.doc), "--kind", "codex", "--multiplexer", "herdr", "--cwd", self.tmp.name, "--dry-run"],
+            capture_output=True, text=True, env=self._clean_env(agy_env), timeout=30,
+        )
+        self.assertIn("AGENT_KIND=codex\n", r_cross.stdout)
+        self.assertIn("RESOLVED_MODEL=gpt-6.1-terra\n", r_cross.stdout)
 
 
 if __name__ == "__main__":

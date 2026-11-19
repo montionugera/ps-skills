@@ -279,11 +279,11 @@ def test_ship_absorbs_a_hotfix_that_lands_during_gate1(
     real = ship_mod._run_precheck
     calls = []
 
-    def hotfix_lands_during_first_gate(tree):
+    def hotfix_lands_during_first_gate(tree, **kw):
         if not calls:
             _land_on_origin_main(repo, "hotfix.txt", "mid-gate\n")
         calls.append(tree)
-        return real(tree)
+        return real(tree, **kw)
 
     monkeypatch.setattr(ship_mod, "_run_precheck", hotfix_lands_during_first_gate)
     res = ship_current_work(wt)

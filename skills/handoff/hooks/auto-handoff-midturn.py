@@ -18,8 +18,10 @@
 #   CLAUDE_AUTO_HANDOFF=0 / AGY_AUTO_HANDOFF=0
 #       disable (same switch as the Stop hook)
 #   CLAUDE_AUTO_HANDOFF_MIDTURN_LEVELS / AGY_AUTO_HANDOFF_MIDTURN_LEVELS
-#       comma list of token levels (default 250000,300000,400000,500000 for Claude;
-#       100000,128000,160000,200000 for AGY)
+#       comma list of token levels (default 320000,400000,480000,560000 for Claude;
+#       300000,380000,460000,520000 for AGY)
+#   CLAUDE_AUTO_HANDOFF_MIN_DELTA / AGY_AUTO_HANDOFF_MIN_DELTA
+#       minimum active session growth before auto-handoff fires (default 100000)
 #   CLAUDE_AUTO_HANDOFF_NOTICES=1 / AGY_AUTO_HANDOFF_NOTICES=1
 #       add the note to the context (Claude default: log only unless =1;
 #       AGY default: emit unless AGY_AUTO_HANDOFF_NOTICES=0)
@@ -29,7 +31,7 @@
 #       marker files (default /tmp)
 #   AGY_APP_DATA_DIR / ANTIGRAVITY_APP_DATA_DIR
 #       override Antigravity app data root
-
+#
 import json
 import os
 import pathlib
@@ -39,19 +41,20 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from handoff_usage import (
     BYTES_PER_TOKEN,
-    active_transcript_bytes,
     dirty_tree,
     is_agy_payload,
+    is_compaction_reset_line,
     is_delegated_subagent,
+    min_work_delta,
     parse_transcript_usage_and_tasks,
-    resolve_agy_app_dirs,
     resolve_agy_transcript_and_bytes,
     stop_thresholds,
     stop_would_hand_off,
+    transcript_work_delta_blocked,
     usage_context,
 )
 
-TAIL_BYTES = 1 << 20  # the newest usage record is always near the end
+TAIL_BYTES = 2 << 20  # the newest usage record is always near the end
 
 
 def levels(is_agy=False):
@@ -59,7 +62,7 @@ def levels(is_agy=False):
     try:
         return sorted(int(x) for x in os.environ[env_key].split(","))
     except (KeyError, ValueError):
-        return [100000, 128000, 160000, 200000] if is_agy else [250000, 300000, 400000, 500000]
+        return [300000, 380000, 460000, 520000] if is_agy else [320000, 400000, 480000, 560000]
 
 
 def latest_context(transcript):
@@ -74,7 +77,7 @@ def latest_context(transcript):
     if size > TAIL_BYTES:
         lines = lines[1:]  # the first line of the tail is cut in the middle
     for line in reversed(lines):
-        if ("CHECKPOINT" in line and "type" in line) or "# Resuming from a compaction" in line:
+        if is_compaction_reset_line(line):
             break
         if '"usage"' not in line and '"PLANNER_RESPONSE"' not in line:
             continue
@@ -110,11 +113,12 @@ def next_stop_hands_off(data, is_agy, transcript, context, flag, drain):
     if drain.exists():
         return False
     threshold, hard_cap = stop_thresholds(is_agy)
+    delta_blocked, _, _ = transcript_work_delta_blocked(transcript, context, min_work_delta(is_agy))
     if is_agy:
-        return stop_would_hand_off(context, threshold, hard_cap, flag.exists(), (), False, agy_not_idle=True)
+        return stop_would_hand_off(context, threshold, hard_cap, flag.exists(), (), False, agy_not_idle=True, delta_blocked=delta_blocked)
     _, running, _, _ = parse_transcript_usage_and_tasks(transcript)
     return stop_would_hand_off(context, threshold, hard_cap, flag.exists(), running,
-                               dirty_tree(data.get("cwd")))
+                               dirty_tree(data.get("cwd")), delta_blocked=delta_blocked)
 
 
 def main():
