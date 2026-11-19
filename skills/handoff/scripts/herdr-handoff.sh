@@ -43,7 +43,7 @@ Options:
   --cwd <dir>                 Working directory (auto-hoisted to repo/workspace root unless --allow-subdir)
   --allow-subdir              Keep subfolder/worktree cwd as-is (not recommended: triggers Trust prompts)
   --prompt <text>             Custom prompt override
-  --mode <code|plan>          Fallback handoff type when no session/--model is set (claude: code->sonnet, plan->default; agy: code->gemini-4-hydrogen-high, plan->gemini-4-argon-medium)
+  --mode <code|plan>          Fallback handoff type when no session/--model is set (claude: code->sonnet, plan->default; agy: code->gemini-4-hydrogen-high, plan->gemini-4-neon-medium)
   --model <name>              Explicit model for claude, codex, or agy (default: derived from calling session); overrides --mode
   --effort <level>            Reasoning effort for codex/claude/agy (default: derived from calling session, else medium for codex)
   --cloud / --no-cloud        Force or disable claude --cloud (default: auto; checks free credit > $0 first, then requires Jev cloud_compatible >= 0.85 & read-only review/research)
@@ -769,12 +769,12 @@ fi
 #    - Tier 1 (Free Cloud Session Credit > $0 on Claude, or --cloud): route to
 #      `claude --cloud` (`CCR_ENABLE_BUNDLE=1`), with Jev picking `sonnet` (for
 #      coding, fallback `codex/gpt-6.1-terra`) vs `opus` (for complex/review,
-#      fallback `agy/gemini-4-argon-medium`).
+#      fallback `agy/gemini-4-neon-medium`).
 #    - Tier 2 (Coding task + High Codex quota 5h >= 50%, wk >= 30% when local
 #      Claude quota is low or handing off from AGY without --model): auto-switch
 #      to `codex` (`gpt-6.1-terra`, effort: medium).
 #    - Tier 3 (Local Claude quota low <= 10%): auto-switch to `agy`
-#      (`gemini-4-hydrogen-high` for code, `gemini-4-argon-medium` for plan).
+#      (`gemini-4-hydrogen-high` for code, `gemini-4-neon-medium` for plan).
 # --------------------------------------------------------------------------
 if [[ ( "$AGENT_KIND" == "claude" || "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ) && ( "$QUOTA_SWITCH" != "false" && "$QUOTA_SWITCH" != "0" || "$CLAUDE_CLOUD" == "true" || "$JEV_ASSIST" == "true" ) ]]; then
   QUOTA_PROBE_OUT=$(HANDOFF_DOC_FILE="$HANDOFF_PATH" HANDOFF_CUSTOM_PROMPT="$CUSTOM_PROMPT" JEV_ASSIST_MODE="$JEV_ASSIST" HANDOFF_MODE_IN="$HANDOFF_MODE" CLAUDE_CLOUD_IN="$CLAUDE_CLOUD" python3 -c '
@@ -1085,7 +1085,7 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}|{agy_sta
         FALLBACK_MODEL="${AGY_CODE_MODEL:-gemini-4-hydrogen-high}"
       else
         FALLBACK_KIND="agy"
-        FALLBACK_MODEL="${AGY_PLAN_MODEL:-gemini-4-argon-medium}"
+        FALLBACK_MODEL="${AGY_PLAN_MODEL:-gemini-4-neon-medium}"
       fi
       if [[ -n "$LOW_QUOTA_INFO" && -n "$CLOUD_CREDIT_DOLLARS" ]]; then
         echo "☁️  Claude quota low ($LOW_QUOTA_INFO), free Cloud Session Credit available (\$$CLOUD_CREDIT_DOLLARS left in $CLOUD_CREDIT_BUCKET) — Auto-switching handoff to claude --cloud (fallback: $FALLBACK_KIND/$FALLBACK_MODEL)"
@@ -1111,10 +1111,10 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}|{agy_sta
         if [[ "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-sonnet* ]]; then
           CLAUDE_MODEL="${AGY_CODE_MODEL:-gemini-4-hydrogen-high}"
         elif [[ "$CLAUDE_MODEL" == "opus" || "$CLAUDE_MODEL" == claude-opus* || "$CLAUDE_MODEL" == "fable"* || "$CLAUDE_MODEL" == claude-fable* ]]; then
-          CLAUDE_MODEL="${AGY_PLAN_MODEL:-gemini-4-argon-medium}"
+          CLAUDE_MODEL="${AGY_PLAN_MODEL:-gemini-4-neon-medium}"
         elif [[ -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == claude-* ]]; then
           if [[ "$HANDOFF_MODE" == "plan" ]]; then
-            CLAUDE_MODEL="${AGY_PLAN_MODEL:-gemini-4-argon-medium}"
+            CLAUDE_MODEL="${AGY_PLAN_MODEL:-gemini-4-neon-medium}"
           else
             CLAUDE_MODEL="${AGY_CODE_MODEL:-gemini-4-hydrogen-high}"
           fi
@@ -1137,15 +1137,17 @@ fi
 # Model routing for claude, codex, and agy handoffs:
 # - claude: code -> sonnet, plan -> default
 # - codex: default -> gpt-6.1-terra (effort: medium)
-# - agy/gemini: code/default -> gemini-4-hydrogen-high, plan -> gemini-4-argon-medium,
+# - agy/gemini: code/default -> gemini-4-hydrogen-high, plan -> gemini-4-neon-medium,
 #   shorthand aliases: argon/carbon/hydrogen/orchestrator/flash -> full AGY model IDs
 # An explicit --model always wins.
 normalize_agy_model_slug() {
   local raw="$1" slug
   slug=$(printf '%s' "${raw%.}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^[-.]+//; s/[-.]+$//; s/^(claude-(opus|sonnet))-5\.5(-|$)/\1-5-5\3/')
   case "$slug" in
-    argon|argon-medium|gemini-4-argon|gemini-4-argon-medium|opus|claude-opus-4*)
-      printf '%s' "${AGY_PLAN_MODEL:-gemini-4-argon-medium}" ;;
+    argon|argon-medium|gemini-4-argon|gemini-4-argon-medium)
+      printf 'gemini-4-argon-medium' ;;
+    opus|claude-opus-4*|neon|neon-medium|gemini-4-neon)
+      printf '%s' "${AGY_PLAN_MODEL:-gemini-4-neon-medium}" ;;
     claude-opus-5-5)
       printf 'claude-opus-5-5-medium' ;;
     argon-high|gemini-4-argon-high)
@@ -1206,7 +1208,7 @@ elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
     CLAUDE_MODEL="$(normalize_agy_model_slug "$CLAUDE_MODEL")"
   else
     case "$HANDOFF_MODE" in
-      plan) CLAUDE_MODEL="${AGY_PLAN_MODEL:-gemini-4-argon-medium}" ;;
+      plan) CLAUDE_MODEL="${AGY_PLAN_MODEL:-gemini-4-neon-medium}" ;;
       code|"") CLAUDE_MODEL="${AGY_CODE_MODEL:-gemini-4-hydrogen-high}" ;;
     esac
   fi
@@ -1546,7 +1548,7 @@ launch_t3_handoff() {
   echo "👉 AGENT ACTION REQUIRED: call the t3_thread_launch MCP tool now with message = contents of $PROMPT_FILE"
   local t3_model_hint=""
   if [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
-    t3_model_hint=", provider 'antigravity', model '${CLAUDE_MODEL:-gemini-4-argon-medium}'"
+    t3_model_hint=", provider 'antigravity', model '${CLAUDE_MODEL:-gemini-4-neon-medium}'"
   elif [[ "$AGENT_KIND" == "claude" ]]; then
     t3_model_hint=", provider 'claudeAgent'${CLAUDE_MODEL:+, model '$CLAUDE_MODEL'}"
   elif [[ "$AGENT_KIND" == "codex" ]]; then
@@ -1798,11 +1800,11 @@ elif [[ "$AGENT_KIND" == "claude" ]]; then
     if [[ "${FALLBACK_KIND:-agy}" == "codex" ]]; then
       FALLBACK_CMD="codex --dangerously-bypass-approvals-and-sandbox -c model=\"${FALLBACK_MODEL:-gpt-6.1-terra}\" -c model_reasoning_effort=\"${CODEX_EFFORT:-medium}\" \"\$(cat $QUOTED_PROMPT_FILE)\""
     else
-      FALLBACK_CMD="agy ${YOLO_FLAG}--model ${FALLBACK_MODEL:-gemini-4-argon-medium} -i \"\$(cat $QUOTED_PROMPT_FILE)\""
+      FALLBACK_CMD="agy ${YOLO_FLAG}--model ${FALLBACK_MODEL:-gemini-4-neon-medium} -i \"\$(cat $QUOTED_PROMPT_FILE)\""
     fi
     CLOUD_LOG="${HANDOFF_PATH%.md}.cloud.log"
     QUOTED_CLOUD_LOG=$(printf '%q' "$CLOUD_LOG")
-    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}${CLAUDE_EFFORT_FLAG}--name $QUOTED_TAB_LABEL --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\" 2>&1 | tee $QUOTED_CLOUD_LOG; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; _sid=\$(grep -Eo 'session_[A-Za-z0-9]+' $QUOTED_CLOUD_LOG | head -n 1); if [[ -n \"\$_sid\" ]]; then claude --teleport \"\$_sid\"; fi; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-argon-medium})...\" >&2; $FALLBACK_CMD; fi"
+    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}${CLAUDE_EFFORT_FLAG}--name $QUOTED_TAB_LABEL --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\" 2>&1 | tee $QUOTED_CLOUD_LOG; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; _sid=\$(grep -Eo 'session_[A-Za-z0-9]+' $QUOTED_CLOUD_LOG | head -n 1); if [[ -n \"\$_sid\" ]]; then claude --teleport \"\$_sid\"; fi; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-neon-medium})...\" >&2; $FALLBACK_CMD; fi"
   else
     echo "🧠 Claude model: ${CLAUDE_MODEL:-default}${MODEL_SOURCE:+ (from $MODEL_SOURCE)}${CLAUDE_EFFORT_LEVEL:+, effort $CLAUDE_EFFORT_LEVEL}"
     LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}${CLAUDE_EFFORT_FLAG}--name $QUOTED_TAB_LABEL \"\$(cat $QUOTED_PROMPT_FILE)\""
