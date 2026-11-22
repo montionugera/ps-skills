@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # serve.sh — start the server for a ps-commu workspace.
-# Usage: serve.sh <slug> [--dev] [--keep-alive <dur>] [--no-lint]
+# Usage: serve.sh <slug> [--dev] [--keep-alive <dur>] [--no-lint] [--tailnet]
 #   --dev         React tier only: run vite dev (fix loop). Default serves app/dist.
 #   --keep-alive  Watchdog lifetime: 10s | 90m | 8h | 72h. Default 24h (spec D6).
 #   --no-lint     Skip the scripts/lint.sh authoring-chain gate before serving.
@@ -8,6 +8,8 @@
 #                 own server-mechanics tests. Prints a warning. Without it,
 #                 serve.sh refuses (exit 1, printing the lint output) when
 #                 scripts/lint.sh <slug> fails.
+#   --tailnet     Publish over Tailscale HTTPS (tailnet-only) on port 177xx
+#                 (loopback port + 10000). Refused with --dev.
 # All servers bind 127.0.0.1 ONLY (spec D9). The server command line contains the
 # workspace path — the kill-safety marker (spec D7). Binding is authoritative:
 # on bind failure the next port is tried, up to 7799 (spec D3).
@@ -15,19 +17,24 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
 usage() { grep '^#' "$0" | cut -c3-; exit "${1:-0}"; }
-slug="" dev=0 keep="24h" no_lint=0
+slug="" dev=0 keep="24h" no_lint=0 tailnet=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dev) dev=1 ;;
     --keep-alive) [[ $# -ge 2 ]] || { echo "--keep-alive requires a value" >&2; exit 1; }
                   keep="$2"; shift ;;
     --no-lint) no_lint=1 ;;
+    --tailnet) tailnet=1 ;;
     -h|--help) usage ;;
     *) slug="$1" ;;
   esac
   shift
 done
 [[ -n "$slug" ]] || usage 1
+if [[ "$tailnet" == 1 && "$dev" == 1 ]]; then
+  echo "error: --tailnet cannot be combined with --dev" >&2
+  exit 1
+fi
 ws="$PS_COMMU_ROOT/$slug"
 [[ -d "$ws" ]] || { echo "no workspace: $ws (run init.sh first)" >&2; exit 1; }
 trap 'log_timing serve.sh "$SECONDS"' EXIT
@@ -60,6 +67,34 @@ if [[ "$tier" == "html" || "$tier" == "infographic" ]]; then
 fi
 
 keep_secs="$(parse_duration "$keep")" || exit 1
+
+# Sync <html lang="..."> from 00-brief.md (default en) before serving.
+python3 - "$ws" <<'PY'
+import os, re, sys, tempfile
+ws = sys.argv[1]
+brief_p = os.path.join(ws, "00-brief.md")
+lang = "en"
+if os.path.isfile(brief_p):
+    try:
+        brief = re.sub(r"<!--.*?-->", "", open(brief_p, encoding="utf-8").read(), flags=re.S)
+        m = re.search(r"(?mi)^Lang:[ \t]*(\S+)", brief)
+        if m:
+            cand = m.group(1).strip()
+            if cand and "(...)" not in cand and re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", cand):
+                lang = cand.lower()
+    except OSError:
+        pass
+for rel in ("app/index.html", "app/dist/index.html"):
+    hp = os.path.join(ws, rel)
+    if os.path.isfile(hp):
+        html_txt = open(hp, encoding="utf-8").read()
+        new_txt = re.sub(r"(<html\b[^>]*\blang=)([\x22\x27])[^\x22\x27]*\2", lambda m: f'{m.group(1)}{m.group(2)}{lang}{m.group(2)}', html_txt, count=1, flags=re.I)
+        if new_txt != html_txt:
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(hp), prefix=".index.")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(new_txt)
+            os.replace(tmp, hp)
+PY
 server_pid=""
 
 # Truncate log once per invocation; start_one appends per-attempt headers.
@@ -74,9 +109,14 @@ start_one() {
   echo "--- attempt port $port $(date -u +%H:%M:%SZ) ---" >>"$ws/server.log"
   rm -f "$ready"
   if [[ "$tier" == "react" && "$dev" == 1 ]]; then
-    node "$ws/app/node_modules/vite/bin/vite.js" "$ws/app" \
-      --host 127.0.0.1 --port "$port" --strictPort >>"$ws/server.log" 2>&1 &
-    server_pid=$!
+    server_pid="$(python3 -c '
+import os, subprocess, sys
+log_path = sys.argv[1]
+cmd = sys.argv[2:]
+with open(log_path, "ab") as logf:
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+print(p.pid)
+' "$ws/server.log" node "$ws/app/node_modules/vite/bin/vite.js" "$ws/app" --host 127.0.0.1 --port "$port" --strictPort)"
     for _ in $(seq 1 50); do
       kill -0 "$server_pid" 2>/dev/null || return 1
       # Verify our specific PID owns the port (lsof -a = AND: pid AND socket filter).
@@ -95,12 +135,16 @@ start_one() {
     # httpserve.py = SimpleHTTPRequestHandler + Cache-Control: no-store, so the
     # browser never shows a stale fix-loop page. $docroot in argv keeps the
     # kill-safety marker (D7); it binds 127.0.0.1 only (D9).
-    # Readiness = httpserve.py writes its PID to $ready right after bind()
-    # succeeds (a taken port makes it exit instead). The old lsof+curl probe
-    # never passed on the GitHub macOS runner, stalling every port attempt.
-    python3 "$(dirname "$0")/httpserve.py" "$port" "$docroot" "$ready" \
-      >>"$ws/server.log" 2>&1 &
-    server_pid=$!
+    # Spawn via start_new_session=True so parent process-group cleanup (e.g.
+    # agent run_command exit) cannot reap the server and leave Tailscale 502.
+    server_pid="$(python3 -c '
+import os, subprocess, sys
+log_path = sys.argv[1]
+cmd = sys.argv[2:]
+with open(log_path, "ab") as logf:
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+print(p.pid)
+' "$ws/server.log" python3 "$(dirname "$0")/httpserve.py" "$port" "$docroot" "$ready")"
     for _ in $(seq 1 50); do
       if [[ -s "$ready" ]]; then
         server_pid="$(cat "$ready")"   # the PID that actually bound the port
@@ -129,18 +173,53 @@ while (( port <= 7799 )); do
 done
 (( ok )) || { echo "no free port in 7700-7799 — try clean.sh" >&2; exit 1; }
 
+prev_ts_port="$(meta_get "$slug" tailnet_port)"
+if [[ "$tailnet" == 0 && -n "$prev_ts_port" ]]; then
+  if ts_unpublish_owned "$slug"; then
+    meta_set "$slug" tailnet_port ""
+    meta_set "$slug" tailnet_url ""
+  fi
+fi
+
 meta_set "$slug" pid "$server_pid"
 meta_set "$slug" port "$port"
 meta_set "$slug" started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Self-destruct watchdog (spec D6): marker-verified kill after the TTL.
-(
-  trap - EXIT
-  sleep "$keep_secs"
-  if ps -p "$server_pid" -o command= 2>/dev/null | grep -qF "$PS_COMMU_ROOT/$slug"; then
-    kill "$server_pid" 2>/dev/null || true
+tailnet_url=""
+if [[ "$tailnet" == 1 ]]; then
+  ts_port=$((port + 10000))
+  ts_host="$(ts_hostname 2>/dev/null)" || ts_host=""
+  if [[ -z "$ts_host" ]]; then
+    echo "WARNING: tailscale is missing or not logged in/running; serving on localhost only" >&2
+    if [[ -n "$prev_ts_port" ]]; then
+      meta_set "$slug" tailnet_port ""
+      meta_set "$slug" tailnet_url ""
+    fi
+  else
+    if [[ -n "$prev_ts_port" && "$prev_ts_port" != "$ts_port" ]]; then
+      ts_unpublish_owned "$slug" || true
+    fi
+    if "$TAILSCALE_BIN" serve --bg --https="$ts_port" --yes "http://127.0.0.1:$port" >/dev/null 2>&1; then
+      tailnet_url="https://${ts_host}:${ts_port}/"
+      meta_set "$slug" tailnet_port "$ts_port"
+      meta_set "$slug" tailnet_url "$tailnet_url"
+    else
+      echo "WARNING: tailscale serve failed on port $ts_port; serving on localhost only" >&2
+      meta_set "$slug" tailnet_port ""
+      meta_set "$slug" tailnet_url ""
+    fi
   fi
-) >/dev/null 2>&1 &
-disown
+fi
+
+# Self-destruct watchdog (spec D6): marker-verified kill after the TTL.
+# Detached into its own session so parent command exit cannot reap it.
+python3 -c '
+import subprocess, sys
+script = sys.argv[1]
+subprocess.Popen(["bash", "-c", script], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+' "source \"$(dirname "$0")/common.sh\"; sleep \"$keep_secs\"; if ps -p \"$server_pid\" -o command= 2>/dev/null | grep -qF \"$PS_COMMU_ROOT/$slug\"; then kill \"$server_pid\" 2>/dev/null || true; if [[ \"\$(meta_get \"$slug\" pid)\" == \"$server_pid\" ]]; then ts_unpublish_owned \"$slug\" || true; meta_set \"$slug\" pid \"\"; fi; fi"
 
 echo "serving $slug at http://localhost:$port (pid=$server_pid ttl=$keep)"
+if [[ -n "$tailnet_url" ]]; then
+  echo "$tailnet_url"
+fi

@@ -17,6 +17,8 @@ content.md). Read this first, then open only the section you need:
 | `id="beforeafter"` | Before / after | before-after, ba-panel, ba-label, ba-value, ba-arrow, compare, compare-panel, cmp-head, cmp-body, sm |
 | `id="callouts"` | Callouts | `::: callout note`, `::: callout check`, `::: callout pitfall` |
 | `id="steps"` | Steps | steps, step, step-num, step-title, step-body |
+| `id="tabs"` | Tabs (declarative) | tabs, tab-list, tab-btn (aria-pressed, data-tab), tab-panel (data-panel, hidden) |
+| `id="accordion"` | Accordion (declarative) | accordion, acc-item (is-open), acc-btn (aria-expanded), acc-panel (hidden) |
 | `id="badges"` | Badges | badge, dot, chip-row, topic-chip, legend, legend-item, legend-swatch |
 | `id="receipts"` | Receipts | receipts, receipts-label, receipts-list, receipts-fact |
 

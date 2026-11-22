@@ -1,90 +1,57 @@
 /* ============================================================================
-   theme.css — THE DESIGN LOCK
+   theme.css — THE DESIGN LOCK (Shared Across All 3 Tiers)
    ----------------------------------------------------------------------------
-   Design tokens ONLY. This is the ONE place raw color / size / font values are
-   allowed. explainer.css and cherry-setup.js MUST reference these variables —
-   never hardcode a value.
-
-   DESIGN DIRECTION — "Cream Explainer", warm editorial / data-journalism.
-   A light, information-dense look: cream paper, near-white cards, soft warm
-   shadows, generous rounded corners. COLOR RULE: a neutral cream ramp, ONE
-   structural accent, and exactly two reserved hues that carry meaning —
-   pitfall (what goes wrong) and check (what is verified). Nothing else is
-   colored, and section ORDER is never colored.
-
-     • Canvas: warm cream paper (#FBF7EF) with a cleaner near-white card surface.
-     • Depth: layered low-opacity WARM shadows + warm hairline borders.
-     • Text: warm near-black (#211C15) primary, warm brown-gray secondary/tertiary
-       (all AA-checked on cream and on card surfaces).
-     • Hues: accent (deep blue, structure + links + chips), pitfall (brick
-       red, reserved), check (green, reserved). All ≥4.5:1 on the paper.
-     • Type: Bricolage Grotesque (characterful display) + Inter (body/UI) +
-       JetBrains Mono (labels + tabular numbers).
-     • Motion: staggered entrance (fade+rise), hover lift, colored accents.
-
-   cherry-setup.js's readRoleColors() reads --accent/--pitfall/--check straight
-   off :root here via getComputedStyle — no duplicated hex, no themeVariables
-   object; draw.io's mxGraph style strings just get the live computed values
-   substituted in at render time.
+   Single source of design tokens across infographic, html, and react tiers.
+   Light editorial "Cream Explainer" system (dark mode is out of scope).
+   Neutral cream ramp + ONE structural accent (--accent) + TWO reserved hues:
+   --pitfall (what goes wrong) and --check (what is verified).
    ============================================================================ */
 
 :root {
-  /* --- Warm neutral / paper ramp (cream canvas → near-white cards) ----------
-     Numbered ramp: 0 = deepest warm shade, ascending = lighter / cleaner. */
+  /* --- Warm neutral / paper ramp (cream canvas → near-white cards) ---------- */
   --n-0:  #e2d7bf;  /* deep cream — insets, code wells        */
   --n-1:  #e9dfca;  /* cream shade — raised label strips       */
-  --n-2:  #efe6d3;  /* PAPER — app canvas (toned down, less glare) */
+  --n-2:  #efe6d3;  /* PAPER — app canvas                      */
   --n-3:  #f7f1e6;  /* card surface — warm off-white           */
-  --n-4:  #fcf8f0;  /* cleanest surface — tiles, popovers (no pure-white glare) */
+  --n-4:  #fcf8f0;  /* cleanest surface — tiles, popovers      */
   --n-5:  #fefcf6;  /* highlight surface                       */
 
-  /* --- Surface & elevation roles (semantic aliases of the ramp) ------------- */
-  --bg:             var(--n-2);   /* cream paper canvas          */
-  --surface:        var(--n-3);   /* card / panel surface        */
-  --surface-raised: var(--n-4);   /* tiles, elevated cards       */
-  --surface-overlay:var(--n-1);   /* hover / inset strips        */
-  --surface-well:   var(--n-0);   /* code wells, deep insets     */
-  /* legacy aliases kept so existing component rules resolve cleanly */
-  --surface-2:     var(--n-4);
-  --surface-3:     var(--n-1);
-  --border:        #e6dcc7;   /* hairline (visible warm)        */
-  --border-soft:   #efe7d7;   /* hairline (whisper warm)        */
-  --border-strong: #d9ccb2;   /* border-strong                  */
+  /* --- Surface & elevation roles -------------------------------------------- */
+  --bg:              var(--n-2);
+  --surface:         var(--n-3);
+  --surface-raised:  var(--n-4);
+  --surface-overlay: var(--n-1);
+  --surface-well:    var(--n-0);
+  --surface-2:       var(--n-4);
+  --surface-3:       var(--n-1);
+  --border:          #e6dcc7;
+  --border-soft:     #efe7d7;
+  --border-strong:   #d9ccb2;
 
-  /* --- Text roles (warm near-black ladder; AA on cream + cards) ------------- */
-  --text:   #211c15;  /* primary   — warm near-black   (contrast ~14:1 on paper) */
-  --text-2: #5c5344;  /* secondary — warm brown-gray   (contrast ~6.5:1)         */
-  --text-3: #6b6152;  /* tertiary  — muted warm gray   (4.90:1 on paper, 5.40:1 on cards — AA for ≤12px labels) */
-  /* legacy ink aliases → new roles (so no component rule needs rewriting) */
+  /* --- Text roles (WCAG AA >= 4.5:1 on ALL cream surfaces incl. well) ------- */
+  --text:   #211c15;  /* primary   — ~13.6:1 on paper, ~11.8:1 on well */
+  --text-2: #4a4236;  /* secondary — ~7.97:1 on paper, ~6.92:1 on well */
+  --text-3: #615849;  /* tertiary  — ~5.64:1 on paper, ~4.90:1 on well */
   --ink:        var(--text);
   --ink-bright: #000000;
   --ink-dim:    var(--text-2);
 
-  /* --- THE COLOR RULE ---------------------------------------------------------
-     Neutral cream ramp above + ONE structural accent + TWO reserved hues.
-     Each hue: a solid (strokes / icons / text-on-cream), a -weak (dim rail /
-     text-on-tint), and a -tint (soft wash for panel backgrounds).
-     Contrast (WCAG, vs paper #efe6d3 / card #f7f1e6): accent 6.60 / 7.28,
-     pitfall 5.39 / 5.95, check 5.33 / 5.88 — all ≥4.5:1 for small text.
-     No other hue tokens exist; no --info/--success/--idea/--metric/--action. */
-  --accent:       #1c4f8f;  --accent-weak:  #163f73;  --accent-tint:  #e2ebfb;  /* structure: heads, links, chips, nav, diagram strokes */
-  --pitfall:      #a8321f;  --pitfall-weak: #86281a;  --pitfall-tint: #fbeae5;  /* RESERVED: what goes wrong (callout pitfall, errors)   */
-  --check:        #186a42;  --check-weak:   #135436;  --check-tint:   #daf1ec;  /* RESERVED: what is verified (callout check)             */
+  /* --- THE COLOR RULE: 1 structural accent + 2 reserved semantic hues ------- */
+  --accent:       #1c4f8f;  --accent-weak:  #163f73;  --accent-tint:  #e2ebfb;
+  --pitfall:      #a8321f;  --pitfall-weak: #86281a;  --pitfall-tint: #fbeae5;
+  --check:        #186a42;  --check-weak:   #135436;  --check-tint:   #daf1ec;
 
-  /* --- Atmospheric tints (single-hue, kept as tokens so no rgba is hardcoded
-     downstream). Mark = accent highlighter; blooms = whisper of accent + warm. */
+  /* --- Atmospheric tints ---------------------------------------------------- */
   --tint-mark:  rgba(28, 79, 143, 0.14);
-  --bloom-1: rgba(28, 79, 143, 0.06);    /* accent, top-right   */
-  --bloom-2: rgba(93, 66, 20, 0.06);     /* warm, top-left      */
-  --bloom-3: rgba(28, 79, 143, 0.04);    /* accent, bottom      */
+  --bloom-1:    rgba(28, 79, 143, 0.06);
+  --bloom-2:    rgba(93, 66, 20, 0.06);
+  --bloom-3:    rgba(28, 79, 143, 0.04);
 
-  /* --- Typefaces ------------------------------------------------------------
-     Bricolage Grotesque (characterful display, loaded in shell.html) for
-     headings; Inter for body/UI; JetBrains Mono for labels + tabular numbers. */
-  --font-display: "Bricolage Grotesque", "Inter", -apple-system, BlinkMacSystemFont,
+  /* --- Typefaces (Latin + Thai with matching weights) ----------------------- */
+  --font-display: "Bricolage Grotesque", "Inter", "Noto Sans Thai", -apple-system, BlinkMacSystemFont,
                   "Segoe UI", Roboto, sans-serif;
-  --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", "SFMono-Regular",
+  --font-body:    "Inter", "Noto Sans Thai", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono:    "JetBrains Mono", "Noto Sans Thai", ui-monospace, "SF Mono", "SFMono-Regular",
                   Menlo, monospace;
 
   /* --- Weight ladder -------------------------------------------------------- */
@@ -94,33 +61,32 @@
   --w-bold:     700;
   --w-black:    800;
 
-  /* --- Type ramp (fluid; confident infographic headings) -------------------- */
-  --fs-display: clamp(3.0rem, 2.0rem + 4.6vw, 5.0rem);   /* hero              */
-  --fs-h1:      clamp(2.2rem, 1.6rem + 2.6vw, 3.3rem);
-  --fs-h2:      clamp(1.7rem, 1.3rem + 1.6vw, 2.35rem);
-  --fs-h3:      clamp(1.25rem, 1.05rem + 0.7vw, 1.55rem);
+  /* --- Type ramp (fluid headings capped <= 2.5x min; body >= 16px) ---------- */
+  --fs-display: clamp(2.25rem, 1.5rem + 3vw, 4rem);
+  --fs-h1:      clamp(1.9rem, 1.4rem + 2vw, 3rem);
+  --fs-h2:      clamp(1.5rem, 1.2rem + 1.2vw, 2.2rem);
+  --fs-h3:      clamp(1.2rem, 1.05rem + 0.6vw, 1.5rem);
   --fs-body:    1.03rem;
-  --fs-sm:      0.82rem;
-  --fs-caption: 0.73rem;
-  /* legacy alias */
+  --fs-sm:      0.9375rem;
+  --fs-caption: 0.78rem;
   --fs-hero:    var(--fs-display);
-  /* intermediate reading sizes for dense blocks */
-  --fs-mono-sm: 0.85rem;  /* schematic + pre code   */
-  --fs-table:   0.94rem;  /* table body             */
-  --fs-code:    0.86em;   /* inline code (tracks text) */
-  --fs-stat:    clamp(2.6rem, 2.0rem + 2.2vw, 3.6rem);  /* KPI numbers */
+  --fs-mono-sm: 0.875rem;
+  --fs-table:   1rem;
+  --fs-code:    0.88em;
+  --fs-stat:    clamp(2.2rem, 1.8rem + 1.8vw, 3.2rem);
 
-  /* --- Tracking (letter-spacing) -------------------------------------------- */
+  /* --- Tracking (letter-spacing) & label transform ------------------------- */
   --track-display: -0.028em;
   --track-h:       -0.018em;
   --track-body:    -0.004em;
-  --track-eyebrow:  0.18em;   /* uppercase overline */
-  --track-label:    0.06em;   /* mono micro-labels  */
+  --track-eyebrow:  0.14em;
+  --track-label:    0.05em;
+  --tt-label:       uppercase;
 
   /* --- Line-height ---------------------------------------------------------- */
-  --lh-tight:  1.05;   /* display / headings */
-  --lh-snug:   1.28;   /* h3 / quotes        */
-  --lh-body:   1.64;   /* prose (generous)   */
+  --lh-tight:  1.14;
+  --lh-snug:   1.32;
+  --lh-body:   1.65;
 
   /* --- Spacing scale (8pt rhythm) ------------------------------------------- */
   --space-1: 0.25rem;
@@ -138,18 +104,18 @@
   --radius-lg:   24px;
   --radius-pill: 999px;
   --maxw:        1120px;
-  --nav-w:       244px;   /* sticky sidebar width (wide screens) */
+  --nav-w:       244px;
 
   --pad-code: 0.12em 0.42em;
   --pad-mark: 0.06em 0.34em;
 
-  /* --- Chip geometry (icon chips that carry Lucide icons) ------------------- */
-  --chip:    2.5rem;   /* standard icon chip size          */
-  --chip-sm: 1.7rem;   /* small chip (nav, inline)         */
-  --chip-lg: 3.1rem;   /* large chip (section header, KPI) */
-  --icon:    1.15rem;  /* default Lucide icon stroke box    */
+  /* --- Chip geometry -------------------------------------------------------- */
+  --chip:    2.5rem;
+  --chip-sm: 1.7rem;
+  --chip-lg: 3.1rem;
+  --icon:    1.15rem;
 
-  /* --- Elevation shadows (soft, layered, WARM — depth on cream) ------------- */
+  /* --- Elevation shadows ---------------------------------------------------- */
   --shadow-1: 0 1px 2px rgba(93, 66, 20, 0.06),
               0 1px 3px rgba(93, 66, 20, 0.05);
   --shadow-2: 0 2px 6px rgba(93, 66, 20, 0.06),
@@ -159,14 +125,61 @@
 
   /* --- Motion --------------------------------------------------------------- */
   --ease-standard:   cubic-bezier(0.2, 0.0, 0, 1.0);
-  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);       /* springy decel */
+  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-accelerate: cubic-bezier(0.3, 0.0, 0.8, 0.15);
-  /* legacy alias */
   --ease: var(--ease-standard);
 
-  --dur-1: 0.16s;   /* micro hover           */
-  --dur-2: 0.28s;   /* transitions           */
-  --dur-3: 0.55s;   /* entrance / emphasis   */
-  /* legacy alias */
+  --dur-1: 0.16s;
+  --dur-2: 0.28s;
+  --dur-3: 0.55s;
   --dur:   var(--dur-2);
+}
+
+html {
+  font-size: 100%;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* --- Thai typography rules (lang="th") ------------------------------------- */
+:root:lang(th),
+html[lang^="th"] {
+  --lh-tight: 1.38;
+  --lh-snug:  1.46;
+  --lh-body:  1.75;
+  --track-display: 0;
+  --track-h:       0;
+  --track-body:    0;
+  --track-eyebrow: 0;
+  --track-label:   0;
+  --tt-label:      none;
+}
+
+html[lang^="th"] .sh-kicker,
+html[lang^="th"] .rq-kicker,
+html[lang^="th"] .nav-kicker,
+html[lang^="th"] .nav-sub,
+html[lang^="th"] .badge,
+html[lang^="th"] .ba-label,
+html[lang^="th"] .we-label,
+html[lang^="th"] .we-stage-k,
+html[lang^="th"] .receipts-label,
+html[lang^="th"] thead th,
+html[lang^="th"] .gallery-label,
+html[lang^="th"] .explainer-error .eyebrow,
+html[lang^="th"] .toc-title,
+html[lang^="th"] .tldr-chip,
+html[lang^="th"] .kicker,
+:lang(th) {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* --- Universal reduced-motion protection across all 3 tiers --------------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

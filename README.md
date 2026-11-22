@@ -8,7 +8,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 
 | Skill | What it does |
 |-------|--------------|
-| **ps-commu-explain** | Turns "explain X" into a fact-checked, visually rich web explanation (diagrams, animation, interactivity) served from `/tmp` and handed back as a verified localhost URL. Six-stage chain — brief → facts → storyboard → author → verify (render gate + reader gate) → handoff — gated by `scripts/lint.sh` and `scripts/verify.sh`. Mechanical steps are scripted so the model only does the judgment: `skeleton.sh` drafts `content.md` from the storyboard, `verify.sh` does one Chrome load per cycle and `verify.sh --reader-prompt` builds the reader-gate prompt, `handoff.sh` prints the handoff, and init, serve, skeleton, verify and handoff log to the workspace's `timings.log`. Self-contained: lifecycle scripts + HTML and React+TS templates. |
+| **ps-commu-explain** | Turns "explain X" into a fact-checked, visually rich web explanation (diagrams, animation, interactivity) served from `/tmp` and handed back as a verified localhost URL (or tailnet-only HTTPS via `serve.sh <slug> --tailnet`, overridable via `TAILSCALE_BIN`). Six-stage chain — brief (`Lang: en\|th`) → facts → storyboard → author → verify (render gate + reader gate) → handoff — gated by `scripts/lint.sh` and `scripts/verify.sh`. Mechanical steps are scripted so the model only does the judgment: `skeleton.sh` drafts `content.md` from the storyboard, `verify.sh` does one Chrome load per cycle and `verify.sh --reader-prompt` builds the reader-gate prompt, `handoff.sh` prints the handoff, and init, serve, skeleton, verify and handoff log to the workspace's `timings.log`. Self-contained with offline vendored assets, shared design tokens, declarative `.tabs`/`.accordion`, and HTML and React+TS templates. |
 | **ps-interactive-learning-builder** | Orchestrates research, learning design, interactive builds, independent audits, and durable verification for traceable courses and explorable references. |
 | **ps-release-workflow-init** | Opt a repo into the ship-the-release workflow (`.release.json`, backlogs, routing convention). |
 | **ps-release-workflow-idea** | Capture a new idea (`I-NNN`) in the idea backlog. |
@@ -202,7 +202,8 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
   brief's 3 questions with citations. `scripts/handoff.sh <slug>` prints the final handoff. Authors read
   `app/components-index.md` (a 25-line index) before grepping `components.md`.
   Modes: `/ps-commu-explain list`, `/ps-commu-explain clean`.
-  Built explanations live under `/tmp/ps-commu/<slug>/` and self-destruct after 24h.
+  Built explanations live under `/tmp/ps-commu/<slug>/` and self-destruct after 24h; `serve.sh <slug> --tailnet`
+  publishes tailnet-only HTTPS on port `177xx` (`TAILSCALE_BIN` overrides the `tailscale` CLI).
 - **ps-interactive-learning-builder** — invoke `/ps-interactive-learning-builder <topic>` to create a
   source-backed course, explorable reference, or hybrid learning project with gated audit and verification.
 - **ps-release-workflow** — start with `ps-release-workflow-init` in a repo, then

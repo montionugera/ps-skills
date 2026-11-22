@@ -11,4 +11,5 @@ if [[ -n "$pid" ]] && pid_has_marker "$pid" "$slug"; then
 else
   echo "$slug: no live marker-verified server (pid='$pid') — nothing killed"
 fi
+ts_unpublish_owned "$slug" || true
 meta_set "$slug" pid ""

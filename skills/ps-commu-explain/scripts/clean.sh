@@ -13,6 +13,7 @@ for ws in "$PS_COMMU_ROOT"/*; do
     kill "$pid" 2>/dev/null && echo "killed $s (pid $pid)"
   fi
   if target="$(validate_workspace_path "$ws")"; then
+    ts_unpublish_owned "$s" || true
     rm -rf "$target"
   else
     # rm -f (no -r): removes a symlink/file name only; on a real directory it is a

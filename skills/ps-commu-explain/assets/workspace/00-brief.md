@@ -18,6 +18,12 @@ never seen this repo, its ticket ids, or its internal names — write for them.
 
 Reader: (...)
 
+## Language
+
+BCP-47 language code for the rendered page (`en` or `th`).
+
+Lang: (...)
+
 ## Section budget
 
 How many top-level sections app/content.md will have — an integer, 4-7.
