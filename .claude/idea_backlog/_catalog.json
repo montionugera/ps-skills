@@ -192,5 +192,89 @@
     "title": "Vault sync kill test: fit the kill delay to the machine so kills land mid-update on a fast runner",
     "created_at": "2026-10-11T16:02:19.072079+00:00",
     "promoted_to": "F-024"
+  },
+  {
+    "id": "I-032",
+    "title": "Triage the vault sync fix-later review notes from release 1.11",
+    "created_at": "2026-10-12T01:03:38.997398+00:00",
+    "promoted_to": null
+  },
+  {
+    "id": "I-033",
+    "title": "Release cleanup must not delete a work folder that holds unsaved files",
+    "created_at": "2026-10-13T03:48:14.932321+00:00",
+    "promoted_to": null
+  },
+  {
+    "id": "I-034",
+    "title": "dispatch-worker ends with no output and no reason on a read-only task",
+    "created_at": "2026-10-13T03:48:15.925157+00:00",
+    "promoted_to": null
+  },
+  {
+    "id": "I-035",
+    "title": "Fix the 32 open vault sync review findings",
+    "created_at": "2026-10-13T04:41:12.758879+00:00",
+    "promoted_to": "F-025"
+  },
+  {
+    "id": "I-036",
+    "title": "Vault sync follow-ups left after fixing the 32 review findings",
+    "created_at": "2026-10-13T13:51:28.607234+00:00",
+    "promoted_to": null
+  },
+  {
+    "id": "I-037",
+    "title": "Sync harness hides why a scenario failed and breaks on a busy Mac",
+    "created_at": "2026-10-13T13:51:28.876508+00:00",
+    "promoted_to": null
+  },
+  {
+    "id": "I-038",
+    "title": "Add the two release check scripts this repo is missing",
+    "created_at": "2026-10-13T16:17:55.977017+00:00",
+    "promoted_to": "F-026"
+  },
+  {
+    "id": "I-039",
+    "title": "Jev-gated auto knowledge extraction: classify-lesson lens on Stop-hook session summaries, cheap flash extractor drafts to _inbox, Argon review before publish-knowledge",
+    "created_at": "2026-11-11T01:25:24.902956+00:00",
+    "promoted_to": "F-027"
+  },
+  {
+    "id": "I-040",
+    "title": "vault-distill nightly knowledge save in shadow mode (I-039 slice 2)",
+    "created_at": "2026-11-11T04:00:37.078738+00:00",
+    "promoted_to": "F-029"
+  },
+  {
+    "id": "I-041",
+    "title": "vault recall precision: skip automated prompts, fix rule-only summaries, down-weight generic terms",
+    "created_at": "2026-11-11T04:08:42.194124+00:00",
+    "promoted_to": "F-028"
+  },
+  {
+    "id": "I-042",
+    "title": "vault-distill extractor: agy call fails on its flags and is not tool-less (found in go-live G4)",
+    "created_at": "2026-11-11T05:53:35.479283+00:00",
+    "promoted_to": "F-030"
+  },
+  {
+    "id": "I-043",
+    "title": "vault-distill auto integrate and publish, calibration and usage loop (I-039 slice 3)",
+    "created_at": "2026-11-11T06:03:01.793624+00:00",
+    "promoted_to": null
+  },
+  {
+    "id": "I-044",
+    "title": "vault-recall precision measure goes stale when the vault grows",
+    "created_at": "2026-11-11T12:30:16.825823+00:00",
+    "promoted_to": "F-031"
+  },
+  {
+    "id": "I-045",
+    "title": "Upgrade ps-commu-explain visual quality and tailnet HTTPS",
+    "created_at": "2026-11-22T07:44:52.708909+00:00",
+    "promoted_to": "F-032"
   }
 ]

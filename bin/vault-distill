@@ -1,0 +1,1009 @@
+#!/usr/bin/env python3
+"""vault-distill: nightly batch that turns finished agent sessions into candidate knowledge notes.
+
+Shadow mode (I-040, slice 2 of I-039): it writes drafts, scores, candidates and review verdicts to
+the vault inbox and a report, and never publishes to 04_Knowledge/.
+
+Usage:
+  vault-distill              run the nightly batch
+  vault-distill --dry-run    gate preview: calls Jev, never the extractor or reviewer, records nothing
+  vault-distill --report     print the last run's report
+
+Env: VAULT_DISTILL=0 (do nothing), VAULT_DISTILL_MAX (20), VAULT_DISTILL_UNSURE_MAX (3),
+VAULT_DISTILL_SKIP_REPOS (comma-separated repo root basenames), VAULT_ROOT, VAULT_ENGINE.
+Test seams: VAULT_DISTILL_JEV_CMD, VAULT_DISTILL_EXTRACT_CMD, VAULT_DISTILL_REVIEW_CMD.
+"""
+import argparse
+import datetime
+import fcntl
+import http.client
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+DIGEST_MAX = 12000
+DIGEST_HEAD = 2000
+GROWTH_MIN = 4000
+ACTIVE_SECONDS = 30 * 60
+EXTRACT_AT = 0.85
+DROP_AT = 0.15
+PENDING = {"jev-failed", "unsure-pending", "extract-pending"}
+DRAFT_MAX = 1500
+JUNK_BELOW = 0.5
+SAME_AT = 0.85
+HIGH_STAKES_AT = 0.85
+SAME_MAX = 5
+CANDIDATE_DAYS = 60
+JEV_RULES_MAX = 20000
+EXTRACT_MODEL = "gemini-3.8-flash"
+REVIEW_MODEL = "gemini-4-argon"
+# Own copy of bin/ps-skills-sync SECRET_RE without the home-path rule (R11); a test keeps them in step.
+# The literal is split so this public file does not trip ps-skills-sync's scan of itself.
+SECRET_RE = re.compile(r"""ghp_[A-Za-z0-9]{20}|github""" r"""_pat_|sk-[A-Za-z0-9_-]{20}|xox[bpas]-|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|(password|passwd|api[_-]?key|secret|token)["' ]*[:=]["' ]*[A-Za-z0-9/+_-]{12,}""")
+LINE_RE = re.compile(r"repo: `[^`]*` — cwd: `(?P<cwd>[^`]*)` — session: `(?P<sid>[^`]+)` — transcript: `(?P<transcript>[^`]*)`")
+CORRECTION_RE = re.compile(r"^\s*(no\b|nope|wrong|don't|do not|stop|actually|that's not|not what|instead)", re.I)
+HOOK_BLOCK_RE = re.compile(r"hook (?:error|blocked)|blocked by (?:a |the )?\w*\s*hook|guard_check", re.I)
+COUNT_KEYS = ("seen", "not_allowed", "private", "no_transcript", "skipped_small", "skipped_active", "dropped",
+              "unsure", "no_lesson", "extracted", "invalid", "no_evidence", "junk", "unscored", "candidates_waiting",
+              "recurred", "ready", "would_publish", "published", "merged", "rejected", "collisions", "archived", "expired",
+              "errors", "extract_tokens")
+STAGES = ("classify", "extract", "score", "same_lesson", "review")
+
+
+def env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def vault_root():
+    return Path(os.environ.get("VAULT_ROOT") or Path.home() / "workspace" / "agentic-vault")
+
+
+def state_dir():
+    return Path.home() / ".claude" / "state" / "vault-distill"
+
+
+def engine_bin():
+    return os.environ.get("VAULT_ENGINE") or shutil.which("vault-engine") or str(Path.home() / ".local/bin/vault-engine")
+
+
+def repo_root(cwd):
+    """Main repo path for a session cwd, resolved like vault-engine RepoRoot; a removed worktree falls back to its path."""
+    try:
+        out = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            return str(Path(out.stdout.strip()).parent)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    base = cwd.rstrip("/").split("/.claude/worktrees/", 1)[0]
+    return re.sub(r"-hotfix-[^/]+$", "", base)
+
+
+def atomic_write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    os.replace(tmp, path)
+
+
+def free_path(path):
+    p = Path(path)
+    if not p.exists():
+        return p
+    i = 2
+    while True:
+        candidate = p.with_name(f"{p.stem}-{i}{p.suffix}")
+        if not candidate.exists():
+            return candidate
+        i += 1
+
+
+class Run:
+    def __init__(self, dry_run=False):
+        self.dry = dry_run
+        self.vault = vault_root()
+        self.distill = self.vault / "_inbox" / "agent" / "distill"
+        self.live = self.vault / "_inbox" / "agent" / "session-summaries.md"
+        self.state = state_dir()
+        self.seen_path = self.state / "seen.jsonl"
+        self.digests = self.state / "digests"
+        self.start = time.time()
+        self.date = datetime.date.today().isoformat()
+        self.counts = dict.fromkeys(COUNT_KEYS, 0)
+        self.bytes = dict.fromkeys(STAGES, 0)
+        self.attempts = dict.fromkeys(STAGES, 0)
+        self.failures = dict.fromkeys(STAGES, 0)
+        self.failure_lines = {}
+        self.tool_failed = self.extract_tool_failed = False
+        self.classified = 0
+        self.notes = []  # report lines: expired candidates, verdicts
+        self.seen = self.load_seen()
+
+    # --- seen-file (R13): one JSON line per final state, last line per session wins ---
+    def load_seen(self):
+        seen = {}
+        try:
+            lines = self.seen_path.read_text().splitlines()
+        except OSError:
+            return seen
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue  # a torn last line from a crash
+            if isinstance(rec, dict) and rec.get("sid"):
+                seen[rec["sid"]] = rec
+        return seen
+
+    def mark(self, session, state, offset=None, **extra):
+        rec = {"sid": session["sid"], "transcript": session["transcript"], "cwd": session["cwd"],
+               "offset": session.get("offset", 0) if offset is None else offset, "state": state,
+               "ts": int(time.time()), **extra}
+        self.seen[session["sid"]] = rec
+        if self.dry:
+            return
+        self.state.mkdir(parents=True, exist_ok=True)
+        with open(self.seen_path, "a") as handle:
+            handle.write(json.dumps(rec) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    # --- external calls: every model call goes through one of these three seams ---
+    def call(self, stage, argv, stdin_text, timeout):
+        """Returns the child's JSON, or None. self.tool_failed tells a tool failure (fallback, timeout, exit other
+        than 1) from a bad answer (exit 1 or unparsable stdout): the caller retries the first, drops the second."""
+        self.attempts[stage] += 1
+        self.bytes[stage] += len(stdin_text.encode())
+        self.tool_failed, out, text, self.spent = False, None, "", 0
+        try:
+            proc = subprocess.run(argv, input=stdin_text, capture_output=True, text=True, timeout=timeout)
+            self.spent = spent_tokens(proc.stdout)
+            if proc.returncode != 0:
+                self.tool_failed = proc.returncode != 1
+                text = proc.stderr or f"exit {proc.returncode}"
+            else:
+                out = json.loads(proc.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError) as err:
+            self.tool_failed = not isinstance(err, ValueError)
+            text = type(err).__name__
+        if isinstance(out, dict) and out.get("fallback"):
+            self.tool_failed, text, out = True, str(out.get("error") or "fallback"), None
+        if out is None:
+            self.failures[stage] += 1
+            self.note_failure(stage, text)
+        return out
+
+    def note_failure(self, stage, text):
+        """Report line "<stage> failed: <reason>": secret check on the full text, then one line of 200 characters."""
+        if SECRET_RE.search(text):
+            text = "error text withheld"
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        line = f"{stage} failed: {one_line(lines[-1] if lines else text, 200)}"
+        seen = self.failure_lines.setdefault(stage, set())
+        if line not in seen and len(seen) < 5:
+            seen.add(line)
+            self.notes.append(line)
+
+    def jev(self, stage, sub, flags, stdin_text):
+        cmd = shlex.split(os.environ.get("VAULT_DISTILL_JEV_CMD", "")) or [str(Path(__file__).resolve().parent / "jev-gate")]
+        return self.call(stage, [*cmd, sub, "--timeout", "20", *flags], stdin_text, timeout=60)
+
+
+def spent_tokens(stdout):
+    """The "tokens" field of a child's first stdout line, else 0."""
+    try:
+        value = json.loads((stdout or "").splitlines()[0]).get("tokens")
+    except (ValueError, IndexError, AttributeError):
+        return 0
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+# --- inbox rotation (R6, R6f) ---
+def work_files(run):
+    """Dated work files to process: a crashed run's first (R6f), then tonight's rotation."""
+    inbox = run.live.parent
+    files = sorted(inbox.glob("session-summaries.*.work.md"))
+    if run.dry:
+        return files + ([run.live] if run.live.exists() else [])
+    if run.live.exists():
+        target = inbox / f"session-summaries.{datetime.datetime.now():%Y-%m-%d-%H%M%S}.work.md"
+        os.rename(run.live, target)  # atomic: the Stop hook's next append starts a fresh live file
+        files.append(target)
+    return files
+
+
+def parse_entries(paths):
+    """One entry per session id (the last line wins), with the raw line kept for re-queueing."""
+    entries = {}
+    for path in paths:
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = LINE_RE.search(line)
+            if m:
+                entries[m["sid"]] = {"sid": m["sid"], "cwd": m["cwd"], "transcript": m["transcript"], "line": line}
+    return entries
+
+
+def requeue(run, session):
+    """A session still running goes back to the live inbox and is not processed (R6)."""
+    if run.dry or not session["line"]:
+        return
+    with open(run.live, "a") as handle:
+        handle.write(session["line"] + "\n")
+
+
+# --- digest (R7, R7s) ---
+def text_of(content):
+    if isinstance(content, str):
+        return content.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "").encode("utf-8", "replace").decode("utf-8")
+                         for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def tool_result_text(block):
+    content = block.get("content")
+    if isinstance(content, list):
+        return "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
+    return content if isinstance(content, str) else ""
+
+
+def build_digest(transcript, offset):
+    """Signals line plus user prompts and each turn's last assistant text, tool output removed."""
+    with open(transcript, "rb") as handle:
+        handle.seek(offset)
+        raw = handle.read()
+    turns, last_assistant = [], ""
+    corrections = fail_then_pass = hook_blocks = 0
+    open_failures = 0
+    errors = {}
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("isMeta"):
+            continue
+        msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+        content = msg.get("content")
+        if rec.get("type") == "user":
+            user_text = text_of(content).strip()
+            if user_text and not user_text.startswith("<"):
+                if last_assistant:
+                    turns.append("assistant: " + last_assistant.strip())
+                    last_assistant = ""
+                corrections += bool(CORRECTION_RE.search(user_text))
+                turns.append("user: " + user_text)
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_result":
+                        continue
+                    text = tool_result_text(block)
+                    hook_blocks += bool(HOOK_BLOCK_RE.search(text))
+                    if block.get("is_error") is True:
+                        open_failures += 1
+                        first = text.strip().splitlines()[0][:200] if text.strip() else ""
+                        errors[first] = errors.get(first, 0) + 1
+                    elif open_failures:
+                        fail_then_pass += 1
+                        open_failures = 0
+        elif rec.get("type") == "assistant":
+            said = text_of(content)
+            if said.strip():
+                last_assistant = said
+    if last_assistant:
+        turns.append("assistant: " + last_assistant.strip())
+    repeats = sum(1 for k, n in errors.items() if k and n >= 2)
+    signals = (f"signals: corrections={corrections} fail_then_pass={fail_then_pass} "
+               f"hook_blocks={hook_blocks} repeated_errors={repeats}\n")
+    return signals + cut("\n".join(turns), DIGEST_MAX - len(signals.encode()))
+
+
+def cut(text, limit):
+    """First DIGEST_HEAD bytes plus the last bytes that fit, so the digest is at most `limit` bytes."""
+    data = text.encode("utf-8", errors="replace")
+    if len(data) <= limit:
+        return text
+    head = data[:DIGEST_HEAD].decode("utf-8", errors="ignore")
+    tail = data[len(data) - (limit - len(head.encode("utf-8", errors="replace")) - 5):].decode("utf-8", errors="ignore")
+    return head + "\n...\n" + tail
+
+
+def quarantine(run, name, text):
+    """R11: credential-bearing text goes to _inbox/private/, never to a model. Content is written only when
+    the vault's .gitignore quarantines that folder (vault-engine check-privacy's rule); else a pointer."""
+    private = run.vault / "_inbox" / "private"
+    try:
+        lines = [ln.strip() for ln in (run.vault / ".gitignore").read_text().splitlines()]
+        ignored = any(ln in ("_inbox/private/", "/_inbox/private/") for ln in lines)
+    except OSError:
+        ignored = False
+    body = text if ignored else "content withheld: add _inbox/private/ to the vault .gitignore\n"
+    atomic_write(private / f"{name}.md", body)
+
+
+# --- one session through the cheap stages (R7, R7f, R8, R11, R11a) ---
+def screen(run, session, skip_repos):
+    """Return the lesson probability for a session, or None when it reached a final or pending state."""
+    sid = session["sid"]
+    prior = run.seen.get(sid, {})
+    session["offset"] = prior.get("offset", 0)
+    if (skip_repos and not session.get("cwd")) or os.path.basename(repo_root(session.get("cwd", ""))) in skip_repos:
+        run.counts["not_allowed"] += 1
+        run.mark(session, "not-allowed", offset=size_or_zero(session["transcript"]))
+        return None
+    try:
+        size = os.path.getsize(session["transcript"])
+        if size - session["offset"] < GROWTH_MIN and prior.get("state") not in PENDING:
+            run.counts["skipped_small"] += 1
+            return None
+        digest = build_digest(session["transcript"], session["offset"])
+    except OSError:
+        run.counts["no_transcript"] += 1
+        run.mark(session, "no-transcript")
+        return None
+    session["end"] = size
+    if SECRET_RE.search(digest):
+        run.counts["private"] += 1
+        quarantine(run, f"digest-{sid}", digest)
+        run.mark(session, "private", offset=size)
+        return None
+    session["digest"] = digest
+    session["digest_path"] = str(run.digests / f"{sid}.txt")
+    atomic_write(Path(session["digest_path"]), digest)  # kept for tomorrow's rescoring (R9df)
+    if prior.get("state") == "extract-pending":
+        return prior.get("p", 1.0)
+    run.classified += 1
+    out = run.jev("classify", "classify-lesson", ["--digest", session["digest_path"]], digest)
+    if out is None:
+        run.counts["unsure"] += 1
+        run.mark(session, "jev-failed")  # R8f: unsure, no extractor tonight, asked again next run
+        return None
+    return float(out.get("lesson_prob", 0.5))
+
+
+def size_or_zero(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def record_session_error(run, session, err):
+    traceback.print_exc()
+    run.counts["errors"] += 1
+    run.mark(session, "error", offset=session.get("end", size_or_zero(session.get("transcript", ""))))
+    if hasattr(run, "notes") and run.notes is not None:
+        run.notes.append(one_line(f"{session.get('sid', 'unknown')}: {type(err).__name__}: {err}", 200))
+
+
+def run_batch(run):
+    skip_repos = {r.strip() for r in os.environ.get("VAULT_DISTILL_SKIP_REPOS", "").split(",") if r.strip()}
+    files = work_files(run)
+    entries = parse_entries(files)
+    for sid, rec in run.seen.items():  # pending sessions from earlier nights (R8u, caps)
+        if rec.get("state") in PENDING and sid not in entries:
+            entries[sid] = {"sid": sid, "cwd": rec.get("cwd", ""), "transcript": rec.get("transcript", ""), "line": ""}
+    queue, unsure_again = [], []
+    for session in entries.values():
+        try:
+            active = run.start - os.path.getmtime(session["transcript"]) < ACTIVE_SECONDS
+        except OSError:
+            active = False
+        if active:
+            run.counts["skipped_active"] += 1
+            requeue(run, session)
+            continue
+        run.counts["seen"] += 1
+        prior_state = run.seen.get(session["sid"], {}).get("state")
+        try:
+            p = screen(run, session, skip_repos)
+            if p is None:
+                continue
+            if p >= EXTRACT_AT or prior_state == "extract-pending":
+                queue.append((p, session))
+            elif p <= DROP_AT:
+                run.counts["dropped"] += 1
+                run.mark(session, "dropped", offset=session["end"], p=p)
+            elif prior_state == "unsure-pending":
+                unsure_again.append((p, session))
+            else:
+                run.counts["unsure"] += 1
+                run.mark(session, "unsure-pending", p=p)  # R8u: offered to Jev once more next run
+        except Exception as err:
+            record_session_error(run, session, err)
+            continue
+    unsure_again.sort(key=lambda item: -item[0])
+    keep = env_int("VAULT_DISTILL_UNSURE_MAX", 3)
+    for p, session in unsure_again[keep:]:
+        run.counts["unsure"] += 1
+        run.mark(session, "unsure", offset=session["end"], p=p)
+    queue.extend(unsure_again[:keep])
+    run_extractions(run, queue)
+    finish(run, files)
+
+
+def run_extractions(run, queue):
+    """R9-R10f and R19: extract up to VAULT_DISTILL_MAX sessions, gate each draft, then one review call."""
+    queue.sort(key=lambda item: -item[0])
+    cap = env_int("VAULT_DISTILL_MAX", 20)
+    if run.dry:
+        run.counts["extracted"] += min(len(queue), cap)
+        return
+    run.ledger = load_ledger(run)
+    rescore_unscored(run)
+    in_a_row = 0
+    for i, (p, session) in enumerate(queue):
+        tries = run.seen.get(session["sid"], {}).get("tries", 0)
+        if i >= cap or in_a_row >= 2:  # over the nightly cap, or the tool is down tonight: first in line tomorrow
+            run.mark(session, "extract-pending", p=p, **({"tries": tries} if tries else {}))
+            continue
+        try:
+            state, draft = extract_session(run, session)
+            in_a_row = in_a_row + 1 if run.extract_tool_failed else 0
+            if run.extract_tool_failed and state != "invalid":  # a tool failure does not use up the session (X8)
+                run.mark(session, "extract-pending", p=p, tries=tries + 1)
+                continue
+            run.counts["extracted"] += 1
+            run.mark(session, state, offset=session["end"], p=p, draft=draft)
+            save_ledger(run)
+        except Exception as err:
+            record_session_error(run, session, err)
+            continue
+    expire_candidates(run)
+    review(run)
+    for entry in run.ledger.values():
+        run.counts["candidates_waiting"] += entry["state"] in ("candidate", "ready", "would-publish")
+        run.counts["ready"] += entry["state"] == "ready"
+    save_ledger(run)
+
+
+def load_ledger(run):
+    try:
+        data = json.loads((run.state / "drafts.json").read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_ledger(run):
+    atomic_write(run.state / "drafts.json", json.dumps(run.ledger, indent=1) + "\n")
+
+
+def engine(run, *args):
+    try:
+        return subprocess.run([engine_bin(), *args], capture_output=True, text=True, timeout=20,
+                              env={**os.environ, "VAULT_ROOT": str(run.vault)})
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def related_notes(run, query):
+    proc = engine(run, "context", "--query", query[:2000], "--limit", "3")
+    return proc.stdout if proc is not None and proc.returncode == 0 else ""
+
+
+def repo_scope(run, cwd):
+    """project_ids of project notes whose release_repo is the session's repo, else the repo:<name> tag."""
+    root = os.path.realpath(repo_root(cwd)) if cwd else ""
+    ids = []
+    try:
+        lines = (run.vault / "_meta" / "indexes" / "projects.jsonl").read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("release_repo") and os.path.realpath(entry["release_repo"]) == root:
+            ids.append(entry["id"])
+    return (ids, []) if ids else ([], [f"repo:{os.path.basename(root)}"] if root else [])
+
+
+def prompts_of(digest):
+    return " ".join(line[6:] for line in digest.splitlines() if line.startswith("user: "))
+
+
+def extract_session(run, session):
+    """Returns (session state, draft key or None)."""
+    project_ids, tags = repo_scope(run, session["cwd"])
+    request = {"session_id": session["sid"], "digest_path": session["digest_path"], "out_dir": str(run.distill),
+               "project_ids": project_ids, "tags": tags,
+               "related": related_notes(run, prompts_of(session["digest"]) or session["digest"][:2000])}
+    cmd = shlex.split(os.environ.get("VAULT_DISTILL_EXTRACT_CMD", "")) or [sys.executable, str(Path(__file__).resolve()), "--extract-default"]
+    run.bytes["extract"] += len(session["digest"].encode()) + len(request["related"].encode())  # what the model reads
+    out = run.call("extract", cmd, json.dumps(request), timeout=360)
+    run.extract_tool_failed = run.tool_failed  # later Jev calls overwrite tool_failed
+    run.counts["extract_tokens"] += run.spent  # failed calls cost tokens too
+    if not isinstance(out, dict):
+        if run.extract_tool_failed and run.seen.get(session["sid"], {}).get("tries", 0) < 2:
+            return "extract-pending", None  # run_extractions raises the try count; the third tool failure falls through
+        run.counts["invalid"] += 1
+        return "invalid", None  # R9f: a bad answer, or the third tool failure
+    if not out.get("path"):
+        run.counts["no_lesson"] += 1
+        return "no-lesson", None
+    draft = Path(out["path"]).resolve()
+    if run.distill.resolve() not in draft.parents or not draft.is_file():
+        run.counts["invalid"] += 1
+        return "invalid", None
+    key = str(draft.relative_to(run.distill.resolve()))
+    entry = {"sid": session["sid"], "sessions": [session["sid"]], "digest": session["digest_path"],
+             "created": int(time.time()), "state": "new", "scores": {}}
+    run.ledger[key] = entry
+    admit_draft(run, key, entry)
+    return "extracted", key
+
+
+def admit_draft(run, key, entry):
+    path = run.distill / key
+    text = path.read_text(errors="replace")
+    if SECRET_RE.search(text):
+        quarantine(run, f"draft-{entry['sid']}", text)
+        path.unlink()  # a credential must not stay in a synced inbox path; the copy is in _inbox/private/
+        entry["state"] = "private"
+        run.counts["private"] += 1
+        return
+    proc = engine(run, "validate", str(path))
+    if len(text.encode()) > DRAFT_MAX or proc is None or proc.returncode != 0:
+        entry["state"] = "invalid"  # R9f: stays in the inbox marked invalid
+        run.counts["invalid"] += 1
+    elif not evidence_ok(text, Path(entry["digest"]).read_text(errors="replace")):
+        entry["state"] = "no-evidence"  # R9c: script check, no model
+        run.counts["no_evidence"] += 1
+    else:
+        score_draft(run, key, entry)
+
+
+def evidence_ok(text, digest):
+    """R9c: at least one quoted Evidence line (8+ characters) is a substring of the digest."""
+    m = re.search(r"^## Evidence[ \t]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    if not m:
+        return False
+    quotes = [ln.strip()[2:].strip().strip("`\"'") for ln in m.group(1).splitlines() if ln.strip()[:2] in ("- ", "> ")]
+    return any(len(q) >= 8 and q in digest for q in quotes)
+
+
+def title_of(text):
+    m = re.search(r'^title:\s*"?(.*?)"?\s*$', text, re.M)
+    return m.group(1) if m else ""
+
+
+def score_draft(run, key, entry):
+    """R9d: Jev scores specific, novel and high_stakes; below 0.5 on either of the first two is junk."""
+    path = run.distill / key
+    text = path.read_text(errors="replace")
+    digest = Path(entry["digest"]).read_text(errors="replace") if Path(entry["digest"]).exists() else ""
+    related = related_notes(run, title_of(text))
+    related_path = run.state / "related" / f"{entry['sid']}.txt"
+    atomic_write(related_path, related)
+    claude_md = Path.home() / ".claude" / "CLAUDE.md"
+    run.bytes["score"] += min(JEV_RULES_MAX, size_or_zero(claude_md))  # jev-gate reads it itself
+    out = run.jev("score", "score-draft", ["--draft", str(path), "--digest", entry["digest"], "--related", str(related_path)],
+                  text + "\n" + digest + "\n" + related)
+    if out is None:
+        entry["state"] = "unscored"  # R9df: scored again on the next run
+        run.counts["unscored"] += 1
+        return
+    entry["scores"] = {k: float(out.get(k, 0.0)) for k in ("specific", "novel", "high_stakes")}
+    if entry["scores"]["specific"] < JUNK_BELOW or entry["scores"]["novel"] < JUNK_BELOW:
+        entry["state"] = "junk"
+        run.counts["junk"] += 1
+        return
+    become_candidate(run, key, entry)
+
+
+def rescore_unscored(run):
+    for key, entry in list(run.ledger.items()):
+        if entry["state"] == "unscored" and (run.distill / key).exists():
+            score_draft(run, key, entry)
+
+
+def terms(text):
+    return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) >= 4}
+
+
+def keyword_score(query, text):
+    """R2's field weights (title 3, tag 2, body 1) over a candidate file.
+    shortcut: no engine stop-word list and no score floor; it only orders at most 5 Jev comparisons."""
+    title = terms(title_of(text))
+    tag_line = re.search(r"^tags:(.*)$", text, re.M)
+    tags = terms(tag_line.group(1)) if tag_line else set()
+    body = terms(text)
+    return sum(3 if t in title else 2 if t in tags else 1 if t in body else 0 for t in query)
+
+
+def become_candidate(run, key, entry):
+    """R19: a candidate goes to review on recurrence in another session or on high_stakes >= 0.85."""
+    src = run.distill / key
+    dest = free_path(run.distill / "candidates" / src.name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dest)
+    new_key = str(dest.relative_to(run.distill))
+    run.ledger.pop(key, None)
+    run.ledger[new_key] = entry
+    entry["state"] = "candidate"
+    text = dest.read_text(errors="replace")
+    query = terms(title_of(text) + " " + text)
+    others = [(keyword_score(query, (run.distill / k).read_text(errors="replace")), k)
+              for k, e in run.ledger.items()
+              if k != new_key and e["state"] in ("candidate", "ready") and entry["sid"] not in e["sessions"]
+              and (run.distill / k).exists()]
+    for _, other in sorted(others, reverse=True)[:SAME_MAX]:
+        other_text = (run.distill / other).read_text(errors="replace")
+        out = run.jev("same_lesson", "same-lesson", ["--a", str(dest), "--b", str(run.distill / other)],
+                      text + "\n---\n" + other_text)
+        if out is not None and float(out.get("same", 0.0)) >= SAME_AT:
+            merge(run, other, new_key)
+            return
+    if entry["scores"].get("high_stakes", 0.0) >= HIGH_STAKES_AT:
+        entry["state"] = "ready"
+
+
+def merge(run, keep_key, new_key):
+    """Recurrence: the older candidate cites both sessions; the newer file moves to merged/."""
+    keep, new = run.ledger[keep_key], run.ledger[new_key]
+    keep["sessions"] = sorted(set(keep["sessions"]) | set(new["sessions"]))
+    keep["state"] = "ready"
+    with open(run.distill / keep_key, "a") as handle:
+        handle.write("\n## Also seen in\n" + "".join(f"- session `{s}`\n" for s in new["sessions"]))
+    src = run.distill / new_key
+    dest = free_path(run.distill / "merged" / src.name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dest)
+    run.ledger.pop(new_key)
+    run.ledger[str(dest.relative_to(run.distill))] = {**new, "state": "merged", "into": keep_key}
+    run.counts["recurred"] += 1
+
+
+def expire_candidates(run):
+    """R19: a candidate with no match after 60 days leaves the queue; moved to expired/, never deleted."""
+    cutoff = time.time() - CANDIDATE_DAYS * 86400
+    for key, entry in list(run.ledger.items()):
+        if entry["state"] == "candidate" and entry["created"] < cutoff and (run.distill / key).exists():
+            dest = free_path(run.distill / "expired" / Path(key).name)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(run.distill / key, dest)
+            run.ledger.pop(key)
+            run.ledger[str(dest.relative_to(run.distill))] = {**entry, "state": "expired"}
+            run.counts["expired"] += 1
+            run.notes.append(f"expired: {key}")
+
+
+def review(run):
+    """R10: one review call for every ready candidate. Shadow mode: a publish verdict is recorded as would-publish."""
+    ready = [k for k, e in run.ledger.items() if e["state"] == "ready" and (run.distill / k).exists()]
+    if not ready:
+        return
+    items = [{"draft": k, "sessions": run.ledger[k]["sessions"], "scores": run.ledger[k]["scores"],
+              "text": (run.distill / k).read_text(errors="replace")} for k in ready]
+    cmd = shlex.split(os.environ.get("VAULT_DISTILL_REVIEW_CMD", "")) or [sys.executable, str(Path(__file__).resolve()), "--review-default"]
+    out = run.call("review", cmd, json.dumps(items), timeout=360)
+    if not isinstance(out, list):
+        if out is not None:
+            run.failures["review"] += 1
+        return  # R10f: nothing changes, every candidate stays ready for tomorrow
+    for verdict in out:
+        if not isinstance(verdict, dict) or verdict.get("draft") not in ready:
+            continue
+        entry = run.ledger[verdict["draft"]]
+        entry["reason"] = one_line(verdict.get("reason", ""), 300)
+        if verdict.get("verdict") == "publish":
+            entry["state"] = "would-publish"
+            run.counts["would_publish"] += 1
+            run.notes.append(f"would publish: {verdict['draft']} ({entry['reason']})")
+        elif verdict.get("verdict") == "reject":
+            entry["state"] = "rejected"
+            run.counts["rejected"] += 1
+            run.notes.append(f"rejected: {verdict['draft']} ({entry['reason']})")
+
+
+# --- default extractor and reviewer: one Gemini API call each (plain HTTP: no tools, no workspace) ---
+EXTRACT_SCHEMA = {
+    "type": "object", "required": ["lesson"],
+    "properties": {
+        "lesson": {"type": "boolean"},
+        "title": {"type": "string", "maxLength": 80},
+        "summary": {"type": "string", "maxLength": 160},
+        "when": {"type": "string", "maxLength": 300},
+        "rule": {"type": "string", "maxLength": 300},
+        "why": {"type": "string", "maxLength": 300},
+        "scope": {"enum": ["repo", "global"]},
+        "existing_note_id": {"type": "string"},
+        "evidence": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 160}},
+    },
+}
+EXTRACT_PROMPT = """You turn one finished agent session into at most one reusable lesson for a knowledge vault.
+Answer with JSON only, matching the schema.
+- lesson: false when the session holds no trap, fix, decision or rule that would help a future session.
+- title: a short name for the lesson. summary: one sentence. when / rule / why: one or two sentences each.
+- scope: "global" when the rule applies in every repo, else "repo".
+- existing_note_id: when one of the existing notes below already covers this lesson, its id (the draft then
+  becomes a proposed addition to that note); otherwise leave it out.
+- evidence: 1 to 3 strings copied exactly from the digest (an error message, a command or a file path).
+
+Existing notes (id | title | path | matched | summary):
+{related}
+
+Session digest:
+{digest}
+"""
+REVIEW_SCHEMA = {
+    "type": "object", "required": ["verdicts"],
+    "properties": {"verdicts": {"type": "array", "items": {
+        "type": "object", "required": ["draft", "verdict", "reason"],
+        "properties": {"draft": {"type": "string"}, "verdict": {"enum": ["publish", "reject"]},
+                       "reason": {"type": "string", "maxLength": 200}}}}},
+}
+REVIEW_PROMPT = """You review candidate knowledge notes written automatically from agent sessions.
+For each candidate return publish or reject with a one-sentence reason. Publish only a rule that is specific,
+correct as far as the text shows, useful in a future session, and not a one-off. Answer with JSON only.
+
+Candidates (JSON):
+"""
+
+
+def parse_json(text):
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except ValueError:
+        return None
+
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
+
+
+def gemini_key():
+    """GEMINI_API_KEY from the environment, else the Keychain entry; "" when neither has it."""
+    if os.environ.get("GEMINI_API_KEY"):
+        return os.environ["GEMINI_API_KEY"]
+    try:
+        proc = subprocess.run(["security", "find-generic-password", "-s", "joy-companion", "-a", "gemini", "-w"],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def ask_gemini(model, prompt, schema):
+    """One generateContent call. Returns (answer, tokens, failure); failure is None, ("tool", reason) or ("bad", reason).
+    The key goes in a header only, and no response body is copied into a reason, so neither can reach the report."""
+    key = gemini_key()
+    if not key:
+        return None, 0, ("tool", "no Gemini key (env GEMINI_API_KEY or Keychain joy-companion/gemini)")
+    # thinking is billed as output; "low" cut a probe call from 152 to 14 tokens (the API refuses "minimal")
+    body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema,
+                                 "maxOutputTokens": 8000, "thinkingConfig": {"thinkingLevel": "low"}}}
+    req = urllib.request.Request(GEMINI_URL.format(model), data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "x-goog-api-key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            reply = json.loads(resp.read())
+    except urllib.error.HTTPError as err:
+        try:
+            status = json.loads(err.read())["error"]["status"]
+        except (OSError, ValueError, KeyError, TypeError):
+            status = ""
+        return None, 0, ("tool", f"HTTP {err.code} {status if re.fullmatch(r'[A-Z_]{1,40}', str(status)) else ''}".strip())
+    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as err:
+        return None, 0, ("tool", type(err).__name__)
+    if not isinstance(reply, dict):
+        return None, 0, ("tool", "unexpected reply shape")
+    usage = reply.get("usageMetadata")
+    tokens = usage.get("totalTokenCount", 0) if isinstance(usage, dict) else 0
+    tokens = tokens if isinstance(tokens, int) else 0
+    try:
+        block = (reply.get("promptFeedback") or {}).get("blockReason")
+        cands = reply.get("candidates")
+        if block or not cands or not isinstance(cands[0], dict):
+            return None, tokens, ("tool", f"blocked {block}" if block else "no candidate")
+        finish = cands[0].get("finishReason")
+        if finish != "STOP":
+            return None, tokens, ("tool", f"finishReason {finish}")
+        parts = [p for p in (cands[0].get("content") or {}).get("parts") or [] if isinstance(p, dict) and not p.get("thought")]
+    except (AttributeError, TypeError, KeyError, IndexError):
+        return None, tokens, ("tool", "unexpected reply shape")
+    answer = parse_json(parts[-1].get("text") or "") if parts and isinstance(parts[-1].get("text"), str) else None
+    if not isinstance(answer, dict):
+        return None, tokens, ("bad", "Gemini answer is not a JSON object")
+    return answer, tokens, None
+
+
+def one_line(value, limit):
+    return " ".join(str(value or "").split())[:limit]
+
+
+def render_draft(answer, request):
+    sid = request["session_id"]
+    title = one_line(answer.get("title"), 80) or "Untitled lesson"
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60] or "lesson"
+    today = datetime.date.today().isoformat()
+    scope_global = answer.get("scope") == "global"
+    fm = {"schema": "knowledge/v1", "id": f"KNOW-{slug}", "kind": "knowledge", "title": title, "status": "draft",
+          "category": "rule", "author": "agent-distiller", "created": today, "updated": today,
+          "tags": ["auto-distilled"] + (["global"] if scope_global else list(request.get("tags", []))),
+          "project_ids": [] if scope_global else list(request.get("project_ids", [])),
+          "source_sessions": [sid]}
+    if answer.get("existing_note_id"):
+        fm["proposed_addition_to"] = one_line(answer["existing_note_id"], 120)
+    lines = ["---"] + [f"{k}: {json.dumps(v)}" for k, v in fm.items()] + ["---", "",
+             one_line(answer.get("summary"), 160), "",
+             "## When this applies", one_line(answer.get("when"), 300), "",
+             "## Rule", one_line(answer.get("rule"), 300), "",
+             "## Why", one_line(answer.get("why"), 300), "",
+             "## Source", f"- session `{sid}`", "",
+             "## Evidence"] + [f"- {one_line(q, 160)}" for q in (answer.get("evidence") or [])[:3]]
+    return slug, "\n".join(lines) + "\n"
+
+
+def call_failed(failure, tokens=0):
+    """A tool failure is a fallback on stdout (the jev-gate contract, exit 0); a bad answer is stderr and exit 1.
+    Both put the spent tokens on stdout so the night's total counts failed calls too."""
+    kind, reason = failure
+    if kind == "tool":
+        print(json.dumps({"fallback": True, "error": reason, "tokens": tokens}))
+        return 0
+    print(json.dumps({"tokens": tokens}))
+    print(reason, file=sys.stderr)
+    return 1
+
+
+def extract_default():
+    request = json.loads(sys.stdin.read())
+    digest = Path(request["digest_path"]).read_text(errors="replace")
+    answer, tokens, failure = ask_gemini(EXTRACT_MODEL, EXTRACT_PROMPT.format(related=request.get("related") or "(none)", digest=digest),
+                                      EXTRACT_SCHEMA)
+    if failure is None and "lesson" not in answer:
+        failure = ("bad", "Gemini answer has no lesson key")
+    if failure:
+        return call_failed(failure, tokens)
+    if not answer.get("lesson"):
+        print(json.dumps({"path": None, "reason": "no-lesson", "tokens": tokens}))
+        return 0
+    slug, text = render_draft(answer, request)
+    path = free_path(Path(request["out_dir"]) / f"{slug}--{request['session_id'][:8]}.md")
+    atomic_write(path, text)
+    print(json.dumps({"path": str(path), "tokens": tokens}))
+    return 0
+
+
+def review_default():
+    items = sys.stdin.read()
+    answer, _, failure = ask_gemini(REVIEW_MODEL, REVIEW_PROMPT + items, REVIEW_SCHEMA)
+    if failure is None and not isinstance(answer.get("verdicts"), list):
+        failure = ("bad", "Gemini answer has no verdicts list")
+    if failure:
+        return call_failed(failure)
+    print(json.dumps(answer["verdicts"]))
+    return 0
+
+
+# --- report and exit code (R12, R16) ---
+def injections_per_note():
+    counts = {}
+    try:
+        lines = (Path.home() / ".claude" / "state" / "vault-recall" / "injections.jsonl").read_text().splitlines()
+    except OSError:
+        return counts
+    for line in lines:
+        try:
+            nid = json.loads(line).get("note_id")
+        except (ValueError, AttributeError):
+            continue
+        if nid:
+            counts[nid] = counts.get(nid, 0) + 1
+    return counts
+
+
+def render_report(run, exit_code):
+    lines = [f"# vault-distill report {run.date}", "", "Shadow mode: nothing is published (I-040).", "",
+             "| count | value |", "|---|---|"]
+    lines += [f"| {k} | {v} |" for k, v in run.counts.items()]
+    lines += ["", "| stage | bytes sent | calls | failed |", "|---|---|---|---|"]
+    lines += [f"| {s} | {run.bytes[s]} | {run.attempts[s]} | {run.failures[s]} |" for s in STAGES]
+    lines += ["", "## Injections per note (used-rate arrives with R15, slice 3)", ""]
+    lines += [f"- {nid}: {n} injections, used n/a" for nid, n in sorted(injections_per_note().items(), key=lambda kv: -kv[1])[:20]]
+    lines += ["", "## Notes", ""] + [f"- {n}" for n in run.notes] + ["", f"exit: {exit_code}", ""]
+    return "\n".join(lines)
+
+
+def exit_code_for(run):
+    """R16: non-zero when more than half the classified sessions are unsure, or a stage failed every call."""
+    errors = run.counts.get("errors", 0)
+    if errors > 0 and errors * 2 > run.counts.get("seen", 0):
+        return 2
+    if run.classified and run.counts["unsure"] * 2 > run.classified:
+        return 2
+    if any(run.attempts[s] and run.failures[s] == run.attempts[s] for s in STAGES):
+        return 2
+    return 0
+
+
+def finish(run, files):
+    code = exit_code_for(run)
+    report = render_report(run, code)
+    run.exit_code = code
+    if run.dry:
+        print(report)
+        return
+    path = run.distill / f"report-{run.date}.md"
+    atomic_write(path, report)
+    atomic_write(run.state / "last-run.json", json.dumps({
+        "ts": int(time.time()), "date": run.date, "exit": code, "report": str(path),
+        "counts": run.counts, "bytes": run.bytes}, indent=2) + "\n")
+    for f in files:
+        if f != run.live:
+            f.unlink(missing_ok=True)  # R13: every session in it reached a final or pending state
+    print(f"vault-distill: report {path} (exit {code})")
+
+
+def show_report():
+    try:
+        last = json.loads((state_dir() / "last-run.json").read_text())
+        print(Path(last["report"]).read_text())
+        return 0
+    except (OSError, ValueError, KeyError, TypeError):
+        print("vault-distill: no run recorded yet")
+        return 1
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Nightly knowledge distillation from agent sessions (shadow mode).")
+    parser.add_argument("--dry-run", action="store_true", help="call Jev only; record, extract and review nothing")
+    parser.add_argument("--report", action="store_true", help="print the last run's report")
+    parser.add_argument("--extract-default", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--review-default", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.extract_default:
+        return extract_default()
+    if args.review_default:
+        return review_default()
+    if os.environ.get("VAULT_DISTILL") == "0":
+        return 0
+    if args.report:
+        return show_report()
+    if not (vault_root() / "_inbox").is_dir():
+        print(f"vault-distill: no vault inbox at {vault_root()}", file=sys.stderr)
+        return 0
+    state_dir().mkdir(parents=True, exist_ok=True)
+    with open(state_dir() / "run.lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("vault-distill: another run holds the lock", file=sys.stderr)
+            return 0
+        run = Run(dry_run=args.dry_run)
+        run_batch(run)
+        return run.exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

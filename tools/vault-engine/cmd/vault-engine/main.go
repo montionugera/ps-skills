@@ -39,7 +39,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: vault-engine hub-pre-receive <limits_file>")
 			os.Exit(1)
 		}
-		os.Exit(vaultsync.PreReceive(os.Stdin, os.Stderr, os.Args[2], os.Getenv("VAULT_HUB_PLACE"), time.Now()))
+		os.Exit(vaultsync.PreReceive("", os.Stdin, os.Stderr, os.Args[2], os.Getenv("VAULT_HUB_PLACE"), time.Now()))
 	}
 
 	// Determine vault root: if VAULT_ROOT env is set, use it; otherwise search up or use system canonical vault
@@ -71,6 +71,11 @@ func main() {
 	}
 
 	engine := vault.NewVaultEngine(vaultRoot)
+
+	// Read-only and fail-open, so it runs before the sync config can refuse.
+	if command == "context" {
+		os.Exit(runContext(engine, os.Args[2:]))
+	}
 
 	syncCfg, err := vaultsync.LoadConfig(engine.Root)
 	if err != nil {
@@ -469,6 +474,7 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  rebuild-index                       Rebuild _meta/indexes/*.jsonl")
 	fmt.Println("  search <query>                      Search knowledge, projects, and ideas")
+	fmt.Println("  context [--cwd d] [--query q]       Print knowledge relevant to a session")
 	fmt.Println("  ingest <file_path>                  Ingest raw note from inbox")
 	fmt.Println("  read-record <record_id>             Read canonical record with SHA-256")
 	fmt.Println("  commit <id> <sha> <actor> <json>    Optimistic concurrency commit")

@@ -243,6 +243,7 @@ fi
 
 if [[ "$tier" == "html" ]]; then
   [[ "$dump_text" == "1" ]] && { echo "SKIP: --dump-text is not supported for the html tier" >&2; exit 2; }
+  doc="index.html"
   fences=0   # no markdown/draw.io on the html tier; the python block runs its own asserts
 else
 # Which markdown file the page will fetch: ?doc=X, else content.md.
@@ -305,54 +306,113 @@ print(n)
 [[ "$fences" =~ ^[0-9]+$ ]] || { echo "FAIL: could not count drawio fences in $md: $fences"; exit 1; }
 fi
 
-python3 - "$chrome" "$url" "$fences" "$dump_text" "$tier" "$text_out" <<'PY'
+python3 - "$chrome" "$url" "$fences" "$dump_text" "$tier" "$text_out" "$doc" <<'PY'
 import os, re, select, shutil, signal, subprocess, sys, tempfile, time
 from html.parser import HTMLParser
-chrome, url, fences, dump_text, tier, text_out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4] == "1", sys.argv[5], sys.argv[6]
-prof = tempfile.mkdtemp(prefix="ps-commu-verify-")
-proc = None
-out, err = b"", b""
-try:
-    cmd = [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
-           "--no-default-browser-check", "--disable-background-networking", "--disable-sync",
-           "--disable-component-update", "--disable-extensions", "--window-size=1280,900",
-           "--user-data-dir=" + prof, "--enable-logging=stderr", "--v=0",
-           "--virtual-time-budget=8000", "--run-all-compositor-stages-before-draw",
-           "--dump-dom", url]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-    # This Chrome build prints the DOM and then hangs on shutdown, so read stdout
-    # until </html> (or 90s; ~45s is normal on macOS) and kill it ourselves instead of waiting for exit.
-    end = time.time() + 90
-    fds = [proc.stdout, proc.stderr]
-    while fds and time.time() < end and b"</html>" not in out:
-        r, _, _ = select.select(fds, [], [], 0.5)
-        for f in r:
-            chunk = os.read(f.fileno(), 65536)
-            if not chunk: fds.remove(f); continue
-            if f is proc.stdout: out += chunk
-            else: err += chunk
-finally:
-    # try/finally so the Chrome process group and the /tmp profile dir can
-    # never be orphaned: a JSON/dict error, an unexpected exception anywhere
-    # above, or an external SIGTERM (callers wrap this whole script in their
-    # own `timeout`, on top of the 90s internal budget) must still reach this
-    # cleanup. Kill the whole process group: renderer/GPU children hold the
-    # stderr pipe, so a plain kill()+read() would block forever — and never
-    # call a blocking read after this.
-    if proc is not None and proc.poll() is None:
+chrome, url, fences, dump_text, tier, text_out, doc = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4] == "1", sys.argv[5], sys.argv[6], sys.argv[7]
+
+def _chrome_prefix(chrome_path):
+    # On Apple Silicon Macs, spawning a Universal Chrome binary from an x86_64
+    # shell/ancestor can still select the x86_64 slice under Rosetta (~60s/load
+    # + GoogleUpdater stalls vs ~1.4s native arm64) even when python3 itself is
+    # arm64. Pin the native arm64 slice whenever hw.optional.arm64=1 and the
+    # binary contains arm64; shell stubs (CHROME_BIN in tests) fail `lipo`.
+    if sys.platform == "darwin" and os.path.isfile("/usr/bin/arch"):
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            # PermissionError: the process exited between poll() and killpg(), so
-            # the group holds only an unreaped zombie — macOS reports that as EPERM.
-            pass
-    if proc is not None:
-        try:
-            proc.wait(timeout=5)
+            arm_ok = subprocess.run(
+                ["/usr/sbin/sysctl", "-n", "hw.optional.arm64"],
+                capture_output=True, text=True, timeout=2
+            )
+            if arm_ok.returncode == 0 and arm_ok.stdout.strip() == "1":
+                archs = subprocess.run(
+                    ["/usr/bin/lipo", "-archs", chrome_path],
+                    capture_output=True, text=True, timeout=2
+                )
+                if archs.returncode == 0 and "arm64" in archs.stdout.split():
+                    return ["/usr/bin/arch", "-arm64"]
         except Exception:
             pass
-    shutil.rmtree(prof, ignore_errors=True)
-dom, log = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+    return []
+
+_prefix = _chrome_prefix(chrome)
+
+def _run_chrome(budget_ms):
+    prof = tempfile.mkdtemp(prefix="ps-commu-verify-")
+    proc = None
+    out, err = b"", b""
+    t0 = time.time()
+    timed_out = False
+    try:
+        cmd = _prefix + [
+               chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+               "--no-default-browser-check", "--disable-background-networking", "--disable-sync",
+               "--disable-component-update", "--disable-extensions", "--window-size=1280,900",
+               "--user-data-dir=" + prof, "--enable-logging=stderr", "--v=0",
+               f"--virtual-time-budget={budget_ms}", "--run-all-compositor-stages-before-draw",
+               "--dump-dom", url]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        # This Chrome build prints the DOM and then hangs on shutdown, so read stdout
+        # until </html> (or 90s) and kill it ourselves instead of waiting for exit.
+        end = time.time() + 90
+        fds = [proc.stdout, proc.stderr]
+        while fds and time.time() < end and b"</html>" not in out:
+            r, _, _ = select.select(fds, [], [], 0.5)
+            for f in r:
+                chunk = os.read(f.fileno(), 65536)
+                if not chunk: fds.remove(f); continue
+                if f is proc.stdout: out += chunk
+                else: err += chunk
+        if time.time() >= end and b"</html>" not in out:
+            timed_out = True
+    finally:
+        # try/finally so the Chrome process group and the /tmp profile dir can
+        # never be orphaned: a JSON/dict error, an unexpected exception anywhere
+        # above, or an external SIGTERM (callers wrap this whole script in their
+        # own `timeout`, on top of the 90s internal budget) must still reach this
+        # cleanup. Kill the whole process group: renderer/GPU children hold the
+        # stderr pipe, so a plain kill()+read() would block forever — and never
+        # call a blocking read after this.
+        if proc is not None and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                # PermissionError: the process exited between poll() and killpg(), so
+                # the group holds only an unreaped zombie — macOS reports that as EPERM.
+                pass
+        if proc is not None:
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        shutil.rmtree(prof, ignore_errors=True)
+    return out.decode("utf-8", "replace"), err.decode("utf-8", "replace"), timed_out, time.time() - t0
+
+def _console_errors(log_txt):
+    found = []
+    for ln in log_txt.splitlines():
+        mm = re.match(r'\[[^\]]*:ERROR:CONSOLE\(\d+\)\]\s*(.*?)(?:, source: (\S+) \(\d+\))?$', ln)
+        if mm and not (mm.group(2) or "").startswith("chrome-extension://"):
+            found.append((mm.group(1), mm.group(2) or ""))
+    return found
+
+def _has_explainer_error(html_txt):
+    if re.search(r'<body[^>]*\bexplainer-error\b', html_txt, re.I):
+        return True
+    no_scripts = re.sub(r'<script\b.*?</script>', '', html_txt, flags=re.S | re.I)
+    return bool(re.search(r'<div[^>]*class=["\'][^"\']*\bexplainer-error\b', no_scripts, re.I))
+
+dom, log, timed_out, elapsed = _run_chrome(8000)
+if tier != "html" and not _has_explainer_error(dom) and not _console_errors(log):
+    pre_render_booting = (
+        "</html>" in dom
+        and not re.search(r'class="[^"]*\bis-ready\b', dom)
+        and re.search(r'class="[^"]*\bbooting\b', dom)
+        and "cherry-previewer" not in dom
+    )
+    transient_empty = (not timed_out and "</html>" not in dom and elapsed >= 0.3)
+    if pre_render_booting or transient_empty:
+        time.sleep(0.5)
+        dom, log, timed_out, elapsed = _run_chrome(12000)
 lines, failed = [], 0
 def report(status, n, text):
     global failed
@@ -382,6 +442,43 @@ if tier == "html":
     report("FAIL" if tripped else "PASS", "html-1",
            ".explainer-error present on body (mermaid parse/render error)" if tripped else "no .explainer-error on body")
     report("PASS" if mc.svgs == mc.divs else "FAIL", "html-2", f"mermaid svg={mc.svgs} divs={mc.divs}")
+    class HtmlInteractive(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tabs, self.accs, self.stack = [], [], []
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            cls = set((a.get("class") or "").split())
+            entry = {"tag": tag, "kind": None}
+            if "tabs" in cls:
+                rec = {"wired": "is-wired" in cls, "btns": 0, "panels": 0}
+                self.tabs.append(rec); entry["kind"] = ("tabs", rec)
+            elif "accordion" in cls:
+                rec = {"wired": "is-wired" in cls, "btns": 0, "panels": 0}
+                self.accs.append(rec); entry["kind"] = ("acc", rec)
+            for parent in reversed(self.stack):
+                if parent["kind"] and parent["kind"][0] == "tabs":
+                    if "tab-btn" in cls: parent["kind"][1]["btns"] += 1
+                    if "tab-panel" in cls: parent["kind"][1]["panels"] += 1
+                    break
+            for parent in reversed(self.stack):
+                if parent["kind"] and parent["kind"][0] == "acc":
+                    if "acc-btn" in cls: parent["kind"][1]["btns"] += 1
+                    if "acc-panel" in cls: parent["kind"][1]["panels"] += 1
+                    break
+            if tag not in {"br","img","input","hr","meta","link","area","base","col","embed","source","track","wbr"}:
+                self.stack.append(entry)
+        def handle_endtag(self, tag):
+            for i in range(len(self.stack) - 1, -1, -1):
+                if self.stack[i]["tag"] == tag:
+                    del self.stack[i:]; break
+    hi = HtmlInteractive(); hi.feed(dom)
+    bad_ht = [t for t in hi.tabs if not t["wired"] or t["btns"] < 2 or t["btns"] != t["panels"]]
+    bad_ha = [a for a in hi.accs if not a["wired"] or a["btns"] < 2 or a["btns"] != a["panels"]]
+    if bad_ht or bad_ha:
+        report("FAIL", "html-3", f"declarative interactive unwired/malformed (bad_tabs={len(bad_ht)} bad_acc={len(bad_ha)})")
+    else:
+        report("PASS", "html-3", f"declarative interactive wired (tabs={len(hi.tabs)} accordion={len(hi.accs)})")
     print("\n".join(lines))
     sys.exit(1 if failed else 0)
 if not re.search(r'class="[^"]*\bis-ready\b', dom):
@@ -472,6 +569,10 @@ if dump_text and not failed:
 if dump_text:
     # Backward-compatible text-export mode: same load, same extraction, same file.
     if not pv.text:
+        for ln in lines:
+            sys.stderr.write(ln + "\n")
+        for t, u in _console_errors(log)[:10]:
+            sys.stderr.write(f"      {t[:200]}  [{u}]\n")
         sys.stderr.write(f"FAIL: {no_preview_msg}\n")
         sys.exit(1)
     sys.stdout.write(text)
@@ -487,11 +588,7 @@ report("FAIL" if "~~CODE" in text else "PASS", 2, "~~CODE placeholder " + ("LEAK
 report("FAIL" if "data-nav" in prose else "PASS", 3, "raw data-nav text " + ("LEAKED in body text" if "data-nav" in prose else "absent"))
 # Console: Chrome's stderr log lines look like
 #   [pid:tid:ts:ERROR:CONSOLE(12)] "Uncaught ...", source: http://127.0.0.1:7700/x.js (12)
-errs = []
-for ln in log.splitlines():
-    mm = re.match(r'\[[^\]]*:ERROR:CONSOLE\(\d+\)\]\s*(.*?)(?:, source: (\S+) \(\d+\))?$', ln)
-    if mm and not (mm.group(2) or "").startswith("chrome-extension://"):
-        errs.append((mm.group(1), mm.group(2) or ""))
+errs = _console_errors(log)
 report("FAIL" if errs else "PASS", 4, f"console errors={len(errs)}")
 for t, u in errs[:10]: lines.append(f"      {t[:200]}  [{u}]")
 report("SKIP", 5, "nav click: --dump-dom cannot dispatch clicks and DevTools Runtime.evaluate hangs on this Chrome build after page load")
@@ -522,6 +619,73 @@ else:
 # rendered (e.g. a double-escaped draw.io label). <code> samples are exempt.
 br_leaks = re.findall(r"(?:<|&lt;)br\s*/?(?:>|&gt;)", prose, re.I)
 report("FAIL" if br_leaks else "PASS", 8, "literal <br> text " + (f"LEAKED in body text ({len(br_leaks)}x)" if br_leaks else "absent"))
+
+# Assert 9: declarative interactive floor (.tabs + .accordion wired inside .cherry-previewer)
+class InteractiveCount(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_preview = 0
+        self.tabs = []
+        self.accs = []
+        self.stack = []
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        cls = set((a.get("class") or "").split())
+        if not self.in_preview:
+            if "cherry-previewer" in cls:
+                self.in_preview = 1
+            return
+        if tag not in _VOID_TAGS:
+            self.in_preview += 1
+        entry = {"tag": tag, "kind": None}
+        if "tabs" in cls:
+            rec = {"wired": "is-wired" in cls, "btns": 0, "panels": 0, "visible_panels": 0}
+            self.tabs.append(rec)
+            entry["kind"] = ("tabs", rec)
+        elif "accordion" in cls:
+            rec = {"wired": "is-wired" in cls, "btns": 0, "panels": 0}
+            self.accs.append(rec)
+            entry["kind"] = ("acc", rec)
+        for parent in reversed(self.stack):
+            if parent["kind"] and parent["kind"][0] == "tabs":
+                if "tab-btn" in cls:
+                    parent["kind"][1]["btns"] += 1
+                if "tab-panel" in cls:
+                    parent["kind"][1]["panels"] += 1
+                    if "hidden" not in a:
+                        parent["kind"][1]["visible_panels"] += 1
+                break
+        for parent in reversed(self.stack):
+            if parent["kind"] and parent["kind"][0] == "acc":
+                if "acc-btn" in cls:
+                    parent["kind"][1]["btns"] += 1
+                if "acc-panel" in cls:
+                    parent["kind"][1]["panels"] += 1
+                break
+        if tag not in _VOID_TAGS:
+            self.stack.append(entry)
+    def handle_endtag(self, tag):
+        if not self.in_preview:
+            return
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i]["tag"] == tag:
+                del self.stack[i:]
+                break
+        self.in_preview -= 1
+
+ic = InteractiveCount()
+ic.feed(dom)
+bad_tabs = [t for t in ic.tabs if not t["wired"] or t["btns"] < 2 or t["btns"] != t["panels"] or t["visible_panels"] != 1]
+bad_accs = [a for a in ic.accs if not a["wired"] or a["btns"] < 2 or a["btns"] != a["panels"]]
+if bad_tabs or bad_accs:
+    report("FAIL", 9, f"declarative interactive unwired/malformed (bad_tabs={len(bad_tabs)} bad_acc={len(bad_accs)})")
+elif doc == "content.md" and (len(ic.tabs) < 1 or len(ic.accs) < 1):
+    report("FAIL", 9, f"declarative interactive: content.md requires wired .tabs and .accordion (tabs={len(ic.tabs)} accordion={len(ic.accs)})")
+elif len(ic.tabs) == 0 and len(ic.accs) == 0:
+    report("PASS", 9, "declarative interactive: none declared in synthetic doc (content.md requires >=2)")
+else:
+    report("PASS", 9, f"declarative interactive: wired tabs={len(ic.tabs)} accordion={len(ic.accs)}")
+
 if not failed:
     write_page_text()
 print("\n".join(lines))

@@ -5,20 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Explainer Kit</title>
 
-  <!-- Google Fonts — Bricolage Grotesque (display) + Inter (body/UI) +
-       JetBrains Mono (labels + tabular numbers) -->
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&family=JetBrains+Mono:wght@400;500;600&display=swap"
-    rel="stylesheet"
-  />
-
-  <!-- cherry-markdown (pinned 0.8.58) -->
-  <link
-    rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/cherry-markdown@0.8.58/dist/cherry-markdown.css"
-  />
+  <!-- Self-contained vendored fonts & cherry-markdown engine styles -->
+  <link rel="stylesheet" href="./vendor/fonts.css" />
+  <link rel="stylesheet" href="./vendor/cherry-markdown.markdown.min.css" />
 
   <!-- design lock + components (local; must be SERVED, not file://) -->
   <link rel="stylesheet" href="./theme.css" />
@@ -31,41 +20,31 @@
       position: relative; z-index: 2;
       max-width: var(--maxw); margin: 0 auto; padding: var(--space-8) var(--space-6);
       font-family: var(--font-mono); font-size: var(--fs-sm);
-      letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-dim);
+      letter-spacing: var(--track-label); text-transform: var(--tt-label); color: var(--ink-dim);
     }
+    html[lang^="th"] .booting { letter-spacing: 0; text-transform: none; }
   </style>
 </head>
 <body>
   <div id="app"><div class="booting">Loading explainer…</div></div>
 
-  <!-- draw.io static viewer (pinned v31.5.2, resolved from the jgraph/drawio
-       repo's actual latest tagged release via jsdelivr's `gh` CDN mode — NOT
-       @latest/main) + cherry engine, then our setup.
-       CAVEAT (carried from Task 0's spike, not fixed here — no simpler
-       alternative found): this pinned script itself unconditionally runs
-       Editor.initMath() at load, which fetches additional UNPINNED
-       viewer.diagrams.net JS at runtime (math typesetting support). The
-       primary viewer script is pinned; this secondary runtime fetch is not.
-       NOTE: we load the *core* build, NOT cherry-markdown.min.js. The full
-       (.min.js) build auto-registers its own mermaid addon with a hardcoded
-       light `theme:"default"` that cannot be overridden and that would consume
-       fenced code blocks before we ever see them. The core build leaves fenced
-       ```drawio blocks as <pre><code class="language-drawio">, which is
-       exactly what cherry-setup.js's Path B expects: we frame it, substitute
-       role= tokens for real theme hex, and trigger
-       GraphViewer.processElements() ourselves. -->
-  <script src="https://cdn.jsdelivr.net/gh/jgraph/drawio@v31.5.2/src/main/webapp/js/viewer-static.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/cherry-markdown@0.8.58/dist/cherry-markdown.core.js"></script>
-  <!-- Lucide line icons (UMD, global `lucide`). cherry-setup.js guards on
-       window.lucide, so a CDN failure degrades to no-icons rather than error. -->
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Pre-define MathJax + offline draw.io globals BEFORE loading vendor scripts
+       so neither viewer-static.min.js (Editor.initMath) nor cherry-markdown
+       attempts any runtime request to viewer.diagrams.net or math CDNs. -->
+  <script>
+    window.MathJax = { typeset: function () {}, startup: {} };
+    window.mxLoadResources = false;
+    window.DRAWIO_BASE_URL = ".";
+  </script>
+  <script src="./vendor/viewer-static.min.js"></script>
+  <script src="./vendor/cherry-markdown.engine.core.js"></script>
+  <script src="./vendor/lucide.min.js"></script>
   <script src="./cherry-setup.js"></script>
 
   <script>
     (function () {
       "use strict";
 
-      // Known example docs shipped with the kit — surfaced in the error panel.
       var KNOWN_DOCS = ["content.md", "components.md"];
 
       function qparam(name) {
@@ -95,22 +74,26 @@
           "</div>";
       }
 
+      function resolveEngine() {
+        if (window.CherryEngine && window.CherryEngine.default) return window.CherryEngine.default;
+        if (window.Cherry && window.Cherry.default) return window.Cherry.default;
+        return window.CherryEngine || window.Cherry;
+      }
+
       function boot() {
         var doc = qparam("doc") || "content.md";
 
-        // reject path traversal / absolute / non-.md
         if (!/^[\w.\-]+\.md$/.test(doc)) {
           showError("Invalid document name", "The ?doc value must be a plain *.md filename in the kit folder.", doc);
           return;
         }
-        // window.Cherry is a UMD namespace; the real constructor is on .default.
-        var CherryCtor = window.Cherry && window.Cherry.default ? window.Cherry.default : window.Cherry;
+        var CherryCtor = resolveEngine();
         if (typeof CherryCtor !== "function") {
-          showError("Engine failed to load", "cherry-markdown did not load from the CDN. Check your network / the pinned CDN URL.", doc);
+          showError("Engine failed to load", "cherry-markdown engine did not load from ./vendor/.", doc);
           return;
         }
         if (typeof GraphViewer === "undefined") {
-          showError("Diagram engine failed to load", "draw.io's viewer did not load from the CDN. Diagrams cannot render. Check your network / the pinned CDN URL.", doc);
+          showError("Diagram engine failed to load", "draw.io viewer did not load from ./vendor/. Diagrams cannot render.", doc);
           return;
         }
 
@@ -121,8 +104,6 @@
           })
           .then(
             function (md) {
-              // fetch succeeded. Render in its own try so an engine crash is
-              // reported as a render failure, NOT a missing document.
               document.getElementById("app").innerHTML = '<div id="container"></div>';
               try {
                 window.renderExplainer("container", md);
@@ -136,7 +117,6 @@
               }
             },
             function (fetchErr) {
-              // fetch/HTTP failure — the document genuinely could not be loaded.
               showError(
                 "Document not found",
                 "Could not fetch the requested markdown (" + fetchErr.message + ").",

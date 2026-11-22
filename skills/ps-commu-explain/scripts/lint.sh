@@ -108,6 +108,11 @@ else:
         )
     if not re.search(r'(?mi)^Reader:[ \t]*\S', brief):
         defects.append("00-brief.md: missing a filled 'Reader:' line (who reads this and what they already know)")
+    lang_m = re.search(r'(?mi)^Lang:[ \t]*(.*)$', brief)
+    if lang_m:
+        lang_val = lang_m.group(1).strip()
+        if not lang_val or '(...)' in lang_val or not re.fullmatch(r'[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*', lang_val):
+            defects.append(f"00-brief.md: invalid Lang '{lang_val}' (expected BCP-47 tag like 'en' or 'th')")
     m = re.search(r'(?mi)^Section budget:\s*(\S+)', brief)
     if not m:
         defects.append("00-brief.md: missing a 'Section budget:' line")
@@ -510,6 +515,127 @@ if content is not None:
             continue
         drawio_idx += 1
         parse_drawio_xml(body, drawio_idx)
+
+    # Reject inline <script> and validate declarative .tabs / .accordion outside code fences/spans
+    from html.parser import HTMLParser as _LintHTMLParser
+    def check_declarative_html(html_src, fname, allow_script=False):
+        if not allow_script and re.search(r'<script\b', html_src, re.I):
+            defects.append(f"{fname}: inline <script> is forbidden (use declarative components)")
+        class _DeclParser(_LintHTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.tabs = []
+                self.accs = []
+                self.stack = []
+                self.skip_tag = None
+            def handle_starttag(self, tag, attrs):
+                if tag == "script" and not allow_script:
+                    defects.append(f"{fname}: inline <script> is forbidden (use declarative components)")
+                if self.skip_tag:
+                    return
+                if tag in ("script", "style", "pre", "code"):
+                    self.skip_tag = tag
+                    return
+                cls = set((dict(attrs).get("class") or "").split())
+                entry = {"tag": tag, "kind": None}
+                if "tabs" in cls:
+                    rec = {"btns": 0, "panels": 0}
+                    self.tabs.append(rec)
+                    entry["kind"] = ("tabs", rec)
+                elif "accordion" in cls:
+                    rec = {"btns": 0, "panels": 0}
+                    self.accs.append(rec)
+                    entry["kind"] = ("acc", rec)
+                for parent in reversed(self.stack):
+                    if parent["kind"] and parent["kind"][0] == "tabs":
+                        if "tab-btn" in cls: parent["kind"][1]["btns"] += 1
+                        if "tab-panel" in cls: parent["kind"][1]["panels"] += 1
+                        break
+                for parent in reversed(self.stack):
+                    if parent["kind"] and parent["kind"][0] == "acc":
+                        if "acc-btn" in cls: parent["kind"][1]["btns"] += 1
+                        if "acc-panel" in cls: parent["kind"][1]["panels"] += 1
+                        break
+                if tag not in {"br","img","input","hr","meta","link","area","base","col","embed","source","track","wbr"}:
+                    self.stack.append(entry)
+            def handle_endtag(self, tag):
+                if self.skip_tag == tag:
+                    self.skip_tag = None
+                    return
+                if self.skip_tag:
+                    return
+                for idx in range(len(self.stack) - 1, -1, -1):
+                    if self.stack[idx]["tag"] == tag:
+                        del self.stack[idx:]
+                        break
+        dp = _DeclParser()
+        dp.feed(html_src)
+        dp.close()
+        for i, t in enumerate(dp.tabs, 1):
+            if t["btns"] < 2 or t["btns"] != t["panels"]:
+                defects.append(f"{fname}: .tabs #{i} requires >=2 .tab-btn matching .tab-panel count (got btns={t['btns']}, panels={t['panels']})")
+        for i, a in enumerate(dp.accs, 1):
+            if a["btns"] < 2 or a["btns"] != a["panels"]:
+                defects.append(f"{fname}: .accordion #{i} requires >=2 .acc-btn matching .acc-panel count (got btns={a['btns']}, panels={a['panels']})")
+
+    prose_html = re.sub(r'```.*?```', '', content, flags=re.S)
+    prose_html = re.sub(r'(`+)(?!`)(?:(?!\n\s*\n).)*?(?<!`)\1(?!`)', '', prose_html, flags=re.S)
+    check_declarative_html(prose_html, "app/content.md", allow_script=False)
+
+if tier == 'html':
+    idx_path = os.path.join(ws, 'app', 'index.html')
+    if os.path.isfile(idx_path):
+        try:
+            idx_raw = read(idx_path)
+        except UnicodeDecodeError:
+            idx_raw = None
+        if idx_raw is not None:
+            from html.parser import HTMLParser as _LintHTMLParser2
+            class _HtmlDeclParser(_LintHTMLParser2):
+                def __init__(self):
+                    super().__init__()
+                    self.tabs = []
+                    self.accs = []
+                    self.stack = []
+                    self.skip_tag = None
+                def handle_starttag(self, tag, attrs):
+                    if self.skip_tag: return
+                    if tag in ("script", "style", "pre", "code"):
+                        self.skip_tag = tag; return
+                    cls = set((dict(attrs).get("class") or "").split())
+                    entry = {"tag": tag, "kind": None}
+                    if "tabs" in cls:
+                        rec = {"btns": 0, "panels": 0}
+                        self.tabs.append(rec); entry["kind"] = ("tabs", rec)
+                    elif "accordion" in cls:
+                        rec = {"btns": 0, "panels": 0}
+                        self.accs.append(rec); entry["kind"] = ("acc", rec)
+                    for parent in reversed(self.stack):
+                        if parent["kind"] and parent["kind"][0] == "tabs":
+                            if "tab-btn" in cls: parent["kind"][1]["btns"] += 1
+                            if "tab-panel" in cls: parent["kind"][1]["panels"] += 1
+                            break
+                    for parent in reversed(self.stack):
+                        if parent["kind"] and parent["kind"][0] == "acc":
+                            if "acc-btn" in cls: parent["kind"][1]["btns"] += 1
+                            if "acc-panel" in cls: parent["kind"][1]["panels"] += 1
+                            break
+                    if tag not in {"br","img","input","hr","meta","link","area","base","col","embed","source","track","wbr"}:
+                        self.stack.append(entry)
+                def handle_endtag(self, tag):
+                    if self.skip_tag == tag: self.skip_tag = None; return
+                    if self.skip_tag: return
+                    for idx in range(len(self.stack) - 1, -1, -1):
+                        if self.stack[idx]["tag"] == tag:
+                            del self.stack[idx:]; break
+            hp = _HtmlDeclParser()
+            hp.feed(idx_raw); hp.close()
+            for i, t in enumerate(hp.tabs, 1):
+                if t["btns"] < 2 or t["btns"] != t["panels"]:
+                    defects.append(f"app/index.html: .tabs #{i} requires >=2 .tab-btn matching .tab-panel count (got btns={t['btns']}, panels={t['panels']})")
+            for i, a in enumerate(hp.accs, 1):
+                if a["btns"] < 2 or a["btns"] != a["panels"]:
+                    defects.append(f"app/index.html: .accordion #{i} requires >=2 .acc-btn matching .acc-panel count (got btns={a['btns']}, panels={a['panels']})")
 
 if defects:
     seen = set()

@@ -12,6 +12,9 @@ Subcommands:
   1. classify-task [--prompt "<subagent prompt>"] [--hook-line]
   2. triage-diff   [--repo <path>] [--base <ref>] [--head <ref>] [--diff-file <path>] [--spec <path>] [--hook-line]
   3. triage-spec   [--spec <path>] [--hook-line]
+  4. classify-lesson --digest <path>                       (vault-distill)
+  5. score-draft     --draft <path> --digest <path> [--related <path>]
+  6. same-lesson     --a <path> --b <path>
 """
 import argparse
 import json
@@ -408,6 +411,69 @@ def cmd_triage_spec(args: argparse.Namespace) -> int:
         return 0
 
 
+# --- vault-distill screening (I-040): one Jev call each, fail open to {"fallback": true} ---
+LESSON_Q = ("Does this agent session digest contain a reusable lesson: a trap, fix, decision or rule that "
+            "would save a future session time or prevent a mistake (not just routine work that went fine)?")
+SPECIFIC_Q = "Is this draft rule specific and actionable: does it name the situation, the command, file or error, and what to do?"
+NOVEL_Q = "Is this draft lesson NOT already covered by the existing notes or the owner rules given in the state?"
+HIGH_STAKES_Q = "Would ignoring this lesson risk data loss, a production failure or a security problem?"
+SAME_Q = "Do draft_a and draft_b describe the same lesson (the same situation and the same rule), even if worded differently?"
+
+
+def _read(path: str, limit: int) -> str:
+    try:
+        return Path(path).read_bytes()[:limit].decode("utf-8", errors="ignore")
+    except (OSError, TypeError):
+        return ""
+
+
+def _jev_nouls(args: argparse.Namespace, state: dict, questions: dict):
+    """Ask Jev yes/no questions in one call. Returns ({name: prob}, "") or (None, error)."""
+    key = _load_api_key()
+    if not key:
+        return None, "TYPESAFE_API_KEY not set"
+    try:
+        from typesafe_sdk import Noul, TypeSafeClient
+
+        client = TypeSafeClient(api_key=key, timeout=args.timeout)
+        res = client.system_one(model=args.model, state=state,
+                                questions={k: Noul(instructions=q) for k, q in questions.items()})
+        return {k: round(float(res.answers[k].noul), 4) for k in questions}, ""
+    except Exception as exc:
+        return None, str(exc)
+
+
+def cmd_classify_lesson(args: argparse.Namespace) -> int:
+    digest = _read(args.digest, 12000)
+    probs, err = _jev_nouls(args, {"session_digest": digest}, {"lesson": LESSON_Q}) if digest else (None, "digest missing or empty")
+    if probs is None:
+        print(json.dumps({"lesson_prob": 0.5, "fallback": True, "error": err}))
+    else:
+        print(json.dumps({"lesson_prob": probs["lesson"], "fallback": False}))
+    return 0
+
+
+def cmd_score_draft(args: argparse.Namespace) -> int:
+    draft = _read(args.draft, 1500)
+    state = {
+        "draft": draft,
+        "session_digest": _read(args.digest, 12000),
+        "existing_notes": _read(args.related, 4000) if args.related else "",
+        "owner_rules": _read(str(Path.home() / ".claude" / "CLAUDE.md"), 20000),
+    }
+    questions = {"specific": SPECIFIC_Q, "novel": NOVEL_Q, "high_stakes": HIGH_STAKES_Q}
+    probs, err = _jev_nouls(args, state, questions) if draft else (None, "draft missing or empty")
+    print(json.dumps({"fallback": True, "error": err} if probs is None else {**probs, "fallback": False}))
+    return 0
+
+
+def cmd_same_lesson(args: argparse.Namespace) -> int:
+    a, b = _read(args.a, 4000), _read(args.b, 4000)
+    probs, err = _jev_nouls(args, {"draft_a": a, "draft_b": b}, {"same_lesson": SAME_Q}) if a and b else (None, "draft missing or empty")
+    print(json.dumps({"same": 0.0, "fallback": True, "error": err} if probs is None else {"same": probs["same_lesson"], "fallback": False}))
+    return 0
+
+
 def main() -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--model", default="jev-latest", help="Jev model ID (default: jev-latest)")
@@ -434,6 +500,21 @@ def main() -> int:
     p_spec.add_argument("--spec", required=True, help="Path to spec markdown file")
     p_spec.add_argument("--hook-line", action="store_true", help="Output compact 1-line summary")
     p_spec.set_defaults(func=cmd_triage_spec)
+
+    p_les = sub.add_parser("classify-lesson", parents=[common], help="vault-distill: does a session digest hold a lesson?")
+    p_les.add_argument("--digest", required=True, help="Session digest file (at most 12,000 bytes)")
+    p_les.set_defaults(func=cmd_classify_lesson)
+
+    p_scd = sub.add_parser("score-draft", parents=[common], help="vault-distill: score a draft note (specific, novel, high_stakes)")
+    p_scd.add_argument("--draft", required=True, help="Draft note file")
+    p_scd.add_argument("--digest", required=True, help="Session digest file the draft came from")
+    p_scd.add_argument("--related", default="", help="File with the top existing notes (vault-engine context output)")
+    p_scd.set_defaults(func=cmd_score_draft)
+
+    p_same = sub.add_parser("same-lesson", parents=[common], help="vault-distill: do two drafts state the same lesson?")
+    p_same.add_argument("--a", required=True, help="First draft file")
+    p_same.add_argument("--b", required=True, help="Second draft file")
+    p_same.set_defaults(func=cmd_same_lesson)
 
     args = parser.parse_args()
     return args.func(args)

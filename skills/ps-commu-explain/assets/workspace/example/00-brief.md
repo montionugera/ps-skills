@@ -18,6 +18,12 @@ never seen this repo, its ticket ids, or its internal names — write for them.
 
 Reader: a developer new to this repo who has used a terminal and Markdown but never seen ps-commu-explain, its scripts, or its F<n> fact ids.
 
+## Language
+
+BCP-47 language code for the rendered page (`en` or `th`).
+
+Lang: en
+
 ## Section budget
 
 How many top-level sections app/content.md will have — an integer, 4-7.

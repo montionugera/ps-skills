@@ -1,0 +1,2 @@
+2026-11-11 | I-039 knowledge save and retrieve | Spec approved as recommended: three slices, publish only after a lesson recurs in a second session unless high-stakes, auto integrate and publish on pass | .claude/idea_backlog/I-039-jev-gated-auto-knowledge-extraction-clas/spec.md
+2026-11-11 | I-039 external sends | Session digests from all repos go to TypeSafe (Jev) and Gemini after the credential scan, except repos in VAULT_DISTILL_SKIP_REPOS (irreversible: sent data cannot be recalled) | .claude/idea_backlog/I-039-jev-gated-auto-knowledge-extraction-clas/spec.md

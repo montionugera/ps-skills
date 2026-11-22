@@ -11,9 +11,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 if [ -z "${VERSION:-}" ]; then
     VERSION="0.2.0-sync+$(git rev-parse --short HEAD)"
-    # Uncommitted or untracked files under this folder mean the build is not
-    # the commit its version names: say so in the version.
-    [ -z "$(git status --porcelain -- .)" ] || VERSION="$VERSION.dirty"
+    # Assigned first: a git status that fails then stops the script (set -e)
+    # instead of reading as a clean tree.
+    changes="$(git status --porcelain -- .)"
+    [ -z "$changes" ] || VERSION="$VERSION.dirty"
 fi
 OUT=bin/release
 mkdir -p "$OUT"
@@ -46,7 +47,7 @@ for target in darwin/amd64 darwin/arm64 linux/amd64; do
     grep -a -q -F -e "$VERSION" "$STAGE/$name" \
         || { echo "build-release: $name does not carry version $VERSION" >&2; exit 1; }
     names+=("$name")
-    echo "built $OUT/$name"
+    echo "built $name"
 done
 
 # The binary for this machine, when there is one, must also say the version.

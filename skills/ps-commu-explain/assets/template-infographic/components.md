@@ -481,6 +481,81 @@ Numbered colored circles with connectors, each with an icon and title. Great for
   </div>
 </div>
 
+
+<div class="section-head" data-nav="Tabs" data-nav-icon="panel-top" id="tabs">
+  <span class="icon-chip lg"><i data-lucide="panel-top"></i></span>
+  <div class="sh-text">
+    <span class="sh-kicker">Interactive · zero JS</span>
+    <div class="sh-title">Tabs (declarative)</div>
+  </div>
+</div>
+
+Declarative tab switcher — zero `<script>` in Markdown. `cherry-setup.js` wires `.tabs` automatically using `<button type="button" class="tab-btn">` controls so keyboard, screen readers, and mobile tap targets work out of the box. Keep at least two `.tab-btn` and matching `.tab-panel` children.
+
+```html
+<div class="tabs">
+  <div class="tab-list">
+    <button type="button" class="tab-btn" aria-pressed="true" data-tab="0">First view</button>
+    <button type="button" class="tab-btn" aria-pressed="false" data-tab="1">Second view</button>
+  </div>
+  <div class="tab-panel is-active" data-panel="0">Content shown first.</div>
+  <div class="tab-panel" data-panel="1" hidden>Content shown when second tab is clicked.</div>
+</div>
+```
+
+<div class="gallery-item">
+  <div class="gallery-label">rendered</div>
+  <div class="gallery-body">
+    <div class="tabs" style="margin:0">
+      <div class="tab-list">
+        <button type="button" class="tab-btn" aria-pressed="true" data-tab="0">Default mode</button>
+        <button type="button" class="tab-btn" aria-pressed="false" data-tab="1">Example mode</button>
+      </div>
+      <div class="tab-panel is-active" data-panel="0">Plain <code>init.sh &lt;slug&gt;</code> moves the exemplar to <code>example-content.md</code> so you start from your own storyboard.</div>
+      <div class="tab-panel" data-panel="1" hidden>Passing <code>--example</code> scaffolds a pre-filled chain and keeps <code>content.md</code> ready to lint and serve immediately.</div>
+    </div>
+  </div>
+</div>
+
+<div class="section-head" data-nav="Accordion" data-nav-icon="chevrons-up-down" id="accordion">
+  <span class="icon-chip lg"><i data-lucide="chevrons-up-down"></i></span>
+  <div class="sh-text">
+    <span class="sh-kicker">Interactive · zero JS</span>
+    <div class="sh-title">Accordion (declarative)</div>
+  </div>
+</div>
+
+Declarative expandable panels — zero `<script>` in Markdown. Each `.acc-item` holds one `<button type="button" class="acc-btn">` and one `.acc-panel` (keep at least two items).
+
+```html
+<div class="accordion">
+  <div class="acc-item is-open">
+    <button type="button" class="acc-btn" aria-expanded="true">Question one</button>
+    <div class="acc-panel">Answer one.</div>
+  </div>
+  <div class="acc-item">
+    <button type="button" class="acc-btn" aria-expanded="false">Question two</button>
+    <div class="acc-panel" hidden>Answer two.</div>
+  </div>
+</div>
+```
+
+<div class="gallery-item">
+  <div class="gallery-label">rendered</div>
+  <div class="gallery-body">
+    <div class="accordion" style="margin:0">
+      <div class="acc-item is-open">
+        <button type="button" class="acc-btn" aria-expanded="true">Why declarative buttons instead of inline scripts?</button>
+        <div class="acc-panel"><code>lint.sh</code> rejects inline <code>&lt;script&gt;</code> in Markdown so authors only maintain structured content while the template owns wiring and accessibility.</div>
+      </div>
+      <div class="acc-item">
+        <button type="button" class="acc-btn" aria-expanded="false">How does verify.sh check interactivity?</button>
+        <div class="acc-panel" hidden>Assert 9 confirms every <code>.tabs</code> and <code>.accordion</code> on the rendered page is wired and exposes working controls.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="section-head" data-nav="Badges" data-nav-icon="gauge" id="badges">
   <span class="icon-chip lg"><i data-lucide="gauge"></i></span>
   <div class="sh-text">

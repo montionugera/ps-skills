@@ -23,6 +23,14 @@ bin/vault-engine version                   # prints "vault-engine dev" for a pla
 
 Nothing changes: every command prints and exits as before.
 
+### `context`: knowledge for a session
+
+`vault-engine context --cwd <dir>` prints notes tied to the repository that owns `<dir>` (through a project's `release_repo`, or a `repo:<name>` tag), up to 3 notes and 800 bytes.
+`vault-engine context --query "<prompt>"` scores notes by distinct prompt terms (cutting queries over 80 terms to the first 20, dropping digit-only terms and 77 common prompt noise words): for indices under 20 notes, flat weights (title 3, tag 2, body 1) with threshold 4; from 20 active notes up, matches are weighted by note rarity with threshold 2.5 and at least one title or tag match, up to 5 notes (or `--limit`).
+Both read only `_meta/indexes/`, print nothing when nothing matches, and always exit 0. Run `rebuild-index` once after upgrading so the index carries tags, summaries and terms.
+`recall_eval.sh <set.jsonl> [min]` scores retrieval against a private prompt set.
+`precision_eval.sh <set.jsonl> [min_percent]` scores injection precision against a private labelled set.
+
 ## Shared folder
 
 A folder is shared when `_meta/bin/sync.json` exists. That file is local to the place and is never synced.
@@ -58,7 +66,7 @@ The last stdout line is always one of:
 | `REFUSED type-not-allowed` | 6 | File type or path not accepted |
 | `REFUSED busy` | 7 | The folder is in use, or the retries were all lost to races |
 
-Other commands in a shared folder: `whoami` prints the place name. `sync-daemon` keeps the place in step (asks every `poll_interval_ms`, fast-forwards under the lock, rebuilds indexes, sends inbox files after a quiet period of `inbox_quiet_ms`, sets hand edits aside in `_quarantine/<place>/`, and moves a file made by hand outside `_inbox/` there after the same quiet period); `sync-daemon --once` does one pass. A stop signal (SIGINT, SIGTERM, SIGHUP) ends `sync-daemon` with exit 0. The stop does not wait for a time limit: a git command that is running is killed, and a wait for the folder lock ends at once. `run-workflow` and `daemon` are refused (`REFUSED engine-error`, exit 1), because they change notes outside the save step. `route` is a plain lookup and is unchanged.
+Other commands in a shared folder: `whoami` prints the place name. `sync-daemon` keeps the place in step (asks every `poll_interval_ms`, fast-forwards under the lock, rebuilds indexes, sends inbox files after a quiet period of `inbox_quiet_ms`, sets hand edits aside in `_quarantine/<place>/`, and moves a file made by hand outside `_inbox/` there after the same quiet period); `sync-daemon --once` does one pass. A stop signal (SIGINT, SIGTERM, SIGHUP) ends `sync-daemon` with exit 0. The stop does not wait for a time limit: a git command that is running is killed and a wait for the folder lock is given up, so `sync-daemon` ends within a couple of seconds. `run-workflow` and `daemon` are refused (`REFUSED engine-error`, exit 1), because they change notes outside the save step. `route` is a plain lookup and is unchanged.
 
 Local files, never synced: `_meta/guards/folder.guard` (the folder lock), `_meta/guards/sync-daemon.guard` (stops a second `sync-daemon` from starting in the same place), `_meta/guards/save-in-progress.json` (marker; it also records that an undo of that save was started), `_quarantine/<place>/` with `REPORT.log`.
 
@@ -79,7 +87,7 @@ creates a bare repository that only moves forward on `refs/heads/main` (`receive
 | Files per send | 500 |
 | Per place per day | 52428800 bytes (50 MB), counted per UTC day in `<hub>/vault-usage/<date>.json` |
 
-Every file in every commit of a send is checked. A refusal reads `vault-hub: REFUSED <too-large|type-not-allowed|engine-error>: <message>`. `too-large` and `type-not-allowed` mean the send broke a rule in the table above. `engine-error` means the hub itself could not read or compute something (its settings file, git's own input, a git command inside the hook (including the check that a send only moves forward), the usage file): the send is still refused, and the place answers `REFUSED engine-error` (exit 1), not a size or type refusal.
+Every file in every commit of a send is checked. A refusal reads `vault-hub: REFUSED <too-large|type-not-allowed|engine-error>: <message>`. `too-large` and `type-not-allowed` mean the send broke a rule in the table above. A send that points `refs/heads/main` at something other than a commit (a tree or a blob) is also refused as `type-not-allowed`, so the place answers `REFUSED type-not-allowed` (exit 6). `engine-error` means the hub itself could not read or compute something (its settings file, git's own input, a git command inside the hook (including the check that a send only moves forward), the usage file): the send is still refused, and the place answers `REFUSED engine-error` (exit 1), not a size or type refusal.
 
 ### Known limits
 

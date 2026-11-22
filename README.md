@@ -8,7 +8,7 @@ Personal [Claude Code](https://claude.com/claude-code) skills (`ps-*`) — distr
 
 | Skill | What it does |
 |-------|--------------|
-| **ps-commu-explain** | Turns "explain X" into a fact-checked, visually rich web explanation (diagrams, animation, interactivity) served from `/tmp` and handed back as a verified localhost URL. Six-stage chain — brief → facts → storyboard → author → verify (render gate + reader gate) → handoff — gated by `scripts/lint.sh` and `scripts/verify.sh`. Mechanical steps are scripted so the model only does the judgment: `skeleton.sh` drafts `content.md` from the storyboard, `verify.sh` does one Chrome load per cycle and `verify.sh --reader-prompt` builds the reader-gate prompt, `handoff.sh` prints the handoff, and init, serve, skeleton, verify and handoff log to the workspace's `timings.log`. Self-contained: lifecycle scripts + HTML and React+TS templates. |
+| **ps-commu-explain** | Turns "explain X" into a fact-checked, visually rich web explanation (diagrams, animation, interactivity) served from `/tmp` and handed back as a verified localhost URL (or tailnet-only HTTPS via `serve.sh <slug> --tailnet`, overridable via `TAILSCALE_BIN`). Six-stage chain — brief (`Lang: en\|th`) → facts → storyboard → author → verify (render gate + reader gate) → handoff — gated by `scripts/lint.sh` and `scripts/verify.sh`. Mechanical steps are scripted so the model only does the judgment: `skeleton.sh` drafts `content.md` from the storyboard, `verify.sh` does one Chrome load per cycle and `verify.sh --reader-prompt` builds the reader-gate prompt, `handoff.sh` prints the handoff, and init, serve, skeleton, verify and handoff log to the workspace's `timings.log`. Self-contained with offline vendored assets, shared design tokens, declarative `.tabs`/`.accordion`, and HTML and React+TS templates. |
 | **ps-interactive-learning-builder** | Orchestrates research, learning design, interactive builds, independent audits, and durable verification for traceable courses and explorable references. |
 | **ps-release-workflow-init** | Opt a repo into the ship-the-release workflow (`.release.json`, backlogs, routing convention). |
 | **ps-release-workflow-idea** | Capture a new idea (`I-NNN`) in the idea backlog. |
@@ -202,7 +202,8 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
   brief's 3 questions with citations. `scripts/handoff.sh <slug>` prints the final handoff. Authors read
   `app/components-index.md` (a 25-line index) before grepping `components.md`.
   Modes: `/ps-commu-explain list`, `/ps-commu-explain clean`.
-  Built explanations live under `/tmp/ps-commu/<slug>/` and self-destruct after 24h.
+  Built explanations live under `/tmp/ps-commu/<slug>/` and self-destruct after 24h; `serve.sh <slug> --tailnet`
+  publishes tailnet-only HTTPS on port `177xx` (`TAILSCALE_BIN` overrides the `tailscale` CLI).
 - **ps-interactive-learning-builder** — invoke `/ps-interactive-learning-builder <topic>` to create a
   source-backed course, explorable reference, or hybrid learning project with gated audit and verification.
 - **ps-release-workflow** — start with `ps-release-workflow-init` in a repo, then
@@ -214,6 +215,24 @@ linked to `~/.claude/hooks/`) is registered the same way; see that skill's `SKIL
   feature worktree, and `psrw status` flags a release that is behind `main`. Emergency
   bypasses: `--no-sync-main` (ship) and `--allow-stale-main` (promote). Each skill's
   `SKILL.md` documents its preconditions.
+
+### Automatic knowledge retrieval (I-039 slice 1)
+
+- `vault-engine context --cwd <dir>` / `--query "<prompt>"`: print the vault notes relevant to a session, from the index only, no LLM.
+- `skills/agentic-vault/hooks/vault-recall.py`: UserPromptSubmit hook. Injects up to 2 notes (1,200 bytes) per prompt, skips prompts that start with `<`, each note once per session, at most 6 notes and 2,400 bytes per session. Register it once in `~/.claude/settings.json` under `hooks.UserPromptSubmit`: `{"type": "command", "command": "python3 ~/.claude/hooks/vault-recall.py", "timeout": 5}`.
+- `tools/vault-engine/recall_eval.sh <set.jsonl> [min]` and `precision_eval.sh <set.jsonl> [min_percent]`: score retrieval recall and precision against private labelled prompt sets.
+- Env: `VAULT_RECALL=0` turns the hook off; `VAULT_ENGINE` and `VAULT_RECALL_STATE` override the binary and the state directory. It is also off when `VAULT_CONTEXT_BOOTSTRAP=0` or `CLAUDE_VAULT_SUMMARY=0` (dispatch workers).
+- `ps-skills-doctor` reports when the hook is missing or unregistered, or the index lacks retrieval fields.
+
+### Automatic knowledge save, shadow mode (I-039 slice 2)
+
+- `vault-distill` (nightly, cron `40 23 * * * PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin VAULT_DISTILL_SKIP_REPOS= $HOME/.local/bin/vault-distill >> $HOME/.claude/logs/vault-distill.log 2>&1`): rotates `_inbox/agent/session-summaries.md`, builds a digest of at most 12,000 bytes per finished session (user prompts and the last assistant text of each turn, no tool output, plus a signals line), and asks Jev `jev-gate classify-lesson` whether it holds a lesson. At most 20 sessions a night go to one `gemini-3.8-flash` Gemini API call that writes a draft note. The extractor and reviewer are direct Gemini API calls (plain HTTP, no tools); the key is `GEMINI_API_KEY` from the environment, else the macOS Keychain entry `joy-companion` / `gemini`, and it travels only in a request header. A failed call is named in the report (`<stage> failed: <reason>`); a session whose extract call fails on the tool side stays `extract-pending` (invalid at the third failure), and two failures in a row end extraction for the night. The report counts `extract_tokens`, the tokens the night's extract calls used. A draft must quote evidence from the digest, pass `jev-gate score-draft`, and recur in a second session (`jev-gate same-lesson`) or score high-stakes before one `gemini-4-argon` review call judges it. Shadow mode: nothing is published; a publish verdict is reported as "would publish".
+- Output: drafts in `_inbox/agent/distill/` (`candidates/`, `merged/`, `expired/`), credential hits in `_inbox/private/`, and the nightly report `_inbox/agent/distill/report-<date>.md`. Machine state lives in `~/.claude/state/vault-distill/` (`seen.jsonl`, `drafts.json`, `digests/`, `last-run.json`).
+- `vault-distill --report` prints the last report. `vault-distill --dry-run` calls Jev only (still writes digest files under the state directory, without extracting or reviewing).
+- Exit code 2 means the run was degraded: more than half the classified sessions were unsure (for example, no Jev key), or a stage failed on every call.
+- External sends: digests from every repo go to TypeSafe (Jev) and Gemini after the credential scan, except repos named in `VAULT_DISTILL_SKIP_REPOS`. The skip list for the nightly run is the `VAULT_DISTILL_SKIP_REPOS=` assignment on the cron line (cron does not read `~/.zshrc`).
+- Env: `VAULT_DISTILL=0` turns it off; `VAULT_DISTILL_MAX` (default 20 extractions a night); `VAULT_DISTILL_UNSURE_MAX` (default 3); `VAULT_DISTILL_SKIP_REPOS` (comma-separated repo root basenames, set on the cron line); `VAULT_ROOT` and `VAULT_ENGINE` as for the hook. Test seams: `VAULT_DISTILL_JEV_CMD`, `VAULT_DISTILL_EXTRACT_CMD`, `VAULT_DISTILL_REVIEW_CMD`. `VAULT_DISTILL_PUBLISH` and `VAULT_DISTILL_PUBLISH_MAX` arrive with slice 3.
+- `ps-skills-doctor` warns when no Jev key or cron line is found, and reports an issue when the last run is more than 36 hours old.
 
 ## Development
 
@@ -246,6 +265,18 @@ everything else on Linux. A `test-coverage` job
 build when any tracked test file is not run by a CI step, when a step uses `unittest` (it never
 collects pytest-style tests), or when a test step can be skipped or have its failures ignored
 (`if:`, `continue-on-error`, `|| true`). A new test suite therefore needs a CI step.
+
+This repo's own release gates run a subset of the same suites locally:
+
+- **Gate 1** ([`scripts/precheck.sh`](scripts/precheck.sh), run by `psrw ship`, a few seconds):
+  Python compile check of `engine/` and `tests/`, `go vet` and a `gofmt` check for
+  `tools/vault-engine`, and that tool's Go tests except `pkg/vaultsync`.
+- **Gate 2** ([`scripts/integration.sh`](scripts/integration.sh), run by `psrw promote`, about
+  17 minutes): the full release-workflow engine suite (`pytest -q`), the root `tests/` suite, and
+  `go test -count=1 -race -timeout 40m ./...` in `tools/vault-engine`.
+- Both gates need `go`, `python3` and `pytest` (with the engine's dev extras) on `PATH`.
+- **Manual, in neither gate:** `tools/vault-engine/scripts/sync-harness.sh run` (about an hour, and
+  it fails on a busy machine) and `tools/vault-engine/test_e2e.sh`.
 
 ## License
 

@@ -51,6 +51,11 @@ func violationOutcome(v *Violation) Outcome {
 	}
 }
 
+// errorOutcome maps an error to the fixed outcome. The order of the cases
+// decides the answer: one error can match more than one of them (a failed
+// fetch is ErrNoConnection and also carries its cause, such as ErrStopped,
+// ErrTimedOut or an *exec.ExitError), and the first match wins. A new case
+// placed above an existing one can change what an existing error answers.
 func errorOutcome(err error) Outcome {
 	var v *Violation
 	switch {
@@ -341,7 +346,10 @@ func (s *Syncer) record(paths []string, actor, subject, key string, m *Marker, a
 		return pushUnconfirmed, errorOutcome(err)
 	}
 	for try := 0; try < 3; try++ {
-		if r.Fetch() != nil {
+		if err := r.Fetch(); err != nil {
+			if errors.Is(err, ErrStopped) {
+				break // the program is stopping: asking again cannot help; the answer stays "not confirmed"
+			}
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}

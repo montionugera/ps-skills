@@ -1197,6 +1197,7 @@ test_verify_passes_template() {
   # using its own synthetic fixture rather than the shipped exemplar.
   (( rc == 0 )) &&
   grep -q '^PASS: 1 drawio svg=1 fences=1 (mxgraph-divs=1 empty-render=0 no-svg=0)' <<<"$out" &&
+  grep -q '^PASS: 9 declarative interactive:' <<<"$out" &&
   ! grep -q '^FAIL' <<<"$out"
 }
 test_verify_dump_text() {  # --dump-text: clean reader-visible text on stdout, exit 0, no raw markup leaks
@@ -1657,7 +1658,7 @@ _stub_chrome() {  # dir page|fail — fake Chrome at $dir/chrome; one line in $d
   local dir="$1" mode="$2"
   mkdir -p "$dir"; : > "$dir/launches"
   if [[ "$mode" == page ]]; then
-    printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="mxgraph" style="margin-top: 10px"><svg><rect></rect></svg></div><p>Stub page text for F-018.</p></div></body></html>' > "$dir/page.html"
+    printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="mxgraph" style="margin-top: 10px"><svg><rect></rect></svg></div><div class="tabs is-wired"><div class="tab-list"><button type="button" class="tab-btn" aria-pressed="true"></button><button type="button" class="tab-btn" aria-pressed="false"></button></div><div class="tab-panel is-active"></div><div class="tab-panel" hidden></div></div><div class="accordion is-wired"><div class="acc-item is-open"><button type="button" class="acc-btn" aria-expanded="true"></button><div class="acc-panel"></div></div><div class="acc-item"><button type="button" class="acc-btn" aria-expanded="false"></button><div class="acc-panel" hidden></div></div></div><p>Stub page text for F-018.</p></div></body></html>' > "$dir/page.html"
   else
     : > "$dir/page.html"          # a failed load: no DOM at all
   fi
@@ -2029,6 +2030,794 @@ test_list_shows_running_and_stopped() {
   echo "$out" | grep -E 't-list .*running .*http://localhost:' >/dev/null &&
   { "$S/stop.sh" t-list >/dev/null; "$S/list.sh" | grep -E 't-list .*stopped' >/dev/null; }
 }
+
+# --- M1: httpserve.py hardening ---
+test_httpserve_get_head_and_headers() {
+  "$S/init.sh" t-http-hdr --tier html >/dev/null
+  echo '<h1>ok</h1>' > /tmp/ps-commu/t-http-hdr/app/index.html
+  "$S/serve.sh" t-http-hdr --no-lint >/dev/null
+  local port hdrs body
+  port="$(meta_get t-http-hdr port)"
+  hdrs="$(curl -sD - -o /dev/null "http://127.0.0.1:$port/")"
+  body="$(curl -sf "http://127.0.0.1:$port/")"
+  "$S/stop.sh" t-http-hdr >/dev/null
+  grep -qi '^HTTP/1\.[01] 200' <<<"$hdrs" &&
+  grep -qi '^X-Content-Type-Options: nosniff' <<<"$hdrs" &&
+  grep -qi '^Cache-Control: no-store' <<<"$hdrs" &&
+  grep -q '<h1>ok</h1>' <<<"$body" &&
+  curl -sI "http://127.0.0.1:$port/" >/dev/null 2>&1 || true
+  "$S/serve.sh" t-http-hdr --no-lint >/dev/null
+  port="$(meta_get t-http-hdr port)"
+  hdrs="$(curl -sI "http://127.0.0.1:$port/")"
+  "$S/stop.sh" t-http-hdr >/dev/null
+  grep -qi '^HTTP/1\.[01] 200' <<<"$hdrs" &&
+  grep -qi '^X-Content-Type-Options: nosniff' <<<"$hdrs"
+}
+
+test_httpserve_rejects_non_get_head_405() {
+  "$S/init.sh" t-http-405 --tier html >/dev/null
+  echo '<h1>ok</h1>' > /tmp/ps-commu/t-http-405/app/index.html
+  "$S/serve.sh" t-http-405 --no-lint >/dev/null
+  local port m hdrs
+  port="$(meta_get t-http-405 port)"
+  for m in POST PUT DELETE PATCH OPTIONS; do
+    hdrs="$(curl -s -X "$m" -D - -o /dev/null "http://127.0.0.1:$port/")"
+    if ! grep -qi '^HTTP/1\.[01] 405' <<<"$hdrs" || ! grep -qi '^X-Content-Type-Options: nosniff' <<<"$hdrs"; then
+      echo "$m failed: $hdrs"
+      "$S/stop.sh" t-http-405 >/dev/null
+      return 1
+    fi
+  done
+  "$S/stop.sh" t-http-405 >/dev/null
+}
+
+test_httpserve_blocks_dotfiles() {
+  "$S/init.sh" t-http-dot --tier html >/dev/null
+  echo 'secret' > /tmp/ps-commu/t-http-dot/app/.ready
+  echo 'secret' > /tmp/ps-commu/t-http-dot/app/.env
+  mkdir -p /tmp/ps-commu/t-http-dot/app/sub
+  echo 'secret' > /tmp/ps-commu/t-http-dot/app/sub/.hidden
+  "$S/serve.sh" t-http-dot --no-lint >/dev/null
+  local port p code
+  port="$(meta_get t-http-dot port)"
+  for p in '/.ready' '/.env' '/%2eenv' '/sub/.hidden' '/sub/%2Ehidden'; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port$p")"
+    if [[ "$code" != "404" ]]; then
+      echo "dotfile $p returned $code (expected 404)"
+      "$S/stop.sh" t-http-dot >/dev/null
+      return 1
+    fi
+  done
+  local hdrs; hdrs="$(curl -sD - -o /dev/null "http://127.0.0.1:$port/.ready")"
+  "$S/stop.sh" t-http-dot >/dev/null
+  grep -qi '^X-Content-Type-Options: nosniff' <<<"$hdrs"
+}
+
+test_httpserve_blocks_traversal_and_symlink_escape() {
+  "$S/init.sh" t-http-esc --tier html >/dev/null
+  echo '<h1>ok</h1>' > /tmp/ps-commu/t-http-esc/app/index.html
+  ln -sfn /tmp/ps-commu/t-http-esc/meta.json /tmp/ps-commu/t-http-esc/app/leak.json
+  ln -sfn /tmp/ps-commu/t-http-esc /tmp/ps-commu/t-http-esc/app/leakdir
+  "$S/serve.sh" t-http-esc --no-lint >/dev/null
+  local port p code
+  port="$(meta_get t-http-esc port)"
+  for p in '/../meta.json' '/%2e%2e/meta.json' '/leak.json' '/leakdir/meta.json'; do
+    code="$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port$p")"
+    if [[ "$code" != "404" ]]; then
+      echo "escape $p returned $code (expected 404)"
+      "$S/stop.sh" t-http-esc >/dev/null
+      return 1
+    fi
+  done
+  "$S/stop.sh" t-http-esc >/dev/null
+}
+
+test_httpserve_dir_listing_and_index() {
+  "$S/init.sh" t-http-dir --tier html >/dev/null
+  mkdir -p /tmp/ps-commu/t-http-dir/app/no_index /tmp/ps-commu/t-http-dir/app/with_index
+  echo 'secret' > /tmp/ps-commu/t-http-dir/app/no_index/secret.txt
+  echo '<h2>sub index</h2>' > /tmp/ps-commu/t-http-dir/app/with_index/index.html
+  "$S/serve.sh" t-http-dir --no-lint >/dev/null
+  local port c1 c2 c3
+  port="$(meta_get t-http-dir port)"
+  c1="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/no_index/")"
+  c2="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/no_index")"
+  c3="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/with_index/")"
+  "$S/stop.sh" t-http-dir >/dev/null
+  [[ "$c1" == "404" && "$c2" == "404" && "$c3" == "200" ]]
+}
+
+# --- M1: Tailscale Serve stub helpers & R2 tests ---
+_ts_stub_create() {  # [backend_state] [dns_name] → prints temp dir path
+  local state="${1:-Running}" dns="${2:-test-node.tail9999.ts.net.}"
+  local d; d="$(mktemp -d)"
+  python3 - "$d/state.json" "$state" "$dns" <<'PY'
+import json, sys
+path, state, dns = sys.argv[1:4]
+data = {
+    "backend_state": state,
+    "dns_name": dns,
+    "serve_status": {
+        "TCP": {"8443": {"HTTPS": True}},
+        "Web": {
+            f"{dns.rstrip('.')}:8443": {
+                "Handlers": {"/": {"Proxy": "http://127.0.0.1:8789"}}
+            }
+        },
+        "AllowFunnel": {f"{dns.rstrip('.')}:8443": True},
+    },
+}
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+  : > "$d/calls.jsonl"
+  cat > "$d/tailscale" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+D="$(cd "$(dirname "$0")" && pwd)"
+exec python3 - "$D" "$@" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+args = sys.argv[2:]
+with open(os.path.join(d, "calls.jsonl"), "a") as f:
+    f.write(json.dumps(args) + "\n")
+with open(os.path.join(d, "state.json")) as f:
+    st = json.load(f)
+
+if args == ["status", "--self", "--json"]:
+    out = {"BackendState": st.get("backend_state", "Running"), "Self": {"DNSName": st.get("dns_name", "")}}
+    print(json.dumps(out))
+    sys.exit(0)
+
+if args == ["serve", "status", "--json"]:
+    print(json.dumps(st.get("serve_status", {})))
+    sys.exit(0)
+
+if args and args[0] == "serve":
+    if "reset" in args or "funnel" in args:
+        sys.stderr.write("FORBIDDEN tailscale command in stub\n")
+        sys.exit(99)
+    host = (st.get("dns_name") or "").rstrip(".")
+    web = st.setdefault("serve_status", {}).setdefault("Web", {})
+    tcp = st.setdefault("serve_status", {}).setdefault("TCP", {})
+    if "off" in args:
+        ts_port = ""
+        for a in args:
+            if a.startswith("--https="):
+                ts_port = a.split("=", 1)[1]
+        if ts_port in ("8443", "8444", "9443"):
+            sys.stderr.write(f"FORBIDDEN port {ts_port} in stub\n")
+            sys.exit(99)
+        for k in [k for k in list(web.keys()) if k.endswith(":" + ts_port)]:
+            del web[k]
+        tcp.pop(ts_port, None)
+        with open(os.path.join(d, "state.json"), "w") as f:
+            json.dump(st, f, indent=2)
+        sys.exit(0)
+    if "--bg" in args:
+        ts_port = ""
+        for a in args:
+            if a.startswith("--https="):
+                ts_port = a.split("=", 1)[1]
+        target = args[-1]
+        if not ts_port or ts_port in ("8443", "8444", "9443"):
+            sys.stderr.write(f"FORBIDDEN or missing port {ts_port}\n")
+            sys.exit(99)
+        tcp[ts_port] = {"HTTPS": True}
+        web[f"{host}:{ts_port}"] = {"Handlers": {"/": {"Proxy": target}}}
+        with open(os.path.join(d, "state.json"), "w") as f:
+            json.dump(st, f, indent=2)
+        sys.exit(0)
+
+sys.stderr.write(f"Unhandled stub args: {args}\n")
+sys.exit(2)
+PY
+SH
+  chmod +x "$d/tailscale"
+  echo "$d"
+}
+
+test_tailnet_publish_derives_host_and_records_meta() {
+  local stub; stub="$(_ts_stub_create Running "custom-box.tail12345.ts.net.")"
+  "$S/init.sh" t-ts-pub --tier html >/dev/null
+  echo '<h1>tailnet</h1>' > /tmp/ps-commu/t-ts-pub/app/index.html
+  local out port ts_port expected_url
+  out="$(TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-pub --no-lint --tailnet)"
+  port="$(meta_get t-ts-pub port)"
+  ts_port=$((port + 10000))
+  expected_url="https://custom-box.tail12345.ts.net:${ts_port}/"
+  local ok_flag=1
+  grep -qxF "$expected_url" <<<"$out" || ok_flag=0
+  [[ "$(meta_get t-ts-pub tailnet_port)" == "$ts_port" ]] || ok_flag=0
+  [[ "$(meta_get t-ts-pub tailnet_url)" == "$expected_url" ]] || ok_flag=0
+  grep -qF "\"--https=${ts_port}\"" "$stub/calls.jsonl" || ok_flag=0
+  grep -qF "\"http://127.0.0.1:${port}\"" "$stub/calls.jsonl" || ok_flag=0
+  grep -qF ':8443' "$stub/state.json" || ok_flag=0
+  TAILSCALE_BIN="$stub/tailscale" "$S/stop.sh" t-ts-pub >/dev/null
+  rm -rf "$stub"
+  (( ok_flag ))
+}
+
+test_tailnet_refuses_dev() {
+  local stub; stub="$(_ts_stub_create Running "dev-refuse.tail9999.ts.net.")"
+  "$S/init.sh" t-ts-dev --tier react >/dev/null
+  local out rc=0
+  out="$(TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-dev --no-lint --tailnet --dev 2>&1)" || rc=$?
+  local p; p="$(meta_get t-ts-dev pid)"
+  local calls; calls="$(wc -l < "$stub/calls.jsonl" | tr -d ' ')"
+  rm -rf "$stub"
+  (( rc != 0 )) && grep -qi 'cannot be combined' <<<"$out" && [[ -z "$p" && "$calls" == "0" ]]
+}
+
+test_tailnet_missing_and_logged_out_fallback() {
+  "$S/init.sh" t-ts-miss --tier html >/dev/null
+  echo '<h1>local</h1>' > /tmp/ps-commu/t-ts-miss/app/index.html
+  local err out rc=0 port
+  err="$(TAILSCALE_BIN=/nonexistent/tailscale "$S/serve.sh" t-ts-miss --no-lint --tailnet 2>&1 >/dev/null)" || rc=$?
+  port="$(meta_get t-ts-miss port)"
+  (( rc == 0 )) && grep -qi 'WARNING' <<<"$err" &&
+  curl -sf "http://127.0.0.1:$port/" | grep -q '<h1>local</h1>' &&
+  [[ -z "$(meta_get t-ts-miss tailnet_port)" ]] || { "$S/stop.sh" t-ts-miss >/dev/null; return 1; }
+  "$S/stop.sh" t-ts-miss >/dev/null
+
+  local stub; stub="$(_ts_stub_create NeedsLogin "")"
+  err="$(TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-miss --no-lint --tailnet 2>&1 >/dev/null)" || rc=$?
+  port="$(meta_get t-ts-miss port)"
+  local ok_flag=1
+  (( rc == 0 )) || ok_flag=0
+  grep -qi 'WARNING' <<<"$err" || ok_flag=0
+  curl -sf "http://127.0.0.1:$port/" | grep -q '<h1>local</h1>' || ok_flag=0
+  [[ -z "$(meta_get t-ts-miss tailnet_port)" ]] || ok_flag=0
+  ! grep -q '"--bg"' "$stub/calls.jsonl" || ok_flag=0
+  "$S/stop.sh" t-ts-miss >/dev/null
+  rm -rf "$stub"
+  (( ok_flag ))
+}
+
+test_without_tailnet_preserves_localhost_and_cleans_stale() {
+  local stub; stub="$(_ts_stub_create Running "plain-box.tail9999.ts.net.")"
+  "$S/init.sh" t-ts-plain --tier html >/dev/null
+  echo '<h1>plain</h1>' > /tmp/ps-commu/t-ts-plain/app/index.html
+  local out
+  out="$(TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-plain --no-lint)"
+  [[ "$(wc -l <<<"$out" | tr -d ' ')" == "1" ]] &&
+  ! grep -q 'https://' <<<"$out" &&
+  [[ "$(wc -l < "$stub/calls.jsonl" | tr -d ' ')" == "0" ]] || { "$S/stop.sh" t-ts-plain >/dev/null; rm -rf "$stub"; return 1; }
+  "$S/stop.sh" t-ts-plain >/dev/null
+
+  # Serve with --tailnet, then re-serve without --tailnet → stale 177xx cleaned up
+  TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-plain --no-lint --tailnet >/dev/null
+  local ts_port; ts_port="$(meta_get t-ts-plain tailnet_port)"
+  out="$(TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-plain --no-lint)"
+  local ok_flag=1
+  [[ "$(wc -l <<<"$out" | tr -d ' ')" == "1" ]] || ok_flag=0
+  [[ -z "$(meta_get t-ts-plain tailnet_port)" ]] || ok_flag=0
+  [[ -z "$(meta_get t-ts-plain tailnet_url)" ]] || ok_flag=0
+  grep -qF "\"--https=${ts_port}\"" "$stub/calls.jsonl" && grep -qF '"off"' "$stub/calls.jsonl" || ok_flag=0
+  "$S/stop.sh" t-ts-plain >/dev/null
+  rm -rf "$stub"
+  (( ok_flag ))
+}
+
+test_tailnet_ownership_refuses_non_owned() {
+  local stub; stub="$(_ts_stub_create Running "own-box.tail9999.ts.net.")"
+  "$S/init.sh" t-ts-own --tier html >/dev/null
+  # Case 1: tailnet_port = 8443 → refused, zero off calls
+  meta_set t-ts-own tailnet_port 8443
+  local err rc=0
+  err="$(TAILSCALE_BIN="$stub/tailscale" ts_unpublish_owned t-ts-own 2>&1)" || rc=$?
+  (( rc != 0 )) && grep -q 'REFUSED' <<<"$err" && ! grep -q '"off"' "$stub/calls.jsonl" || { rm -rf "$stub"; return 1; }
+
+  # Case 2: tailnet_port = 17742 but serve_status points to :3000 (not 77xx) → refused
+  python3 - "$stub/state.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: st = json.load(f)
+st["serve_status"]["Web"]["own-box.tail9999.ts.net:17742"] = {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}}
+with open(sys.argv[1], "w") as f: json.dump(st, f, indent=2)
+PY
+  meta_set t-ts-own tailnet_port 17742
+  rc=0; err="$(TAILSCALE_BIN="$stub/tailscale" ts_unpublish_owned t-ts-own 2>&1)" || rc=$?
+  (( rc != 0 )) && grep -q 'REFUSED' <<<"$err" && ! grep -q '"off"' "$stub/calls.jsonl" || { rm -rf "$stub"; return 1; }
+
+  # Case 3: listener already gone from status JSON → clears meta keys cleanly
+  meta_set t-ts-own tailnet_port 17743
+  meta_set t-ts-own tailnet_url "https://own-box.tail9999.ts.net:17743/"
+  TAILSCALE_BIN="$stub/tailscale" ts_unpublish_owned t-ts-own || { rm -rf "$stub"; return 1; }
+  [[ -z "$(meta_get t-ts-own tailnet_port)" && -z "$(meta_get t-ts-own tailnet_url)" ]]
+  local ok=$?
+  rm -rf "$stub"
+  return $ok
+}
+
+test_tailnet_stop_unpublishes() {
+  local stub; stub="$(_ts_stub_create Running "stop-box.tail9999.ts.net.")"
+  "$S/init.sh" t-ts-stop --tier html >/dev/null
+  echo ok > /tmp/ps-commu/t-ts-stop/app/index.html
+  TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-stop --no-lint --tailnet >/dev/null
+  local ts_port; ts_port="$(meta_get t-ts-stop tailnet_port)"
+  TAILSCALE_BIN="$stub/tailscale" "$S/stop.sh" t-ts-stop >/dev/null
+  local ok_flag=1
+  [[ -z "$(meta_get t-ts-stop tailnet_port)" && -z "$(meta_get t-ts-stop tailnet_url)" ]] || ok_flag=0
+  grep -qF "[\"--https=${ts_port}\", \"off\"]" "$stub/calls.jsonl" || grep -qE "\"--https=${ts_port}\".*\"off\"" "$stub/calls.jsonl" || ok_flag=0
+  ! grep -qF ":${ts_port}" "$stub/state.json" || ok_flag=0
+  grep -qF ":8443" "$stub/state.json" || ok_flag=0
+  rm -rf "$stub"
+  (( ok_flag ))
+}
+
+test_tailnet_re_serve_port_change_unpublishes_old() {
+  local stub; stub="$(_ts_stub_create Running "resv-box.tail9999.ts.net.")"
+  "$S/init.sh" t-ts-resv --tier html >/dev/null
+  echo ok > /tmp/ps-commu/t-ts-resv/app/index.html
+  TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-resv --no-lint --tailnet >/dev/null
+  local ts1; ts1="$(meta_get t-ts-resv tailnet_port)"
+
+  "$S/init.sh" t-ts-hold --tier html >/dev/null
+  echo ok > /tmp/ps-commu/t-ts-hold/app/index.html
+  "$S/serve.sh" t-ts-hold --no-lint >/dev/null
+  local hold_port; hold_port="$(meta_get t-ts-hold port)"
+
+  # Force next serve attempt to try t-ts-hold's occupied port and land on hold_port+1
+  meta_set t-ts-resv port "$hold_port"
+  TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-resv --no-lint --tailnet >/dev/null
+  local ts2; ts2="$(meta_get t-ts-resv tailnet_port)"
+  local ok_flag=1
+  [[ "$ts1" != "$ts2" ]] || ok_flag=0
+  grep -qE "\"--https=${ts1}\".*\"off\"" "$stub/calls.jsonl" || ok_flag=0
+  ! grep -qF ":${ts1}" "$stub/state.json" || ok_flag=0
+  grep -qF ":${ts2}" "$stub/state.json" || ok_flag=0
+  TAILSCALE_BIN="$stub/tailscale" "$S/stop.sh" t-ts-resv >/dev/null
+  "$S/stop.sh" t-ts-hold >/dev/null
+  rm -rf "$stub"
+  (( ok_flag ))
+}
+
+test_tailnet_watchdog_unpublishes() {
+  local stub; stub="$(_ts_stub_create Running "ttl-box.tail9999.ts.net.")"
+  "$S/init.sh" t-ts-ttl --tier html >/dev/null
+  echo ok > /tmp/ps-commu/t-ts-ttl/app/index.html
+  TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-ttl --no-lint --tailnet --keep-alive 2s >/dev/null
+  local pid ts_port
+  pid="$(meta_get t-ts-ttl pid)"
+  ts_port="$(meta_get t-ts-ttl tailnet_port)"
+  local died=0
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$pid" 2>/dev/null && ! grep -qF ":${ts_port}" "$stub/state.json"; then
+      died=1; break
+    fi
+    sleep 0.5
+  done
+  local ok_flag=1
+  (( died )) || ok_flag=0
+  grep -qE "\"--https=${ts_port}\".*\"off\"" "$stub/calls.jsonl" || ok_flag=0
+  [[ -z "$(meta_get t-ts-ttl tailnet_port)" ]] || ok_flag=0
+  rm -rf "$stub"
+  (( ok_flag ))
+}
+
+test_tailnet_init_sweep_unpublishes() {
+  local stub; stub="$(_ts_stub_create Running "sweep-box.tail9999.ts.net.")"
+  mkdir -p /tmp/ps-commu/t-ts-old
+  meta_set t-ts-old port 7788
+  meta_set t-ts-old tailnet_port 17788
+  meta_set t-ts-old tailnet_url "https://sweep-box.tail9999.ts.net:17788/"
+  python3 - "$stub/state.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: st = json.load(f)
+st["serve_status"]["Web"]["sweep-box.tail9999.ts.net:17788"] = {"Handlers": {"/": {"Proxy": "http://127.0.0.1:7788"}}}
+with open(sys.argv[1], "w") as f: json.dump(st, f, indent=2)
+PY
+  touch -t 202601010000 /tmp/ps-commu/t-ts-old
+  TAILSCALE_BIN="$stub/tailscale" "$S/init.sh" t-ts-sweeper >/dev/null
+  local ok_flag=1
+  [[ ! -d /tmp/ps-commu/t-ts-old ]] || ok_flag=0
+  grep -qE '"--https=17788".*"off"' "$stub/calls.jsonl" || ok_flag=0
+  ! grep -qF ':17788' "$stub/state.json" || ok_flag=0
+  rm -rf "$stub"
+  (( ok_flag ))
+}
+
+test_tailnet_list_and_handoff_and_orphan() {
+  local stub; stub="$(_ts_stub_create Running "view-box.tail9999.ts.net.")"
+  "$S/init.sh" t-ts-lh --example >/dev/null
+  TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-lh --tailnet >/dev/null
+  local turl; turl="$(meta_get t-ts-lh tailnet_url)"
+  local lout hout
+  lout="$(TAILSCALE_BIN="$stub/tailscale" "$S/list.sh")"
+  hout="$(TAILSCALE_BIN="$stub/tailscale" "$S/handoff.sh" t-ts-lh)"
+  local ok_flag=1
+  grep -qxF "$turl" <<<"$lout" || ok_flag=0
+  grep -qxF "Tailnet URL: $turl" <<<"$hout" || ok_flag=0
+  grep -qxF "$turl" <<<"$hout" || ok_flag=0
+  ! grep -q 'ORPHANED' <<<"$lout" || ok_flag=0
+
+  # Add orphaned 17777 listener with no live server
+  python3 - "$stub/state.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: st = json.load(f)
+st["serve_status"]["Web"]["view-box.tail9999.ts.net:17777"] = {"Handlers": {"/": {"Proxy": "http://127.0.0.1:7777"}}}
+with open(sys.argv[1], "w") as f: json.dump(st, f, indent=2)
+PY
+  lout="$(TAILSCALE_BIN="$stub/tailscale" "$S/list.sh")"
+  grep -q 'ORPHANED tailnet listener: https://view-box.tail9999.ts.net:17777/' <<<"$lout" || ok_flag=0
+  ! grep -q 'ORPHANED.*8443' <<<"$lout" || ok_flag=0
+  TAILSCALE_BIN="$stub/tailscale" "$S/stop.sh" t-ts-lh >/dev/null
+  rm -rf "$stub"
+  (( ok_flag ))
+}
+
+test_tailnet_clean_unpublishes() {
+  local stub; stub="$(_ts_stub_create Running "clean-box.tail9999.ts.net.")"
+  "$S/init.sh" t-ts-clean --tier html >/dev/null
+  echo ok > /tmp/ps-commu/t-ts-clean/app/index.html
+  TAILSCALE_BIN="$stub/tailscale" "$S/serve.sh" t-ts-clean --no-lint --tailnet >/dev/null
+  local ts_port; ts_port="$(meta_get t-ts-clean tailnet_port)"
+  TAILSCALE_BIN="$stub/tailscale" "$S/clean.sh" >/dev/null
+  local ok_flag=1
+  [[ ! -d /tmp/ps-commu/t-ts-clean ]] || ok_flag=0
+  grep -qE "\"--https=${ts_port}\".*\"off\"" "$stub/calls.jsonl" || ok_flag=0
+  ! grep -qF ":${ts_port}" "$stub/state.json" || ok_flag=0
+  grep -qF ":8443" "$stub/state.json" || ok_flag=0
+  rm -rf "$stub"
+  (( ok_flag ))
+}
+
+check httpserve_get_head_and_headers          test_httpserve_get_head_and_headers
+check httpserve_rejects_non_get_head_405      test_httpserve_rejects_non_get_head_405
+check httpserve_blocks_dotfiles               test_httpserve_blocks_dotfiles
+check httpserve_blocks_traversal_and_symlink  test_httpserve_blocks_traversal_and_symlink_escape
+check httpserve_dir_listing_and_index         test_httpserve_dir_listing_and_index
+check tailnet_publish_derives_host            test_tailnet_publish_derives_host_and_records_meta
+check tailnet_refuses_dev                     test_tailnet_refuses_dev
+check tailnet_missing_and_logged_out_fallback test_tailnet_missing_and_logged_out_fallback
+check without_tailnet_and_cleans_stale        test_without_tailnet_preserves_localhost_and_cleans_stale
+check tailnet_ownership_refuses_non_owned     test_tailnet_ownership_refuses_non_owned
+check tailnet_stop_unpublishes                test_tailnet_stop_unpublishes
+check tailnet_re_serve_port_change            test_tailnet_re_serve_port_change_unpublishes_old
+check tailnet_watchdog_unpublishes            test_tailnet_watchdog_unpublishes
+check tailnet_init_sweep_unpublishes          test_tailnet_init_sweep_unpublishes
+check tailnet_list_and_handoff_and_orphan     test_tailnet_list_and_handoff_and_orphan
+
+
+# --- M2: R1 Vendored assets, shared tokens, Thai+EN lang sync, declarative interactivity ---
+test_vendor_assets_budget_and_no_external_urls() {
+  local v="$SKILL_DIR/assets/vendor"
+  local f
+  for f in cherry-markdown.engine.core.js cherry-markdown.markdown.min.css viewer-static.min.js lucide.min.js fonts.css \
+           fonts/bricolage-grotesque-latin.woff2 fonts/inter-latin.woff2 fonts/jetbrains-mono-latin.woff2 fonts/noto-sans-thai-thai.woff2; do
+    [[ -s "$v/$f" ]] || { echo "missing vendor file: $f"; return 1; }
+  done
+  python3 - "$SKILL_DIR" <<'PY'
+import os, re, sys
+sd = sys.argv[1]
+v = os.path.join(sd, "assets", "vendor")
+total = sum(os.path.getsize(os.path.join(r, fn)) for r, _, fs in os.walk(v) for fn in fs)
+assert total <= 6291456, f"vendor dir {total} > 6291456"
+for rel in (
+    "assets/template-infographic/index.html",
+    "assets/template-html/index.html",
+    "assets/template-react/index.html",
+    "assets/vendor/fonts.css",
+    "assets/vendor/cherry-markdown.markdown.min.css",
+):
+    txt = open(os.path.join(sd, rel), encoding="utf-8").read()
+    hits = re.findall(r"https?://[^\s\x22\x27<>)]+", txt)
+    assert not hits, f"{rel} has external URLs: {hits}"
+inf = open(os.path.join(sd, "assets/template-infographic/index.html"), encoding="utf-8").read()
+for tok in ("window.MathJax", "window.mxLoadResources = false", 'window.DRAWIO_BASE_URL = "."'):
+    assert tok in inf, f"missing {tok} in template-infographic/index.html"
+PY
+}
+
+test_shared_tokens_and_impeccable_bans() {
+  python3 - "$SKILL_DIR" <<'PY'
+import os, re, sys
+sd = sys.argv[1]
+theme = open(os.path.join(sd, "assets/template-infographic/theme.css"), encoding="utf-8").read()
+assert "--accent:       #1c4f8f;" in theme or "--accent: #1c4f8f;" in theme
+assert "Noto Sans Thai" in theme
+
+for rel in (
+    "assets/template-infographic/explainer.css",
+    "assets/template-html/index.html",
+    "assets/template-react/src/styles.css",
+):
+    txt = open(os.path.join(sd, rel), encoding="utf-8").read()
+    for bad in ("#0a0e1a", "background-clip: text", "backdrop-filter", "border-left: 4px", "metric-grid", "metric-tile", "break-all"):
+        assert bad not in txt, f"{rel} contains banned pattern: {bad}"
+    assert "cat-" not in txt, f"{rel} contains cat-* classes"
+
+html_tpl = open(os.path.join(sd, "assets/template-html/index.html"), encoding="utf-8").read()
+assert "./theme.css" in html_tpl and "./vendor/fonts.css" in html_tpl
+rmain = open(os.path.join(sd, "assets/template-react/src/main.tsx"), encoding="utf-8").read()
+assert "../../vendor/fonts.css" in rmain and "../../template-infographic/theme.css" in rmain
+PY
+}
+
+test_thai_lang_sync_and_css_rules() {
+  rm -rf /tmp/ps-commu/t-thai-sync /tmp/ps-commu/t-thai-html
+  "$S/init.sh" t-thai-sync --example >/dev/null
+  sed -i.bak 's/^Lang: en$/Lang: th/' /tmp/ps-commu/t-thai-sync/00-brief.md && rm -f /tmp/ps-commu/t-thai-sync/00-brief.md.bak
+  "$S/lint.sh" t-thai-sync || return 1
+  rm -f /tmp/ps-commu/t-thai-sync/app/content.md
+  "$S/skeleton.sh" t-thai-sync >/dev/null || return 1
+  grep -q '<html lang="th">' /tmp/ps-commu/t-thai-sync/app/index.html || return 1
+
+  # Reject invalid Lang
+  sed -i.bak 's/^Lang: th$/Lang: (...)/' /tmp/ps-commu/t-thai-sync/00-brief.md && rm -f /tmp/ps-commu/t-thai-sync/00-brief.md.bak
+  ! "$S/lint.sh" t-thai-sync >/dev/null 2>&1 || return 1
+
+  # serve.sh syncs Lang: th into html tier index.html
+  "$S/init.sh" t-thai-html --tier html >/dev/null
+  _lint_valid_brief_facts_storyboard t-thai-html
+  printf '\nLang: th\n' >> /tmp/ps-commu/t-thai-html/00-brief.md
+  "$S/serve.sh" t-thai-html >/dev/null || return 1
+  grep -q '<html lang="th">' /tmp/ps-commu/t-thai-html/app/index.html || { "$S/stop.sh" t-thai-html >/dev/null; return 1; }
+  "$S/stop.sh" t-thai-html >/dev/null
+
+  python3 - "$SKILL_DIR/assets/template-infographic/theme.css" <<'PY'
+import re, sys
+css = open(sys.argv[1], encoding="utf-8").read()
+assert 'html[lang^="th"]' in css
+m_body = re.search(r'html\[lang\^="th"\][^{]*\{[^}]*--lh-body:\s*([0-9.]+)', css)
+m_tight = re.search(r'html\[lang\^="th"\][^{]*\{[^}]*--lh-tight:\s*([0-9.]+)', css)
+assert m_body and float(m_body.group(1)) >= 1.7
+assert m_tight and float(m_tight.group(1)) >= 1.35
+assert "text-transform: none" in css and "letter-spacing: 0" in css
+PY
+}
+
+test_lint_rejects_script_and_malformed_declarative() {
+  rm -rf /tmp/ps-commu/t-decl-lint
+  "$S/init.sh" t-decl-lint --example >/dev/null
+  local c=/tmp/ps-commu/t-decl-lint/app/content.md out rc
+
+  # 1. Inline <script> rejected
+  printf '\n<script>alert(1)</script>\n' >> "$c"
+  out="$("$S/lint.sh" t-decl-lint 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q 'inline <script> is forbidden' <<<"$out" || return 1
+
+  # 2. Malformed .tabs (only 1 button) rejected
+  cat > "$c" <<'EOF'
+See F1.
+<div class="tabs"><div class="tab-list"><button type="button" class="tab-btn">Only</button></div><div class="tab-panel">P1</div></div>
+EOF
+  out="$("$S/lint.sh" t-decl-lint 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q '.tabs #1 requires >=2' <<<"$out" || return 1
+
+  # 3. Malformed .accordion (mismatched panels) rejected
+  cat > "$c" <<'EOF'
+See F1.
+<div class="accordion"><div class="acc-item"><button type="button" class="acc-btn">Q1</button><div class="acc-panel">A1</div></div><div class="acc-item"><button type="button" class="acc-btn">Q2</button></div></div>
+EOF
+  out="$("$S/lint.sh" t-decl-lint 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q '.accordion #1 requires >=2' <<<"$out" || return 1
+
+  # 4. Valid .tabs + .accordion passes
+  cat > "$c" <<'EOF'
+See F1.
+<div class="tabs"><div class="tab-list"><button type="button" class="tab-btn" aria-pressed="true">A</button><button type="button" class="tab-btn" aria-pressed="false">B</button></div><div class="tab-panel is-active">PA</div><div class="tab-panel" hidden>PB</div></div>
+<div class="accordion"><div class="acc-item is-open"><button type="button" class="acc-btn" aria-expanded="true">Q1</button><div class="acc-panel">A1</div></div><div class="acc-item"><button type="button" class="acc-btn" aria-expanded="false">Q2</button><div class="acc-panel" hidden>A2</div></div></div>
+EOF
+  "$S/lint.sh" t-decl-lint
+}
+
+test_verify_assert9_declarative_interactivity() {
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-a9 out rc
+  _stub_chrome "$d" page
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub 2>&1)"; rc=$?
+  (( rc == 0 )) && grep -q '^PASS: 9 declarative interactive:' <<<"$out" || return 1
+
+  # Missing .tabs/.accordion on content.md -> FAIL: 9
+  printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="mxgraph" style="margin-top: 10px"><svg><rect></rect></svg></div><p>No interactive.</p></div></body></html>' > "$d/page.html"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q '^FAIL: 9 declarative interactive:' <<<"$out" || return 1
+
+  # Unwired .tabs -> FAIL: 9
+  printf '%s\n' '<html><body class="is-ready"><div class="cherry-previewer"><div class="mxgraph" style="margin-top: 10px"><svg><rect></rect></svg></div><div class="tabs"><div class="tab-list"><button class="tab-btn"></button><button class="tab-btn"></button></div><div class="tab-panel"></div><div class="tab-panel" hidden></div></div><div class="accordion is-wired"><div class="acc-item"><button class="acc-btn"></button><div class="acc-panel"></div></div><div class="acc-item"><button class="acc-btn"></button><div class="acc-panel" hidden></div></div></div></div></body></html>' > "$d/page.html"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q '^FAIL: 9 declarative interactive unwired/malformed' <<<"$out"
+}
+
+check vendor_assets_budget_and_offline    test_vendor_assets_budget_and_no_external_urls
+check shared_tokens_and_impeccable_bans   test_shared_tokens_and_impeccable_bans
+check thai_lang_sync_and_css_rules        test_thai_lang_sync_and_css_rules
+check lint_script_and_declarative         test_lint_rejects_script_and_malformed_declarative
+check verify_assert9_declarative          test_verify_assert9_declarative_interactivity
+
+# --- M3: Polish regression tests ---
+test_thai_tt_label_and_nav_title_tokens() {
+  python3 - "$SKILL_DIR" <<'PY'
+import os, re, sys
+sd = sys.argv[1]
+theme = open(os.path.join(sd, "assets/template-infographic/theme.css"), encoding="utf-8").read()
+assert "--tt-label:" in theme and "uppercase" in theme
+assert re.search(r'html\[lang\^="th"\][^{]*\{[^}]*--tt-label:\s*none', theme, re.S), "missing --tt-label: none for Thai"
+
+ecss = open(os.path.join(sd, "assets/template-infographic/explainer.css"), encoding="utf-8").read()
+for sel in (
+    r'\.explainer-nav \.nav-brand \.nav-sub\s*\{[^}]*text-transform:\s*var\(--tt-label\)',
+    r'\.cherry-markdown\.theme__explainer thead th\s*\{[^}]*text-transform:\s*var\(--tt-label\)',
+    r'\.toc-title\s*\{[^}]*text-transform:\s*var\(--tt-label\)',
+    r'\.explainer-nav \.nav-brand \.nav-title\s*\{[^}]*line-height:\s*var\(--lh-tight\)',
+    r'\.tabs \.tab-btn\s*\{[^}]*line-height:\s*var\(--lh-snug\)',
+):
+    assert re.search(sel, ecss, re.S), f"explainer.css missing expected rule: {sel}"
+assert "text-transform: uppercase" not in ecss, "explainer.css still has hardcoded text-transform: uppercase"
+
+h = open(os.path.join(sd, "assets/template-html/index.html"), encoding="utf-8").read()
+assert re.search(r'thead th\s*\{[^}]*text-transform:\s*var\(--tt-label\)', h, re.S)
+assert re.search(r'\.tab-btn\s*\{[^}]*line-height:\s*var\(--lh-snug\)', h, re.S)
+r = open(os.path.join(sd, "assets/template-react/src/styles.css"), encoding="utf-8").read()
+assert re.search(r'\.readout-k\s*\{[^}]*text-transform:\s*var\(--tt-label\)', r, re.S)
+assert re.search(r'thead th\s*\{[^}]*text-transform:\s*var\(--tt-label\)', r, re.S)
+PY
+}
+
+test_cherry_setup_toc_locale_object() {
+  python3 - "$SKILL_DIR/assets/template-infographic/cherry-setup.js" <<'PY'
+import re, sys
+js = open(sys.argv[1], encoding="utf-8").read()
+assert '"en_US"' not in js and "'en_US'" not in js, "bare string en_US still in cherry-setup.js"
+assert re.search(r'locale\s*=\s*\{\s*toc:', js), "locale object with toc key missing"
+assert "สารบัญ" in js and "Table of Contents" in js
+assert "String(i) === String(targetIdx)" in js
+PY
+}
+
+test_lint_allows_backtick_script_prose_rejects_html_script() {
+  rm -rf /tmp/ps-commu/t-lint-bt
+  "$S/init.sh" t-lint-bt --example >/dev/null
+  local c=/tmp/ps-commu/t-lint-bt/app/content.md out rc
+  printf '\nProse citing `<script>` and ``<script src="x">`` safely (F1).\n' >> "$c"
+  "$S/lint.sh" t-lint-bt || return 1
+  printf '\n<SCRIPT>alert(2)</SCRIPT>\n' >> "$c"
+  out="$("$S/lint.sh" t-lint-bt 2>&1)"; rc=$?
+  (( rc == 1 )) && grep -q 'inline <script> is forbidden' <<<"$out"
+}
+
+test_init_react_excludes_node_modules_and_dist() {
+  rm -rf /tmp/ps-commu/t-react-clean-copy
+  local tpl="$SKILL_DIR/assets/template-react" created_dist=0 created_nm=0
+  if [[ ! -d "$tpl/dist" ]]; then mkdir -p "$tpl/dist"; touch "$tpl/dist/.probe"; created_dist=1; fi
+  if [[ ! -d "$tpl/node_modules" ]]; then mkdir -p "$tpl/node_modules"; touch "$tpl/node_modules/.probe"; created_nm=1; fi
+  "$S/init.sh" t-react-clean-copy --tier react >/dev/null
+  local ok=1
+  [[ ! -e /tmp/ps-commu/t-react-clean-copy/app/node_modules ]] || ok=0
+  [[ ! -e /tmp/ps-commu/t-react-clean-copy/app/dist ]] || ok=0
+  [[ -f /tmp/ps-commu/t-react-clean-copy/app/package.json && -d /tmp/ps-commu/t-react-clean-copy/app/vendor ]] || ok=0
+  (( created_dist )) && rm -rf "$tpl/dist"
+  (( created_nm )) && rm -rf "$tpl/node_modules"
+  (( ok ))
+}
+
+test_list_flags_orphan_even_when_localhost_port_live() {
+  local stub; stub="$(_ts_stub_create Running "orphan-box.tail9999.ts.net.")"
+  "$S/init.sh" t-local-reuse --tier html >/dev/null
+  echo '<h1>local</h1>' > /tmp/ps-commu/t-local-reuse/app/index.html
+  "$S/serve.sh" t-local-reuse --no-lint >/dev/null
+  local port ts_port lout ok_flag=1
+  port="$(meta_get t-local-reuse port)"
+  ts_port=$((port + 10000))
+  # Inject an orphaned 177xx listener pointing to the live localhost app's 77xx port
+  python3 - "$stub/state.json" "$port" "$ts_port" <<'PY'
+import json, sys
+path, port, ts_port = sys.argv[1:4]
+with open(path) as f: st = json.load(f)
+st["serve_status"]["Web"][f"orphan-box.tail9999.ts.net:{ts_port}"] = {"Handlers": {"/": {"Proxy": f"http://127.0.0.1:{port}"}}}
+with open(path, "w") as f: json.dump(st, f, indent=2)
+PY
+  lout="$(TAILSCALE_BIN="$stub/tailscale" "$S/list.sh")"
+  grep -q "ORPHANED tailnet listener: https://orphan-box.tail9999.ts.net:${ts_port}/" <<<"$lout" || ok_flag=0
+  "$S/stop.sh" t-local-reuse >/dev/null
+  rm -rf "$stub"
+  (( ok_flag ))
+}
+
+test_verify_booting_retry_and_diagnostics() {
+  _vstub_ws || return 1
+  local d=/tmp/ps-commu/t-stub-boot pt=/tmp/ps-commu/t-vstub/page-text.txt out rc
+  _stub_chrome "$d" page
+  rm -f "$pt"
+  cat > "$d/chrome" <<EOF
+#!/usr/bin/env bash
+echo launch >> "$d/launches"
+n="\$(wc -l < "$d/launches" | tr -d ' ')"
+if [[ "\$n" -eq 1 ]]; then
+  printf '<html><body><div id="app"><div class="booting">Loading explainer…</div></div></body></html>\n'
+else
+  cat "$d/page.html"
+fi
+EOF
+  chmod +x "$d/chrome"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --dump-text 2>/dev/null)"; rc=$?
+  (( rc == 0 )) && [[ "$(wc -l < "$d/launches" | tr -d ' ')" == 2 ]] &&
+  [[ "$out" == "Stub page text for F-018." ]] || return 1
+
+  # Persistent .booting must stay bounded at 2 launches, exit 1, emit diagnostic, and leave no page-text.txt
+  : > "$d/launches"; rm -f "$pt"
+  cat > "$d/chrome" <<EOF
+#!/usr/bin/env bash
+echo launch >> "$d/launches"
+printf '<html><body><div id="app"><div class="booting">Loading explainer…</div></div></body></html>\n'
+EOF
+  chmod +x "$d/chrome"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --dump-text 2>&1)"; rc=$?
+  (( rc == 1 )) && [[ "$(wc -l < "$d/launches" | tr -d ' ')" == 2 ]] &&
+  grep -q 'page never reached .is-ready' <<<"$out" &&
+  grep -q 'no .cherry-previewer subtree' <<<"$out" &&
+  [[ ! -e "$pt" ]] || return 1
+
+  # Booting DOM whose <script> mentions 'explainer-error' (like real template-infographic/index.html)
+  # must still trigger the retry on launch 1, while a real rendered <div class="explainer-error"> does not.
+  : > "$d/launches"; rm -f "$pt"
+  cat > "$d/chrome" <<EOF
+#!/usr/bin/env bash
+echo launch >> "$d/launches"
+n="\$(wc -l < "$d/launches" | tr -d ' ')"
+if [[ "\$n" -eq 1 ]]; then
+  printf '<html><body><div id="app"><div class="booting">Loading…</div></div><script>var x="<div class=\\"explainer-error\\">";</script></body></html>\n'
+else
+  cat "$d/page.html"
+fi
+EOF
+  chmod +x "$d/chrome"
+  out="$(CHROME_BIN="$d/chrome" "$S/verify.sh" t-vstub --dump-text 2>/dev/null)"; rc=$?
+  (( rc == 0 )) && [[ "$(wc -l < "$d/launches" | tr -d ' ')" == 2 ]] &&
+  [[ "$out" == "Stub page text for F-018." ]]
+}
+
+test_m4_visual_polish_css_and_table_rules() {
+  python3 - "$SKILL_DIR" <<'PY'
+import os, re, sys
+sd = sys.argv[1]
+for rel in (
+    "assets/template-infographic/explainer.css",
+    "assets/template-html/index.html",
+    "assets/template-react/src/styles.css",
+):
+    txt = open(os.path.join(sd, rel), encoding="utf-8").read()
+    assert "overflow-wrap: anywhere" not in txt, f"{rel} still uses overflow-wrap: anywhere"
+    assert "overflow-wrap: break-word" in txt, f"{rel} missing overflow-wrap: break-word"
+    assert "position: static" in txt, f"{rel} missing static mobile nav rule"
+    assert "scroll-margin-top" in txt, f"{rel} missing scroll-margin-top"
+    assert "min-width: 7.5rem" not in txt, f"{rel} still has rigid min-width: 7.5rem"
+    assert "table-layout: auto" in txt, f"{rel} missing table-layout: auto"
+    assert "max-width: 639px" in txt and "attr(data-label)" in txt, f"{rel} missing responsive stacked table card CSS"
+    assert "nav-toggle" in txt and "nav-links" in txt and ".is-open" in txt, f"{rel} missing collapsible mobile nav CSS"
+    assert "tab-list" in txt and "tab-btn" in txt, f"{rel} missing segmented tab styling"
+    assert "abbr[title]" in txt, f"{rel} missing abbr[title] reset"
+
+js = open(os.path.join(sd, "assets/template-infographic/cherry-setup.js"), encoding="utf-8").read()
+assert 'setAttribute("data-label"' in js and "td-val" in js, "cherry-setup.js missing data-label/.td-val table stamping"
+assert "nav-toggle" in js and "aria-expanded" in js and "nav-links" in js, "cherry-setup.js missing collapsible mobile nav toggle"
+assert "scrollHeight - 48" in js, "cherry-setup.js missing scrollspy bottom-of-page accuracy"
+
+ht = open(os.path.join(sd, "assets/template-html/index.html"), encoding="utf-8").read()
+assert '.acc-item.is-open > .acc-btn' in ht and '.acc-btn[aria-expanded="true"]' in ht
+assert 'code-nowrap' in ht
+assert "setAttribute('data-label'" in ht and "td-val" in ht, "template-html missing data-label/.td-val table stamping"
+assert "nav-toggle" in ht and "aria-expanded" in ht and "nav-links" in ht, "template-html missing collapsible mobile nav toggle"
+assert "scrollHeight - 48" in ht, "template-html missing scrollspy bottom-of-page accuracy"
+assert "startOnLoad: false" in ht and "fontSize: '18px'" in ht and "mermaid.run" in ht, "template-html missing updated Mermaid readability config"
+
+rapp = open(os.path.join(sd, "assets/template-react/src/App.tsx"), encoding="utf-8").read()
+assert "IntersectionObserver" in rapp and "setActiveId" in rapp
+assert "data-label=" in rapp and "td-val" in rapp, "template-react App.tsx missing explicit data-label/.td-val"
+assert "nav-toggle" in rapp and "navOpen" in rapp and "aria-expanded" in rapp, "template-react App.tsx missing collapsible mobile nav"
+assert "scrollHeight - 48" in rapp, "template-react App.tsx missing scrollspy bottom-of-page accuracy"
+PY
+}
+
+check thai_tt_label_and_nav_title       test_thai_tt_label_and_nav_title_tokens
+check cherry_setup_toc_locale_object    test_cherry_setup_toc_locale_object
+check lint_backtick_script_vs_html      test_lint_allows_backtick_script_prose_rejects_html_script
+check init_react_excludes_build_dirs    test_init_react_excludes_node_modules_and_dist
+check list_orphan_with_live_local_port  test_list_flags_orphan_even_when_localhost_port_live
+check verify_booting_retry_diagnostics  test_verify_booting_retry_and_diagnostics
+check m4_visual_polish_css_and_tables   test_m4_visual_polish_css_and_table_rules
+
 test_clean_refuses_symlink_escape() {   # D8: realpath guard on wipe
   mkdir -p /tmp/ps-commu-outside-canary
   ln -sfn /tmp/ps-commu-outside-canary /tmp/ps-commu/t-evil
@@ -2056,6 +2845,7 @@ check list_running_stopped     test_list_shows_running_and_stopped
 check clean_refuses_symlink    test_clean_refuses_symlink_escape
 check clean_removes_dangling   test_clean_removes_dangling_link
 check clean_wipes_and_kills    test_clean_wipes_and_kills
+check tailnet_clean_unpublishes test_tailnet_clean_unpublishes
 
 echo "----- $PASS passed, $FAIL failed, $SKIP skipped"
 exit $(( FAIL > 0 ))

@@ -60,6 +60,7 @@ for ws in "$PS_COMMU_ROOT"/*/; do
   mtime="$(stat -f %m "$ws" 2>/dev/null || stat -c %Y "$ws" 2>/dev/null || echo "$now")"
   if (( now - mtime > 259200 )); then          # 3 days
     target="$(validate_workspace_path "$ws")" || continue
+    ts_unpublish_owned "$s" || true
     rm -rf "$target" && echo "swept: $s"
   fi
 done
@@ -77,7 +78,16 @@ trap 'log_timing init.sh "$SECONDS"' EXIT
 tpl="$(cd "$(dirname "$0")/.." && pwd)/assets/template-$tier"
 if [[ -d "$tpl" && ! -e "$ws/app/index.html" ]]; then
   mkdir -p "$ws/app"
-  cp -R "$tpl"/. "$ws/app"/
+  if [[ "$tier" == "react" ]]; then
+    for item in "$tpl"/* "$tpl"/.[!.]* "$tpl"/..?*; do
+      [[ -e "$item" || -L "$item" ]] || continue
+      base="$(basename "$item")"
+      [[ "$base" == "node_modules" || "$base" == "dist" ]] && continue
+      cp -R "$item" "$ws/app"/
+    done
+  else
+    cp -R "$tpl"/. "$ws/app"/
+  fi
   # F-018: the model should not start by reading and deleting a 281-line exemplar.
   # A plain infographic init keeps it at app/example-content.md; skeleton.sh writes
   # app/content.md from the storyboard. --example keeps the exemplar AS content.md.
@@ -85,6 +95,13 @@ if [[ -d "$tpl" && ! -e "$ws/app/index.html" ]]; then
     mv "$ws/app/content.md" "$ws/app/example-content.md"
   fi
   echo "scaffolded app/ from template-$tier"
+fi
+assets_root="$(cd "$(dirname "$0")/.." && pwd)/assets"
+if [[ -d "$assets_root/vendor" && ! -e "$ws/app/vendor" ]]; then
+  cp -R "$assets_root/vendor" "$ws/app/vendor"
+fi
+if [[ -f "$assets_root/template-infographic/theme.css" && ! -e "$ws/app/theme.css" ]]; then
+  cp "$assets_root/template-infographic/theme.css" "$ws/app/theme.css"
 fi
 
 # --- scaffold authoring-chain docs from assets/workspace/ (workspace root,
