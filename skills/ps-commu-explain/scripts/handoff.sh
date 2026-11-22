@@ -23,6 +23,8 @@ port="$(meta_get "$slug" port)"; pid="$(meta_get "$slug" pid)"
 rc=0
 if [[ -n "$pid" ]] && pid_has_marker "$pid" "$slug"; then
   echo "URL: http://localhost:$port"
+  turl="$(meta_get "$slug" tailnet_url)"
+  [[ -n "$turl" ]] && echo "Tailnet URL: $turl"
 else
   echo "URL: none, no live server (run $dir/serve.sh $slug)"; rc=1
 fi

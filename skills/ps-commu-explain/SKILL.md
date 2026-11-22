@@ -15,7 +15,7 @@ Build a fact-checked, visually rich explanation served from /tmp; hand over a ve
 
 ## Tiers
 
-- **infographic (DEFAULT)** — cream, Markdown-driven explainer rendered by cherry-markdown + draw.io (pan/zoom mxGraph diagrams) + Lucide. You author `app/content.md`; you do NOT touch `app/index.html`. Components: read `app/components-index.md` first (one line per section), then `grep -n 'id="<id>"' app/components.md` for only the section you need. This is the default look — `init.sh <slug>` with no `--tier`.
+- **infographic (DEFAULT)** — cream, Markdown-driven explainer rendered with offline vendored assets (cherry-markdown + draw.io pan/zoom mxGraph diagrams + Lucide + subset woff2 fonts). You author `app/content.md` (including declarative `.tabs`/`.accordion`); you do NOT touch `app/index.html`. Components: read `app/components-index.md` first (one line per section), then `grep -n 'id="<id>"' app/components.md` for only the section you need. This is the default look — `init.sh <slug>` with no `--tier`.
 - **html** (opt-in `--tier html`) — the classic bespoke, hand-written HTML tier. You edit `app/index.html` in place. Component/treatment-tag reference: `references/visual-components.md`.
 - **react** (opt-in `--tier react`) — interactive React+TS, for sections that need state (slider / step-sim / live-filter). Component/treatment-tag reference: `references/visual-components.md`. Build before serving: `npm ci` in `app/` once, then `npm run build` (creates `app/dist`, which `serve.sh` hard-requires) — or `serve.sh <slug> --dev` to run `vite` directly instead (still needs `npm ci` first).
 
@@ -32,6 +32,7 @@ digraph tier {
 ## Modes
 
 - `list` → `scripts/list.sh`. `clean` → `scripts/clean.sh` — wipes ALL apps. One app: `scripts/stop.sh <slug>`.
+- `serve.sh <slug> --tailnet` publishes tailnet-only HTTPS on port `177xx` (refused with `--dev`; `TAILSCALE_BIN` overrides the `tailscale` binary).
 - Existing slug: re-serve / update (Author stage) / rebuild.
 
 ## The six-stage chain
@@ -40,10 +41,10 @@ Each stage produces a file the next one reads. `lint.sh <slug>` is the single sc
 
 | # | Stage | Output | Checked by |
 |---|---|---|---|
-| 1 | Brief | `00-brief.md` — exactly 3 numbered reader questions (Q1-Q3), a `Reader:` line (who reads it and what they already know — default: a newcomer to this repo), and a section budget (integer, 4-7) | `init.sh` scaffolds it (never overwrites an existing one); `lint.sh` rejects unfilled `(...)` placeholders, a wrong count of Q1-Q3, a missing/empty `Reader:` line, or a missing/bad section-budget integer |
+| 1 | Brief | `00-brief.md` — exactly 3 numbered reader questions (Q1-Q3), `Reader:` (who reads it — default: a newcomer to this repo), `Lang: en|th` (default `en`, sets `<html lang>` + Thai typography), and section budget (integer, 4-7) | `init.sh` scaffolds it (never overwrites an existing one); `lint.sh` rejects unfilled `(...)` placeholders, wrong Q1-Q3 count, missing `Reader:`, invalid `Lang:`, or bad section budget |
 | 2 | Facts | `01-facts.md` — `F<n> \| statement \| source` rows (source: `path:line`, bare path, commit hash, or `"user said"`), gathered by a subagent | `lint.sh` rejects a bad source shape and any `F<n>` content.md cites that isn't a row here |
 | 3 | Storyboard | `02-storyboard.md` — one row per planned `app/content.md` section: `section \| question (Q1-Q3) \| facts (F<n>,...)` | `lint.sh` rejects an uncovered Q1-Q3, or a row citing an `F<n>` missing from 01-facts.md |
-| 4 | Author | `app/content.md` — once the storyboard lints, run `scripts/skeleton.sh <slug>`: it writes the reader-questions block, one section per storyboard row with a `TODO(Q<n>; F<n>,...): <section>` line for you to replace with cited prose, and a Receipts footer (refuses to overwrite without `--force`). Exemplar: `app/example-content.md`; `init.sh --example <slug>` uses it as content.md with a matching filled chain. **A plain `init.sh` + `serve.sh` fails lint until `skeleton.sh` has run and every `TODO(` line is filled.** Components: `app/components-index.md` | `lint.sh` rejects a missing `content.md` and any remaining `TODO(` line; it also rejects removed classes (`stat-grid`, `stat-tile`, `meter`, `cat-*`, `metric-grid`, `card-grid`), and — for each ` ```drawio ` diagram (plain mxGraph XML: `<mxGraphModel>`/`<mxfile>` → `<root>` → `<mxCell>`) — malformed XML, missing root cells, duplicate ids, unlabeled edges, >7 vertices, overlapping/out-of-bounds vertices, unescaped `<` or `&` in labels (e.g. a shell `&&` in a label must be written `&amp;&amp;`; a line break is `&lt;br&gt;` — the one allowed tag — and a double-escaped `&amp;lt;br&amp;gt;` is rejected because the reader would see a literal `<br>`), and raw hex colors (use `role=accent\|pitfall\|check` instead) |
+| 4 | Author | `app/content.md` — once the storyboard lints, run `scripts/skeleton.sh <slug>`: it writes the reader-questions block, one section per storyboard row with a `TODO(Q<n>; F<n>,...): <section>` line for you to replace with cited prose + declarative `.tabs`/`.accordion` (no inline `<script>`), and a Receipts footer (refuses to overwrite without `--force`). Exemplar: `app/example-content.md`; `init.sh --example <slug>` uses it as content.md with a matching filled chain. **A plain `init.sh` + `serve.sh` fails lint until `skeleton.sh` has run and every `TODO(` line is filled.** Components: `app/components-index.md` | `lint.sh` rejects a missing `content.md`, any remaining `TODO(` line, inline `<script>`, malformed `.tabs`/`.accordion`, removed classes (`stat-grid`, `stat-tile`, `meter`, `cat-*`, `metric-grid`, `card-grid`), and — for each ` ```drawio ` diagram (plain mxGraph XML: `<mxGraphModel>`/`<mxfile>` → `<root>` → `<mxCell>`) — malformed XML, missing root cells, duplicate ids, unlabeled edges, >7 vertices, overlapping/out-of-bounds vertices, unescaped `<` or `&` in labels (`&&` → `&amp;&amp;`; line break → `&lt;br&gt;`; double-escaped `&amp;lt;br&amp;gt;` rejected), and raw hex colors (use `role=accent\|pitfall\|check` instead) |
 | 5 | Verify | render gate (`verify.sh <slug>`, **infographic tier only**, main thread; the same Chrome load writes `page-text.txt`) then reader gate (`model: sonnet` subagent, prompt from `verify.sh <slug> --reader-prompt`) | both pass on infographic (html/react: a `model: haiku` subagent Chrome load stands in for the render gate — see below), or an honest defect list — ≤5 cycles |
 | 6 | Handoff | `scripts/handoff.sh <slug>` output + the reader gate's answers | prose |
 
@@ -72,7 +73,7 @@ The reader named in `00-brief.md`'s `Reader:` line has NOT been in this conversa
 
 ## Handoff
 
-Run `scripts/handoff.sh <slug>`: it prints the URL, the brief's 3 questions, `list.sh` output, the cleanup hint and the re-serve command. Relay it and add the reader gate's answers with citations. Offer an artifact copy-out. Explainers stay under `/tmp`, never committed.
+Run `scripts/handoff.sh <slug>`: it prints the URL (and tailnet URL when published with `--tailnet`), the brief's 3 questions, `list.sh` output, the cleanup hint and the re-serve command. Relay it and add the reader gate's answers with citations. Offer an artifact copy-out. Explainers stay under `/tmp`, never committed.
 
 ## Rationalizations (from baselines)
 

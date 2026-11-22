@@ -63,6 +63,23 @@ def esc(s):
 
 
 brief, facts, story = read("00-brief.md"), read("01-facts.md"), read("02-storyboard.md")
+lang_m = re.search(r"(?mi)^Lang:[ \t]*(\S+)", brief)
+lang = "en"
+if lang_m:
+    cand = lang_m.group(1).strip()
+    if cand and "(...)" not in cand and re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", cand):
+        lang = cand.lower()
+
+index_path = os.path.join(ws, "app", "index.html")
+if os.path.isfile(index_path):
+    with open(index_path, encoding="utf-8") as f:
+        idx_html = f.read()
+    new_html = re.sub(r"(<html\b[^>]*\blang=)([\x22\x27])[^\x22\x27]*\2", lambda m: f'{m.group(1)}{m.group(2)}{lang}{m.group(2)}', idx_html, count=1, flags=re.I)
+    if new_html != idx_html:
+        fd_i, tmp_i = tempfile.mkstemp(dir=os.path.dirname(index_path), prefix=".index.")
+        with os.fdopen(fd_i, "w", encoding="utf-8") as f:
+            f.write(new_html)
+        os.replace(tmp_i, index_path)
 qs = dict(re.findall(r"(?m)^Q([1-3]):[ \t]*(\S.*)$", brief))
 fact_rows = {
     f"F{n}": (stmt.strip(), src.strip())
@@ -103,6 +120,28 @@ for i, (sec, q, fc) in enumerate(rows, 1):
         if fid not in cited:
             cited.append(fid)
 
+out += [
+    '<div class="tabs">',
+    '  <div class="tab-list">',
+    '    <button type="button" class="tab-btn" aria-pressed="true" data-tab="0">Primary view</button>',
+    '    <button type="button" class="tab-btn" aria-pressed="false" data-tab="1">Alternative view</button>',
+    '  </div>',
+    '  <div class="tab-panel is-active" data-panel="0">Replace with primary comparison details.</div>',
+    '  <div class="tab-panel" data-panel="1" hidden>Replace with secondary comparison details.</div>',
+    '</div>',
+    '',
+    '<div class="accordion">',
+    '  <div class="acc-item is-open">',
+    '    <button type="button" class="acc-btn" aria-expanded="true">Key question one</button>',
+    '    <div class="acc-panel">Replace with concise answer citing facts.</div>',
+    '  </div>',
+    '  <div class="acc-item">',
+    '    <button type="button" class="acc-btn" aria-expanded="false">Key question two</button>',
+    '    <div class="acc-panel" hidden>Replace with concise answer citing facts.</div>',
+    '  </div>',
+    '</div>',
+    '',
+]
 out += ['<div class="receipts">',
         '  <div class="receipts-label"><i data-lucide="receipt"></i> Receipts</div>',
         '  <ul class="receipts-list">']
