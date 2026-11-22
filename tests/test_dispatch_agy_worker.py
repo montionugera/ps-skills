@@ -24,6 +24,13 @@ CODEX_SCRIPT_PATH = BIN_DIR / "dispatch-codex-worker"
 # Keep every in-process and CLI test run out of the user's real ~/.local/state/dispatch/events.jsonl.
 _EVENTS_TMP = tempfile.TemporaryDirectory()
 os.environ["DISPATCH_EVENTS_FILE"] = str(Path(_EVENTS_TMP.name) / "events.jsonl")
+# Keep tests off the machine-wide worker slots (live workers hold them) and skip the launch spacing delay.
+os.environ["DISPATCH_SLOT_DIR"] = str(Path(_EVENTS_TMP.name) / "slots")
+os.environ["DISPATCH_LAUNCH_GAP"] = "0"
+_TEST_AGY_TOKEN = Path(_EVENTS_TMP.name) / "antigravity-oauth-token"
+_TEST_AGY_TOKEN.write_text("{}", encoding="utf-8")
+os.environ["AGY_TOKEN_FILE"] = str(_TEST_AGY_TOKEN)
+os.environ["AGY_AUTH_MARKER"] = str(Path(_EVENTS_TMP.name) / "agy-auth-failed")
 
 import importlib.machinery
 import importlib.util
@@ -1388,13 +1395,25 @@ class TestBatchAndAsyncFeatures(unittest.TestCase):
 
     def test_normalize_model_name_agy_aliases(self):
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "argon"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "argon-low"), "gemini-4-argon-low")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "argon-high"), "gemini-4-argon-high")
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon"), "gemini-4-argon-medium")
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon-medium"), "gemini-4-argon-medium")
         self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-argon-thinking"), "gemini-4-argon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "carbon"), "gemini-4-carbon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "carbon-low"), "gemini-4-carbon-low")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "carbon-high"), "gemini-4-carbon-high")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "gemini-4-carbon"), "gemini-4-carbon-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "hydrogen"), "gemini-4-hydrogen-high")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "hydrogen-low"), "gemini-4-hydrogen-low")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "hydrogen-medium"), "gemini-4-hydrogen-medium")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "hydrogen-xhigh"), "gemini-4-hydrogen-xhigh")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "orchestrator"), "gemini-pro-orchestrator")
+        self.assertEqual(dispatch_mod.normalize_model_name("agy", "orchestrator-argon"), "gemini-pro-orchestrator-argon")
         self.assertEqual(dispatch_mod.map_claude_to_agy_model("opus"), "gemini-4-argon-medium")
         self.assertEqual(dispatch_mod.map_claude_to_agy_model("claude-opus-5-5"), "gemini-4-argon-medium")
-        self.assertEqual(dispatch_mod.map_claude_to_agy_model("sonnet"), "gemini-3.8-flash-high")
-        self.assertEqual(dispatch_mod.map_claude_to_agy_model("claude-sonnet-5-5"), "gemini-3.8-flash-high")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("sonnet"), "gemini-4-hydrogen-high")
+        self.assertEqual(dispatch_mod.map_claude_to_agy_model("claude-sonnet-5-5"), "gemini-4-hydrogen-high")
 
     def test_claude_quota_telemetry_yellow_and_red_zones(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1685,9 +1704,11 @@ class TestThinkerRouting(unittest.TestCase):
 
     def test_claude_fable_model_is_strictly_forbidden(self):
         self._fake("claude")
-        proc = self._run("--dry-run", "--model", "claude-fable-5-1")
-        self.assertEqual(proc.returncode, 12)
-        self.assertIn("strictly forbidden", proc.stderr)
+        for m in ("claude-fable-5-1", "claude-fable-5-2"):
+            with self.subTest(model=m):
+                proc = self._run("--dry-run", "--model", m)
+                self.assertEqual(proc.returncode, 12)
+                self.assertIn("strictly forbidden", proc.stderr)
 
     def test_attestation_records_effort(self):
         self._fake("claude")
@@ -1708,6 +1729,13 @@ class TestThinkerRouting(unittest.TestCase):
         proc = self._run("--dry-run", "--model", "argon")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("to agy with gemini-4-argon", proc.stdout)
+
+    def test_carbon_and_orchestrator_allowed_under_deep_design(self):
+        self._codex_quota(100.0, 100.0)
+        for m, expected in (("carbon", "gemini-4-carbon-medium"), ("gemini-4-carbon-high", "gemini-4-carbon-high"), ("gemini-pro-orchestrator", "gemini-pro-orchestrator")):
+            proc = self._run("--dry-run", "--model", m)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn(f"to agy with {expected}", proc.stdout)
 
     def test_gemini_4_argon_allowed_under_plain_think(self):
         self._codex_quota(100.0, 100.0)
@@ -1818,7 +1846,7 @@ class TestEffortHelpers(unittest.TestCase):
         self.assertEqual(dispatch_mod.normalize_effort("agy", "medium"), "medium")
         self.assertEqual(dispatch_mod.normalize_effort("agy", "high"), "high")
         self.assertEqual(dispatch_mod.normalize_effort("agy", "max"), "max")
-        self.assertEqual(dispatch_mod.normalize_effort("agy", "xhigh"), "high")
+        self.assertEqual(dispatch_mod.normalize_effort("agy", "xhigh"), "xhigh")
 
     def test_normalize_effort_cursor(self):
         self.assertIsNone(dispatch_mod.normalize_effort("cursor", "high"))
@@ -2308,7 +2336,7 @@ class TestCodexDisabled(unittest.TestCase):
             capture_output=True, text=True, env=env,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high", proc.stdout)
+        self.assertIn("Would dispatch to agy with gemini-4-hydrogen-high", proc.stdout)
 
     def test_falls_back_to_agy_flash_when_codex_quota_low(self):
         self._quota(self.agy_state, 90.0, 20.0)
@@ -2329,7 +2357,7 @@ class TestCodexDisabled(unittest.TestCase):
             capture_output=True, text=True, env=env,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high", proc.stdout)
+        self.assertIn("Would dispatch to agy with gemini-4-hydrogen-high", proc.stdout)
 
     # 1. auto and the default chain never pick codex
     def test_auto_route_ignores_codex_with_higher_runway(self):
@@ -3167,7 +3195,7 @@ class ScoutingRoutingTests(unittest.TestCase):
             env=self._env(), capture_output=True, text=True, timeout=30
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high (effort: low)", proc.stdout)
+        self.assertIn("Would dispatch to agy with gemini-4-hydrogen-high (effort: low)", proc.stdout)
         self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
         self.assertNotIn("codex", proc.stdout.lower())
 
@@ -3188,7 +3216,7 @@ class ScoutingRoutingTests(unittest.TestCase):
             env=self._env(), capture_output=True, text=True, timeout=30
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("Would dispatch to agy with gemini-3.8-flash-high (effort: medium)", proc.stdout)
+        self.assertIn("Would dispatch to agy with gemini-4-hydrogen-high (effort: medium)", proc.stdout)
         self.assertIn("Verify: skipped (--no-verify)", proc.stdout)
 
     def test_graft_prefetch_injects_context_when_graft_dir_exists(self):
@@ -3269,6 +3297,120 @@ class WarmVerifyRetryTests(FakeAgyBase):
         self.assertNotIn("--conversation", calls[0])
         self.assertIn("--conversation", calls[1])
         self.assertEqual(calls[1][calls[1].index("--conversation") + 1], "c-1")
+
+
+class TestLaunchSpacing(unittest.TestCase):
+    """Worker starts are spaced machine-wide so a big batch cannot starve its own startup calls."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.slot_dir = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _launch_times(self, count, gap):
+        times, lock = [], threading.Lock()
+
+        def launch():
+            dispatch_mod.space_worker_launch(self.slot_dir)
+            with lock:
+                times.append(time.monotonic())
+
+        with mock.patch.dict(os.environ, {"DISPATCH_LAUNCH_GAP": gap}):
+            threads = [threading.Thread(target=launch) for _ in range(count)]
+            start = time.monotonic()
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+        return start, sorted(times)
+
+    # Margins are wide on purpose: these run on machines that are busy with real workers.
+    def test_simultaneous_launches_are_spaced_by_the_gap(self):
+        start, times = self._launch_times(3, "1.0")
+        for earlier, later in zip(times, times[1:]):
+            self.assertGreaterEqual(later - earlier, 0.7)
+        self.assertGreaterEqual(times[-1] - start, 1.9)
+
+    def test_gap_zero_turns_spacing_off(self):
+        start, times = self._launch_times(4, "0")
+        self.assertLess(times[-1] - start, 2)
+        self.assertFalse((self.slot_dir / "launch.lock").exists())
+
+    def test_first_launch_and_a_launch_after_the_gap_do_not_wait(self):
+        with mock.patch.dict(os.environ, {"DISPATCH_LAUNCH_GAP": "30"}):
+            start = time.monotonic()
+            dispatch_mod.space_worker_launch(self.slot_dir)  # nothing launched before
+            (self.slot_dir / "launch.lock").write_text(repr(time.time() - 31), encoding="utf-8")
+            dispatch_mod.space_worker_launch(self.slot_dir)  # previous launch is older than the gap
+        self.assertLess(time.monotonic() - start, 5)
+
+    def test_stamp_from_the_future_or_garbage_is_not_waited_out(self):
+        for stamp in (repr(time.time() + 3600), "not-a-number"):
+            (self.slot_dir / "launch.lock").write_text(stamp, encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DISPATCH_LAUNCH_GAP": "30"}):
+                start = time.monotonic()
+                dispatch_mod.space_worker_launch(self.slot_dir)
+            self.assertLess(time.monotonic() - start, 5, stamp)
+
+    def test_slot_holder_goes_through_launch_spacing(self):
+        with mock.patch.dict(os.environ, {"DISPATCH_SLOT_DIR": str(self.slot_dir), "DISPATCH_LAUNCH_GAP": "0.3"}):
+            start = time.monotonic()
+            for _ in range(3):
+                with dispatch_mod.worker_concurrency_slot(label="t"):
+                    pass
+        self.assertGreaterEqual(time.monotonic() - start, 0.55)
+
+
+class TestBatchFailureReason(unittest.TestCase):
+    """A failed batch item says why, in the report line and in its finish event."""
+
+    def test_failure_reason_is_the_last_non_empty_line(self):
+        self.assertEqual(dispatch_mod.failure_reason("boot\nError: not logged in\n\n", "ignored"), "Error: not logged in")
+        self.assertEqual(dispatch_mod.failure_reason("", "out line\n"), "out line")
+        self.assertEqual(dispatch_mod.failure_reason(None, None), "")
+        self.assertEqual(len(dispatch_mod.failure_reason("x" * 500)), 200)
+
+    def test_failure_reason_redacts_credentials(self):
+        reason = dispatch_mod.failure_reason("GET https://x/y?key=AIzaSECRET failed: Authorization: Bearer ya29.SECRET")
+        self.assertNotIn("SECRET", reason)
+        self.assertIn("key=<redacted>", reason)
+        self.assertIn("Bearer <redacted>", reason)
+
+    def test_report_line_carries_the_reason_only_for_failures(self):
+        rep = dispatch_mod.format_batch_report([
+            {"task": "ok task", "agent": "agy", "exit_code": 0, "files_changed": 1, "diff_summary": "ok", "error": ""},
+            {"task": "bad task", "agent": "agy", "exit_code": 1, "files_changed": 0, "diff_summary": "err",
+             "error": "Error: You are not logged into Antigravity."},
+        ])
+        lines = rep.splitlines()
+        self.assertNotIn("why:", lines[1])
+        self.assertIn("| why: Error: You are not logged into Antigravity.", lines[2])
+
+    def test_failed_batch_item_finish_event_has_the_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, events = Path(tmp) / "repo", Path(tmp) / "events.jsonl"
+            repo.mkdir()
+            for cmd in (["git", "init", "-q"], ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                                                 "--allow-empty", "-m", "init"]):
+                subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+
+            def failing_task(task_text, target_dir, *_a, **_k):
+                if "bad" in task_text:
+                    return 1, "", "starting\nError: You are not logged into Antigravity.\n", 0, "no git diff"
+                return 0, "done", "", 0, "no git diff"
+
+            with mock.patch.dict(os.environ, {"DISPATCH_EVENTS_FILE": str(events)}), \
+                    mock.patch.object(dispatch_mod, "run_single_task", failing_task):
+                results = dispatch_mod.execute_batch_parallel(
+                    [{"task": "good"}, {"task": "bad"}], base_repo_dir=str(repo), chosen_agent="agy",
+                    chosen_model=None, timeout_seconds=30, max_parallel=2)
+            finishes = {e["run_id"][-2:]: e for e in map(json.loads, events.read_text().splitlines())
+                        if e["event"] == "finish"}
+            self.assertEqual(results[1]["error"], "Error: You are not logged into Antigravity.")
+            self.assertEqual(finishes["-2"]["error"], "Error: You are not logged into Antigravity.")
+            self.assertNotIn("error", finishes["-1"])
 
 
 if __name__ == "__main__":

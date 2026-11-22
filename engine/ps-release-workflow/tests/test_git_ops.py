@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from lib.git_ops import (
-    current_branch, branch_exists, is_dirty,
+    add_worktree_new_branch, current_branch, branch_exists, is_dirty,
     commit_all, commit_paths, create_branch, GitError,
 )
 
@@ -78,3 +78,32 @@ def test_commit_paths_records_deletions(tmp_repo: Path):
 def test_commit_paths_nothing_to_commit_returns_false(tmp_repo: Path):
     (tmp_repo / "junk.txt").write_text("junk")
     assert commit_paths(tmp_repo, "msg", ["keep"]) is False
+
+
+def test_add_worktree_copies_ignored_caches_and_excludes_claude_state(tmp_repo: Path):
+    import shutil
+    if not shutil.which("wt"):
+        pytest.skip("wt (worktrunk) not installed")
+
+    (tmp_repo / ".gitignore").write_text("node_modules/\ngraft/\n.claude/state/\n")
+    commit_all(tmp_repo, "chore: add gitignore")
+
+    nm = tmp_repo / "node_modules" / "pkg"
+    nm.mkdir(parents=True)
+    (nm / "index.js").write_text("module.exports = 42;\n")
+
+    graft_dir = tmp_repo / "graft"
+    graft_dir.mkdir(parents=True)
+    (graft_dir / "graph.json").write_text("{}\n")
+
+    state_dir = tmp_repo / ".claude" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "claims.json").write_text('{"F-001": "main"}\n')
+
+    wt_path = tmp_repo.parent / "wt-warm-cache"
+    add_worktree_new_branch(tmp_repo, wt_path, "feat/warm-cache", "main")
+
+    assert (wt_path / "node_modules" / "pkg" / "index.js").read_text() == "module.exports = 42;\n"
+    assert (wt_path / "graft" / "graph.json").is_file()
+    assert not (wt_path / ".claude" / "state" / "claims.json").exists()
+    assert not is_dirty(wt_path)

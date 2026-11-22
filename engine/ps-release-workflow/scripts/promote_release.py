@@ -202,6 +202,40 @@ def _merge_pr_squash(repo: Path, ref: str, runner) -> subprocess.CompletedProces
                   cwd=repo, capture_output=True, text=True)
 
 
+def _finalize_via_pr(repo: Path, version: str, gh_runner) -> None:
+    """main is branch-protected: ship the finalize commit (HEAD of local main) via
+    chore/release-<v>-finalize -> PR -> checks -> squash-merge, then reset local
+    main to origin/main. --admin only when checks never started (CI infra down)."""
+    branch = f"chore/release-{version}-finalize"
+    git_run(repo, "branch", "-f", branch, "HEAD")
+    git_run(repo, "push", "--force-with-lease", "-u", "origin", branch)
+    title = f"chore(release): finalize {version} cleanup on main"
+    cp = gh_runner(["gh", "pr", "create", "--base", "main", "--head", branch, "--title", title,
+                    "--body", f"Release {version} bookkeeping (archival, catalog, claims). "
+                              "Opened by promote cleanup because main is protected."],
+                   cwd=repo, capture_output=True, text=True)
+    if cp.returncode != 0:
+        raise Gate2FailedError(f"main is protected and gh pr create for {branch} failed: "
+                               f"{(cp.stderr or cp.stdout or '').strip()}")
+    ref = (cp.stdout or "").strip().splitlines()[-1] if (cp.stdout or "").strip() else branch
+    admin = False
+    if _watch_pr_checks(repo, ref, gh_runner) != 0:
+        probe = gh_runner(["gh", "pr", "checks", ref], cwd=repo, capture_output=True, text=True)
+        if "no checks reported" not in ((probe.stderr or "") + (probe.stdout or "")).lower():
+            raise Gate2FailedError(f"finalize PR checks FAILED for {ref} — NOT merging. "
+                                   f"Fix, merge it by hand, then re-run --cleanup-only {version}.")
+        admin = True
+        print(f"⚠️ no checks ever started on {ref} (CI unavailable) — merging with "
+              f"`gh pr merge --squash --admin`", file=sys.stderr)
+    merged = gh_runner(["gh", "pr", "merge", "--squash", *(["--admin"] if admin else []), ref],
+                       cwd=repo, capture_output=True, text=True)
+    if merged.returncode != 0:
+        raise Gate2FailedError(f"gh pr merge for finalize PR {ref} failed: "
+                               f"{(merged.stderr or merged.stdout or '').strip()}")
+    git_run(repo, "fetch", "origin", "main")
+    git_run(repo, "reset", "--hard", "origin/main")
+
+
 def _ensure_release_pr_merged_or_absent(repo: Path, release_branch: str,
                                         version: str, runner) -> None:
     """B3: cleanup deletes the remote release branch, and GitHub auto-closes any
@@ -707,6 +741,13 @@ def _promote_release(
                 )
         _finalize_and_push()
         merged = _merge_pr_squash(repo, ref, gh_runner)
+        if merged.returncode != 0 and "base branch was modified" in (
+                (merged.stderr or "") + (merged.stdout or "")).lower():
+            # The finalize push above re-triggers checks; wait once more, retry once.
+            print("   base branch was modified (checks re-run after the finalize push); "
+                  "re-waiting for checks and retrying the merge once", file=sys.stderr)
+            if _watch_pr_checks(repo, ref, gh_runner) == 0:
+                merged = _merge_pr_squash(repo, ref, gh_runner)
         if merged.returncode != 0:
             raise Gate2FailedError(
                 f"gh pr merge --squash failed for {ref}: "
@@ -1087,6 +1128,11 @@ def cleanup(repo: Path, version: str, *, gh_runner=subprocess.run,
             try:
                 git_run(repo, "push", "origin", "main")
             except GitError as e:
+                if "GH006" in str(e) or "protected branch" in str(e).lower():
+                    _finalize_via_pr(repo, version, gh_runner)
+                    unfreeze_release(repo, version)
+                    return {"ok": True, "version": version,
+                            "stranded": [e["id"] for e in stranded], "unverified": unverified}
                 raise Gate2FailedError(
                     f"finalize push to origin/main failed: {e}\n"
                     f"origin/main moved under us. Reconcile with:\n"

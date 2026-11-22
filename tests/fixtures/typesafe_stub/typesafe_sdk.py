@@ -22,6 +22,17 @@ class TypeSafeClient:
         pass
 
     def system_one(self, model, state, questions):
+        if "git_diff" in state:  # triage-diff: answer each lens from the file extensions in the diff
+            diff = state["git_diff"]
+            ext = {
+                "needs_rust_reviewer": r"\.rs\b", "needs_godot_reviewer": r"\.(cs|tscn|gdshader)\b",
+                "needs_svelte_reviewer": r"\.svelte\b", "needs_db_migration_reviewer": r"migrations/.*\.sql\b",
+                "needs_go_reviewer": r"\.go\b", "needs_py_reviewer": r"\.py\b", "needs_ts_reviewer": r"\.(ts|tsx|svelte)\b",
+            }
+            answers = {q: NS(noul=0.9 if q in ext and re.search(ext[q], diff) else 0.05) for q in questions}
+            answers["review_tier"] = NS(choice="argon_or_opus_deep_review", confidence=0.95)
+            answers["risk_score"] = NS(score=1.0)
+            return NS(model="stub", answers=answers, usage=NS(input_tokens=len(diff)))
         text = state.get("subagent_prompt", "")
         risky = bool(_RISKY.search(text))
         review = bool(_REVIEW.search(text))

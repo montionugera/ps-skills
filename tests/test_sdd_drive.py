@@ -870,6 +870,19 @@ Work completed without running test.
         combined = (proc.stdout + proc.stderr).lower()
         self.assertTrue("lock" in combined or "timeout" in combined, f"Expected lock timeout message: {combined}")
 
+    def test_10_batch_directives_combine_small_tasks_into_single_gate(self) -> None:
+        """Batch: 1,2 and Batch: 3,4 (or --batch) combine 4 tasks into 2 implementer + 2 review runs."""
+        batched_plan = self.repo_dir / "batched-plan.md"
+        batched_plan.write_text("Batch: 1,2\nBatch: 3,4\n\n" + self.plan_file.read_text(encoding="utf-8"), encoding="utf-8")
+        proc = self.run_sdd_drive(["--plan", str(batched_plan), "--cwd", str(self.repo_dir)])
+        self.assertEqual(proc.returncode, 0, f"sdd-drive batched failed: {proc.stderr}\nstdout: {proc.stdout}")
+
+        worker_calls = [c for c in self.worker_log.read_text().splitlines() if "read brief" in c.lower()]
+        self.assertEqual(len(worker_calls), 2, f"Expected 2 batched implementer calls, got {len(worker_calls)}: {worker_calls}")
+        self.assertIn("task-1_2-brief.md", worker_calls[0])
+        self.assertIn("task-3_4-brief.md", worker_calls[1])
+        self.assertIn("Tasks completed: 4/4", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

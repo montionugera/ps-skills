@@ -21,6 +21,6 @@ T3COUNT="$($PS_CMD 2>/dev/null | awk '
 if [ "$T3COUNT" -ge "$LIMIT" ]; then
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"T3 concurrency cap: %s T3 Code agent threads are already running (limit %s, env T3_MAX_THREADS). Launching more pushes this Mac into swap and freezes T3. Wait for one to finish with a single blocking t3_thread_wait, then launch."}}\n' "$T3COUNT" "$LIMIT"
 else
-  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"T3 threads running: %s of %s allowed. Before ending the turn with T3 tasks pending, block ONCE on t3_thread_wait: T3 closes idle provider sessions after 30 min and a late task notification is lost."}}\n' "$T3COUNT" "$LIMIT"
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"T3 threads running: %s of %s allowed. Use mode='async' and end your turn immediately so the conversation stays unblocked (T3 Code wakes the thread reactively when the child finishes; only call t3_thread_wait if all slots are full)."}}\n' "$T3COUNT" "$LIMIT"
 fi
 exit 0

@@ -32,23 +32,23 @@ When executing inside Antigravity (`agy`), orchestrators MUST prioritize native 
   - Pair long-running `invoke_subagent` calls with `schedule(DurationSeconds=240, TimerCondition="<conversationId>", Prompt="Check subagent status")`.
   - When woken by the timer, inspect `manage_subagents(Action="list")`: only respawn/recover if `state == "errored"` (such as `502 Bad Gateway`) or `state == "idle"` without a final report; never kill a subagent whose `state == "running"`.
 
-#### The 80/20 Flash-First Model Tiering in AGY:
-- **80% Fast Worker Tier (`Model: "flash"` / `gemini-3.8-flash-high`)**:
+#### The 80/20 Gemini 4 Model Tiering in AGY (`1.5.8+`):
+- **80% Fast Worker Tier (`Model: "flash"`, CLI default `gemini-4-hydrogen-high` / legacy `gemini-3.8-flash-high`)**:
   - Codebase exploration & `graft` queries (`TypeName: "research"`, `Model: "flash"`, `Workspace: "inherit"`).
   - Diagram XML math & visual rendering (`drawio-skill` loops, `validate.py --score`, `render-spec`).
-  - Round 1 & Round 2 plan implementation (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"` or `"branch"`).
+  - Round 1 & Round 2 plan implementation (`TypeName: "self"`, `Model: "flash"`, `Workspace: "share"` or `"branch"`; or CLI `--model gemini-4-hydrogen-high` / `gemini-4-hydrogen-xhigh`).
   - Step 2 Test verification (`Verify`) and Step 4 simplification (`/simplify`, `README.md` sync, `graft build`).
-- **20% Frontier Tier (`Model: "inherit"` / `gemini-4-argon`)**:
-  - Thin orchestrator thinking, brainstorming, spec writing, and plan drafting on the main thread.
-  - Step 3 Adversarial review (`code-reviewer`, `self-grill-audit`).
-  - Round 3+ Escalation: If Round 2 fails review/verification, terminate the Flash subagent (`manage_subagents(Action: "kill")`) and escalate to a fresh `gemini-4-argon` subagent (`Model: "inherit"`). Also default to Argon for `[complex]` or `[architectural]` tasks.
+- **20% Frontier Tier (`Model: "inherit"`, `gemini-4-argon-{low,medium,high}` & `gemini-4-carbon-{low,medium,high}` & `gemini-pro-orchestrator`)**:
+  - Thin orchestrator thinking, brainstorming, spec writing, and plan drafting on the main thread (`gemini-4-argon-medium`, `gemini-4-carbon-high`, or `gemini-pro-orchestrator`).
+  - Step 3 Adversarial review (`code-reviewer`, `self-grill-audit`; content review uses `gemini-4-argon-low`).
+  - Round 3+ Escalation: If Round 2 fails review/verification, terminate the Flash subagent (`manage_subagents(Action: "kill")`) and escalate to a fresh `gemini-4-argon` / `gemini-4-carbon` subagent (`Model: "inherit"`). Also default to Argon/Carbon for `[complex]` or `[architectural]` tasks.
 
 ### Mode 1b: T3 Code Native Cross-Provider Delegation (`t3-code:delegate_task`)
 
 When running inside **T3 Code** (either as Antigravity `antigravity` or Claude Code `claudeAgent`), use the `t3-code` MCP server for cross-provider child tasks:
-- **Discover live models**: Call `orchestrator_capabilities` to inspect active providers (`claudeAgent`: `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-1`, `claude-haiku-5-5`; `antigravity`: `gemini-4-argon-*`, `gemini-3.8-flash-*`) and effort options.
+- **Discover live models**: Call `orchestrator_capabilities` to inspect active providers (`claudeAgent`: `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-2`, `claude-haiku-5-5`; `antigravity`: `gemini-4-carbon-*`, `gemini-4-argon-*`, `gemini-4-hydrogen-*`, `gemini-3.8-flash-*`) and effort options.
 - **Dispatch (`delegate_task`)**: Use `mode: "async"` with `target: {"providerInstanceId": "claudeAgent", "model": "claude-sonnet-5-5", "options": [{"id": "effort", "value": "high"}]}` (or vice versa from Claude to `antigravity`).
-- **Zero-Polling Reactive Monitoring**: End your turn after `delegate_task(mode="async")`. T3 Code automatically wakes the parent thread when the child reaches a terminal state; then call `task_status(taskId)` to read the summary, or `t3_thread_read(threadId=childThreadId)` to inspect detailed steps.
+- **Non-Blocking Turn Yield & Zero-Polling Reactive Monitoring**: Always default to `delegate_task(mode="async")` (never `mode="wait"` or `t3_thread_wait` unless all 4 `T3_MAX_THREADS` slots are full) and **end your turn immediately** after launching so the user can keep chatting in the thread while the task runs. T3 Code automatically wakes the parent thread when the child reaches a terminal state; then call `task_status(taskId)` to read the summary, or `t3_thread_read(threadId=childThreadId)` to inspect detailed steps. For long `run_command` executions (`>2s`), set `WaitMsBeforeAsync: 500` and end your turn immediately once backgrounded.
 
 ### Mode 2: External Cross-Harness CLI Dispatch (`dispatch-worker --agent agy`)
 

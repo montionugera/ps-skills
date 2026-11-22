@@ -36,7 +36,7 @@ main checkout and carries no claim marker, so edits are allowed.
 4. Run the repo's verification with **visible exit codes**.
 5. Commit — a **new commit**, never `git commit --amend`.
 6. Push, open a PR to `main`, babysit CI, squash-merge.
-7. `git worktree remove <path>` and delete the remote branch.
+7. After the squash-merge, from the MAIN checkout: `psrw hotfix --cleanup "<desc>"` — refuses unless the PR is MERGED, then fast-forwards main, removes the worktree (never `--force`; a dirty tree is kept), and deletes the local + remote branch.
 8. If a release is in progress, the hotfix reaches `release/<v>` automatically at the
    next `psrw ship` / `psrw promote`. To absorb it now (e.g. to redeploy locally):
    `psrw sync-main --deploy`.

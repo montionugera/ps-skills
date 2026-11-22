@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset CDPATH
 
 # herdr-handoff.sh — Create a new tab in Herdr (or open/launch in T3 Code),
 # start a coding agent, and deliver a handoff prompt.
@@ -35,14 +36,16 @@ Usage: herdr-handoff.sh <handoff-markdown-path> [options]
 
 Options:
   --kind <agent-kind>         Agent kind: agy, gemini, claude, codex, opencode, cursor, t3code
+                              (default: derived from the calling session's agent)
   --multiplexer <mux>         Multiplexer target: herdr, t3 (or t3code), auto (default: auto)
   --label <tab-label>         Exact tab label (default: "<project> · <topic> #N")
   --topic <text>              2-5 words on what the new session does next
-  --cwd <dir>                 Working directory (default: the doc's Worktree/Repo, else $PWD)
+  --cwd <dir>                 Working directory (auto-hoisted to repo/workspace root unless --allow-subdir)
+  --allow-subdir              Keep subfolder/worktree cwd as-is (not recommended: triggers Trust prompts)
   --prompt <text>             Custom prompt override
-  --mode <code|plan>          Handoff type (claude: code->sonnet, plan->default; agy: code->gemini-3.8-flash-high, plan->gemini-4-argon-medium)
-  --model <name>              Explicit model for claude, codex, or agy; overrides --mode
-  --effort <level>            Reasoning effort for codex (low, medium, high; default: medium)
+  --mode <code|plan>          Fallback handoff type when no session/--model is set (claude: code->sonnet, plan->default; agy: code->gemini-4-hydrogen-high, plan->gemini-4-neon-medium)
+  --model <name>              Explicit model for claude, codex, or agy (default: derived from calling session); overrides --mode
+  --effort <level>            Reasoning effort for codex/claude/agy (default: derived from calling session, else medium for codex)
   --cloud / --no-cloud        Force or disable claude --cloud (default: auto; checks free credit > $0 first, then requires Jev cloud_compatible >= 0.85 & read-only review/research)
   --jev / --no-jev            Enable or disable TypeSafe Jev System-1 task routing assist (default: auto)
   --no-quota-switch           Do not auto-switch low-quota claude handoffs to cloud/codex/agy
@@ -59,32 +62,32 @@ EOF
 }
 
 HANDOFF_PATH=""
-# Auto-detect current calling agent by environment, or fall back to sensible default:
-DETECTED_KIND="opencode"
-if [[ -n "${T3CODE_PROJECT_ID:-}" || "${TERM_PROGRAM:-}" == "t3code" ]]; then
-  DETECTED_KIND="t3code"
-elif [[ -n "${ANTIGRAVITY_AGENT:-}" || -n "${ANTIGRAVITY_APP_DATA_DIR:-}" || -n "${ANTIGRAVITY_AGENTAPI_EXE:-}" || -n "${GEMINI_AI_STUDIO_API_KEY:-}" ]]; then
-  DETECTED_KIND="agy"
-elif [[ -n "${CODEX_HOME:-}" || -n "${CODEX_CLI_PATH:-}" || -n "${CODEX_SANDBOX:-}" ]]; then
-  DETECTED_KIND="codex"
-elif [[ -n "${CLAUDE_CODE_ENTRYPOINT:-}" || -n "${CLAUDE_CODE_MAX_RETRIES:-}" || -n "${CLAUDE_SESSION_ID:-}" ]]; then
-  DETECTED_KIND="claude"
-elif [[ -n "${OPENCODE_SESSION_ID:-}" ]]; then
-  DETECTED_KIND="opencode"
-elif [[ -n "${CURSOR_AGENT:-}" ]]; then
-  DETECTED_KIND="cursor"
-fi
-
-AGENT_KIND="${HERDR_HANDOFF_AGENT_KIND:-$DETECTED_KIND}"
+AGENT_KIND="${HERDR_HANDOFF_AGENT_KIND:-}"
+KIND_EXPLICIT=false
+[[ -n "$AGENT_KIND" ]] && KIND_EXPLICIT=true
 MULTIPLEXER="${HERDR_HANDOFF_MULTIPLEXER:-auto}"
 TAB_LABEL=""
+# Single-quote a value for a shell command line. Not printf %q: macOS bash 3.2
+# escapes multibyte text byte by byte ("…" -> \xe2\\200\xa6), producing invalid
+# UTF-8 that herdr rejects ("argument 4 is not valid UTF-8").
+sq() { local v=${1//\'/\'\\\'\'}; printf "'%s'" "$v"; }
 TAB_TOPIC=""
 TARGET_CWD="$PWD"
 CWD_EXPLICIT=false
+ALLOW_SUBDIR=false
+[[ "${HERDR_HANDOFF_ALLOW_SUBDIR:-}" == "1" || "${HERDR_HANDOFF_ALLOW_SUBDIR:-}" == "true" ]] && ALLOW_SUBDIR=true
+ACTIVE_SUBDIR=""
 CUSTOM_PROMPT=""
 HANDOFF_MODE=""
 CLAUDE_MODEL=""
+MODEL_EXPLICIT=false
+MODEL_SOURCE=""
 CODEX_EFFORT="${HERDR_HANDOFF_EFFORT:-medium}"
+EFFORT_EXPLICIT=false
+[[ -n "${HERDR_HANDOFF_EFFORT:-}" ]] && EFFORT_EXPLICIT=true
+RESOLVED_EFFORT=""
+CLAUDE_EFFORT_LEVEL=""
+AGY_EFFORT_LEVEL=""
 CLAUDE_CLOUD="${HERDR_HANDOFF_CLOUD:-auto}"
 JEV_ASSIST="${HERDR_HANDOFF_JEV:-auto}"
 CLOUD_CREDIT_DOLLARS=""
@@ -104,6 +107,35 @@ CONFIRM_TIMEOUT="${HERDR_HANDOFF_CONFIRM_TIMEOUT:-90}"
 YOLO=true
 QUOTA_SWITCH="${HERDR_HANDOFF_QUOTA_SWITCH:-true}"
 DRY_RUN=false
+CALLER_WORKSPACE="${HERDR_WORKSPACE_ID:-}"
+SOURCE_TAB="${HERDR_TAB_ID:-}"
+ACTUAL_WORKSPACE=""
+TAB_ID=""
+ROOT_PANE=""
+
+write_ledger() {
+  local outcome="$1" confirm_secs="${2:-0}" reason="${3:-}"
+  local path="${HERDR_HANDOFF_LEDGER:-${XDG_STATE_HOME:-$HOME/.local/state}/handoff/ledger.jsonl}"
+  {
+    mkdir -p "$(dirname "$path")" &&
+      jq -nc --arg ts "$(date -Iseconds)" --arg doc "${HANDOFF_PATH:-}" --arg label "${TAB_LABEL:-}" \
+        --arg kind "${AGENT_KIND:-}" --arg model "${CLAUDE_MODEL:-}" --arg cwd "${TARGET_CWD:-}" \
+        --arg source_tab "${SOURCE_TAB:-}" --arg tab "${TAB_ID:-}" \
+        --arg workspace_expected "${CALLER_WORKSPACE:-}" --arg workspace_actual "${ACTUAL_WORKSPACE:-}" \
+        --argjson confirm_secs "$confirm_secs" --arg outcome "$outcome" --arg reason "$reason" \
+        '$ARGS.named' >> "$path"
+  } 2>/dev/null || true
+}
+
+fail_with_reason() {
+  local outcome="$1" reason="$2" hint="${3:-}"
+  write_ledger "$outcome" 0 "$reason"
+  echo "❌ HANDOFF FAILED — Reason: $reason" >&2
+  if [[ -n "$hint" ]]; then
+    echo "   $hint" >&2
+  fi
+  exit 1
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -112,40 +144,57 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     --kind)
+      [[ $# -ge 2 ]] || fail_with_reason "invalid_args" "Option $1 requires a value."
       AGENT_KIND="$2"
+      KIND_EXPLICIT=true
       shift 2
       ;;
     --multiplexer|--mux)
+      [[ $# -ge 2 ]] || fail_with_reason "invalid_args" "Option $1 requires a value."
       MULTIPLEXER="$2"
       shift 2
       ;;
     --label)
+      [[ $# -ge 2 ]] || fail_with_reason "invalid_args" "Option $1 requires a value."
       TAB_LABEL="$2"
       shift 2
       ;;
     --topic)
+      [[ $# -ge 2 ]] || fail_with_reason "invalid_args" "Option $1 requires a value."
       TAB_TOPIC="$2"
       shift 2
       ;;
     --cwd)
+      [[ $# -ge 2 ]] || fail_with_reason "invalid_args" "Option $1 requires a value."
       TARGET_CWD="$2"
       CWD_EXPLICIT=true
       shift 2
       ;;
+    --allow-subdir)
+      ALLOW_SUBDIR=true
+      shift
+      ;;
     --prompt)
+      [[ $# -ge 2 ]] || fail_with_reason "invalid_args" "Option $1 requires a value."
       CUSTOM_PROMPT="$2"
       shift 2
       ;;
     --mode)
+      [[ $# -ge 2 ]] || fail_with_reason "invalid_args" "Option $1 requires a value."
       HANDOFF_MODE="$2"
       shift 2
       ;;
     --model)
+      [[ $# -ge 2 ]] || fail_with_reason "invalid_args" "Option $1 requires a value."
       CLAUDE_MODEL="$2"
+      MODEL_EXPLICIT=true
+      MODEL_SOURCE="--model"
       shift 2
       ;;
     --effort)
+      [[ $# -ge 2 ]] || fail_with_reason "invalid_args" "Option $1 requires a value."
       CODEX_EFFORT="$2"
+      EFFORT_EXPLICIT=true
       shift 2
       ;;
     --cloud)
@@ -179,8 +228,7 @@ while [[ $# -gt 0 ]]; do
     --running)
       RUNNING="${2:-}"
       if [[ ! "$RUNNING" =~ ^[0-9]{1,4}$ ]]; then
-        echo "Error: --running needs a whole number of up to 4 digits (got '$RUNNING')." >&2
-        exit 1
+        fail_with_reason "invalid_args" "--running needs a whole number of up to 4 digits (got '$RUNNING')."
       fi
       RUNNING=$((10#$RUNNING))  # "08" is eight, not a bad octal
       shift 2
@@ -206,8 +254,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -*)
-      echo "Unknown option: $1" >&2
-      exit 1
+      fail_with_reason "invalid_args" "Unknown option: $1"
       ;;
     *)
       if [[ -z "$HANDOFF_PATH" ]]; then
@@ -226,14 +273,11 @@ if [[ -n "$RUNNING" ]]; then
 fi
 
 if [[ -z "$HANDOFF_PATH" ]]; then
-  echo "Error: Handoff file path is required." >&2
-  echo "Usage: herdr-handoff.sh <handoff-markdown-path> [--kind <agent>] [--multiplexer <herdr|t3|auto>] [--prompt <text>]" >&2
-  exit 1
+  fail_with_reason "invalid_args" "Handoff file path is required." "Usage: herdr-handoff.sh <handoff-markdown-path> [--kind <agent>] [--multiplexer <herdr|t3|auto>] [--prompt <text>]"
 fi
 
 if [[ ! -f "$HANDOFF_PATH" ]]; then
-  echo "Error: Handoff file '$HANDOFF_PATH' does not exist." >&2
-  exit 1
+  fail_with_reason "missing_handoff_file" "Handoff file '$HANDOFF_PATH' does not exist. Write '$HANDOFF_PATH' with the Write tool first."
 fi
 [[ "$HANDOFF_PATH" == /* ]] || HANDOFF_PATH="$PWD/$HANDOFF_PATH"
 CLAIM_DIR="$HANDOFF_PATH.claim"
@@ -241,33 +285,474 @@ SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # A claimed doc already has an owner; a second spawn could only race it.
 if [[ -d "$CLAIM_DIR" && "$DRY_RUN" != "true" && "$START_AGENT" == "true" ]]; then
-  echo "❌ Handoff already claimed by: $(cat "$CLAIM_DIR/owner" 2>/dev/null || echo unknown)" >&2
-  echo "   To spawn it again on purpose: rm -r '$CLAIM_DIR'" >&2
-  exit 1
+  CLAIM_OWNER="$(cat "$CLAIM_DIR/owner" 2>/dev/null || echo unknown)"
+  fail_with_reason "already_claimed" "Handoff already claimed by: $CLAIM_OWNER" "To spawn it again on purpose: rm -r '$CLAIM_DIR'"
 fi
 
 case "$MULTIPLEXER" in
   herdr|t3|t3code|auto) ;;
   *)
-    echo "Error: --multiplexer must be 'herdr', 't3', 't3code', or 'auto' (got '$MULTIPLEXER')." >&2
-    exit 1
+    fail_with_reason "invalid_args" "--multiplexer must be 'herdr', 't3', 't3code', or 'auto' (got '$MULTIPLEXER')."
     ;;
 esac
 
 if [[ "$MULTIPLEXER" == "t3code" ]]; then
   MULTIPLEXER="t3"
 fi
-if [[ "$AGENT_KIND" == "t3code" && "$MULTIPLEXER" == "auto" ]]; then
-  MULTIPLEXER="t3"
-fi
 
 case "$HANDOFF_MODE" in
   code|plan|"") ;;
   *)
-    echo "Error: --mode must be 'code' or 'plan' (got '$HANDOFF_MODE')." >&2
-    exit 1
+    fail_with_reason "invalid_args" "--mode must be 'code' or 'plan' (got '$HANDOFF_MODE')."
     ;;
 esac
+
+# Detect Herdr & T3Code availability and live caller pane metadata FIRST so
+# both calling-session agent/model derivation and TARGET_CWD root-hoisting see
+# the live pane state (`herdr pane current`).
+HERDR_AVAILABLE=false
+if command -v herdr >/dev/null 2>&1; then
+  HERDR_STATUS=$(herdr status server 2>&1 || true)
+  # An exact line: a stopped server prints "status: not running".
+  if grep -qE '^[[:space:]]*status: running[[:space:]]*$' <<<"$HERDR_STATUS"; then
+    HERDR_AVAILABLE=true
+  fi
+fi
+
+T3_AVAILABLE=false
+T3_RUNTIME_FILE="${T3CODE_HOME:-$HOME/.t3}/userdata/server-runtime.json"
+if command -v t3 >/dev/null 2>&1 || [[ -f "$T3_RUNTIME_FILE" ]]; then
+  T3_AVAILABLE=true
+fi
+
+CALLER_WORKSPACE="${HERDR_WORKSPACE_ID:-}"
+SOURCE_TAB="${HERDR_TAB_ID:-}"
+SOURCE_LABEL=""
+CALLER_PANE_CWD=""
+LIVE_PANE_AGENT=""
+LIVE_PANE_SESSION=""
+if [[ "$HERDR_AVAILABLE" == "true" && -n "${HERDR_PANE_ID:-}" ]]; then
+  CALLER_JSON=$(herdr pane current 2>/dev/null || true)
+  {
+    IFS= read -r LIVE_WORKSPACE || true
+    IFS= read -r LIVE_TAB || true
+    IFS= read -r CALLER_PANE_CWD || true
+    IFS= read -r LIVE_PANE_AGENT || true
+    IFS= read -r LIVE_PANE_SESSION || true
+  } < <(
+    jq -r '(.result.pane.workspace_id // ""), (.result.pane.tab_id // ""), (.result.pane.cwd // ""), (.result.pane.agent // ""), (.result.pane.agent_session.value // "")' <<<"$CALLER_JSON" 2>/dev/null || true
+  )
+  CALLER_WORKSPACE="${LIVE_WORKSPACE:-$CALLER_WORKSPACE}"
+  SOURCE_TAB="${LIVE_TAB:-$SOURCE_TAB}"
+fi
+
+# Derive calling session's live (agent, model, effort) from environment, Herdr
+# pane session metadata, ancestor process args, and active session transcript.
+CALLER_PROBE_OUT=$(LIVE_PANE_AGENT_IN="$LIVE_PANE_AGENT" LIVE_PANE_SESSION_IN="$LIVE_PANE_SESSION" python3 - <<'PY' 2>/dev/null || true
+import glob, json, os, re, shlex, subprocess
+from pathlib import Path
+
+AGY_ALIASES = {
+    "argon": os.environ.get("AGY_PLAN_MODEL") or "gemini-4-argon-medium",
+    "argon-medium": os.environ.get("AGY_PLAN_MODEL") or "gemini-4-argon-medium",
+    "gemini-4-argon": os.environ.get("AGY_PLAN_MODEL") or "gemini-4-argon-medium",
+    "argon-high": "gemini-4-argon-high",
+    "argon-low": "gemini-4-argon-low",
+    "carbon": "gemini-4-carbon-medium",
+    "carbon-medium": "gemini-4-carbon-medium",
+    "gemini-4-carbon": "gemini-4-carbon-medium",
+    "carbon-high": "gemini-4-carbon-high",
+    "carbon-low": "gemini-4-carbon-low",
+    "hydrogen": os.environ.get("AGY_CODE_MODEL") or "gemini-4-hydrogen-high",
+    "hydrogen-high": os.environ.get("AGY_CODE_MODEL") or "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen": os.environ.get("AGY_CODE_MODEL") or "gemini-4-hydrogen-high",
+    "hydrogen-medium": "gemini-4-hydrogen-medium",
+    "hydrogen-low": "gemini-4-hydrogen-low",
+    "hydrogen-xhigh": "gemini-4-hydrogen-xhigh",
+    "orchestrator": "gemini-pro-orchestrator",
+    "orchestrator-carbon": "gemini-pro-orchestrator",
+    "orchestrator-argon": "gemini-pro-orchestrator-argon",
+    "flash": "gemini-3.8-flash-high",
+    "flash-high": "gemini-3.8-flash-high",
+    "3.8-flash": "gemini-3.8-flash-high",
+    "3.8-flash-high": "gemini-3.8-flash-high",
+    "gemini-3.8-flash": "gemini-3.8-flash-high",
+    "flash-medium": "gemini-3.8-flash-medium",
+    "3.8-flash-medium": "gemini-3.8-flash-medium",
+    "flash-low": "gemini-3.8-flash-low",
+    "3.8-flash-low": "gemini-3.8-flash-low",
+}
+
+def norm_agy(raw):
+    s = str(raw or "").strip().rstrip(".")
+    if not s or s.lower() == "none":
+        return ""
+    slug = re.sub(r"[^a-z0-9._-]+", "-", s.lower()).strip("-.")
+    slug = re.sub(r"^(claude-(?:opus|sonnet))-5\.5(?=-|$)", r"\1-5-5", slug)
+    if slug == "claude-opus-5-5":
+        return "claude-opus-5-5-medium"
+    if slug == "claude-sonnet-5-5":
+        return "claude-sonnet-5-5-medium"
+    return AGY_ALIASES.get(slug, slug)
+
+is_fake = bool(os.environ.get("FAKE_LOG"))
+test_sess = os.environ.get("HERDR_HANDOFF_TEST_SESSION") == "1"
+env = os.environ
+caller_kind = ""
+session_id = ""
+ps_model = ""
+ps_effort = ""
+
+if not is_fake or test_sess:
+    if any(env.get(k) for k in ("ANTIGRAVITY_AGENT", "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_APP_DATA_DIR", "AGY_APP_DATA_DIR", "ANTIGRAVITY_AGENTAPI_EXE", "ANTIGRAVITY_TRAJECTORY_ID", "GEMINI_HOME")):
+        caller_kind = "agy"
+        session_id = env.get("ANTIGRAVITY_CONVERSATION_ID", "").strip()
+        if not session_id and env.get("ANTIGRAVITY_SOURCE_METADATA"):
+            try:
+                session_id = str(((json.loads(env["ANTIGRAVITY_SOURCE_METADATA"]).get("tool") or {}).get("conversationId") or "")).strip()
+            except Exception:
+                pass
+    elif any(env.get(k) for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_MAX_RETRIES")):
+        caller_kind = "claude"
+        session_id = (env.get("CLAUDE_CODE_SESSION_ID") or env.get("CLAUDE_SESSION_ID") or "").strip()
+    elif any(env.get(k) for k in ("CODEX_THREAD_ID", "CODEX_SESSIONS_DIR", "CODEX_SANDBOX", "CODEX_CI", "CODEX_CLI_PATH", "CODEX_HOME")):
+        caller_kind = "codex"
+        session_id = env.get("CODEX_THREAD_ID", "").strip()
+    elif env.get("OPENCODE_SESSION_ID"):
+        caller_kind = "opencode"
+        session_id = env.get("OPENCODE_SESSION_ID", "").strip()
+    elif env.get("CURSOR_AGENT"):
+        caller_kind = "cursor"
+    elif env.get("GEMINI_AI_STUDIO_API_KEY"):
+        caller_kind = "agy"
+
+pane_agent = env.get("LIVE_PANE_AGENT_IN", "").strip().lower()
+pane_sess = env.get("LIVE_PANE_SESSION_IN", "").strip()
+if pane_agent in ("agy", "gemini", "claude", "codex", "opencode", "cursor"):
+    norm_pane_agent = "agy" if pane_agent == "gemini" else pane_agent
+    if not caller_kind:
+        caller_kind = norm_pane_agent
+    if not session_id and pane_sess and caller_kind == norm_pane_agent:
+        session_id = pane_sess
+
+if not is_fake:
+    pid = os.getppid()
+    seen = set()
+    while pid and pid > 1 and pid not in seen:
+        seen.add(pid)
+        try:
+            out = subprocess.check_output(["ps", "-o", "ppid=,args=", "-p", str(pid)], text=True, timeout=1).strip()
+        except Exception:
+            break
+        if not out:
+            break
+        parts = out.split(None, 1)
+        try:
+            next_pid = int(parts[0])
+        except ValueError:
+            next_pid = 0
+        args_str = parts[1] if len(parts) > 1 else ""
+        try:
+            toks = shlex.split(args_str)
+        except ValueError:
+            toks = args_str.split()
+        comm = os.path.basename(toks[0]).lower() if toks else ""
+        if comm in ("node", "bun", "deno") and len(toks) > 1:
+            sub_comm = os.path.basename(toks[1]).lower()
+            if sub_comm in ("agy", "claude", "codex", "opencode"):
+                comm = sub_comm
+        if comm in ("agy", "claude", "codex", "opencode"):
+            if not caller_kind:
+                caller_kind = comm
+            if caller_kind == comm or {caller_kind, comm} <= {"agy", "gemini"}:
+                for idx, tok in enumerate(toks):
+                    nxt = toks[idx + 1] if idx + 1 < len(toks) else ""
+                    if tok in ("--conversation", "--resume", "--session-id") and nxt and not session_id:
+                        session_id = nxt
+                    elif tok == "--model" and nxt and not ps_model:
+                        ps_model = nxt
+                    elif tok == "--effort" and nxt and not ps_effort:
+                        ps_effort = nxt
+                    elif tok == "-c" and nxt:
+                        if nxt.startswith("model=") and not ps_model:
+                            ps_model = nxt.split("=", 1)[1].strip("\"'")
+                        elif nxt.startswith("model_reasoning_effort=") and not ps_effort:
+                            ps_effort = nxt.split("=", 1)[1].strip("\"'")
+            break
+        pid = next_pid
+
+if not caller_kind and (not is_fake or test_sess):
+    if env.get("T3CODE_PROJECT_ID") or env.get("TERM_PROGRAM") == "t3code":
+        caller_kind = "t3code"
+
+caller_model = ""
+caller_effort = ""
+
+if caller_kind in ("agy", "gemini"):
+    app_dirs = []
+    for k in ("AGY_APP_DATA_DIR", "ANTIGRAVITY_APP_DATA_DIR"):
+        if env.get(k):
+            app_dirs.append(Path(env[k]).expanduser())
+    if env.get("GEMINI_HOME"):
+        gh_acp = Path(env["GEMINI_HOME"]).expanduser() / "antigravity-acp"
+        if gh_acp.is_dir() and gh_acp not in app_dirs:
+            app_dirs.append(gh_acp)
+    if not is_fake:
+        for d in ("~/.gemini/antigravity-cli", "~/.gemini/antigravity"):
+            p = Path(d).expanduser()
+            if p not in app_dirs:
+                app_dirs.append(p)
+        t3_prov = Path("~/.t3/userdata/providers/antigravity").expanduser()
+        if t3_prov.is_dir():
+            for sub in sorted(t3_prov.glob("*/antigravity-acp")):
+                if sub not in app_dirs:
+                    app_dirs.append(sub)
+    settings_re = re.compile(
+        r"<USER_SETTINGS_CHANGE>[\s\S]*?changed setting `Model Selection` from [^\n]+? to ([^\n<]+?)(?:\.(?=\s|<|$)|\s*(?=</USER_SETTINGS_CHANGE>|\n))[\s\S]*?</USER_SETTINGS_CHANGE>",
+        re.I,
+    )
+    if session_id:
+        for root in app_dirs:
+            logs_dir = root / "brain" / session_id / ".system_generated" / "logs"
+            tfile = next((logs_dir / n for n in ("transcript.jsonl", "transcript_full.jsonl") if (logs_dir / n).is_file()), None)
+            if not tfile:
+                continue
+            try:
+                with open(tfile, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if "model" not in line and "USER_SETTINGS_CHANGE" not in line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except Exception:
+                            continue
+                        if not isinstance(d, dict):
+                            continue
+                        t = d.get("type")
+                        if t == "PLANNER_RESPONSE" and d.get("model"):
+                            m = norm_agy(d["model"])
+                            if m:
+                                caller_model = m
+                        elif t in ("USER_INPUT", "user") and d.get("source") in ("USER_EXPLICIT", None):
+                            c = d.get("content") if isinstance(d.get("content"), str) else ""
+                            for mm in settings_re.finditer(c):
+                                m = norm_agy(mm.group(1))
+                                if m:
+                                    caller_model = m
+            except Exception:
+                pass
+            if caller_model:
+                break
+    if not caller_model and ps_model:
+        caller_model = norm_agy(ps_model)
+    if not caller_model:
+        for root in app_dirs:
+            sf = root / "settings.json"
+            if sf.is_file():
+                try:
+                    m = norm_agy((json.loads(sf.read_text()) or {}).get("model") or "")
+                    if m:
+                        caller_model = m
+                        break
+                except Exception:
+                    pass
+    caller_effort = (env.get("AGY_EFFORT") or ps_effort or "").strip()
+
+elif caller_kind == "claude":
+    cfg_dirs = []
+    if env.get("CLAUDE_CONFIG_DIR"):
+        cfg_dirs.append(Path(env["CLAUDE_CONFIG_DIR"]).expanduser())
+    elif not is_fake:
+        cfg_dirs.append(Path("~/.claude").expanduser())
+    if session_id:
+        cand_files = []
+        for cd in cfg_dirs:
+            cand_files.extend(sorted(cd.glob(f"projects/*/{session_id}.jsonl")))
+    elif not is_fake:
+        import time as _t
+        proj_slug = re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
+        cand_files = []
+        for cd in cfg_dirs:
+            pdir = cd / "projects" / proj_slug
+            if pdir.is_dir():
+                recent = [p for p in pdir.glob("*.jsonl") if (_t.time() - p.stat().st_mtime) <= 600]
+                if recent:
+                    cand_files.append(max(recent, key=lambda p: p.stat().st_mtime))
+    else:
+        cand_files = []
+    for tf in cand_files:
+        try:
+            with open(tf, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if '"assistant"' not in line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    if d.get("type") == "assistant" and not d.get("isSidechain"):
+                        m = str((d.get("message") or {}).get("model") or "").strip()
+                        if m and not m.startswith("<"):
+                            caller_model = m
+        except Exception:
+            pass
+        if caller_model:
+            break
+    if not caller_model and ps_model:
+        caller_model = ps_model
+    caller_effort = (env.get("CLAUDE_EFFORT") or ps_effort or "").strip()
+
+elif caller_kind == "codex":
+    sess_roots = []
+    if env.get("CODEX_SESSIONS_DIR"):
+        sess_roots.append(Path(env["CODEX_SESSIONS_DIR"]).expanduser())
+    elif env.get("CODEX_HOME"):
+        sess_roots.append(Path(env["CODEX_HOME"]).expanduser() / "sessions")
+    elif not is_fake:
+        sess_roots.append(Path("~/.codex/sessions").expanduser())
+    if session_id:
+        for sr in sess_roots:
+            if not sr.is_dir():
+                continue
+            matches = sorted(sr.glob(f"*/*/*/*{session_id}*.jsonl"))
+            if not matches:
+                continue
+            try:
+                with open(matches[-1], encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if "turn_context" not in line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except Exception:
+                            continue
+                        if d.get("type") == "turn_context":
+                            p = d.get("payload") or {}
+                            if p.get("model"):
+                                caller_model = str(p["model"]).strip()
+                            eff = p.get("effort") or (((p.get("collaboration_mode") or {}).get("settings") or {}).get("reasoning_effort"))
+                            if eff:
+                                caller_effort = str(eff).strip()
+            except Exception:
+                pass
+            if caller_model:
+                break
+    if not caller_model and ps_model:
+        caller_model = ps_model
+    if not caller_effort and ps_effort:
+        caller_effort = ps_effort
+
+print(f"{caller_kind}|{caller_model}|{caller_effort}")
+PY
+)
+IFS='|' read -r CALLER_KIND CALLER_MODEL CALLER_EFFORT <<<"$CALLER_PROBE_OUT"
+
+DOC_HEADER_LINES="$(sed -n '1,25p' "$HANDOFF_PATH" 2>/dev/null || true)"
+DOC_AGENT=$(sed -nE 's/.*\*\*Agent:\*\* `([^`<]+)`.*/\1/p' <<<"$DOC_HEADER_LINES" | sed -n '1p')
+DOC_MODEL=$(sed -nE 's/.*\*\*Model:\*\* `([^`<]+)`.*/\1/p' <<<"$DOC_HEADER_LINES" | sed -n '1p')
+DOC_EFFORT=$(sed -nE 's/.*\*\*Effort:\*\* `([^`<]+)`.*/\1/p' <<<"$DOC_HEADER_LINES" | sed -n '1p')
+
+if [[ "$KIND_EXPLICIT" != "true" ]]; then
+  if [[ -n "$DOC_AGENT" ]]; then
+    AGENT_KIND="$DOC_AGENT"
+  elif [[ -n "$CALLER_KIND" ]]; then
+    AGENT_KIND="$CALLER_KIND"
+  else
+    AGENT_KIND="opencode"
+  fi
+fi
+
+if [[ "$AGENT_KIND" == "t3code" && "$MULTIPLEXER" == "auto" ]]; then
+  MULTIPLEXER="t3"
+fi
+
+RESOLVED_MUX="$MULTIPLEXER"
+if [[ "$RESOLVED_MUX" == "auto" ]]; then
+  if [[ -n "${T3CODE_PROJECT_ID:-}" || "${TERM_PROGRAM:-}" == "t3code" || "${__CFBundleIdentifier:-}" == "com.t3tools.t3code" || -n "${T3CODE_CLI_PATH:-}" ]]; then
+    RESOLVED_MUX="t3"
+  elif [[ "$HERDR_AVAILABLE" == "true" ]]; then
+    RESOLVED_MUX="herdr"
+  elif [[ "$T3_AVAILABLE" == "true" ]]; then
+    RESOLVED_MUX="t3"
+  else
+    RESOLVED_MUX="none"
+  fi
+fi
+
+if [[ "$RESOLVED_MUX" == "herdr" && "$HERDR_AVAILABLE" == "true" ]]; then
+  # HANDOFF_WORKSPACE overrides the target workspace: a herdr workspace id (wG)
+  # or a label substring ("quest"), e.g. when the owner keeps a project's
+  # handoffs in its own workspace.
+  if [[ -n "${HANDOFF_WORKSPACE:-}" ]]; then
+    WS_ID=$(herdr workspace list 2>/dev/null | jq -r --arg w "$HANDOFF_WORKSPACE" \
+      '.result.workspaces[] | select(.workspace_id == $w or (.label | ascii_downcase | test("(^|\\] )" + ($w | ascii_downcase) + "$"))) | .workspace_id' 2>/dev/null | head -n 1 || true)
+    if [[ -n "$WS_ID" ]]; then
+      CALLER_WORKSPACE="$WS_ID"
+    else
+      echo "⚠️  HANDOFF_WORKSPACE='$HANDOFF_WORKSPACE' matched no herdr workspace; using $CALLER_WORKSPACE."
+    fi
+  fi
+  if [[ -n "$SOURCE_TAB" ]]; then
+    SOURCE_JSON=$(herdr tab get "$SOURCE_TAB" 2>/dev/null || true)
+    {
+      IFS= read -r SOURCE_LABEL || true
+      IFS= read -r SOURCE_FOCUSED || true
+    } < <(
+      jq -r '(.result.tab.label // ""), (.result.tab.focused | tostring)' <<<"$SOURCE_JSON" 2>/dev/null || true
+    )
+    # Follow the handoff only if the user is on the parent; never pull them off other work.
+    [[ "$SOURCE_FOCUSED" == "false" ]] && FOCUS_FLAG="--no-focus"
+  fi
+fi
+
+same_agent_family() {
+  local a="$1" b="$2"
+  [[ -n "$a" && -n "$b" ]] || return 1
+  [[ "$a" == "gemini" ]] && a="agy"
+  [[ "$b" == "gemini" ]] && b="agy"
+  [[ "$a" == "$b" ]]
+}
+
+normalize_claude_model_slug() {
+  local raw="$1" lc
+  lc="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  case "$lc" in
+    fable-5-2|fable-5.2|claude-fable-5.2|"claude fable 5.2"|"fable 5.2")
+      printf 'claude-fable-5-2' ;;
+    *)
+      printf '%s' "$raw" ;;
+  esac
+}
+
+if [[ "$MODEL_EXPLICIT" == "true" && "$AGENT_KIND" == "claude" ]]; then
+  CLAUDE_MODEL="$(normalize_claude_model_slug "$CLAUDE_MODEL")"
+fi
+
+# Model & effort precedence: --model / --effort > doc **Model:** / **Effort:** > calling session > --mode defaults.
+# Note: calling-session model carry-over ALWAYS preserves the owner's active model, including claude-fable-5-2 / fable.
+DOC_FAMILY_OK=true
+if [[ -n "$DOC_AGENT" ]] && ! same_agent_family "$AGENT_KIND" "$DOC_AGENT"; then
+  DOC_FAMILY_OK=false
+fi
+
+if [[ "$MODEL_EXPLICIT" != "true" ]]; then
+  if [[ -n "$DOC_MODEL" && "$DOC_FAMILY_OK" == "true" ]]; then
+    CLAUDE_MODEL="$DOC_MODEL"
+    [[ "$AGENT_KIND" == "claude" ]] && CLAUDE_MODEL="$(normalize_claude_model_slug "$CLAUDE_MODEL")"
+    MODEL_SOURCE="doc"
+  elif same_agent_family "$AGENT_KIND" "$CALLER_KIND" && [[ -n "$CALLER_MODEL" ]]; then
+    CLAUDE_MODEL="$CALLER_MODEL"
+    MODEL_SOURCE="calling session"
+  fi
+fi
+
+if [[ "$EFFORT_EXPLICIT" == "true" ]]; then
+  RESOLVED_EFFORT="$CODEX_EFFORT"
+elif [[ -n "$DOC_EFFORT" && "$DOC_FAMILY_OK" == "true" ]]; then
+  RESOLVED_EFFORT="$DOC_EFFORT"
+elif same_agent_family "$AGENT_KIND" "$CALLER_KIND" && [[ -n "$CALLER_EFFORT" ]]; then
+  RESOLVED_EFFORT="$CALLER_EFFORT"
+fi
 
 # --------------------------------------------------------------------------
 # Free-credit, low-quota & Jev System-1 auto-routing:
@@ -284,15 +769,15 @@ esac
 #    - Tier 1 (Free Cloud Session Credit > $0 on Claude, or --cloud): route to
 #      `claude --cloud` (`CCR_ENABLE_BUNDLE=1`), with Jev picking `sonnet` (for
 #      coding, fallback `codex/gpt-6.1-terra`) vs `opus` (for complex/review,
-#      fallback `agy/gemini-4-argon-medium`).
+#      fallback `agy/gemini-4-neon-medium`).
 #    - Tier 2 (Coding task + High Codex quota 5h >= 50%, wk >= 30% when local
 #      Claude quota is low or handing off from AGY without --model): auto-switch
 #      to `codex` (`gpt-6.1-terra`, effort: medium).
 #    - Tier 3 (Local Claude quota low <= 10%): auto-switch to `agy`
-#      (`gemini-3.8-flash-high` for code, `gemini-4-argon-medium` for plan).
+#      (`gemini-4-hydrogen-high` for code, `gemini-4-neon-medium` for plan).
 # --------------------------------------------------------------------------
 if [[ ( "$AGENT_KIND" == "claude" || "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ) && ( "$QUOTA_SWITCH" != "false" && "$QUOTA_SWITCH" != "0" || "$CLAUDE_CLOUD" == "true" || "$JEV_ASSIST" == "true" ) ]]; then
-  QUOTA_PROBE_OUT=$(HANDOFF_DOC_FILE="$HANDOFF_PATH" HANDOFF_CUSTOM_PROMPT="$CUSTOM_PROMPT" JEV_ASSIST_MODE="$JEV_ASSIST" python3 -c '
+  QUOTA_PROBE_OUT=$(HANDOFF_DOC_FILE="$HANDOFF_PATH" HANDOFF_CUSTOM_PROMPT="$CUSTOM_PROMPT" JEV_ASSIST_MODE="$JEV_ASSIST" HANDOFF_MODE_IN="$HANDOFF_MODE" CLAUDE_CLOUD_IN="$CLAUDE_CLOUD" python3 -c '
 import json, os, subprocess, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -496,7 +981,7 @@ for d in dirs:
             if "gemini-weekly" in q:
                 rw_a = float(q["gemini-weekly"].get("remaining_fraction", 0.0)) * 100.0
         if rw_a is not None:
-            if (r5_a is None or r5_a >= 30.0) and rw_a >= 30.0:
+            if (r5_a is None or r5_a >= 20.0) and rw_a >= 20.0:
                 agy_status = "high"
             else:
                 agy_status = "low"
@@ -507,7 +992,10 @@ for d in dirs:
 jev_str = ""
 jev_mode = os.environ.get("JEV_ASSIST_MODE", "auto").strip().lower()
 jev_bin_env = os.environ.get("JEV_GATE_BIN", "").strip()
-run_jev = (jev_mode == "true") or (jev_mode == "auto" and (bool(jev_bin_env) or not os.environ.get("FAKE_LOG")))
+mode_in = os.environ.get("HANDOFF_MODE_IN", "").strip()
+cloud_in = os.environ.get("CLAUDE_CLOUD_IN", "auto").strip()
+need_jev_auto = bool(jev_bin_env) or (not os.environ.get("FAKE_LOG") and not (mode_in == "plan" and (not cloud_credit_str or cloud_in == "false")))
+run_jev = (jev_mode == "true") or (jev_mode == "auto" and need_jev_auto)
 if run_jev:
     doc_path = os.environ.get("HANDOFF_DOC_FILE", "")
     custom_p = os.environ.get("HANDOFF_CUSTOM_PROMPT", "")
@@ -539,11 +1027,12 @@ if run_jev:
                     import re
                     if re.search(r"(\.superpowers/|orbstack|kubectl|deploy-local|shoot\.mjs|psrw\s+ship|dispatch-worker|\.claude/worktrees/)", full_text):
                         cloud_p = min(cloud_p, 0.05)
-                    if raw_r in ("agy_argon", "claude_opus") or rev_p >= 0.50 or risk_p >= 0.35:
+                    if raw_r in ("agy_argon", "claude_opus") or rev_p >= 0.45 or risk_p >= 0.35 or comp >= 1.80:
                         jtier = "plan"
                     else:
                         jtier = "code"
-                    jev_str = f"{jtier}:{raw_r}:{conf:.2f}:{rev_p:.2f}:{risk_p:.2f}:{comp:.2f}:{cloud_p:.2f}"
+                    cloud_ok = "true" if (cloud_p >= 0.85 and rev_p >= 0.50) else "false"
+                    jev_str = f"{jtier}:{raw_r}:{conf:.2f}:{rev_p:.2f}:{risk_p:.2f}:{comp:.2f}:{cloud_p:.2f}:{cloud_ok}"
         except Exception:
             pass
     if not jev_str and full_text:
@@ -554,9 +1043,9 @@ if run_jev:
             r"root[- ]cause\s+analysis|architectural\s+(?:design|review|audit))\b",
             full_text, re.IGNORECASE
         ):
-            jev_str = "plan:agy_argon:0.85:0.85:0.50:2.00:0.00"
+            jev_str = "plan:agy_argon:0.85:0.85:0.50:2.00:0.00:false"
         else:
-            jev_str = "code:agy_flash:0.80:0.05:0.05:1.20:0.00"
+            jev_str = "code:agy_flash:0.80:0.05:0.05:1.20:0.00:false"
 
 print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}|{agy_status}")
 ' 2>/dev/null || true)
@@ -569,10 +1058,8 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}|{agy_sta
 
   JEV_CLOUD_OK="false"
   if [[ -n "$JEV_INFO" ]]; then
-    IFS=':' read -r JEV_TIER JEV_RAW_ROUTE JEV_CONF JEV_REV JEV_RISK JEV_COMP JEV_CLOUD <<<"$JEV_INFO"
-    if python3 -c "import sys; rev=float(sys.argv[1] or 0); cld=float(sys.argv[2] or 0); sys.exit(0 if (cld >= 0.85 and rev >= 0.50) else 1)" "${JEV_REV:-0}" "${JEV_CLOUD:-0}" 2>/dev/null; then
-      JEV_CLOUD_OK="true"
-    fi
+    IFS=':' read -r JEV_TIER JEV_RAW_ROUTE JEV_CONF JEV_REV JEV_RISK JEV_COMP JEV_CLOUD JEV_CLOUD_OK <<<"$JEV_INFO"
+    [[ "$JEV_CLOUD_OK" == "true" ]] || JEV_CLOUD_OK="false"
     if [[ "$JEV_TIER" == "plan" && "$HANDOFF_MODE" != "plan" ]]; then
       HANDOFF_MODE="plan"
       echo "🧭 Jev System-1 assist: route=$JEV_RAW_ROUTE (conf=$JEV_CONF, rev=$JEV_REV, risk=$JEV_RISK, complexity=$JEV_COMP, cloud=${JEV_CLOUD:-0.00}) -> escalating mode to plan"
@@ -585,7 +1072,7 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}|{agy_sta
   fi
 
   if [[ "$AGENT_KIND" == "claude" ]]; then
-    if [[ "$CLAUDE_CLOUD" == "true" || ( "$CLAUDE_CLOUD" == "auto" && -n "$CLOUD_CREDIT_DOLLARS" && "$JEV_CLOUD_OK" == "true" ) ]]; then
+    if [[ "$CLAUDE_CLOUD" == "true" || ( "$CLAUDE_CLOUD" == "auto" && -n "$CLOUD_CREDIT_DOLLARS" && "$JEV_CLOUD_OK" == "true" && "$CLAUDE_MODEL" != *fable* ) ]]; then
       CLAUDE_CLOUD="true"
       if [[ "$HANDOFF_MODE" == "plan" && -z "$CLAUDE_MODEL" && -n "$JEV_INFO" ]]; then
         CLAUDE_MODEL="opus"
@@ -595,10 +1082,10 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}|{agy_sta
         FALLBACK_MODEL="gpt-6.1-terra"
       elif [[ "$HANDOFF_MODE" != "plan" ]]; then
         FALLBACK_KIND="agy"
-        FALLBACK_MODEL="gemini-3.8-flash-high"
+        FALLBACK_MODEL="${AGY_CODE_MODEL:-gemini-4-hydrogen-high}"
       else
         FALLBACK_KIND="agy"
-        FALLBACK_MODEL="gemini-4-argon-medium"
+        FALLBACK_MODEL="${AGY_PLAN_MODEL:-gemini-4-neon-medium}"
       fi
       if [[ -n "$LOW_QUOTA_INFO" && -n "$CLOUD_CREDIT_DOLLARS" ]]; then
         echo "☁️  Claude quota low ($LOW_QUOTA_INFO), free Cloud Session Credit available (\$$CLOUD_CREDIT_DOLLARS left in $CLOUD_CREDIT_BUCKET) — Auto-switching handoff to claude --cloud (fallback: $FALLBACK_KIND/$FALLBACK_MODEL)"
@@ -609,23 +1096,27 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}|{agy_sta
       fi
     elif [[ -n "$LOW_QUOTA_INFO" && "$QUOTA_SWITCH" != "false" && "$QUOTA_SWITCH" != "0" ]]; then
       # Priority waterfall: Claude > AGY (if 7d >= 30%) > Codex (if code & AGY 7d < 30% & Codex 5h > 80%, 7d >= 60%)
-      if [[ "$HANDOFF_MODE" != "plan" && "$AGY_STATUS" != "high" && -n "$CODEX_HIGH_INFO" && "$CLAUDE_MODEL" != "opus" && "$CLAUDE_MODEL" != claude-opus* && "$CLAUDE_MODEL" != "argon" && "$CLAUDE_MODEL" != gemini-4-argon* && ( -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-* ) ]]; then
+      if [[ "$HANDOFF_MODE" != "plan" && "$AGY_STATUS" != "high" && -n "$CODEX_HIGH_INFO" && "$CLAUDE_MODEL" != "opus" && "$CLAUDE_MODEL" != claude-opus* && "$CLAUDE_MODEL" != "fable"* && "$CLAUDE_MODEL" != claude-fable* && "$CLAUDE_MODEL" != "argon"* && "$CLAUDE_MODEL" != gemini-4-argon* && "$CLAUDE_MODEL" != "carbon"* && "$CLAUDE_MODEL" != gemini-4-carbon* && "$CLAUDE_MODEL" != *orchestrator* && ( -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-* ) ]]; then
         AGENT_KIND="codex"
         YOLO=true
         CLAUDE_MODEL="gpt-6.1-terra"
+        MODEL_SOURCE="quota-switch"
+        [[ "$EFFORT_EXPLICIT" != "true" ]] && RESOLVED_EFFORT=""
         echo "⚡ Claude quota low ($LOW_QUOTA_INFO), AGY low/unavailable & Codex quota high ($CODEX_HIGH_INFO) — Auto-switching code handoff to codex (yolo, model: $CLAUDE_MODEL, effort: $CODEX_EFFORT)"
       else
         AGENT_KIND="agy"
         YOLO=true
+        MODEL_SOURCE="quota-switch"
+        [[ "$EFFORT_EXPLICIT" != "true" ]] && RESOLVED_EFFORT=""
         if [[ "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-sonnet* ]]; then
-          CLAUDE_MODEL="gemini-3.8-flash-high"
-        elif [[ "$CLAUDE_MODEL" == "opus" || "$CLAUDE_MODEL" == claude-opus* ]]; then
-          CLAUDE_MODEL="gemini-4-argon-medium"
+          CLAUDE_MODEL="${AGY_CODE_MODEL:-gemini-4-hydrogen-high}"
+        elif [[ "$CLAUDE_MODEL" == "opus" || "$CLAUDE_MODEL" == claude-opus* || "$CLAUDE_MODEL" == "fable"* || "$CLAUDE_MODEL" == claude-fable* ]]; then
+          CLAUDE_MODEL="${AGY_PLAN_MODEL:-gemini-4-neon-medium}"
         elif [[ -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == claude-* ]]; then
           if [[ "$HANDOFF_MODE" == "plan" ]]; then
-            CLAUDE_MODEL="gemini-4-argon-medium"
+            CLAUDE_MODEL="${AGY_PLAN_MODEL:-gemini-4-neon-medium}"
           else
-            CLAUDE_MODEL="gemini-3.8-flash-high"
+            CLAUDE_MODEL="${AGY_CODE_MODEL:-gemini-4-hydrogen-high}"
           fi
         fi
         echo "⚡ Claude quota low ($LOW_QUOTA_INFO) — Auto-switching handoff to agy (yolo, model: $CLAUDE_MODEL)"
@@ -636,6 +1127,8 @@ print(f"{low_quota_info}|{cloud_credit_str}|{codex_high_info}|{jev_str}|{agy_sta
       AGENT_KIND="codex"
       YOLO=true
       CLAUDE_MODEL="gpt-6.1-terra"
+      MODEL_SOURCE="quota-switch"
+      [[ "$EFFORT_EXPLICIT" != "true" ]] && RESOLVED_EFFORT=""
       echo "⚡ Jev classified as coding, AGY 7d low & Codex quota high ($CODEX_HIGH_INFO) — Auto-switching handoff to codex (yolo, model: $CLAUDE_MODEL, effort: $CODEX_EFFORT)"
     fi
   fi
@@ -644,8 +1137,54 @@ fi
 # Model routing for claude, codex, and agy handoffs:
 # - claude: code -> sonnet, plan -> default
 # - codex: default -> gpt-6.1-terra (effort: medium)
-# - agy/gemini: code/default -> gemini-3.8-flash-high, plan -> gemini-4-argon-medium, --model argon -> gemini-4-argon-medium
+# - agy/gemini: code/default -> gemini-4-hydrogen-high, plan -> gemini-4-neon-medium,
+#   shorthand aliases: argon/carbon/hydrogen/orchestrator/flash -> full AGY model IDs
 # An explicit --model always wins.
+normalize_agy_model_slug() {
+  local raw="$1" slug
+  slug=$(printf '%s' "${raw%.}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^[-.]+//; s/[-.]+$//; s/^(claude-(opus|sonnet))-5\.5(-|$)/\1-5-5\3/')
+  case "$slug" in
+    argon|argon-medium|gemini-4-argon|gemini-4-argon-medium)
+      printf 'gemini-4-argon-medium' ;;
+    opus|claude-opus-4*|neon|neon-medium|gemini-4-neon)
+      printf '%s' "${AGY_PLAN_MODEL:-gemini-4-neon-medium}" ;;
+    claude-opus-5-5)
+      printf 'claude-opus-5-5-medium' ;;
+    argon-high|gemini-4-argon-high)
+      printf 'gemini-4-argon-high' ;;
+    argon-low|gemini-4-argon-low)
+      printf 'gemini-4-argon-low' ;;
+    carbon|carbon-medium|gemini-4-carbon|gemini-4-carbon-medium)
+      printf 'gemini-4-carbon-medium' ;;
+    carbon-high|gemini-4-carbon-high)
+      printf 'gemini-4-carbon-high' ;;
+    carbon-low|gemini-4-carbon-low)
+      printf 'gemini-4-carbon-low' ;;
+    hydrogen|hydrogen-high|gemini-4-hydrogen|gemini-4-hydrogen-high|sonnet|claude-sonnet-4*)
+      printf '%s' "${AGY_CODE_MODEL:-gemini-4-hydrogen-high}" ;;
+    claude-sonnet-5-5)
+      printf 'claude-sonnet-5-5-medium' ;;
+    hydrogen-medium|gemini-4-hydrogen-medium)
+      printf 'gemini-4-hydrogen-medium' ;;
+    hydrogen-low|gemini-4-hydrogen-low)
+      printf 'gemini-4-hydrogen-low' ;;
+    hydrogen-xhigh|gemini-4-hydrogen-xhigh)
+      printf 'gemini-4-hydrogen-xhigh' ;;
+    orchestrator|orchestrator-carbon|gemini-pro-orchestrator)
+      printf 'gemini-pro-orchestrator' ;;
+    orchestrator-argon|gemini-pro-orchestrator-argon)
+      printf 'gemini-pro-orchestrator-argon' ;;
+    flash|flash-high|3.8-flash|3.8-flash-high|gemini-3.8-flash|gemini-3.8-flash-high)
+      printf 'gemini-3.8-flash-high' ;;
+    flash-medium|3.8-flash-medium|gemini-3.8-flash-medium)
+      printf 'gemini-3.8-flash-medium' ;;
+    flash-low|3.8-flash-low|gemini-3.8-flash-low)
+      printf 'gemini-3.8-flash-low' ;;
+    *)
+      printf '%s' "$slug" ;;
+  esac
+}
+
 if [[ "$AGENT_KIND" == "claude" ]]; then
   case "$HANDOFF_MODE" in
     code) CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}" ;;
@@ -654,37 +1193,195 @@ if [[ "$AGENT_KIND" == "claude" ]]; then
   if [[ -z "$HANDOFF_MODE" && -z "$CLAUDE_MODEL" ]]; then
     echo "⚠️  No --mode given; claude will start on the default model. Pass --mode code for Sonnet." >&2
   fi
-elif [[ "$AGENT_KIND" == "codex" ]]; then
-  if [[ -z "$CLAUDE_MODEL" || "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-* ]]; then
-    CLAUDE_MODEL="gpt-6.1-terra"
+  CLAUDE_EFFORT_LEVEL="$RESOLVED_EFFORT"
+  if [[ -n "$CLAUDE_EFFORT_LEVEL" && ! "$CLAUDE_EFFORT_LEVEL" =~ ^[a-z]+$ ]]; then
+    fail_with_reason "invalid_args" "Invalid --effort '$CLAUDE_EFFORT_LEVEL'."
   fi
+elif [[ "$AGENT_KIND" == "codex" ]]; then
+  case "$CLAUDE_MODEL" in
+    ""|sonnet|opus|claude-*|gemini-*|argon*|carbon*|hydrogen*|flash*|3.8-flash*|orchestrator*|gpt-oss-*)
+      CLAUDE_MODEL="gpt-6.1-terra" ;;
+  esac
+  [[ -n "$RESOLVED_EFFORT" ]] && CODEX_EFFORT="$RESOLVED_EFFORT"
 elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
-  if [[ "$CLAUDE_MODEL" == "argon" || "$CLAUDE_MODEL" == "opus" || "$CLAUDE_MODEL" == claude-opus* ]]; then
-    CLAUDE_MODEL="gemini-4-argon-medium"
-  elif [[ "$CLAUDE_MODEL" == "sonnet" || "$CLAUDE_MODEL" == claude-sonnet* ]]; then
-    CLAUDE_MODEL="gemini-3.8-flash-high"
-  elif [[ -z "$CLAUDE_MODEL" ]]; then
+  if [[ -n "$CLAUDE_MODEL" ]]; then
+    CLAUDE_MODEL="$(normalize_agy_model_slug "$CLAUDE_MODEL")"
+  else
     case "$HANDOFF_MODE" in
-      plan) CLAUDE_MODEL="gemini-4-argon-medium" ;;
-      code|"") CLAUDE_MODEL="gemini-3.8-flash-high" ;;
+      plan) CLAUDE_MODEL="${AGY_PLAN_MODEL:-gemini-4-neon-medium}" ;;
+      code|"") CLAUDE_MODEL="${AGY_CODE_MODEL:-gemini-4-hydrogen-high}" ;;
     esac
   fi
+  if [[ -n "$RESOLVED_EFFORT" ]]; then
+    if [[ ! "$RESOLVED_EFFORT" =~ ^(low|medium|high|xhigh|max)$ ]]; then
+      fail_with_reason "invalid_args" "Invalid --effort '$RESOLVED_EFFORT'."
+    fi
+    AGY_EFFORT_LEVEL="$RESOLVED_EFFORT"
+  fi
+fi
+if [[ -n "$CODEX_EFFORT" && ! "$CODEX_EFFORT" =~ ^[a-z]+$ ]]; then
+  fail_with_reason "invalid_args" "Invalid --effort '$CODEX_EFFORT'."
 fi
 CLAUDE_MODEL_FLAG=""
 if [[ -n "$CLAUDE_MODEL" ]]; then
   if [[ ! "$CLAUDE_MODEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "Error: invalid --model '$CLAUDE_MODEL'." >&2
-    exit 1
+    fail_with_reason "invalid_args" "Invalid --model '$CLAUDE_MODEL'."
   fi
   CLAUDE_MODEL_FLAG="--model $CLAUDE_MODEL "
 fi
+CLAUDE_EFFORT_FLAG=""
+if [[ "$AGENT_KIND" == "claude" && -n "$CLAUDE_EFFORT_LEVEL" ]]; then
+  CLAUDE_EFFORT_FLAG="--effort $CLAUDE_EFFORT_LEVEL "
+fi
+AGY_EFFORT_FLAG=""
+if [[ ( "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ) && -n "$AGY_EFFORT_LEVEL" ]]; then
+  AGY_EFFORT_FLAG="--effort $AGY_EFFORT_LEVEL "
+fi
 
-# The doc says where the work lives; the calling shell may be somewhere else.
+# Helpers to hoist subfolder / linked-worktree paths up to the already-trusted
+# repository or project root so Claude Code, Codex, and Antigravity (AGY)
+# never stall on an interactive "Do you trust this folder?" dialog.
+abspath_logical() {
+  local p="$1"
+  [[ -n "$p" ]] || return 0
+  if [[ "$p" != /* ]]; then
+    p="${PWD%/}/$p"
+  fi
+  if [[ -d "$p" ]]; then
+    (cd -L "$p" 2>/dev/null && pwd -L) || printf '%s' "${p%/}"
+  elif [[ "$p" == "/" ]]; then
+    printf '/'
+  else
+    printf '%s' "${p%/}"
+  fi
+}
+
+preserve_logical_root() {
+  local orig="${1%/}" target_root="${2%/}"
+  [[ -n "$orig" ]] || orig="/"
+  [[ -n "$target_root" ]] || target_root="/"
+  local orig_phys root_phys rel orig_parent_phys root_parent_phys
+  orig_phys="$(cd -P "$orig" 2>/dev/null && pwd || printf '%s' "$orig")"
+  root_phys="$(cd -P "$target_root" 2>/dev/null && pwd || printf '%s' "$target_root")"
+  if [[ "$orig_phys" == "$root_phys" ]]; then
+    printf '%s' "$orig"
+    return 0
+  fi
+  if [[ "$orig_phys" == "$root_phys"/* ]]; then
+    rel="${orig_phys#"$root_phys"/}"
+    if [[ "$orig" == *"/$rel" ]]; then
+      printf '%s' "${orig%/"$rel"}"
+      return 0
+    fi
+  fi
+  orig_parent_phys="$(cd -P "$(dirname "$orig")" 2>/dev/null && pwd || true)"
+  root_parent_phys="$(cd -P "$(dirname "$target_root")" 2>/dev/null && pwd || true)"
+  if [[ -n "$orig_parent_phys" && "$orig_parent_phys" == "$root_parent_phys" ]]; then
+    printf '%s/%s' "$(dirname "$orig")" "$(basename "$target_root")"
+    return 0
+  fi
+  printf '%s' "$target_root"
+}
+
+is_generic_os_root() {
+  local d="$1" phys home_phys tmp_phys
+  [[ -n "$d" && -d "$d" ]] || return 0
+  phys="$(cd -P "$d" 2>/dev/null && pwd || printf '%s' "$d")"
+  home_phys="$(cd -P "$HOME" 2>/dev/null && pwd || printf '%s' "$HOME")"
+  tmp_phys="$(cd -P "${TMPDIR:-/tmp}" 2>/dev/null && pwd || printf '%s' "${TMPDIR:-/tmp}")"
+  case "$phys" in
+    /|/Users|/home|/tmp|/private|/private/tmp|/var|/private/var|"$home_phys"|"$home_phys/Desktop"|"$home_phys/Documents"|"$home_phys/Downloads"|"$home_phys/workspace"|"$home_phys/workspace/repos"|"$tmp_phys")
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+git_main_repo_root() {
+  local d="$1" gc root=""
+  [[ -n "$d" && -d "$d" ]] || return 1
+  git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  gc="$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [[ -n "$gc" ]] || return 1
+  if [[ "$gc" == */.git ]]; then
+    root="${gc%/.git}"
+  elif [[ "$gc" == */.git/* ]]; then
+    root="${gc%%/.git/*}"
+  fi
+  [[ -n "$root" && -d "$root" ]] || return 1
+  preserve_logical_root "$d" "$root"
+}
+
+hoist_to_root_cwd() {
+  local raw="$1" hoisted="$1" _git_root="" _cur="" _caller_root="" _h_phys="" _c_phys=""
+  [[ -n "$raw" && -d "$raw" ]] || { printf '%s' "$raw"; return 0; }
+  # Inside a Git repo or linked worktree, the main Git repo root IS the canonical
+  # trusted folder across Claude Code, Codex, and AGY — never hoist above it into
+  # a non-git parent directory (which would break Codex trust and repo CLAUDE.md/.mcp.json).
+  if _git_root="$(git_main_repo_root "$hoisted")"; then
+    printf '%s' "$_git_root"
+    return 0
+  fi
+  # Non-git directory: walk upward to find the outermost non-generic project root marker.
+  _cur="$(dirname "${hoisted%/}")"
+  while [[ -n "$_cur" && "$_cur" != "/" ]] && ! is_generic_os_root "$_cur"; do
+    if [[ -f "$_cur/CLAUDE.md" || -f "$_cur/AGENTS.md" || -f "$_cur/GEMINI.md" || -d "$_cur/.claude" || -d "$_cur/graft" ]]; then
+      hoisted="$_cur"
+    fi
+    [[ "$(dirname "$_cur")" == "$_cur" ]] && break
+    _cur="$(dirname "$_cur")"
+  done
+  if [[ -z "${HANDOFF_WORKSPACE:-}" && -n "$CALLER_PANE_CWD" && -d "$CALLER_PANE_CWD" ]]; then
+    _caller_root="$CALLER_PANE_CWD"
+    if _git_root="$(git_main_repo_root "$CALLER_PANE_CWD")"; then
+      _caller_root="$_git_root"
+    fi
+    if ! is_generic_os_root "$_caller_root"; then
+      _h_phys="$(cd -P "$hoisted" 2>/dev/null && pwd || printf '%s' "$hoisted")"
+      _c_phys="$(cd -P "$_caller_root" 2>/dev/null && pwd || printf '%s' "$_caller_root")"
+      if [[ "$_h_phys" == "$_c_phys"/* ]]; then
+        hoisted="$(preserve_logical_root "$hoisted" "$_caller_root")"
+      fi
+    fi
+  fi
+  printf '%s' "$hoisted"
+}
+
+TARGET_CWD="$(abspath_logical "$TARGET_CWD")"
+
+# The doc says where the work lives; scan past any injected Section 0 (lines 1-25).
+DOC_CWD=$(sed -n '1,25p' "$HANDOFF_PATH" | sed -nE 's/.*\*\*(Worktree|Repo):\*\* `([^`]+)`.*/\2/p' | sed -n '1p')
+if [[ -n "$DOC_CWD" && "$DOC_CWD" != \<* && -d "$DOC_CWD" ]]; then
+  DOC_CWD="$(abspath_logical "$DOC_CWD")"
+else
+  DOC_CWD=""
+fi
 if [[ "$CWD_EXPLICIT" != "true" ]]; then
-  DOC_CWD=$(sed -n '1,3p' "$HANDOFF_PATH" | sed -nE 's/.*\*\*(Worktree|Repo):\*\* `([^`]+)`.*/\2/p' | sed -n '1p')
-  if [[ -n "$DOC_CWD" && -d "$DOC_CWD" && "$DOC_CWD" != "$TARGET_CWD" ]]; then
+  if [[ -n "$DOC_CWD" && "$DOC_CWD" != "$TARGET_CWD" ]]; then
     echo "📂 Using the doc's directory: $DOC_CWD"
     TARGET_CWD="$DOC_CWD"
+  fi
+fi
+
+CANDIDATE_SUBDIR="$TARGET_CWD"
+if [[ "$ALLOW_SUBDIR" != "true" && -d "$TARGET_CWD" ]]; then
+  HOISTED_TARGET_CWD="$(hoist_to_root_cwd "$TARGET_CWD")"
+  _target_phys="$(cd -P "$TARGET_CWD" 2>/dev/null && pwd || printf '%s' "$TARGET_CWD")"
+  _hoist_phys="$(cd -P "$HOISTED_TARGET_CWD" 2>/dev/null && pwd || printf '%s' "$HOISTED_TARGET_CWD")"
+  # If caller explicitly passed `--cwd <repo_root>` while the doc specifies a worktree/subdir
+  # belonging to that same hoisted root, preserve the doc's worktree as ACTIVE_SUBDIR.
+  if [[ "$CWD_EXPLICIT" == "true" && "$_target_phys" == "$_hoist_phys" && -n "$DOC_CWD" ]]; then
+    _doc_root="$(hoist_to_root_cwd "$DOC_CWD")"
+    _doc_root_phys="$(cd -P "$_doc_root" 2>/dev/null && pwd || printf '%s' "$_doc_root")"
+    if [[ "$_doc_root_phys" == "$_hoist_phys" ]]; then
+      CANDIDATE_SUBDIR="$DOC_CWD"
+    fi
+  fi
+  _cand_phys="$(cd -P "$CANDIDATE_SUBDIR" 2>/dev/null && pwd || printf '%s' "$CANDIDATE_SUBDIR")"
+  if [[ "$_cand_phys" != "$_hoist_phys" ]]; then
+    ACTIVE_SUBDIR="$CANDIDATE_SUBDIR"
+    TARGET_CWD="$HOISTED_TARGET_CWD"
+    echo "🏠 Hoisted tab cwd to root '$TARGET_CWD' (active worktree/subfolder: '$ACTIVE_SUBDIR') to avoid Trust prompts."
   fi
 fi
 
@@ -692,12 +1389,11 @@ fi
 claim_section() {
   cat <<EOF
 
-## 0. Claim This Handoff (run this FIRST, before reading further)
+## 0. Claim This Handoff (run in Turn 1 — may batch read-only checks, before any edits)
 \`\`\`bash
 mkdir "$CLAIM_DIR" 2>/dev/null && echo "\$(whoami) pid \$\$ \$(date -Iseconds)" > "$CLAIM_DIR/owner" && echo CLAIMED || { echo "ALREADY CLAIMED by:"; cat "$CLAIM_DIR/owner"; }
 \`\`\`
-If it prints \`ALREADY CLAIMED\`: STOP. Another agent already owns this handoff. Do not read further or dispatch anything; tell the user two sessions raced this handoff, and end your turn.
-If it prints \`CLAIMED\`: proceed to section 1.
+If \`ALREADY CLAIMED\`: STOP immediately (another session owns this handoff; tell the user and end your turn). If \`CLAIMED\`: execute the handoff.
 EOF
 }
 
@@ -724,100 +1420,66 @@ if [[ "$DRY_RUN" != "true" ]]; then
   grep -q '^## 1' "$HANDOFF_PATH" || echo "⚠️  Handoff doc has no '## 1' (Main Context) section." >&2
   grep -q '^## 4' "$HANDOFF_PATH" || echo "⚠️  Handoff doc has no '## 4' (Immediate Next Action) section." >&2
   DOC_BYTES=$(wc -c < "$HANDOFF_PATH" | tr -d ' ')
-  if (( DOC_BYTES > 12288 )); then
-    echo "⚠️  Handoff doc is $DOC_BYTES bytes; the new session pays for all of it in turn 0." >&2
+  if (( DOC_BYTES > 6144 )); then
+    echo "⚠️  Handoff doc is $DOC_BYTES bytes (target <= 4096-6144); the new session pays for all of it in turn 0." >&2
+  fi
+  if grep -qE 'transcript(_full)?\.jsonl|\.system_generated/logs/' "$HANDOFF_PATH"; then
+    echo "⚠️  Handoff doc references raw transcript JSONL logs — summarize subagent verdicts in '## Late results' instead (reading raw transcripts burns +50K tokens in Turn 1)." >&2
   fi
 fi
-if [[ -n "$CUSTOM_PROMPT" ]]; then
-  FINAL_PROMPT="Handoff file: $HANDOFF_PATH
-Task override / focus: $CUSTOM_PROMPT
-
-Instructions:
-1. Run the Section 0 Claim command first.
-2. Internalize Section 1 (Main Context: Original User Objective, Governing Spec/Plan/Epic, and Key User Decisions/Constraints) so you preserve the full big picture.
-3. Execute Section 4 (Immediate Next Action) and continue driving toward the Section 1 objective (consulting the Governing Spec/Plan file when transitioning between steps, without doing unfocused historical audits).
-
---- BEGIN HANDOFF DOCUMENT ($HANDOFF_PATH) ---
-$HANDOFF_CONTENT
---- END HANDOFF DOCUMENT ---"
-else
-  FINAL_PROMPT="Handoff file: $HANDOFF_PATH
-
-Instructions:
-1. Run the Section 0 Claim command first.
-2. Internalize Section 1 (Main Context: Original User Objective, Governing Spec/Plan/Epic, and Key User Decisions/Constraints) so you preserve the full big picture.
-3. Execute Section 4 (Immediate Next Action) and continue driving toward the Section 1 objective (consulting the Governing Spec/Plan file when transitioning between steps, without doing unfocused historical audits).
-
---- BEGIN HANDOFF DOCUMENT ($HANDOFF_PATH) ---
-$HANDOFF_CONTENT
---- END HANDOFF DOCUMENT ---"
+SUBDIR_NOTE=""
+if [[ -n "$ACTIVE_SUBDIR" ]]; then
+  SUBDIR_NOTE="
+Working directory note: This session was launched at workspace/repo root \`$TARGET_CWD\` (never a subfolder, so Claude/Codex/AGY preserve folder trust without prompting). Active target directory/worktree: \`$ACTIVE_SUBDIR\` — ALWAYS prefix shell/git/test commands with \`cd \"$ACTIVE_SUBDIR\" && ...\` and use paths under \`$ACTIVE_SUBDIR\` (do NOT edit the root checkout directly when a worktree is active)."
 fi
+# Session core note (2026-11-19): one durable file per work stream holding the owner's goal,
+# standing decisions and checklist. A handoff doc is rewritten every hop and loses them; this
+# file is not, so it is pasted whole into every child prompt. The doc names it on a
+# `**Core note:** <path>` line. Capped so a runaway note cannot blow the turn-0 budget.
+CORE_NOTE_PATH="$(sed -n 's/^\*\*Core note:\*\*[[:space:]]*`\{0,1\}\([^`]*[^`[:space:]]\)`\{0,1\}[[:space:]]*$/\1/p' <<<"$HANDOFF_CONTENT" | head -1)"
+CORE_NOTE_PATH="${CORE_NOTE_PATH/#\~/$HOME}"
+CORE_NOTE_BLOCK=""
+if [[ -n "$CORE_NOTE_PATH" && -s "$CORE_NOTE_PATH" ]]; then
+  CORE_NOTE_BLOCK="
+
+--- BEGIN SESSION CORE NOTE ($CORE_NOTE_PATH) ---
+The owner's goal, standing decisions and checklist for this work stream. Follow it. When the owner adds or changes one, edit THIS file (never a copy) and keep the same path in your own handoff.
+$(head -c 6144 "$CORE_NOTE_PATH")
+--- END SESSION CORE NOTE ---"
+else
+  echo "⚠️  Handoff doc has no '**Core note:** <path>' line pointing at a non-empty file — the owner's goal, decisions and checklist will not travel with this handoff (see SKILL.md rule 7)." >&2
+fi
+FOCUS_LINE=""
+[[ -n "$CUSTOM_PROMPT" ]] && FOCUS_LINE="
+Task override / focus: $CUSTOM_PROMPT"
+FINAL_PROMPT="Handoff file: $HANDOFF_PATH${FOCUS_LINE}${SUBDIR_NOTE}
+
+Turn-1 Cold-Start Discipline (keep Turn-1 growth <= 15K tokens):
+1. Run Section 0's claim command + Section 4.1's immediate command ONLY in Turn 1.
+2. Do NOT speculatively bulk-read Governing Specs, SKILL.md files, or Section 6 Target Files on Turn 1 — Sections 1-5 already carry the live frontier.
+3. NEVER call read_file/Read on raw transcript*.jsonl logs (check '## Late results' or grep specific lines if strictly required).
+4. Use 'graft ask' / 'graft skeleton' and bounded line ranges before opening source files, and delegate multi-file implementation/audits (>3 files or >250 lines) to subagents so this orchestrator stays lean.
+
+--- BEGIN HANDOFF DOCUMENT ($HANDOFF_PATH) ---
+$HANDOFF_CONTENT
+--- END HANDOFF DOCUMENT ---${CORE_NOTE_BLOCK}"
 PROMPT_FILE="${HANDOFF_PATH%.md}.prompt.txt"
 printf '%s\n' "$FINAL_PROMPT" > "$PROMPT_FILE"
 
-# Ensure Graft context graph is seeded if TARGET_CWD is a worktree or repo
+# Ensure Graft context graph is seeded only when targeting a linked git worktree
+GRAFT_SEED_DIR="${ACTIVE_SUBDIR:-$TARGET_CWD}"
 if [[ "$DRY_RUN" != "true" ]] && command -v graft >/dev/null 2>&1; then
-  if git -C "$TARGET_CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    _git_common="$(git -C "$TARGET_CWD" rev-parse --git-common-dir 2>/dev/null || true)"
-    if [[ -n "$_git_common" && ! -d "$TARGET_CWD/graft" ]]; then
-      _main_repo="$(cd "$TARGET_CWD" && cd "$_git_common/.." 2>/dev/null && pwd)"
-      if [[ -d "$_main_repo/graft" ]]; then
+  if git -C "$GRAFT_SEED_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    _wt_top="$(git -C "$GRAFT_SEED_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    _git_common="$(git -C "$GRAFT_SEED_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$_wt_top" && -n "$_git_common" ]]; then
+      _wt_phys="$(cd -P "$_wt_top" 2>/dev/null && pwd || printf '%s' "$_wt_top")"
+      _main_repo="$(cd -P "$_git_common/.." 2>/dev/null && pwd || true)"
+      if [[ -n "$_main_repo" && "$_wt_phys" != "$_main_repo" && ! -d "$_wt_top/graft" && -d "$_main_repo/graft" ]]; then
         echo "🌱 Seeding graft context graph for worktree from $(basename "$_main_repo") in the background..."
-        (cd "$TARGET_CWD" && nohup graft build </dev/null >/dev/null 2>&1 &)
+        (cd "$_wt_top" && nohup graft build </dev/null >/dev/null 2>&1 &)
       fi
     fi
-  fi
-fi
-
-# Detect Herdr & T3Code availability
-HERDR_AVAILABLE=false
-if command -v herdr >/dev/null 2>&1; then
-  HERDR_STATUS=$(herdr status server 2>&1 || true)
-  # An exact line: a stopped server prints "status: not running".
-  if grep -qE '^[[:space:]]*status: running[[:space:]]*$' <<<"$HERDR_STATUS"; then
-    HERDR_AVAILABLE=true
-  fi
-fi
-
-T3_AVAILABLE=false
-T3_RUNTIME_FILE="${T3CODE_HOME:-$HOME/.t3}/userdata/server-runtime.json"
-if command -v t3 >/dev/null 2>&1 || [[ -f "$T3_RUNTIME_FILE" ]]; then
-  T3_AVAILABLE=true
-fi
-
-RESOLVED_MUX="$MULTIPLEXER"
-if [[ "$RESOLVED_MUX" == "auto" ]]; then
-  if [[ -n "${T3CODE_PROJECT_ID:-}" || "${TERM_PROGRAM:-}" == "t3code" || "${__CFBundleIdentifier:-}" == "com.t3tools.t3code" || -n "${T3CODE_CLI_PATH:-}" ]]; then
-    RESOLVED_MUX="t3"
-  elif [[ "$HERDR_AVAILABLE" == "true" ]]; then
-    RESOLVED_MUX="herdr"
-  elif [[ "$T3_AVAILABLE" == "true" ]]; then
-    RESOLVED_MUX="t3"
-  else
-    RESOLVED_MUX="none"
-  fi
-fi
-
-# Who is calling. `pane current` resolves HERDR_PANE_ID live, so it stays right
-# after a pane moves; the inherited HERDR_WORKSPACE_ID and HERDR_TAB_ID do not.
-CALLER_WORKSPACE="${HERDR_WORKSPACE_ID:-}"
-SOURCE_TAB="${HERDR_TAB_ID:-}"
-SOURCE_LABEL=""
-if [[ "$RESOLVED_MUX" == "herdr" && "$HERDR_AVAILABLE" == "true" ]]; then
-  if [[ -n "${HERDR_PANE_ID:-}" ]]; then
-    CALLER_JSON=$(herdr pane current 2>/dev/null || true)
-    LIVE_WORKSPACE=$(jq -r '.result.pane.workspace_id // empty' <<<"$CALLER_JSON" 2>/dev/null || true)
-    LIVE_TAB=$(jq -r '.result.pane.tab_id // empty' <<<"$CALLER_JSON" 2>/dev/null || true)
-    CALLER_WORKSPACE="${LIVE_WORKSPACE:-$CALLER_WORKSPACE}"
-    SOURCE_TAB="${LIVE_TAB:-$SOURCE_TAB}"
-  fi
-  if [[ -n "$SOURCE_TAB" ]]; then
-    SOURCE_JSON=$(herdr tab get "$SOURCE_TAB" 2>/dev/null || true)
-    SOURCE_LABEL=$(jq -r '.result.tab.label // empty' <<<"$SOURCE_JSON" 2>/dev/null || true)
-    # Not `// empty`: jq treats false as missing.
-    SOURCE_FOCUSED=$(jq -r '.result.tab.focused | tostring' <<<"$SOURCE_JSON" 2>/dev/null || true)
-    # Follow the handoff only if the user is on the parent; never pull them off other work.
-    [[ "$SOURCE_FOCUSED" == "false" ]] && FOCUS_FLAG="--no-focus"
   fi
 fi
 
@@ -826,7 +1488,8 @@ if [[ -z "$TAB_LABEL" ]]; then
   SLUG=$(echo "$BASENAME" | sed -E 's/handoff(-[0-9_-]+)?-//; s/^[0-9_-]+//')
   [[ "$SLUG" == "$BASENAME" ]] && SLUG=""
   DOC_TITLE=$(sed -n '1s/^# *Handoff: *//p' "$HANDOFF_PATH")
-  GIT_COMMON=$(git -C "$TARGET_CWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  LABEL_CWD="${ACTIVE_SUBDIR:-$TARGET_CWD}"
+  GIT_COMMON=$(git -C "$LABEL_CWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [[ -n "$GIT_COMMON" ]]; then
     PROJECT=$(basename "$(dirname "$GIT_COMMON")")
   else
@@ -845,6 +1508,8 @@ if [[ "$DRY_RUN" == "true" ]]; then
   echo "CLAUDE_CLOUD=$CLAUDE_CLOUD"
   echo "CLOUD_CREDIT_DOLLARS=${CLOUD_CREDIT_DOLLARS:-0}"
   echo "RESOLVED_MODEL=${CLAUDE_MODEL:-default}"
+  echo "MODEL_SOURCE=${MODEL_SOURCE:-default}"
+  echo "RESOLVED_EFFORT=${RESOLVED_EFFORT:-default}"
   echo "TARGET_CWD=$TARGET_CWD"
   echo "HANDOFF_PATH=$HANDOFF_PATH"
   echo "PROMPT_FILE=$PROMPT_FILE"
@@ -883,15 +1548,20 @@ launch_t3_handoff() {
   echo "👉 AGENT ACTION REQUIRED: call the t3_thread_launch MCP tool now with message = contents of $PROMPT_FILE"
   local t3_model_hint=""
   if [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
-    t3_model_hint=", provider 'antigravity', model '${CLAUDE_MODEL:-gemini-4-argon-medium}'"
+    t3_model_hint=", provider 'antigravity', model '${CLAUDE_MODEL:-gemini-4-neon-medium}'"
+  elif [[ "$AGENT_KIND" == "claude" ]]; then
+    t3_model_hint=", provider 'claudeAgent'${CLAUDE_MODEL:+, model '$CLAUDE_MODEL'}"
+  elif [[ "$AGENT_KIND" == "codex" ]]; then
+    t3_model_hint=", provider 'codex', model '${CLAUDE_MODEL:-gpt-6.1-terra}'"
   elif [[ -n "$CLAUDE_MODEL" ]]; then
     t3_model_hint=", model '$CLAUDE_MODEL'"
   fi
+  [[ -n "$RESOLVED_EFFORT" ]] && t3_model_hint="${t3_model_hint}, effort '$RESOLVED_EFFORT'"
   if [[ "$YOLO" == "true" ]]; then
-    echo "   (title '$TAB_LABEL', runtimeMode 'full-access', interactionMode 'default'${t3_model_hint}, workspaceStrategy matching this checkout)."
+    echo "   (title '$TAB_LABEL', runtimeMode 'full-access', interactionMode 'default'${t3_model_hint}, workspaceStrategy 'root')."
     echo "   Never interactionMode 'plan': a plan-mode thread and its subagents refuse every edit."
   else
-    echo "   (title '$TAB_LABEL', runtimeMode 'approval-required' (--no-yolo), interactionMode 'default'${t3_model_hint}, workspaceStrategy matching this checkout)."
+    echo "   (title '$TAB_LABEL', runtimeMode 'approval-required' (--no-yolo), interactionMode 'default'${t3_model_hint}, workspaceStrategy 'root')."
   fi
   echo "   Fallback for a human: paste (⌘V) into a new T3 Code thread."
   exit 0
@@ -925,14 +1595,18 @@ if [[ -n "$CALLER_WORKSPACE" && "$CREATE_RES" == *workspace_not_found* ]]; then
   echo "⚠️  Workspace $CALLER_WORKSPACE no longer exists; opening the tab in the focused workspace."
   CREATE_RES=$(herdr tab create --cwd "$TARGET_CWD" --label "$TAB_LABEL" "$FOCUS_FLAG" 2>&1 || true)
 fi
-TAB_ID=$(jq -r '.result.tab.tab_id // .result.tab_id // empty' <<<"$CREATE_RES" 2>/dev/null || true)
-ROOT_PANE=$(jq -r '.result.root_pane.pane_id // .result.pane_id // empty' <<<"$CREATE_RES" 2>/dev/null || true)
-ACTUAL_WORKSPACE=$(jq -r '.result.tab.workspace_id // empty' <<<"$CREATE_RES" 2>/dev/null || true)
+{
+  IFS= read -r TAB_ID || true
+  IFS= read -r ROOT_PANE || true
+  IFS= read -r ACTUAL_WORKSPACE || true
+} < <(
+  jq -r '(.result.tab.tab_id // .result.tab_id // ""), (.result.root_pane.pane_id // .result.pane_id // ""), (.result.tab.workspace_id // "")' <<<"$CREATE_RES" 2>/dev/null || true
+)
 
 if [[ -z "$TAB_ID" || -z "$ROOT_PANE" ]]; then
-  echo "❌ Failed to create Herdr tab. Response: $CREATE_RES" >&2
-  echo "📁 Handoff file is ready at: $HANDOFF_PATH — launch manually: $AGENT_KIND" >&2
-  exit 1
+  CREATE_ERR=$(jq -r 'if .error then "\(.error.code // "error"): \(.error.message // "unknown")" else empty end' <<<"$CREATE_RES" 2>/dev/null || true)
+  CREATE_REASON="${CREATE_ERR:-${CREATE_RES:-herdr tab create returned no tab_id or pane_id}}"
+  fail_with_reason "tab_create_failed" "Failed to create Herdr tab for '$HANDOFF_PATH' ($CREATE_REASON)." "📁 Handoff file is ready at: $HANDOFF_PATH — launch manually: $AGENT_KIND"
 fi
 
 if [[ -n "$CALLER_WORKSPACE" && -n "$ACTUAL_WORKSPACE" && "$ACTUAL_WORKSPACE" != "$CALLER_WORKSPACE" ]]; then
@@ -981,29 +1655,32 @@ fi
 # Only the claim confirms. It means the agent got its prompt and ran the first
 # command. An agent that is merely present can be stuck on a dialog.
 # --------------------------------------------------------------------------
-write_ledger() {
-  local path="${HERDR_HANDOFF_LEDGER:-${XDG_STATE_HOME:-$HOME/.local/state}/handoff/ledger.jsonl}"
-  {
-    mkdir -p "$(dirname "$path")" &&
-      jq -nc --arg ts "$(date -Iseconds)" --arg doc "$HANDOFF_PATH" --arg label "$TAB_LABEL" \
-        --arg kind "$AGENT_KIND" --arg model "$CLAUDE_MODEL" --arg cwd "$TARGET_CWD" \
-        --arg source_tab "$SOURCE_TAB" --arg tab "$TAB_ID" \
-        --arg workspace_expected "$CALLER_WORKSPACE" --arg workspace_actual "$ACTUAL_WORKSPACE" \
-        --argjson confirm_secs "$2" --arg outcome "$1" \
-        '$ARGS.named' >> "$path"
-  } 2>/dev/null || true
+capture_pane_tail() {
+  local pane_id="$1" out=""
+  out=$(herdr pane read --lines 15 --raw "$pane_id" 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' | tail -n 10 || true)
+  if [[ -z "$out" && -n "${CLOUD_LOG:-}" && -f "${CLOUD_LOG:-}" ]]; then
+    out=$(tr -d '\r' < "$CLOUD_LOG" 2>/dev/null | sed '/^[[:space:]]*$/d' | tail -n 10 || true)
+  fi
+  printf '%s' "$out"
 }
 
 finish_handoff() {
   local claimed=false pane_json agent="" status="" started=$SECONDS waited
   while :; do
-    pane_json=$(herdr pane get "$ROOT_PANE" 2>/dev/null || true)
-    agent=$(jq -r '.result.pane.agent // empty' <<<"$pane_json" 2>/dev/null || true)
-    status=$(jq -r '.result.pane.agent_status // empty' <<<"$pane_json" 2>/dev/null || true)
     if [[ -d "$CLAIM_DIR" ]]; then
       claimed=true
+      pane_json=$(herdr pane get "$ROOT_PANE" 2>/dev/null || true)
+      {
+        IFS= read -r agent || true
+        IFS= read -r status || true
+      } < <(jq -r '(.result.pane.agent // ""), (.result.pane.agent_status // "")' <<<"$pane_json" 2>/dev/null || true)
       break
     fi
+    pane_json=$(herdr pane get "$ROOT_PANE" 2>/dev/null || true)
+    {
+      IFS= read -r agent || true
+      IFS= read -r status || true
+    } < <(jq -r '(.result.pane.agent // ""), (.result.pane.agent_status // "")' <<<"$pane_json" 2>/dev/null || true)
     [[ "$status" == "exited" || "$status" == "dead" ]] && break
     (( SECONDS - started >= CONFIRM_TIMEOUT )) && break
     sleep 0.5
@@ -1014,7 +1691,20 @@ finish_handoff() {
   echo
   echo "════════════════════════════════════════════════════════════"
   if [[ "$claimed" != "true" ]]; then
-    write_ledger unclaimed "$waited"
+    local unclaimed_reason="" pane_tail="" ledger_reason=""
+    if [[ "$status" == "exited" || "$status" == "dead" ]]; then
+      unclaimed_reason="child agent (${agent:-$AGENT_KIND}) in pane $ROOT_PANE exited early (agent_status=$status) after ${waited}s before creating $CLAIM_DIR"
+    elif [[ -n "$agent" ]]; then
+      unclaimed_reason="child agent ($agent) in pane $ROOT_PANE is ${status:-unknown} after ${waited}s (timeout ${CONFIRM_TIMEOUT}s) without creating $CLAIM_DIR (likely stalled on a permission/auto-mode prompt or dialog)"
+    else
+      unclaimed_reason="no agent reported ready and $CLAIM_DIR was not created in pane $ROOT_PANE after ${waited}s (agent_status=${status:-none})"
+    fi
+    pane_tail="$(capture_pane_tail "$ROOT_PANE")"
+    ledger_reason="$unclaimed_reason"
+    if [[ -n "$pane_tail" ]]; then
+      ledger_reason="$unclaimed_reason | pane_tail: $(tr '\n' ' ' <<<"$pane_tail" | cut -c1-240)"
+    fi
+    write_ledger unclaimed "$waited" "$ledger_reason"
     if [[ -n "$agent" && "$status" != "exited" && "$status" != "dead" ]]; then
       echo "⚠️   new tab started, status unknown — check it before closing this one"
       echo "    (agent is ${status:-unknown} but has not claimed the handoff; it may be on a dialog)"
@@ -1022,11 +1712,18 @@ finish_handoff() {
       echo "⛔  DO NOT CLOSE THIS TAB — new agent NOT confirmed running"
     fi
     echo "    in tab $TAB_ID (pane $ROOT_PANE) after ${waited}s."
+    echo "    Reason: $unclaimed_reason"
+    if [[ -n "$pane_tail" ]]; then
+      echo "    📋 Child pane output ($ROOT_PANE, last lines):"
+      while IFS= read -r _pline; do
+        echo "       | $_pline"
+      done <<<"$pane_tail"
+    fi
     echo "    Handoff file: $HANDOFF_PATH"
     echo "════════════════════════════════════════════════════════════"
     return 1
   fi
-  write_ledger claimed "$waited"
+  write_ledger claimed "$waited" ""
   [[ "$agent" =~ ^[A-Za-z0-9_]+$ ]] || agent="$AGENT_KIND"
   [[ "$status" =~ ^[A-Za-z0-9_]+$ && "$status" != "unknown" ]] || status="claimed"
   echo "✅  HANDOFF CONFIRMED — $agent is $status in tab $TAB_ID (claimed in ${waited}s)"
@@ -1082,9 +1779,7 @@ if [[ "$USE_AGENT_MANAGER" == "true" ]]; then
   echo "⚠️  Managed path failed (${AGENT_START_OUT:-prompt delivery failed}); using direct launch." >&2
   if ! herdr pane list 2>/dev/null | jq -e --arg p "$ROOT_PANE" \
         '[.result.panes[]? | select(.pane_id == $p)] | length > 0' >/dev/null 2>&1; then
-    echo "❌ Pane $ROOT_PANE no longer exists (the managed agent took the tab with it)." >&2
-    echo "📁 Handoff file is ready at: $HANDOFF_PATH — launch manually." >&2
-    exit 1
+    fail_with_reason "pane_vanished" "Pane $ROOT_PANE no longer exists (the managed agent took the tab with it: ${AGENT_START_OUT:-no output}) for '$HANDOFF_PATH'." "📁 Handoff file is ready at: $HANDOFF_PATH — launch manually."
   fi
 fi
 
@@ -1094,9 +1789,7 @@ if [[ "$YOLO" == "true" ]]; then
   YOLO_FLAG="--dangerously-skip-permissions "
 fi
 QUOTED_PROMPT_FILE=$(printf '%q' "$PROMPT_FILE")
-# Quote TAB_LABEL with shlex, not printf %q: macOS bash 3.2 %q splits multibyte
-# characters such as "…" into invalid UTF-8, and herdr then rejects the command.
-QUOTED_TAB_LABEL=$(python3 -I -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$TAB_LABEL")
+QUOTED_TAB_LABEL=$(sq "$TAB_LABEL")
 
 if [[ "$AGENT_KIND" == "opencode" ]]; then
   LAUNCH_CMD="opencode --prompt \"\$(cat $QUOTED_PROMPT_FILE)\""
@@ -1107,32 +1800,33 @@ elif [[ "$AGENT_KIND" == "claude" ]]; then
     if [[ "${FALLBACK_KIND:-agy}" == "codex" ]]; then
       FALLBACK_CMD="codex --dangerously-bypass-approvals-and-sandbox -c model=\"${FALLBACK_MODEL:-gpt-6.1-terra}\" -c model_reasoning_effort=\"${CODEX_EFFORT:-medium}\" \"\$(cat $QUOTED_PROMPT_FILE)\""
     else
-      FALLBACK_CMD="agy ${YOLO_FLAG}--model ${FALLBACK_MODEL:-gemini-4-argon-medium} -i \"\$(cat $QUOTED_PROMPT_FILE)\""
+      FALLBACK_CMD="agy ${YOLO_FLAG}--model ${FALLBACK_MODEL:-gemini-4-neon-medium} -i \"\$(cat $QUOTED_PROMPT_FILE)\""
     fi
     CLOUD_LOG="${HANDOFF_PATH%.md}.cloud.log"
     QUOTED_CLOUD_LOG=$(printf '%q' "$CLOUD_LOG")
-    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $QUOTED_TAB_LABEL --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\" 2>&1 | tee $QUOTED_CLOUD_LOG; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; _sid=\$(grep -Eo 'session_[A-Za-z0-9]+' $QUOTED_CLOUD_LOG | head -n 1); if [[ -n \"\$_sid\" ]]; then claude --teleport \"\$_sid\"; fi; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-argon-medium})...\" >&2; $FALLBACK_CMD; fi"
+    LAUNCH_CMD="if CCR_ENABLE_BUNDLE=1 claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}${CLAUDE_EFFORT_FLAG}--name $QUOTED_TAB_LABEL --forward-home-settings true --cloud \"\$(cat $QUOTED_PROMPT_FILE)\" 2>&1 | tee $QUOTED_CLOUD_LOG; then mkdir -p $QUOTED_CLAIM_DIR 2>/dev/null && echo \"claude-cloud \$(date -Iseconds)\" > $QUOTED_CLAIM_DIR/owner; _sid=\$(grep -Eo 'session_[A-Za-z0-9]+' $QUOTED_CLOUD_LOG | head -n 1); if [[ -n \"\$_sid\" ]]; then claude --teleport \"\$_sid\"; fi; else echo \"⚠️ claude --cloud failed; falling back to local ${FALLBACK_KIND:-agy} (${FALLBACK_MODEL:-gemini-4-neon-medium})...\" >&2; $FALLBACK_CMD; fi"
   else
-    echo "🧠 Claude model: ${CLAUDE_MODEL:-default}"
-    LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}--name $QUOTED_TAB_LABEL \"\$(cat $QUOTED_PROMPT_FILE)\""
+    echo "🧠 Claude model: ${CLAUDE_MODEL:-default}${MODEL_SOURCE:+ (from $MODEL_SOURCE)}${CLAUDE_EFFORT_LEVEL:+, effort $CLAUDE_EFFORT_LEVEL}"
+    LAUNCH_CMD="claude ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}${CLAUDE_EFFORT_FLAG}--name $QUOTED_TAB_LABEL \"\$(cat $QUOTED_PROMPT_FILE)\""
   fi
 elif [[ "$AGENT_KIND" == "codex" ]]; then
   CODEX_YOLO_FLAG=""
   if [[ "$YOLO" == "true" ]]; then
     CODEX_YOLO_FLAG="--dangerously-bypass-approvals-and-sandbox "
   fi
-  echo "🧠 Codex model: ${CLAUDE_MODEL:-gpt-6.1-terra} (effort: ${CODEX_EFFORT:-medium})"
+  echo "🧠 Codex model: ${CLAUDE_MODEL:-gpt-6.1-terra}${MODEL_SOURCE:+ (from $MODEL_SOURCE)} (effort: ${CODEX_EFFORT:-medium})"
   LAUNCH_CMD="codex ${CODEX_YOLO_FLAG}-c model=\"${CLAUDE_MODEL:-gpt-6.1-terra}\" -c model_reasoning_effort=\"${CODEX_EFFORT:-medium}\" \"\$(cat $QUOTED_PROMPT_FILE)\""
 elif [[ "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then
-  echo "🧠 AGY model: ${CLAUDE_MODEL:-default}"
-  LAUNCH_CMD="agy ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}-i \"\$(cat $QUOTED_PROMPT_FILE)\""
+  echo "🧠 AGY model: ${CLAUDE_MODEL:-default}${MODEL_SOURCE:+ (from $MODEL_SOURCE)}${AGY_EFFORT_LEVEL:+, effort $AGY_EFFORT_LEVEL}"
+  LAUNCH_CMD="agy ${YOLO_FLAG}${CLAUDE_MODEL_FLAG}${AGY_EFFORT_FLAG}-i \"\$(cat $QUOTED_PROMPT_FILE)\""
 else
   LAUNCH_CMD="$AGENT_KIND"
 fi
-if ! herdr pane run "$ROOT_PANE" "$LAUNCH_CMD"; then
-  echo "❌ Could not start $AGENT_KIND in pane $ROOT_PANE (tab $TAB_ID)." >&2
-  echo "📁 Handoff file is ready at: $HANDOFF_PATH — launch manually: $AGENT_KIND" >&2
-  exit 1
+PANE_RUN_OUT=""
+if ! PANE_RUN_OUT=$(herdr pane run "$ROOT_PANE" "$LAUNCH_CMD" 2>&1); then
+  PANE_RUN_ERR=$(jq -r 'if .error then "\(.error.code // "error"): \(.error.message // "unknown")" else empty end' <<<"$PANE_RUN_OUT" 2>/dev/null || true)
+  PANE_RUN_REASON="${PANE_RUN_ERR:-${PANE_RUN_OUT:-herdr pane run exited non-zero with no output}}"
+  fail_with_reason "pane_run_failed" "Could not start $AGENT_KIND in pane $ROOT_PANE (tab $TAB_ID) for '$HANDOFF_PATH' ($PANE_RUN_REASON)." "📁 Handoff file is ready at: $HANDOFF_PATH — launch manually: $AGENT_KIND"
 fi
 echo "✨ Agent launched INTERACTIVELY in Herdr tab $TAB_ID with handoff context."
 if [[ "$AGENT_KIND" == "claude" || "$AGENT_KIND" == "codex" || "$AGENT_KIND" == "opencode" || "$AGENT_KIND" == "agy" || "$AGENT_KIND" == "gemini" ]]; then

@@ -8,7 +8,7 @@ argument-hint: "[agent-kind (e.g. opencode, claude, codex, gemini, agy, t3code)]
 
 ## Overview
 
-When an agent session grows large (>100k tokens), attention degrades and reasoning degrades.
+When an agent session grows very large (>320k–380k tokens), attention and reasoning begin to degrade.
 The **Handoff** skill solves this by:
 1. Compacting the current session into a high-density, self-contained **Frontier Capsule** (zero pointer indirection).
 2. Saving it to the OS temporary directory (`/tmp/handoff-<timestamp>-<slug>.md`).
@@ -17,13 +17,13 @@ The **Handoff** skill solves this by:
 ### Scope Boundary: In-Session AGY Subagents vs Herdr Handoff
 - **Inside AGY (In-Session)**: For parallel feature slices, research lookups, and adversarial reviews within the same session, use AGY's native `invoke_subagent` (`Workspace: "share"`/`"branch"`, `Model: "flash"`/`"inherit"`) and `send_message` for reactive wakeup. Do NOT spawn new Herdr tabs or file handoffs for standard in-session task delegation.
 - **When to Use Handoff**: Reserve this skill for:
-  1. **Context Window Exhaustion**: When the primary orchestrator session reaches >100k–200k tokens and needs a clean slate.
+  1. **Context Window Exhaustion**: When the primary orchestrator session reaches >320k–380k tokens and needs a clean slate.
   2. **Cross-Harness Transfers**: Handing off work between different agent harnesses (Claude Code $\leftrightarrow$ AGY $\leftrightarrow$ OpenCode).
   3. **Cross-Terminal / Cross-Repo**: Long-running background handoffs across separate terminal panes or detached repositories.
 
 ### Auto-Trigger
 
-A Claude Code Stop hook runs this skill end to end once context reaches `CLAUDE_AUTO_HANDOFF_THRESHOLD` (default `200000`; disable with `CLAUDE_AUTO_HANDOFF=0`). It waits for a safe point, and AGY has equivalent native hooks. Read [`references/auto-handoff-hooks.md`](references/auto-handoff-hooks.md) only when installing or debugging them.
+A Claude Code Stop hook runs this skill end to end once context reaches `CLAUDE_AUTO_HANDOFF_THRESHOLD` / `AGY_AUTO_HANDOFF_THRESHOLD` (default `320000` for Claude, `380000` for AGY; hard cap `480000` for Claude, `520000` for AGY; min work delta `100000`; disable with `CLAUDE_AUTO_HANDOFF=0` or `AGY_AUTO_HANDOFF=0`). It waits for a safe point, and AGY has equivalent native hooks. Read [`references/auto-handoff-hooks.md`](references/auto-handoff-hooks.md) only when installing or debugging them.
 
 ---
 
@@ -44,6 +44,20 @@ A Claude Code Stop hook runs this skill end to end once context reaches `CLAUDE_
 4. **Claim Protocol (mandatory, added 2026-09-14):**
    - A Herdr tab, and a receiving agent inside it, can end up duplicated (observed: one Herdr tab with `pane_count: 2`, both panes running an agent against the same handoff — root cause on Herdr's side, unconfirmed, not fixed here) or a human can reopen the same handoff prompt in an unrelated tab. `herdr tab list` / `ListAgents` do not catch this — they show a peer is *busy*, not that it is busy with *this exact handoff*.
    - Every generated handoff doc MUST embed the claim command from the template below as the literal first thing the receiving agent is told to run — before it reads the goal, before it acts. This makes the doc self-defending even if it reaches two agents at once, per rule (1) above: nothing about the fix should require the receiving agent to already know this skill or this rule.
+5. **Root-Folder Launch — Never Spawn into a Subfolder or Worktree (mandatory, added 2026-11-13):**
+   - **Claude Code, Codex, and Antigravity (`agy`) store folder trust by exact startup `cwd` path** — they do NOT inherit trust to subfolders or `.claude/worktrees/<F-NNN>`. Opening a child tab inside a subfolder or linked worktree triggers an interactive **"Do you trust this folder?"** dialog that stalls unattended handoffs across all three agents.
+   - `herdr-handoff.sh` automatically hoists `TARGET_CWD` up to the **main Git repository root** (via `--git-common-dir`, never above a Git repo root into an untrusted parent folder; or for non-git directories, the outermost project/workspace root), and injects a `Working directory note` into `$PROMPT_FILE` naming the active worktree/subfolder.
+   - Never pass `--allow-subdir`. When working inside `.claude/worktrees/<F-NNN>` or a subfolder, record that path in `**Worktree:**` and ALWAYS prefix Section 4 shell commands with `cd "<worktree>" && ...` so commands run in the worktree while the agent tab stays at the trusted root.
+6. **No Raw Transcript Logs & Turn-1 Cold-Start Discipline (mandatory, added 2026-11-15):**
+   - ❌ **NEVER** reference raw `transcript.jsonl` or `.system_generated/logs/` paths in the handoff doc — summarize subagent verdicts in `## Late results` instead (reading raw JSONL dumps burns +50K tokens in Turn 1).
+   - 🎯 **Target doc size ≤ 4 KB - 6 KB:** The new session pays for the entire handoff doc in Turn 0 prompt tokens.
+   - ⚡ **Turn-1 budget ≤ 15K tokens:** On Turn 1, run Section 0's claim command + Section 4.1's immediate command ONLY. Do NOT speculatively bulk-read Governing Specs, SKILL.md files, or Section 6 Target Files on Turn 1 — Sections 1-5 already carry the live frontier.
+7. **Session Core Note travels with every handoff (mandatory, added 2026-11-19):**
+   - A handoff doc is rewritten at every hop, so the owner's goal, design frames and checklist get paraphrased away (observed 2026-11-19: a child session asked the owner a design question they had already answered two hops earlier). The fix is one durable file per **work stream** that is never rewritten from memory: `~/.local/state/handoff/core-notes/<repo>--<stream-slug>.md`.
+   - It holds only three things: **Goal** (the owner's objective, verbatim, with date), **Key** (standing decisions, frames and corrections from the owner, one dated line each, with where it was said), **Checklist** (`- [ ]` / `- [x]` items toward the goal). Target ≤ 60 lines; it is not a log and not a status report.
+   - Every handoff doc carries the line `**Core note:** <absolute path>` under the `**Worktree:**` line. `herdr-handoff.sh` pastes the file into the child prompt (and warns when the line or file is missing), so the child needs no extra read.
+   - **Rules that stop sessions clashing:** (a) **one stream, one file, one path** — the path is chosen once when the stream starts and is copied unchanged into every later handoff; never create a second note for a stream that already has one, never copy the note; (b) **different streams get different files** — a session that starts unrelated work starts a new note, it does not append to the one it inherited; (c) **only the session that holds the handoff claim writes**; subagents and side sessions report back and the owner session edits; (d) **Goal and Key are append-only** — add a dated line, strike a superseded one with `~~...~~ (superseded <date>)`, never delete or reword the owner's words; checklist items are ticked, not removed; (e) edit with the Edit tool on the exact line (no whole-file rewrite from memory); (f) write a Key line in the same turn the owner states the decision, not at handoff time.
+   - No core note yet when you hand off: create it first from the session (Goal verbatim, the owner's decisions, the open checklist), then write the handoff doc.
 
 ---
 
@@ -60,13 +74,13 @@ The `# Handoff:` title becomes the tab name when `--topic` is not given, so star
 ```markdown
 # Handoff: <Task Title / Slug>
 **Worktree:** `<path>` | **Branch:** `<branch>` | **HEAD:** `<commit-hash> <commit-msg>`
+**Core note:** `<absolute path under ~/.local/state/handoff/core-notes/ — the SAME path this stream already uses>`
 
-## 0. Claim This Handoff (run this FIRST, before reading further)
+## 0. Claim This Handoff (run in Turn 1 — may batch read-only checks, before any edits)
 ```bash
 mkdir "<this-file's-own-absolute-path>.claim" 2>/dev/null && echo "$(whoami) pid $$ $(date -Iseconds)" > "<this-file's-own-absolute-path>.claim/owner" && echo CLAIMED || { echo "ALREADY CLAIMED by:"; cat "<this-file's-own-absolute-path>.claim/owner"; }
 ```
-If it prints `ALREADY CLAIMED`: STOP. Another agent (possibly a duplicate pane/tab of this same spawn) already owns this handoff. Do not read further or dispatch anything — message that session/owner if you can identify it, or tell the user two sessions raced this handoff, and end your turn.
-If it prints `CLAIMED`: proceed to section 1.
+If `ALREADY CLAIMED`: STOP immediately (another session owns this handoff; tell the user and end your turn). If `CLAIMED`: execute the handoff.
 
 ## 1. Main Context (Big Picture & User Decisions)
 - **Original User Objective & Definition of Done:** <What the user originally asked for and what complete success looks like across the whole task/epic>
@@ -107,9 +121,9 @@ If it prints `CLAIMED`: proceed to section 1.
 
 ## Step 2: Save the File
 
-Save the generated markdown to `/tmp/`:
-```bash
-/tmp/handoff-$(date +%Y-%m-%d-%H%M%S)-<slug>.md
+Write the generated markdown directly to `/tmp/` using the **`Write` tool** (never a `Bash` `cat <<EOF` heredoc):
+```text
+/tmp/handoff-<YYYY-MM-DD-HHMMSS>-<slug>.md
 ```
 
 ---
@@ -125,13 +139,18 @@ Always pass `--running N`: your own count, or the larger of it and the `--runnin
 - **`--running 0`** → the script treats it as `--close-source`: once the new agent is confirmed alive, it closes THIS tab after 20s.
 - **`--running N`, N ≥ 1** → the tab never closes itself. It must stay open to receive their results (2026-09-13 fact-board I-074: the handoff fired with 4 plan-writer agents still running; auto-closing would have lost 4 slice plans). Start nothing new. As each agent reports, `SendMessage` the report to the new tab (peer sessions show in `ListAgents`) and append it to `<handoff>.md` under "Late results" as the fallback; after the last one, print `🟢 SAFE TO CLOSE THIS TAB`.
 - **No `--running`** (manual use) → the banner says "count unknown" and never SAFE; you still decide from this count.
-- **Native T3 Code Thread Launch (Optional when running inside T3 Code with `t3_thread_launch` MCP tool available):** After running `herdr-handoff.sh` (which writes `$PROMPT_FILE` with the full inlined handoff document and copies it to clipboard), you may also directly spawn the continuation thread in T3 Code by calling `t3_thread_launch` with `title` set to the label the script prints, the matching `workspaceStrategy` (`existing_worktree` or `root`), and `message` set to the contents of `$PROMPT_FILE`.
+- **Native T3 Code Thread Launch (Optional when running inside T3 Code with `t3_thread_launch` MCP tool available):** After running `herdr-handoff.sh` (which writes `$PROMPT_FILE` with the full inlined handoff document and copies it to clipboard), you may also directly spawn the continuation thread in T3 Code by calling `t3_thread_launch` with `title` set to the label the script prints, `workspaceStrategy: "root"` (always stay on the root project; never register subfolders or `.claude/worktrees/*` as separate T3 projects), and `message` set to the contents of `$PROMPT_FILE`.
 
-Run the bundled Herdr handoff script:
+**3b. Run the bundled Herdr handoff script as a single standalone command.**
+- **MANDATORY (Claude Code `auto` mode guardrail):**
+  - Always use the expanded absolute path `/Users/pasitnusso/.claude/skills/handoff/scripts/herdr-handoff.sh` (never `~/.claude/...` or `bash ...`).
+  - **NEVER** pipe (`| tail`, `| head`), redirect (`2>&1`, `>`), or chain (`&&`, `;`) `herdr-handoff.sh`. In Claude Code `auto` mode, piping to a read-only command triggers `serverHeldShellAllow`, revoking the `settings.json` allow rule and sending the call to the server-side classifier.
+  - **NEVER** pass `--no-yolo` or `--allow-subdir` on agent handoffs (`--no-yolo` stalls on Section-0 `.claim`; `--allow-subdir` triggers subfolder Trust prompts across AGY, Codex, and Claude).
 
 ```bash
-~/.claude/skills/handoff/scripts/herdr-handoff.sh "/tmp/handoff-<timestamp>-<slug>.md" --kind <agent-kind> --mode <code|plan> --topic "<2-5 words on what the next session does>" --prompt "<immediate next steps>" --running <N> [--no-yolo]
+/Users/pasitnusso/.claude/skills/handoff/scripts/herdr-handoff.sh "/tmp/handoff-<timestamp>-<slug>.md" --mode <code|plan> --topic "<2-5 words on what the next session does>" --prompt "<immediate next steps>" --running <N>
 ```
+*(By default, `herdr-handoff.sh` automatically derives both `--kind` and `--model` / `--effort` from the calling session — e.g., `agy` on `Gemini 4 Carbon (Medium)` spawns `agy --model gemini-4-carbon-medium`, and `claude` on `claude-fable-5-2` spawns `claude --model claude-fable-5-2`. **NEVER** pass `--model claude-opus-5-5` or switch/downgrade the active session's model on handoff unless the user explicitly asked for a different model — owner-chosen session carry-over overrides general subagent routing rules.)*
 
 The script ends with a banner — `✅ HANDOFF CONFIRMED` followed by `⛔ KEEP THIS TAB OPEN — N agents still running` (N ≥ 1), `🚪 Closing THIS tab in 20s` (0 running), `🟢 SAFE TO CLOSE` (0 running, no tab id to close) or `⚠️ agents running: count unknown` (no `--running`); or `⚠️ new tab started, status unknown` / `⛔ DO NOT CLOSE` (no agent confirmed after 60s; exit 1). **Only the handoff's `.claim` directory confirms** (typically 5-15s, `HERDR_HANDOFF_CONFIRM_TIMEOUT` default 90): it proves the agent got its prompt and ran the first command. A pane that merely shows an agent proves neither, since it can be stuck on a dialog, so the parent never closes on status alone. An already-claimed doc is refused before any tab opens.
 
@@ -146,17 +165,22 @@ The script ends with a banner — `✅ HANDOFF CONFIRMED` followed by `⛔ KEEP 
 
 ### Where the Tab Opens
 
-In the caller's own workspace, resolved live from `herdr pane current`, then verified against the created tab; a mismatch prints a ⚠️ line. Right after the parent tab: Herdr appends new tabs at the end, so the script moves it with the socket call `tab.move` (`scripts/herdr_tab_move.py`; `herdr tab` has no move subcommand). When the parent closes, the new tab sits in its place. If the move fails, a ⚠️ line says so and the tab stays at the end. Focus follows only if the user is on the parent tab, so a handoff never pulls them off other work. `--no-focus` forces it off. Without `--cwd`, the tab starts in the doc's `**Worktree:**` or `**Repo:**` directory.
+In the caller's own workspace, resolved live from `herdr pane current`, then verified against the created tab; a mismatch prints a ⚠️ line. Right after the parent tab: Herdr appends new tabs at the end, so the script moves it with the socket call `tab.move` (`scripts/herdr_tab_move.py`; `herdr tab` has no move subcommand). When the parent closes, the new tab sits in its place. If the move fails, a ⚠️ line says so and the tab stays at the end. Focus follows only if the user is on the parent tab, so a handoff never pulls them off other work. `--no-focus` forces it off. The tab's `--cwd` is always hoisted to the main Git repository root (or, outside Git, the outermost project/workspace root) — never a subfolder or `.claude/worktrees/*` — so Claude, Codex, and AGY reuse existing folder trust without prompting; when `**Worktree:**` points to a subfolder or linked worktree, `$PROMPT_FILE` carries an explicit `Working directory note` naming the active target directory.
 
 Each handoff appends one line to `~/.local/state/handoff/ledger.jsonl` (parent and child tab, workspaces, seconds to claim, outcome). If the script warns that the skill is behind `origin/main`, merged fixes are not active in this checkout.
 
 ### YOLO Mode (Default):
 All handoffs launch with permission-skipping enabled by default (`--dangerously-skip-permissions` for `claude`, `agy`, and `gemini`), ensuring the incoming agent never gets stalled on interactive permission prompts. Pass `--no-yolo` to disable.
 
-### Choosing `--mode` (always pass it for `--kind claude`):
-- `code` → new session starts on **Sonnet** locally (or auto-switches to local `codex` `gpt-6.1-terra` `medium` when local Claude quota is low and Codex quota is high). Use when the Immediate Next Action is implementation: editing code, running/fixing tests, executing tasks of an already-approved plan.
-- `plan` → new session starts on the **default model** locally (or auto-switches to local `agy` `gemini-4-argon-medium` when local Claude quota is low). Use for brainstorming, specs, plans, research, review/audit, or debugging with an unknown root cause.
-- Unsure → `plan`. `--model <name>` overrides both.
+### Agent & Model Carry-Over (Default = Calling Session) + `--mode` Fallbacks:
+- **Default carry-over (all harnesses — `agy`, `claude`, `codex`, including `claude-fable-5-2`):** By default, the new session inherits **both the calling session's agent (`--kind`) and its active model + effort (`--model` / `--effort`)** from the live session transcript, Herdr pane metadata, or process args (e.g., `agy` on `Gemini 4 Carbon (Medium)` → `agy --model gemini-4-carbon-medium`; `claude` on `claude-fable-5-2` → `claude --model claude-fable-5-2`; `claude` on `claude-opus-5-5` → `claude --model claude-opus-5-5`; `codex` on `gpt-5.4` → `codex -c model="gpt-5.4"`). Never downgrade a `claude-fable-5-2` session to Opus/Sonnet on handoff unless the user explicitly requested it.
+- **Precedence order:**
+  1. Explicit CLI flags: `--kind <agent>`, `--model <name>`, `--effort <level>` (AGY also accepts human display names like `"Carbon Medium"` or `"Gemini 4 Carbon (Medium)"`).
+  2. Handoff doc header: optional `**Agent:** \`<kind>\` | **Model:** \`<model>\` | **Effort:** \`<level>\`` on line 2-3.
+  3. Calling session's live agent + model + effort (when keeping the same agent family).
+  4. `--mode <code|plan>` fallback defaults (used only when no session model / `--model` is known, or on cross-harness handoffs):
+     - `code` → **Sonnet** on `claude`, `gemini-4-hydrogen-high` on `agy` (or auto-switches low-quota `claude` coding handoffs to `codex` `gpt-6.1-terra` `medium` when Codex quota is high). Use for editing code, running/fixing tests, or executing tasks of an already-approved plan.
+     - `plan` → **default model** on `claude`, `gemini-4-neon-medium` on `agy` (or auto-switches low-quota `claude` plan handoffs to `agy` `gemini-4-neon-medium`). Use for brainstorming, specs, plans, research, review/audit, or debugging with an unknown root cause.
 - **Mechanical Free-Credit + Jev `cloud_compatible` Gate**: `herdr-handoff.sh` first mechanically checks `~/.claude.json` (`cachedUsageUtilization.utilization.iguana_necktie` / promo credit buckets) for `remaining_dollars > 0`. Only when free credits exist **AND** Jev System-1 confirms the task is strictly read-only review/research (`cloud_compatible >= 0.85` and `is_reviewer >= 0.50`, with zero references to `.superpowers/`, `orbstack`, `kubectl`, `deploy-local`, `shoot.mjs`, `psrw ship`, `dispatch-worker`, or `.claude/worktrees/`), `--kind claude` auto-routes to `CCR_ENABLE_BUNDLE=1 claude --cloud` and immediately chains `claude --teleport <session_id>` so the terminal stays attached. All coding, SDD worktree, and local-cluster tasks stay 100% local on Mac (`claude` -> `codex` / `agy` fallback).
 
 ### Supported Agent Kinds (`--kind`):
