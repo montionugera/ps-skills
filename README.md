@@ -150,7 +150,7 @@ ratchet switch <slug> --what "<what changed upstream>"   # once per slug, after 
 ratchet status           # at most 10 lines
 ```
 
-A pass is valid only for one artifact, one gate and one input file, so changing the gate makes every older pass stale. A crashed check is never stored. `gate` fails closed. Without `.ratchet.json` every command exits 0 and prints nothing. A check must depend only on the artifact, its input file and the gate files, and the project path must not contain spaces. `.ratchet.json` is part of every gate: treat an edit to it like an edit to a gate file. `gate` and `verdict` find the project from the artifact's folder; a door should run them with the project root as the working folder. Tests: `python3 -m pytest tests/test_ratchet.py -q`.
+A pass is valid only for one artifact, one gate and one input file, so changing the gate makes every older pass stale. A crashed check is never stored. `gate` fails closed. Without `.ratchet.json` every command exits 0 and prints nothing. A check must depend only on the artifact, its input file and the gate files, and the project path must not contain spaces. `.ratchet.json` is part of every gate: treat an edit to it like an edit to a gate file. `gate` and `verdict` find the project from the artifact's folder; a door should run them with the project root as the working folder. A project's `.ratchet.json` must be the only one at or above its artifacts, and an artifact must not be a symlink out of the project; `gate` denies both. Tests: `python3 -m pytest tests/test_ratchet.py -q`.
 
 ## Plugin Bridge & Antigravity (agy) Context Budget (`ps-plugin-bridge`)
 

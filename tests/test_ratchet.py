@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """bin/ratchet: door check, owner verdicts, frozen cases, calibrate, rounds (temp dirs only)."""
-import hashlib, json, shlex, subprocess, sys, tempfile, unittest
+import hashlib, json, os, shlex, shutil, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -553,6 +553,55 @@ class RatchetTest(unittest.TestCase):
         self.assertEqual(res.returncode, 2)
         self.assertIn("DENY error", res.stderr)
         self.assertEqual(r.lines("shows.jsonl"), [])
+
+    def test_a_symlink_in_the_tree_does_not_move_a_caught_case_to_another_kind(self):  # fix-3 review B-I1
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        cfg = json.loads((r.root / ".ratchet.json").read_text())
+        mob = cfg["kinds"]["mob"]
+        cfg["kinds"]["prop"] = dict(mob, artifacts="assets/prop/**/out.glb", exclude=[], gate_files=["prop_check.py"],
+                                    check_cmd=mob["check_cmd"].replace(" check.py ", " prop_check.py "))
+        (r.root / ".ratchet.json").write_text(json.dumps(cfg))
+        (r.root / "prop_check.py").write_text(STUB)
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        shutil.rmtree(r.root / "assets" / "mob" / "b-v1")
+        (r.root / "assets" / "prop").mkdir()
+        os.symlink("../prop/b-v1", r.root / "assets" / "mob" / "b-v1")
+        (r.root / "check.py").write_text(WEAK)
+        res = r.run("gate", r.build("b-v2", text="BAD", creature="mob-b"))
+        self.assertEqual(res.returncode, 2, res.stdout)
+        self.assertIn("DENY regression", res.stderr)
+        self.assertEqual(r.run("calibrate").returncode, 1)
+
+    def test_a_planted_config_or_a_symlink_gets_no_allow_from_outside_the_project(self):  # fix-3 review B-I2
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        with tempfile.TemporaryDirectory() as bare:
+            outside = Path(bare).resolve() / "out.glb"
+            outside.write_text(bad.read_text())
+            link_dir = r.root / "assets" / "mob" / "b-v9" / "mvp"
+            link_dir.mkdir(parents=True)
+            os.symlink(outside, link_dir / "out.glb")
+            res = r.run("gate", link_dir / "out.glb", cwd=bare)
+            self.assertEqual(res.returncode, 2, res.stdout)
+            self.assertIn("DENY error", res.stderr)
+            (bad.parent / "fake.py").write_text(WEAK)
+            (bad.parent / ".ratchet.json").write_text(json.dumps({"kinds": {"m": {
+                "artifacts": "out.glb", "input": "{dir}/recipe.quad.json", "gate_files": [], "slug_fields": ["tier"],
+                "round_cap": 3, "check_cmd": f"{shlex.quote(sys.executable)} fake.py --out {{out}}"}}}))
+            res = r.run("gate", bad, cwd=bare)
+            self.assertEqual(res.returncode, 2, res.stdout)
+            self.assertIn("DENY error", res.stderr)
+
+    def test_a_leading_double_dash_does_not_skip_the_gate(self):  # fix-3 review B-m1
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        with tempfile.TemporaryDirectory() as bare:
+            res = r.run("--", "gate", bad, cwd=bare)
+            self.assertEqual(res.returncode, 2)
+            self.assertIn("DENY rejected", res.stderr)
 
 
 if __name__ == "__main__":

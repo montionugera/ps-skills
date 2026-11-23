@@ -100,10 +100,14 @@ def atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def roots_above(folder: Path) -> list[Path]:
+    """Every folder at or above `folder` that holds .ratchet.json, nearest first, each resolved."""
+    return [p.resolve() for p in [folder, *folder.parents] if (p / ".ratchet.json").is_file()]
+
+
 def find_root(start: Path) -> Path | None:
     """First parent holding .ratchet.json, else None."""
-    cur = start.resolve()
-    return next((p for p in [cur, *cur.parents] if (p / ".ratchet.json").is_file()), None)
+    return next(iter(roots_above(start.resolve())), None)
 
 
 def load(root: Path) -> tuple[dict, Path]:
@@ -112,17 +116,21 @@ def load(root: Path) -> tuple[dict, Path]:
     return cfg, root / cfg.get("ledger", "ratchet")
 
 
-def classify(root: Path, cfg: dict, artifact: Path) -> tuple[str, dict] | None:
-    """(kind name, kind cfg) or None."""
-    try:
-        rel = artifact.resolve().relative_to(root.resolve()).as_posix()
-    except ValueError:
-        return None
+def classify_rel(cfg: dict, rel: str) -> tuple[str, dict] | None:
+    """(kind name, kind cfg) for a root-relative POSIX path, or None. A text match: it never reads the tree."""
     for kind, kind_cfg in cfg["kinds"].items():
         if fnmatch.fnmatchcase(rel, kind_cfg["artifacts"]) and not any(
                 fnmatch.fnmatchcase(rel, e) for e in kind_cfg.get("exclude", [])):
             return kind, kind_cfg
     return None
+
+
+def classify(root: Path, cfg: dict, artifact: Path) -> tuple[str, dict] | None:
+    """(kind name, kind cfg) or None, by where the artifact really is under root."""
+    try:
+        return classify_rel(cfg, artifact.resolve().relative_to(root.resolve()).as_posix())
+    except ValueError:
+        return None
 
 
 def input_of(kind_cfg: dict, artifact: Path) -> Path:
@@ -211,10 +219,13 @@ def case_states(root: Path, cfg: dict, ledger: Path, only_kind: str | None = Non
             if not isinstance(data.get("path"), str) or not isinstance(frozen, list) \
                     or not all(isinstance(f, str) for f in frozen):
                 raise ValueError("path or gate_files missing")
+            if not data["path"] or data["path"].startswith("/") or ".." in data["path"].split("/"):
+                raise ValueError("path must be relative and stay inside the project")
         except (ValueError, KeyError, OSError, TypeError):
             out.append({"kind": None, "state": "error", "sha": d.name, "caught": False, "dir": d, "data": {}, "bad": True})
             continue
-        kind, kind_cfg = classify(root, cfg, root / data["path"]) or (None, None)
+        # by the stored text, never through the live tree: a symlink there must not move a case to another kind
+        kind, kind_cfg = classify_rel(cfg, data["path"]) or (None, None)
         if only_kind and kind is not None and kind != only_kind:
             continue
         case = {"kind": kind, "state": "error", "sha": sha, "caught": data["caught"], "dir": d, "data": data, "bad": False}
@@ -518,6 +529,8 @@ class SilentUsageParser(argparse.ArgumentParser):
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--"]:  # a leading "--" must not hide which command this is
+        argv = argv[1:]
     root = find_root(Path.cwd())
     if root is None and argv[:1] not in (["gate"], ["verdict"]):  # gate/verdict may find the project from the artifact
         return 0
@@ -554,9 +567,12 @@ def main(argv=None) -> int:
 
     args = parser.parse_args(argv)
     if args.subcommand in ("gate", "verdict"):
-        art_root = find_root(Path(args.artifact).resolve().parent)
-        if art_root and root and art_root != root:
-            why = f"artifact project {art_root} is not the working project {root}"
+        real = roots_above(Path(args.artifact).resolve().parent)  # where the bytes are
+        named = roots_above(Path(os.path.abspath(args.artifact)).parent)  # where the path as given points
+        art_root = real[0] if real else None
+        if len(real) > 1 or real != named or (art_root and root and art_root != root):
+            why = (f"cannot tell which project owns {args.artifact}: a nested .ratchet.json, a symlink out of "
+                   "the project, or a different working project")
             return deny(f"error: {why}") if args.subcommand == "gate" else fail(why)
         root = art_root or root
     if root is None:
