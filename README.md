@@ -138,6 +138,20 @@ export AI_AGENT_AUTO_DISPATCH_SKILL_DISPATCH_ROUTING_PREFERENCE="cursor:gemini-3
 | `AGY_THINK_EFFORT` | unset | AGY-specific thinker effort override |
 | `DISPATCH_THINKER_SKIP_CLAUDE` | unset | `1` marks Claude unavailable |
 
+## Ratchet: a rejected file becomes a permanent test (`ratchet`)
+
+A project opts in with a `.ratchet.json` at its root that names, per kind of artifact, the project's own check command and the files that make up that gate. State lives in plain files under the project's ledger folder.
+
+```bash
+ratchet verdict <artifact> rejected --quote "<the owner's words>"   # freezes the file and its input as a case
+ratchet calibrate        # every case must still fail today's gate; a case that now passes is a regression
+ratchet gate <artifact>  # exit 0 allow, exit 2 deny (check fails, regression, rejected file, round cap, undeclared input change)
+ratchet switch <slug> --what "<what changed upstream>"   # once per slug, after the round cap
+ratchet status           # at most 10 lines
+```
+
+A pass is valid only for one artifact, one gate and one input file, so changing the gate makes every older pass stale. A crashed check is never stored. `gate` fails closed. Without `.ratchet.json` every command exits 0 and prints nothing. Tests: `python3 -m pytest tests/test_ratchet.py -q`.
+
 ## Plugin Bridge & Antigravity (agy) Context Budget (`ps-plugin-bridge`)
 
 Bridge Claude plugins (e.g. `superpowers`, `frontend-design`) directly into Google Antigravity CLI (`~/.gemini/config/plugins`):

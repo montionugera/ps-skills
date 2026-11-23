@@ -1,0 +1,702 @@
+#!/usr/bin/env python3
+"""ratchet: test ratchet enforcement tooling."""
+from __future__ import annotations
+
+import argparse
+import difflib
+import fnmatch
+import hashlib
+import json
+import os
+import secrets
+import shlex
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def file_sha(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def gate_hash(root: Path, kind_cfg: dict) -> str:
+    """sha256 over the check command text and the bytes of every gate file. Raises FileNotFoundError."""
+    h = hashlib.sha256(kind_cfg["check_cmd"].encode())
+    for rel in sorted(kind_cfg["gate_files"]):
+        h.update(b"\0" + rel.encode() + b"\0" + (root / rel).read_bytes())
+    return h.hexdigest()
+
+
+def run_check(root: Path, ledger: Path, kind_cfg: dict, artifact: Path, input_path: Path, key: str) -> dict:
+    """key = '<a12>.<g12>.<i12>'. Reuses checks/<key>.json only for PASS or FAIL; otherwise runs check_cmd with cwd=root."""
+    rec_path = ledger / "checks" / f"{key}.json"
+    if rec_path.is_file():
+        rec = json.loads(rec_path.read_text())
+        if rec.get("result") in ("PASS", "FAIL"):
+            return rec
+    out_path = ledger / "checks" / f"{key}.out.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.unlink(missing_ok=True)
+    subs = {"{artifact}": str(artifact), "{input}": str(input_path), "{out}": str(out_path), "{dir}": str(artifact.parent)}
+    cmd = []
+    for part in shlex.split(kind_cfg["check_cmd"]):
+        for token, value in subs.items():
+            part = part.replace(token, value)
+        cmd.append(part)
+    try:
+        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=300)
+        code, tail = proc.returncode, (proc.stderr or proc.stdout)[-300:]
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        code, tail = -1, str(exc)
+    all_pass = None
+    try:
+        all_pass = json.loads(out_path.read_text()).get("all_pass")
+    except (OSError, ValueError, AttributeError):
+        pass
+    if code == 0 and all_pass is True:
+        result = "PASS"
+    elif all_pass is False:
+        result = "FAIL"
+    else:
+        result = "ERROR"
+    rec = {"result": result, "exit": code, "detail": tail,
+           "out": str(out_path.relative_to(ledger)) if out_path.is_file() else None}
+    if result != "ERROR":
+        rec_path.write_text(json.dumps(rec))
+    return rec
+
+
+def find_root(start: Path) -> Path | None:
+    """First parent holding .ratchet.json, else None."""
+    cur = start.resolve()
+    for parent in [cur, *cur.parents]:
+        if (parent / ".ratchet.json").is_file():
+            return parent
+    return None
+
+
+def load(root: Path) -> tuple[dict, Path]:
+    """(config, root / config['ledger'])."""
+    cfg = json.loads((root / ".ratchet.json").read_text())
+    ledger = root / cfg.get("ledger", "ratchet")
+    return cfg, ledger
+
+
+def classify(root: Path, cfg: dict, artifact: Path) -> tuple[str, dict] | None:
+    """(kind name, kind cfg) or None."""
+    try:
+        rel = artifact.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+    for kind, kind_cfg in cfg.get("kinds", {}).items():
+        pat = kind_cfg.get("artifacts", "")
+        if fnmatch.fnmatchcase(rel, pat):
+            excluded = False
+            for exc in kind_cfg.get("exclude", []):
+                if fnmatch.fnmatchcase(rel, exc):
+                    excluded = True
+                    break
+            if not excluded:
+                return kind, kind_cfg
+    return None
+
+
+def input_of(kind_cfg: dict, artifact: Path) -> Path:
+    """kind_cfg['input'] with {dir} replaced; may not exist."""
+    inp_tmpl = kind_cfg.get("input", "")
+    inp_str = inp_tmpl.replace("{dir}", str(artifact.resolve().parent))
+    return Path(inp_str).resolve()
+
+
+def slug_of(kind_cfg: dict, input_path: Path) -> str:
+    """Raises KeyError when a slug field is missing."""
+    data = json.loads(input_path.read_text())
+    parts = []
+    for f in kind_cfg.get("slug_fields", []):
+        if f not in data:
+            raise KeyError(f"Missing slug field: {f}")
+        parts.append(str(data[f]))
+    return "/".join(parts)
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    """[] when the file is missing; raises ValueError on a line that is not JSON."""
+    if not path.is_file():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        records.append(json.loads(line))
+    return records
+
+
+def append_jsonl(path: Path, record: dict) -> None:
+    """Creates parent folders; one json.dumps(record, ensure_ascii=False) line."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def newest_verdict_by_sha(ledger: Path) -> dict[str, dict]:
+    newest = {}
+    for v in read_jsonl(ledger / "verdicts.jsonl"):
+        sha = v.get("sha256")
+        if not sha:
+            continue
+        if sha not in newest or v.get("ts", "") >= newest[sha].get("ts", ""):
+            newest[sha] = v
+    return newest
+
+
+def calibrate(root: Path, cfg: dict, ledger: Path, only_kind: str | None = None) -> tuple[list[tuple[str, str, str]], list[str], list[str]]:
+    """Returns (case_states, false_blocks, regressed).
+    case_states: (kind, state, sha256), state 'caught' (FAIL), 'blind' (PASS) or 'error' (ERROR), one per cases/<sha256>/.
+      Each case is checked on its frozen copy: artifact = cases/<sha>/<case['artifact']>, input = cases/<sha>/<case['input']>.
+    false_blocks: paths whose newest verdict is 'satisfied', whose file still has that sha256, and whose check is not PASS.
+    regressed: sha256 of cases in baseline['caught'][kind] whose state is not 'caught', plus every 'error' case."""
+    base_file = ledger / "baseline.json"
+    baseline = {}
+    if base_file.is_file():
+        try:
+            baseline = json.loads(base_file.read_text())
+        except Exception:
+            pass
+
+    case_states: list[tuple[str, str, str]] = []
+    cases_dir = ledger / "cases"
+    if cases_dir.is_dir():
+        for d in sorted(cases_dir.iterdir()):
+            cj = d / "case.json"
+            if not cj.is_file():
+                continue
+            try:
+                c_data = json.loads(cj.read_text())
+            except Exception:
+                continue
+            c_kind = c_data.get("kind", "")
+            if only_kind and c_kind != only_kind:
+                continue
+            c_sha = c_data.get("sha256", d.name)
+            kind_cfg = cfg.get("kinds", {}).get(c_kind)
+            if not kind_cfg:
+                case_states.append((c_kind, "error", c_sha))
+                continue
+            c_art = d / c_data.get("artifact", "")
+            c_inp = d / c_data.get("input", "")
+            if not c_art.is_file() or not c_inp.is_file():
+                case_states.append((c_kind, "error", c_sha))
+                continue
+            try:
+                g_hash = gate_hash(root, kind_cfg)
+                c_isha = file_sha(c_inp)
+                key = f"{c_sha[:12]}.{g_hash[:12]}.{c_isha[:12]}"
+                res = run_check(root, ledger, kind_cfg, c_art, c_inp, key)
+                if res.get("result") == "FAIL":
+                    state = "caught"
+                elif res.get("result") == "PASS":
+                    state = "blind"
+                else:
+                    state = "error"
+            except Exception:
+                state = "error"
+            case_states.append((c_kind, state, c_sha))
+
+    false_blocks: list[str] = []
+    newest_by_path: dict[str, dict] = {}
+    for v in read_jsonl(ledger / "verdicts.jsonl"):
+        p = v.get("path")
+        if p:
+            if p not in newest_by_path or v.get("ts", "") >= newest_by_path[p].get("ts", ""):
+                newest_by_path[p] = v
+    for p_str, v in newest_by_path.items():
+        c_kind = v.get("kind", "")
+        if only_kind and c_kind != only_kind:
+            continue
+        if v.get("level") == "satisfied":
+            p = Path(p_str)
+            if p.is_file() and file_sha(p) == v.get("sha256"):
+                kind_cfg = cfg.get("kinds", {}).get(c_kind)
+                if not kind_cfg:
+                    false_blocks.append(p_str)
+                    continue
+                inp = input_of(kind_cfg, p)
+                if not inp.is_file():
+                    false_blocks.append(p_str)
+                    continue
+                try:
+                    g_hash = gate_hash(root, kind_cfg)
+                    i_hash = file_sha(inp)
+                    a_hash = v["sha256"]
+                    key = f"{a_hash[:12]}.{g_hash[:12]}.{i_hash[:12]}"
+                    res = run_check(root, ledger, kind_cfg, p, inp, key)
+                    if res.get("result") != "PASS":
+                        false_blocks.append(p_str)
+                except Exception:
+                    false_blocks.append(p_str)
+
+    regressed: list[str] = []
+    kinds_checked = [only_kind] if only_kind else list(cfg.get("kinds", {}).keys())
+    caught_by_kind = baseline.get("caught", {})
+    state_map = {(k, s): st for k, st, s in case_states}
+    for k in kinds_checked:
+        for b_sha in caught_by_kind.get(k, []):
+            st = state_map.get((k, b_sha))
+            if st != "caught":
+                if b_sha not in regressed:
+                    regressed.append(b_sha)
+    for k, st, s in case_states:
+        if st == "error" and s not in regressed:
+            regressed.append(s)
+
+    return case_states, false_blocks, regressed
+
+
+def regression_cases(root: Path, cfg: dict, ledger: Path, kind: str, kind_cfg: dict) -> list[str]:
+    """[] when baseline gate_hash[kind] equals the current gate hash. Otherwise calibrate that kind: if clean, write that
+    kind's baseline entries and return []; if not, return the <a12> of each regressed case (['false-block'] when only a
+    false block was found)."""
+    base_file = ledger / "baseline.json"
+    baseline = {}
+    if base_file.is_file():
+        try:
+            baseline = json.loads(base_file.read_text())
+        except Exception:
+            pass
+
+    cur_gh = gate_hash(root, kind_cfg)
+    base_gh = baseline.get("gate_hash", {}).get(kind)
+    if base_gh is not None and base_gh == cur_gh:
+        return []
+
+    case_states, false_blocks, regressed = calibrate(root, cfg, ledger, only_kind=kind)
+    if not regressed and not false_blocks:
+        baseline["ts"] = datetime.now(timezone.utc).isoformat()
+        baseline.setdefault("gate_hash", {})[kind] = cur_gh
+        baseline.setdefault("caught", {})[kind] = [sha for c_kind, state, sha in case_states if c_kind == kind and state == "caught"]
+        base_file.parent.mkdir(parents=True, exist_ok=True)
+        base_file.write_text(json.dumps(baseline, indent=2))
+        return []
+    else:
+        if regressed:
+            return [r[:12] for r in regressed]
+        else:
+            return ["false-block"]
+
+
+def round_state(ledger: Path, slug: str, cap: int) -> str | None:
+    """'round-cap', 'parked' or None."""
+    switches = [s for s in read_jsonl(ledger / "switches.jsonl") if s.get("slug") == slug]
+    switch_ts = switches[-1].get("ts") if switches else None
+
+    verdicts = read_jsonl(ledger / "verdicts.jsonl")
+    count = 0
+    for v in verdicts:
+        if v.get("slug") == slug and v.get("level") in ("rejected", "for-now"):
+            if switch_ts is None or v.get("ts", "") > switch_ts:
+                count += 1
+
+    if count >= cap:
+        if switch_ts is None:
+            return "round-cap"
+        else:
+            return "parked"
+    return None
+
+
+def cmd_gate(root: Path, cfg: dict, ledger: Path, args) -> int:
+    try:
+        return _cmd_gate_inner(root, cfg, ledger, args)
+    except Exception as exc:
+        sys.stderr.write(f"DENY error: {exc}\n")
+        return 2
+
+
+def _cmd_gate_inner(root: Path, cfg: dict, ledger: Path, args) -> int:
+    artifact = Path(args.artifact).resolve()
+    if not artifact.is_file():
+        sys.stderr.write(f"DENY error: artifact missing: {artifact}\n")
+        return 2
+
+    cls = classify(root, cfg, artifact)
+    if cls is None:
+        sys.stderr.write("DENY error: path matches no kind or is excluded\n")
+        return 2
+    kind, kind_cfg = cls
+
+    input_path = input_of(kind_cfg, artifact)
+    if not input_path.is_file():
+        sys.stderr.write(f"DENY error: input file missing: {input_path}\n")
+        return 2
+
+    try:
+        slug = slug_of(kind_cfg, input_path)
+    except KeyError as exc:
+        sys.stderr.write(f"DENY error: {exc}\n")
+        return 2
+
+    try:
+        g_hash = gate_hash(root, kind_cfg)
+    except FileNotFoundError as exc:
+        sys.stderr.write(f"DENY error: gate file missing: {exc}\n")
+        return 2
+
+    art_sha = file_sha(artifact)
+    inp_sha = file_sha(input_path)
+
+    reg_cases = regression_cases(root, cfg, ledger, kind, kind_cfg)
+    if reg_cases:
+        sys.stderr.write(f"DENY regression: {' '.join(reg_cases)}\n")
+        return 2
+
+    newest_v = newest_verdict_by_sha(ledger)
+    v = newest_v.get(art_sha)
+    if v and v.get("level") == "rejected":
+        sys.stderr.write(f"DENY rejected: artifact {art_sha[:12]} was rejected\n")
+        return 2
+
+    cap = kind_cfg.get("round_cap", 3)
+    r_state = round_state(ledger, slug, cap)
+    if r_state == "round-cap":
+        sys.stderr.write(f"DENY round-cap: slug {slug} reached round cap; run ratchet switch\n")
+        return 2
+    elif r_state == "parked":
+        sys.stderr.write(f"DENY parked: slug {slug} is parked after switch\n")
+        return 2
+
+    slug_shows = [s for s in read_jsonl(ledger / "shows.jsonl") if s.get("slug") == slug]
+    last_show = slug_shows[-1] if slug_shows else None
+    diff_text = None
+    if last_show and last_show.get("inputs_hash") != inp_sha:
+        if not args.inputs_changed:
+            sys.stderr.write("DENY inputs-changed: inputs changed without --inputs-changed\n")
+            return 2
+        old_hash = last_show.get("inputs_hash")
+        old_file = ledger / "inputs" / old_hash if old_hash else None
+        old_lines = old_file.read_text(errors="replace").splitlines(keepends=True) if (old_file and old_file.is_file()) else []
+        new_lines = input_path.read_text(errors="replace").splitlines(keepends=True)
+        diff_text = "".join(difflib.unified_diff(old_lines, new_lines, "previous", "current"))[:4000]
+
+    key = f"{art_sha[:12]}.{g_hash[:12]}.{inp_sha[:12]}"
+    rec = run_check(root, ledger, kind_cfg, artifact, input_path, key)
+    if rec["result"] == "ERROR":
+        sys.stderr.write(f"DENY error: {rec.get('detail', '')}\n")
+        return 2
+    elif rec["result"] == "FAIL":
+        out_p = (ledger / rec["out"]).resolve() if rec.get("out") else (ledger / "checks" / f"{key}.out.json").resolve()
+        tail_str = f" {rec['detail']}" if rec.get("detail") else ""
+        sys.stderr.write(f"DENY check-fail:{tail_str} {out_p}\n")
+        return 2
+
+    blind_cases = []
+    cases_dir = ledger / "cases"
+    if cases_dir.is_dir():
+        for d in sorted(cases_dir.iterdir()):
+            cj = d / "case.json"
+            if cj.is_file():
+                try:
+                    c_data = json.loads(cj.read_text())
+                    if c_data.get("kind") == kind:
+                        c_art = d / c_data["artifact"]
+                        c_inp = d / c_data["input"]
+                        c_sha = c_data["sha256"]
+                        c_isha = file_sha(c_inp)
+                        c_key = f"{c_sha[:12]}.{g_hash[:12]}.{c_isha[:12]}"
+                        c_res = run_check(root, ledger, kind_cfg, c_art, c_inp, c_key)
+                        if c_res.get("result") == "PASS":
+                            blind_cases.append(c_sha[:12])
+                except Exception:
+                    pass
+
+    print(f"ALLOW {slug} {art_sha[:12]}")
+    for b in sorted(blind_cases):
+        print(f"BLIND {b}")
+
+    if not args.dry_run:
+        inp_dest = ledger / "inputs" / inp_sha
+        if not inp_dest.is_file():
+            inp_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(input_path, inp_dest)
+
+        pics = [file_sha(Path(p).resolve()) for p in (args.pictures or [])]
+        show_rec = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "sha256": art_sha,
+            "path": str(artifact),
+            "kind": kind,
+            "slug": slug,
+            "gate_hash": g_hash,
+            "inputs_hash": inp_sha,
+            "pictures": pics,
+            "inputs_why": args.inputs_changed if args.inputs_changed else None,
+            "inputs_diff": diff_text,
+        }
+        append_jsonl(ledger / "shows.jsonl", show_rec)
+
+    return 0
+
+
+def cmd_verdict(root: Path, cfg: dict, ledger: Path, args) -> int:
+    artifact = Path(args.artifact).resolve()
+    if not artifact.is_file():
+        return 1
+
+    cls = classify(root, cfg, artifact)
+    if cls is None:
+        return 1
+    kind, kind_cfg = cls
+
+    input_path = input_of(kind_cfg, artifact)
+    if not input_path.is_file():
+        return 1
+
+    try:
+        slug = slug_of(kind_cfg, input_path)
+    except Exception:
+        return 1
+
+    art_sha = file_sha(artifact)
+    level = args.level
+
+    if args.quote is not None:
+        m_id = f"m-{secrets.token_hex(4)}"
+        m_rec = {
+            "id": m_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "source": "agent",
+            "session": os.environ.get("RATCHET_SESSION"),
+            "text": args.quote,
+        }
+        append_jsonl(ledger / "owner_msgs.jsonl", m_rec)
+        msg_source = "agent"
+    else:
+        m_id = args.msg
+        owner_msgs = read_jsonl(ledger / "owner_msgs.jsonl")
+        msg_match = next((m for m in owner_msgs if m.get("id") == m_id), None)
+        msg_source = msg_match.get("source") if msg_match else None
+
+    if level == "satisfied":
+        if msg_source != "hook":
+            level = "for-now"
+            sys.stderr.write("NOTE satisfied needs a hook-captured owner message; recorded for-now\n")
+
+    if level == "rejected":
+        case_dir = ledger / "cases" / art_sha
+        case_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(artifact, case_dir / artifact.name)
+        shutil.copy2(input_path, case_dir / input_path.name)
+        case_json = {
+            "sha256": art_sha,
+            "kind": kind,
+            "slug": slug,
+            "verdict": level,
+            "artifact": artifact.name,
+            "input": input_path.name,
+        }
+        (case_dir / "case.json").write_text(json.dumps(case_json, indent=2))
+
+    v_rec = {
+        "id": f"v-{secrets.token_hex(4)}",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "sha256": art_sha,
+        "path": str(artifact),
+        "kind": kind,
+        "slug": slug,
+        "level": level,
+        "msg": m_id,
+        "session": os.environ.get("RATCHET_SESSION"),
+        "harness": os.environ.get("RATCHET_HARNESS"),
+    }
+    append_jsonl(ledger / "verdicts.jsonl", v_rec)
+
+    print(f"RECORDED {level} {slug} {art_sha[:12]} msg={m_id}")
+    return 0
+
+
+def cmd_calibrate(root: Path, cfg: dict, ledger: Path, args) -> int:
+    case_states, false_blocks, regressed = calibrate(root, cfg, ledger, only_kind=args.kind)
+    for k, state, sha in case_states:
+        print(f"{state} {sha[:12]}")
+    for p in false_blocks:
+        print(f"false-block {p}")
+
+    if regressed or false_blocks:
+        print("CALIBRATE regression")
+        return 1
+    else:
+        base_path = ledger / "baseline.json"
+        base = json.loads(base_path.read_text()) if base_path.is_file() else {"ts": "", "gate_hash": {}, "caught": {}}
+        base["ts"] = datetime.now(timezone.utc).isoformat()
+        kinds_to_update = [args.kind] if args.kind else list(cfg.get("kinds", {}).keys())
+        for k in kinds_to_update:
+            if k in cfg.get("kinds", {}):
+                base.setdefault("gate_hash", {})[k] = gate_hash(root, cfg["kinds"][k])
+                base.setdefault("caught", {})[k] = [sha for c_kind, state, sha in case_states if c_kind == k and state == "caught"]
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+        base_path.write_text(json.dumps(base, indent=2))
+        print("CALIBRATE ok")
+        return 0
+
+
+def cmd_switch(root: Path, cfg: dict, ledger: Path, args) -> int:
+    slug = args.slug
+    switches = read_jsonl(ledger / "switches.jsonl")
+    if any(s.get("slug") == slug for s in switches):
+        sys.stderr.write(f"DENY switch-used: slug {slug} already has a switch\n")
+        return 2
+
+    sw_rec = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "slug": slug,
+        "what": args.what,
+    }
+    append_jsonl(ledger / "switches.jsonl", sw_rec)
+    print(f"SWITCHED {slug}")
+    return 0
+
+
+def cmd_status(root: Path, cfg: dict, ledger: Path, args) -> int:
+    print(f"ratchet: {root.name}")
+
+    case_states, _, _ = calibrate(root, cfg, ledger)
+    cases_count = len(case_states)
+    blind_count = sum(1 for _, state, _ in case_states if state == "blind")
+    if cases_count > 0:
+        print(f"cases {cases_count} (blind {blind_count})")
+
+    verdicts = read_jsonl(ledger / "verdicts.jsonl")
+    rej_ts = {}
+    for v in verdicts:
+        if v.get("level") == "rejected" and "sha256" in v:
+            rej_ts[v["sha256"]] = v.get("ts", "")
+
+    sorted_cases = sorted(case_states, key=lambda c: rej_ts.get(c[2], ""), reverse=True)
+    for _, state, sha in sorted_cases[:3]:
+        print(f"{sha[:12]} rejected -> {state}")
+
+    newest_v = newest_verdict_by_sha(ledger)
+    rej_n = sum(1 for v in newest_v.values() if v.get("level") == "rejected")
+    if rej_n > 0:
+        print(f"rejected {rej_n}")
+
+    fn_n = sum(1 for v in newest_v.values() if v.get("level") == "for-now")
+    if fn_n > 0:
+        print(f"for-now {fn_n}")
+
+    slug_kind_map = {v["slug"]: v.get("kind") for v in verdicts if v.get("slug")}
+    all_slugs = set(slug_kind_map.keys())
+    for s in read_jsonl(ledger / "shows.jsonl"):
+        if s.get("slug"):
+            all_slugs.add(s["slug"])
+            if s.get("kind"):
+                slug_kind_map[s["slug"]] = s["kind"]
+    for sw in read_jsonl(ledger / "switches.jsonl"):
+        if sw.get("slug"):
+            all_slugs.add(sw["slug"])
+
+    parked_slugs = []
+    round_cap_slugs = []
+    for slug in sorted(all_slugs):
+        k = slug_kind_map.get(slug, "")
+        cap = cfg.get("kinds", {}).get(k, {}).get("round_cap", 3)
+        st = round_state(ledger, slug, cap)
+        if st == "parked":
+            parked_slugs.append(slug)
+        elif st == "round-cap":
+            round_cap_slugs.append(slug)
+
+    if parked_slugs:
+        print(f"parked {len(parked_slugs)}: {' '.join(parked_slugs[:3])}")
+    if round_cap_slugs:
+        print(f"round-cap {len(round_cap_slugs)}: {' '.join(round_cap_slugs[:3])}")
+
+    base_file = ledger / "baseline.json"
+    stale = False
+    if not base_file.is_file():
+        stale = True
+    else:
+        try:
+            baseline = json.loads(base_file.read_text())
+            for k, k_cfg in cfg.get("kinds", {}).items():
+                if gate_hash(root, k_cfg) != baseline.get("gate_hash", {}).get(k):
+                    stale = True
+                    break
+        except Exception:
+            stale = True
+
+    if stale:
+        print("baseline: stale (gate changed since last calibrate)")
+    else:
+        print("baseline: current")
+
+    return 0
+
+
+class SilentUsageParser(argparse.ArgumentParser):
+    def error(self, message):
+        sys.stderr.write(f"error: {message}\n")
+        sys.exit(1)
+
+
+def main(argv=None) -> int:
+    root = find_root(Path.cwd())
+    if root is None:
+        return 0
+
+    cfg, ledger = load(root)
+
+    parser = SilentUsageParser(prog="ratchet")
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    # gate
+    p_gate = subparsers.add_parser("gate")
+    p_gate.add_argument("artifact")
+    p_gate.add_argument("--pictures", nargs="*", default=[])
+    p_gate.add_argument("--inputs-changed", dest="inputs_changed", metavar="WHY", default=None)
+    p_gate.add_argument("--dry-run", action="store_true")
+
+    # verdict
+    p_verdict = subparsers.add_parser("verdict")
+    p_verdict.add_argument("artifact")
+    p_verdict.add_argument("level", choices=["satisfied", "for-now", "rejected", "no-comment"])
+    g_verdict = p_verdict.add_mutually_exclusive_group(required=True)
+    g_verdict.add_argument("--msg", default=None)
+    g_verdict.add_argument("--quote", default=None)
+
+    # calibrate
+    p_calibrate = subparsers.add_parser("calibrate")
+    p_calibrate.add_argument("--kind", default=None)
+
+    # switch
+    p_switch = subparsers.add_parser("switch")
+    p_switch.add_argument("slug")
+    p_switch.add_argument("--what", required=True)
+
+    # status
+    subparsers.add_parser("status")
+
+    args = parser.parse_args(argv)
+
+    if args.subcommand == "gate":
+        return cmd_gate(root, cfg, ledger, args)
+    elif args.subcommand == "verdict":
+        return cmd_verdict(root, cfg, ledger, args)
+    elif args.subcommand == "calibrate":
+        return cmd_calibrate(root, cfg, ledger, args)
+    elif args.subcommand == "switch":
+        return cmd_switch(root, cfg, ledger, args)
+    elif args.subcommand == "status":
+        return cmd_status(root, cfg, ledger, args)
+
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

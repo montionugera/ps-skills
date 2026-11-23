@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""bin/ratchet: door check, owner verdicts, frozen cases, calibrate, rounds (temp dirs only)."""
+import hashlib, json, shlex, subprocess, sys, tempfile, unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = REPO_ROOT / "bin" / "ratchet"
+
+STUB = '''import json, os, sys
+art = sys.argv[1]
+out = sys.argv[sys.argv.index("--out") + 1]
+json.load(open(sys.argv[sys.argv.index("--recipe") + 1]))
+text = open(art).read()
+if "CRASH" in text or os.path.exists("flaky.flag"):
+    sys.exit(3)
+ok = "BAD" not in text
+json.dump({"all_pass": ok}, open(out, "w"))
+sys.exit(0 if ok else 1)
+'''
+WEAK = '''import json, sys
+json.dump({"all_pass": True}, open(sys.argv[sys.argv.index("--out") + 1], "w"))
+'''
+BROKEN = "import sys\nsys.exit(3)\n"
+HOOK_MSG = {"ts": "2026-01-01T00:00:00+00:00", "source": "hook", "session": "s", "text": "good"}
+
+
+def sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+
+class Repo:
+    def __init__(self, tmp):
+        self.root = Path(tmp).resolve()
+        (self.root / "check.py").write_text(STUB)
+        cfg = {"ledger": "ratchet", "kinds": {"mob": {
+            "artifacts": "assets/mob/**/out.glb",
+            "exclude": ["assets/mob/_rollback/**"],
+            "input": "{dir}/recipe.quad.json",
+            "check_cmd": f"{shlex.quote(sys.executable)} check.py {{artifact}} --recipe {{input}} --out {{out}}",
+            "gate_files": ["check.py"],
+            "slug_fields": ["bestiary_id", "tier"],
+            "picture_roots": ["assets/mob"],
+            "round_cap": 3}}}
+        (self.root / ".ratchet.json").write_text(json.dumps(cfg))
+        self.ledger = self.root / "ratchet"
+
+    def build(self, name, text="GOOD", recipe=True, creature="mob-a", tier="mvp", max_tris=100):
+        d = self.root / "assets" / "mob" / name / tier
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "out.glb").write_text(f"{text} {name}")
+        if recipe:
+            (d / "recipe.quad.json").write_text(json.dumps(
+                {"bestiary_id": creature, "tier": tier, "budgets": {"max_tris": max_tris}}))
+        return d / "out.glb"
+
+    def run(self, *args, cwd=None):
+        return subprocess.run([sys.executable, str(SCRIPT), *map(str, args)],
+                              cwd=cwd or self.root, capture_output=True, text=True)
+
+    def lines(self, name):
+        p = self.ledger / name
+        return [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+
+    def hook_msg(self, mid):
+        self.ledger.mkdir(exist_ok=True)
+        with open(self.ledger / "owner_msgs.jsonl", "a") as f:
+            f.write(json.dumps({"id": mid, **HOOK_MSG}) + "\n")
+
+
+class RatchetTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Repo(self._tmp.name)
+
+    def test_no_marker_is_silent(self):  # R10
+        with tempfile.TemporaryDirectory() as bare:
+            for args in (["status"], ["gate", "x.glb"], ["calibrate"], ["switch", "a/b", "--what", "x"]):
+                res = self.repo.run(*args, cwd=bare)
+                self.assertEqual((res.returncode, res.stdout, res.stderr), (0, "", ""), args)
+
+    def test_gate_pass_fail_error(self):  # R4, R5
+        r = self.repo
+        res = r.run("gate", r.build("a-v1"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("ALLOW mob-a/mvp", res.stdout)
+        res = r.run("gate", r.build("b-v1", text="BAD", creature="mob-b"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY check-fail", res.stderr)
+        out = Path(res.stderr.split()[-1])
+        self.assertTrue(out.is_absolute() and out.name.endswith(".out.json"), res.stderr)
+        self.assertIs(json.loads(out.read_text())["all_pass"], False)
+        res = r.run("gate", r.build("c-v1", text="CRASH", creature="mob-c"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
+        res = r.run("gate", r.build("d-v1", recipe=False, creature="mob-d"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
+        self.assertIn("input", res.stderr)
+
+    def test_error_result_is_never_cached(self):
+        r = self.repo
+        art = r.build("a-v1")
+        (r.root / "flaky.flag").write_text("x")
+        res = r.run("gate", art)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
+        (r.root / "flaky.flag").unlink()
+        self.assertEqual(r.run("gate", art).returncode, 0)
+
+    def test_gate_fails_closed_on_a_corrupt_ledger(self):
+        r = self.repo
+        art = r.build("a-v1")
+        r.ledger.mkdir(exist_ok=True)
+        (r.ledger / "verdicts.jsonl").write_text('{"half": ')
+        res = r.run("gate", art)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
+
+    def test_excluded_and_foreign_paths_are_denied(self):
+        r = self.repo
+        res = r.run("gate", r.build("_rollback/a-v1"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
+        other = r.root / "notes.txt"
+        other.write_text("x")
+        self.assertEqual(r.run("gate", other).returncode, 2)
+
+    def test_rejected_freezes_case_and_blocks_the_same_file(self):  # R2
+        r = self.repo
+        art = r.build("a-v1")
+        res = r.run("verdict", art, "rejected", "--quote", "ทดสอบข้อความไทย")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        case = r.ledger / "cases" / sha(art)
+        self.assertEqual(sha(case / "out.glb"), sha(art))
+        self.assertTrue((case / "recipe.quad.json").is_file())
+        v = r.lines("verdicts.jsonl")[-1]
+        self.assertEqual((v["level"], v["slug"], v["sha256"]), ("rejected", "mob-a/mvp", sha(art)))
+        msg = r.lines("owner_msgs.jsonl")[-1]
+        self.assertEqual((msg["text"], msg["source"], msg["id"]), ("ทดสอบข้อความไทย", "agent", v["msg"]))
+        res = r.run("gate", art)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY rejected", res.stderr)
+
+    def test_verdict_that_cannot_resolve_appends_nothing(self):  # R2 failure twin
+        r = self.repo
+        missing = r.root / "assets/mob/none/mvp/out.glb"
+        no_input = r.build("d-v1", recipe=False, creature="mob-d")
+        for art in (missing, no_input):
+            res = r.run("verdict", art, "rejected", "--quote", "x")
+            self.assertEqual(res.returncode, 1, art)
+            self.assertEqual(r.lines("verdicts.jsonl"), [])
+            self.assertEqual(r.lines("owner_msgs.jsonl"), [])
+            self.assertFalse((r.ledger / "cases").exists())
+
+    def test_satisfied_needs_a_hook_captured_message(self):  # R3
+        r = self.repo
+        art = r.build("a-v1")
+        res = r.run("verdict", art, "satisfied", "--quote", "ok")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(r.lines("verdicts.jsonl")[-1]["level"], "for-now")
+        r.hook_msg("m-hook0001")
+        res = r.run("verdict", art, "satisfied", "--msg", "m-hook0001")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(r.lines("verdicts.jsonl")[-1]["level"], "satisfied")
+
+    def test_stale_pass_is_rechecked_when_the_gate_changes(self):  # D4
+        r = self.repo
+        art = r.build("a-v1")
+        self.assertEqual(r.run("gate", art).returncode, 0)
+        (r.root / "check.py").write_text(STUB.replace('"BAD" not in text', '"GOOD" not in text'))
+        res = r.run("gate", art)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY check-fail", res.stderr)
+
+    def test_input_change_must_be_declared(self):  # R8
+        r = self.repo
+        self.assertEqual(r.run("gate", r.build("a-v1")).returncode, 0)
+        v2 = r.build("a-v2", max_tris=999)
+        for _ in (1, 2):  # a denied gate records nothing, so a plain retry is denied again
+            res = r.run("gate", v2)
+            self.assertEqual(res.returncode, 2)
+            self.assertIn("DENY inputs-changed", res.stderr)
+        self.assertEqual(len(r.lines("shows.jsonl")), 1)
+        res = r.run("gate", v2, "--inputs-changed", "boss tier needs more tris")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        show = r.lines("shows.jsonl")[-1]
+        self.assertEqual(show["inputs_why"], "boss tier needs more tris")
+        self.assertIn("999", show["inputs_diff"])
+
+    def test_pictures_are_registered_and_dry_run_records_nothing(self):  # R14 groundwork
+        r = self.repo
+        art = r.build("a-v1")
+        pic = art.parent / "front.png"
+        pic.write_bytes(b"\x89PNG fake")
+        res = r.run("gate", art, "--dry-run")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(r.lines("shows.jsonl"), [])
+        self.assertEqual(r.run("gate", art, "--pictures", pic).returncode, 0)
+        self.assertEqual(r.lines("shows.jsonl")[-1]["pictures"], [sha(pic)])
+
+    def test_calibrate_regression_blocks_every_show(self):  # R6, D5
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        res = r.run("calibrate")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn(f"caught {sha(bad)[:12]}", res.stdout)
+        self.assertIn(f"{sha(bad)[:12]} rejected -> caught", r.run("status").stdout)
+        good = r.build("a-v1")
+        self.assertEqual(r.run("gate", good).returncode, 0)
+        for weaker in (WEAK, BROKEN):
+            (r.root / "check.py").write_text(weaker)
+            res = r.run("gate", good)
+            self.assertEqual(res.returncode, 2, weaker)
+            self.assertIn("DENY regression", res.stderr)
+            self.assertIn(sha(bad)[:12], res.stderr)
+        (r.root / "check.py").write_text(STUB)
+        self.assertEqual(r.run("gate", good).returncode, 0)
+
+    def test_blind_case_is_reported_not_blocking(self):
+        r = self.repo
+        art = r.build("a-v1")
+        self.assertEqual(r.run("verdict", art, "rejected", "--quote", "looks wrong").returncode, 0)
+        res = r.run("calibrate")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn(f"blind {sha(art)[:12]}", res.stdout)
+        self.assertIn(f"{sha(art)[:12]} rejected -> blind", r.run("status").stdout)
+        res = r.run("gate", r.build("a-v2"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"BLIND {sha(art)[:12]}", res.stdout)
+
+    def test_satisfied_file_that_stops_passing_is_a_false_block(self):
+        r = self.repo
+        art = r.build("a-v1")
+        r.hook_msg("m-hook0002")
+        self.assertEqual(r.run("verdict", art, "satisfied", "--msg", "m-hook0002").returncode, 0)
+        (r.root / "check.py").write_text(STUB.replace('"BAD" not in text', '"GOOD" not in text'))
+        res = r.run("calibrate")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("false-block", res.stdout)
+        self.assertIn("CALIBRATE regression", res.stdout)
+
+    def test_round_cap_then_one_switch_then_parked(self):  # R7
+        r = self.repo
+        for i in (1, 2, 3):
+            self.assertEqual(r.run("verdict", r.build(f"a-v{i}"), "for-now", "--quote", "meh").returncode, 0)
+        v4 = r.build("a-v4")
+        res = r.run("gate", v4)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY round-cap", res.stderr)
+        res = r.run("switch", "mob-a/mvp", "--what", "re-rig with auto-rig")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("SWITCHED mob-a/mvp", res.stdout)
+        self.assertEqual(r.run("gate", v4).returncode, 0)
+        res = r.run("switch", "mob-a/mvp", "--what", "again")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY switch-used", res.stderr)
+        for i in (4, 5, 6):
+            self.assertEqual(r.run("verdict", r.build(f"a-v{i}"), "for-now", "--quote", "meh").returncode, 0)
+        res = r.run("gate", r.build("a-v7"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY parked", res.stderr)
+
+    def test_status_is_at_most_ten_lines(self):  # R13
+        r = self.repo
+        for i in range(50):
+            art = r.build(f"s{i}-v1", creature=f"mob-s{i}")
+            self.assertEqual(r.run("verdict", art, "for-now", "--quote", "meh").returncode, 0)
+        res = r.run("status")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertLessEqual(len(res.stdout.strip().splitlines()), 10)
+        self.assertIn("for-now 50", res.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

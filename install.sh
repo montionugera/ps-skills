@@ -59,7 +59,7 @@ mkdir -p "$CLAUDE_HOME/skills" "$CLAUDE_HOME/hooks" "$GEMINI_HOME/skills" "$CODE
 replace_destination() {  # dest
   local dest="$1"
   case "$dest" in
-    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$GEMINI_HOME/hooks/"*|"$CODEX_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/jev-gate"|"$BIN_HOME/vault-distill"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
+    "$CLAUDE_HOME/skills/"*|"$AGENTS_HOME/skills/"*|"$GEMINI_HOME/skills/"*|"$GEMINI_HOME/hooks/"*|"$CODEX_HOME/skills/"*|"$CURSOR_HOME/skills/"*|"$CLAUDE_HOME/hooks/"*|"$CLAUDE_HOME/ps-release-workflow"|"$BIN_HOME/ps-skills-sync"|"$BIN_HOME/ps-work"|"$BIN_HOME/mesh"|"$BIN_HOME/mesh-run"|"$BIN_HOME/dispatch-agy-worker"|"$BIN_HOME/dispatch-codex-worker"|"$BIN_HOME/dispatch-cursor-worker"|"$BIN_HOME/dispatch-worker"|"$BIN_HOME/ratchet"|"$BIN_HOME/dispatch-thinker"|"$BIN_HOME/jev-gate"|"$BIN_HOME/vault-distill"|"$BIN_HOME/ps-skills-doctor"|"$BIN_HOME/ps-plugin-bridge"|"$BIN_HOME/sync-agent-rules"|"$BIN_HOME/vault-engine"|"$HOME/.gemini/antigravity-cli/bin/"*) ;;
     *) echo "refuse unsafe destination: $dest" >&2; return 1 ;;
   esac
   rm -rf -- "$dest"
@@ -138,6 +138,7 @@ link "$REPO/bin/vault-distill" "$BIN_HOME/vault-distill"
 link "$REPO/bin/ps-skills-doctor" "$BIN_HOME/ps-skills-doctor"
 link "$REPO/bin/ps-plugin-bridge" "$BIN_HOME/ps-plugin-bridge"
 link "$REPO/bin/sync-agent-rules" "$BIN_HOME/sync-agent-rules"
+link "$REPO/bin/ratchet" "$BIN_HOME/ratchet"
 
 if [[ -d "$REPO/tools/vault-engine" ]] && command -v go >/dev/null 2>&1; then
   echo "Building and installing vault-engine..."
