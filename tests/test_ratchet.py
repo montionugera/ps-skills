@@ -458,5 +458,102 @@ class RatchetTest(unittest.TestCase):
         self.assertIn("DENY error", res.stderr)
 
 
+    def test_a_shadow_kind_does_not_hide_a_caught_case(self):  # final review N-I1, probe 1
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        (r.root / "weak.py").write_text(WEAK)
+        cfg = json.loads((r.root / ".ratchet.json").read_text())
+        weak = dict(cfg["kinds"]["mob"], gate_files=["weak.py"],
+                    check_cmd=f"{shlex.quote(sys.executable)} weak.py --out {{out}}")
+        cfg["kinds"] = {"mob2": weak, "mob": cfg["kinds"]["mob"]}
+        (r.root / ".ratchet.json").write_text(json.dumps(cfg))
+        res = r.run("gate", r.build("b-v2", text="BAD", creature="mob-b"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY regression", res.stderr)
+        self.assertIn(sha(bad)[:12], res.stderr)
+        self.assertEqual(r.run("calibrate").returncode, 1)
+
+    def test_renaming_a_kind_does_not_drop_its_cases(self):  # final review N-I1, probe 2
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        cfg = json.loads((r.root / ".ratchet.json").read_text())
+        cfg["kinds"] = {"mobs": cfg["kinds"]["mob"]}
+        (r.root / ".ratchet.json").write_text(json.dumps(cfg))
+        res = r.run("gate", r.build("a-v1"))
+        self.assertEqual(res.returncode, 0, res.stderr)  # a rename alone locks nothing
+        (r.root / "check.py").write_text(WEAK)
+        res = r.run("gate", r.build("b-v2", text="BAD", creature="mob-b"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY regression", res.stderr)
+        self.assertEqual(r.run("calibrate", "--kind", "mobs").returncode, 1)
+
+    def test_dropping_a_gate_file_from_the_list_does_not_freeze_old_results(self):  # final review N-I1, probe 3
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        cfg = json.loads((r.root / ".ratchet.json").read_text())
+        cfg["kinds"]["mob"]["gate_files"] = []
+        (r.root / ".ratchet.json").write_text(json.dumps(cfg))
+        self.assertEqual(r.run("gate", r.build("a-v1")).returncode, 0)
+        (r.root / "check.py").write_text(WEAK)
+        res = r.run("gate", r.build("b-v2", text="BAD", creature="mob-b"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY regression", res.stderr)
+
+    def test_excluding_a_caught_case_from_the_config_blocks_the_gate(self):  # final review N-I1
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        cfg = json.loads((r.root / ".ratchet.json").read_text())
+        cfg["kinds"]["mob"]["exclude"].append("assets/mob/b-v1/**")
+        (r.root / ".ratchet.json").write_text(json.dumps(cfg))
+        res = r.run("gate", r.build("a-v1"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY regression", res.stderr)
+        self.assertIn(sha(bad)[:12], res.stderr)
+
+    def test_a_frozen_case_records_its_path_and_gate_files(self):  # ruling R-M
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        case = json.loads((r.ledger / "cases" / sha(bad) / "case.json").read_text())
+        self.assertEqual(case["path"], "assets/mob/b-v1/mvp/out.glb")
+        self.assertEqual(case["gate_files"], ["check.py"])
+        self.assertIs(case["caught"], True)
+
+    def test_gate_and_verdict_find_the_project_from_the_artifact(self):  # final review N-I2
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        with tempfile.TemporaryDirectory() as bare:
+            res = r.run("verdict", bad, "rejected", "--quote", "stretched", cwd=bare)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(len(r.lines("verdicts.jsonl")), 1)
+            res = r.run("gate", bad, cwd=bare)
+            self.assertEqual(res.returncode, 2)
+            self.assertIn("DENY rejected", res.stderr)
+            res = r.run("gate", r.build("a-v1"), cwd=bare)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("ALLOW mob-a/mvp", res.stdout)
+
+    def test_a_config_nested_under_the_project_cannot_take_over(self):  # final review N-I2
+        r = self.repo
+        art = r.build("a-v1")
+        (art.parent / ".ratchet.json").write_text(json.dumps({"ledger": "ratchet", "kinds": {}}))
+        res = r.run("gate", art)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
+        self.assertEqual(r.run("verdict", art, "rejected", "--quote", "no").returncode, 1)
+        self.assertEqual(r.lines("verdicts.jsonl"), [])
+
+    def test_option_abbreviations_are_not_accepted(self):  # final review N-m2
+        r = self.repo
+        res = r.run("gate", r.build("a-v1"), "--dry")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
+        self.assertEqual(r.lines("shows.jsonl"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
