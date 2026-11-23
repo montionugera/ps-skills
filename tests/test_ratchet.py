@@ -21,6 +21,7 @@ WEAK = '''import json, sys
 json.dump({"all_pass": True}, open(sys.argv[sys.argv.index("--out") + 1], "w"))
 '''
 BROKEN = "import sys\nsys.exit(3)\n"
+COUNTING = STUB.replace("text = open(art).read()", "text = open(art).read()\nopen('runs.log', 'a').write(art + '\\n')")
 HOOK_MSG = {"ts": "2026-01-01T00:00:00+00:00", "source": "hook", "session": "s", "text": "good"}
 
 
@@ -65,6 +66,13 @@ class Repo:
         self.ledger.mkdir(exist_ok=True)
         with open(self.ledger / "owner_msgs.jsonl", "a") as f:
             f.write(json.dumps({"id": mid, **HOOK_MSG}) + "\n")
+
+    def hook_now(self, mid):
+        from datetime import datetime, timezone
+        self.ledger.mkdir(exist_ok=True)
+        with open(self.ledger / "owner_msgs.jsonl", "a") as f:
+            f.write(json.dumps({"id": mid, "ts": datetime.now(timezone.utc).isoformat(), "source": "hook",
+                                "session": "s", "text": "good"}) + "\n")
 
 
 class RatchetTest(unittest.TestCase):
@@ -331,7 +339,7 @@ class RatchetTest(unittest.TestCase):
         res = r.run("gate", art)
         self.assertEqual(res.returncode, 2)
         self.assertIn("DENY rejected", res.stderr)
-        r.hook_msg("m-hook0003")
+        r.hook_now("m-hook0003")
         self.assertEqual(r.run("verdict", art, "for-now", "--msg", "m-hook0003").returncode, 0)
         self.assertNotIn("DENY rejected", r.run("gate", art).stderr)
 
@@ -358,10 +366,96 @@ class RatchetTest(unittest.TestCase):
         r = self.repo
         art = r.build("a-v1")
         self.assertEqual(r.run("verdict", art, "rejected", "--quote", "no").returncode, 0)
+        (r.root / "check.py").write_text(WEAK)  # new gate hash: nothing is cached for today's key
+        listing = lambda: sorted(p.name for p in (r.ledger / "checks").glob("*"))
+        before = listing()
         res = r.run("status")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn(f"{sha(art)[:12]} rejected -> unknown", res.stdout)
-        self.assertFalse((r.ledger / "checks").exists())
+        self.assertEqual(listing(), before)
+
+    def test_only_a_later_owner_message_lifts_a_rejection(self):  # re-review I-1
+        r = self.repo
+        art = r.build("a-v1")
+        r.hook_now("m-hook0010")
+        self.assertEqual(r.run("verdict", art, "rejected", "--msg", "m-hook0010").returncode, 0)
+        self.assertEqual(r.run("verdict", art, "for-now", "--msg", "m-hook0010").returncode, 0)
+        self.assertIn("DENY rejected", r.run("gate", art).stderr)
+        r.hook_now("m-hook0011")
+        self.assertEqual(r.run("verdict", art, "no-comment", "--msg", "m-hook0011").returncode, 0)
+        self.assertIn("DENY rejected", r.run("gate", art).stderr)
+        self.assertEqual(r.run("verdict", art, "for-now", "--msg", "m-hook0011").returncode, 0)
+        self.assertNotIn("DENY rejected", r.run("gate", art).stderr)
+
+    def test_rejecting_marks_the_case_caught_at_once(self):  # re-review I-2
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        self.assertIs(json.loads((r.ledger / "cases" / sha(bad) / "case.json").read_text())["caught"], True)
+        (r.root / "check.py").write_text(WEAK)
+        res = r.run("gate", r.build("a-v1"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY regression", res.stderr)
+
+    def test_a_current_baseline_hash_does_not_skip_the_regression_check(self):  # re-review I-2
+        r = self.repo
+        good = r.build("a-v1")
+        (r.root / "check.py").write_text(WEAK)
+        self.assertEqual(r.run("gate", good).returncode, 0)  # baseline now holds the weak gate's hash
+        (r.root / "check.py").write_text(STUB)
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        (r.root / "check.py").write_text(WEAK)
+        res = r.run("gate", good)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY regression", res.stderr)
+
+    def test_gate_help_and_usage_errors_never_exit_zero(self):  # re-review I-3
+        r = self.repo
+        art = r.build("b-v1", text="BAD", creature="mob-b")
+        for args in (["gate", art, "-h"], ["gate", art, "--pictures", "-h"], ["gate"], ["gate", art, "--nope"]):
+            res = r.run(*args)
+            self.assertEqual(res.returncode, 2, args)
+            self.assertNotIn("ALLOW", res.stdout)
+
+    def test_an_erroring_case_is_checked_once_per_gate(self):  # re-review I-4
+        r = self.repo
+        (r.root / "check.py").write_text(COUNTING)
+        crash = r.build("c-v1", text="CRASH", creature="mob-c")
+        self.assertEqual(r.run("verdict", crash, "rejected", "--quote", "broken").returncode, 0)
+        good = r.build("a-v1")
+        (r.root / "runs.log").write_text("")
+        self.assertEqual(r.run("gate", good).returncode, 0)
+        runs = (r.root / "runs.log").read_text().splitlines()
+        self.assertEqual(sum("cases" in line for line in runs), 1, runs)
+
+    def test_bad_config_values_and_blank_reasons_are_denied(self):  # re-review minors
+        r = self.repo
+        self.assertEqual(r.run("gate", r.build("a-v1")).returncode, 0)
+        res = r.run("gate", r.build("a-v2", max_tris=999), "--inputs-changed", "  ")
+        self.assertEqual(res.returncode, 2)
+        cfg = json.loads((r.root / ".ratchet.json").read_text())
+        cfg["kinds"]["mob"]["round_cap"] = 0
+        (r.root / ".ratchet.json").write_text(json.dumps(cfg))
+        res = r.run("gate", r.build("a-v1"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
+
+    def test_a_case_folder_without_a_valid_case_file_fails_closed(self):  # re-review M6
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        case = r.ledger / "cases" / sha(bad) / "case.json"
+        data = json.loads(case.read_text())
+        for broken in ("", json.dumps({**data, "caught": "yes"})):
+            case.write_text(broken)
+            res = r.run("gate", r.build("a-v1"))
+            self.assertEqual(res.returncode, 2, broken)
+            self.assertIn("DENY error", res.stderr)
+        case.unlink()
+        res = r.run("gate", r.build("a-v1"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
 
 
 if __name__ == "__main__":
