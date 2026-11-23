@@ -272,6 +272,97 @@ class RatchetTest(unittest.TestCase):
         self.assertLessEqual(len(res.stdout.strip().splitlines()), 10)
         self.assertIn("for-now 50", res.stdout)
 
+    def test_corrupt_baseline_fails_closed(self):  # review I1
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        self.assertEqual(r.run("calibrate").returncode, 0)
+        (r.ledger / "baseline.json").write_text('{"ts": ')
+        (r.root / "check.py").write_text(WEAK)
+        res = r.run("gate", r.build("a-v1"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
+
+    def test_deleting_the_baseline_does_not_reset_caught_cases(self):  # review I1
+        r = self.repo
+        bad = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", bad, "rejected", "--quote", "stretched").returncode, 0)
+        self.assertEqual(r.run("calibrate").returncode, 0)
+        (r.ledger / "baseline.json").unlink()
+        (r.root / "check.py").write_text(WEAK)
+        res = r.run("gate", r.build("a-v1"))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY regression", res.stderr)
+        self.assertIn(sha(bad)[:12], res.stderr)
+
+    def test_rejected_file_that_crashes_the_check_blocks_nothing_else(self):  # review I2
+        r = self.repo
+        crash = r.build("c-v1", text="CRASH", creature="mob-c")
+        self.assertEqual(r.run("verdict", crash, "rejected", "--quote", "broken").returncode, 0)
+        res = r.run("calibrate")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn(f"error {sha(crash)[:12]}", res.stdout)
+        self.assertEqual(r.run("gate", r.build("a-v1")).returncode, 0)
+
+    def test_corrupt_config_fails_closed(self):  # review I3
+        r = self.repo
+        art = r.build("a-v1")
+        (r.root / ".ratchet.json").write_text("{")
+        res = r.run("gate", art)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY error", res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+
+    def test_allow_is_printed_only_after_everything_succeeded(self):  # review I4
+        r = self.repo
+        art = r.build("a-v1")
+        res = r.run("gate", art, "--pictures", art.parent / "missing.png")
+        self.assertEqual(res.returncode, 2)
+        self.assertNotIn("ALLOW", res.stdout)
+        self.assertIn("DENY error", res.stderr)
+        self.assertEqual(r.lines("shows.jsonl"), [])
+        self.assertFalse((r.ledger / "inputs").exists())
+
+    def test_rejected_is_sticky_until_the_owner_says_otherwise(self):  # review S1
+        r = self.repo
+        art = r.build("a-v1")
+        self.assertEqual(r.run("verdict", art, "rejected", "--quote", "no").returncode, 0)
+        self.assertEqual(r.run("verdict", art, "for-now", "--quote", "agent says ok").returncode, 0)
+        res = r.run("gate", art)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("DENY rejected", res.stderr)
+        r.hook_msg("m-hook0003")
+        self.assertEqual(r.run("verdict", art, "for-now", "--msg", "m-hook0003").returncode, 0)
+        self.assertNotIn("DENY rejected", r.run("gate", art).stderr)
+
+    def test_a_frozen_case_is_never_overwritten(self):  # review M1
+        r = self.repo
+        art = r.build("b-v1", text="BAD", creature="mob-b")
+        self.assertEqual(r.run("verdict", art, "rejected", "--quote", "one").returncode, 0)
+        case = r.ledger / "cases" / sha(art)
+        before = (case / "recipe.quad.json").read_text()
+        (art.parent / "recipe.quad.json").write_text(json.dumps({"bestiary_id": "mob-other", "tier": "mvp"}))
+        self.assertEqual(r.run("verdict", art, "rejected", "--quote", "two").returncode, 0)
+        self.assertEqual((case / "recipe.quad.json").read_text(), before)
+        self.assertEqual(json.loads((case / "case.json").read_text())["slug"], "mob-b/mvp")
+
+    def test_unknown_message_id_and_unknown_kind_are_usage_errors(self):  # review M2, M9
+        r = self.repo
+        art = r.build("a-v1")
+        res = r.run("verdict", art, "for-now", "--msg", "m-nope")
+        self.assertEqual(res.returncode, 1)
+        self.assertEqual(r.lines("verdicts.jsonl"), [])
+        self.assertEqual(r.run("calibrate", "--kind", "nope").returncode, 1)
+
+    def test_status_never_runs_a_check(self):  # review M7
+        r = self.repo
+        art = r.build("a-v1")
+        self.assertEqual(r.run("verdict", art, "rejected", "--quote", "no").returncode, 0)
+        res = r.run("status")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"{sha(art)[:12]} rejected -> unknown", res.stdout)
+        self.assertFalse((r.ledger / "checks").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
