@@ -42,9 +42,9 @@ class TestVaultDistillCheck(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def run_check(self, crontab):
+    def run_check(self, crontab, launchd=""):
         issues, warnings = [], []
-        self.doctor.check_vault_distill(self.home, issues, warnings, crontab=crontab)
+        self.doctor.check_vault_distill(self.home, issues, warnings, crontab=crontab, launchd=launchd)
         return issues, warnings
 
     def record(self, hours_ago, code=0):
@@ -72,6 +72,12 @@ class TestVaultDistillCheck(unittest.TestCase):
         issues, warnings = self.run_check("55 23 * * * other-job\n")
         self.assertEqual(issues, [])
         self.assertTrue(any("no cron line" in w for w in warnings), warnings)
+
+    def test_launchd_job_replaces_the_cron_line(self):
+        os.environ["TYPESAFE_API_KEY"] = "k"
+        self.record(2)
+        launchd = "-\t0\tlocal.vault-distill\n"
+        self.assertEqual(self.run_check("", launchd=launchd), ([], []))
 
     def test_cron_without_a_run_is_a_warning(self):
         os.environ["TYPESAFE_API_KEY"] = "k"

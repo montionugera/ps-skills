@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Recall failure is visible in the session: engine install guard, hook heartbeat and error record, doctor accepts launchd distill</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700;9..144,800&family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07090d;
+      --surface: #10141b;
+      --surface-2: #161b24;
+      --surface-3: #1b212c;
+      --border: #2a3340;
+      --border-soft: #1c232e;
+      --ink: #d6dde7;
+      --ink-bright: #f6f8fb;
+      --ink-dim: #8392a3;
+      --accent: #4ee39b;
+      --accent-dim: #2f8f63;
+      --amber: #ffc746;
+      --amber-dim: #a37a1a;
+      --blue: #74b0ff;
+      --blue-dim: #3a5d8a;
+      --red: #ff6b6b;
+      --red-dim: #a14242;
+      --purple: #b288ff;
+      --purple-dim: #7a4dc5;
+      --teal: #4ed2c8;
+      --teal-dim: #347e7a;
+      --serif-display: "Fraunces", Georgia, serif;
+      --serif-body: "Spectral", Georgia, serif;
+      --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: var(--serif-body);
+      font-size: 19.5px;
+      line-height: 1.66;
+      color: var(--ink);
+      background: var(--bg);
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 64px 30px 160px;
+      counter-reset: sec;
+      animation: riseIn .55s cubic-bezier(.2,.7,.2,1) both;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    body::before {
+      content: "";
+      position: fixed; inset: 0; z-index: -1; pointer-events: none;
+      background:
+        radial-gradient(900px 500px at 80% -10%, rgba(78,227,155,.10), transparent 62%),
+        radial-gradient(720px 520px at -4% 110%, rgba(255,199,70,.055), transparent 60%),
+        linear-gradient(rgba(255,255,255,.020) 1px, transparent 1px) 0 0 / 100% 30px,
+        linear-gradient(90deg, rgba(255,255,255,.020) 1px, transparent 1px) 0 0 / 30px 100%;
+    }
+
+    @keyframes riseIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+    /* ---------- headings ---------- */
+    h1, h2, h3, h4 { font-family: var(--serif-display); color: var(--ink-bright); line-height: 1.16; letter-spacing: -.012em; font-weight: 600; }
+    h1 {
+      font-size: 3.2rem; font-weight: 700; margin: 0 0 .25em; letter-spacing: -.028em;
+      background: linear-gradient(180deg, #ffffff, #afb9c5);
+      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    h2 {
+      counter-increment: sec;
+      font-size: 2rem; margin: 2.8em 0 .7em; padding-top: .65em;
+      border-top: 1px solid var(--border-soft);
+      display: flex; align-items: baseline; gap: .55em; flex-wrap: wrap;
+      font-weight: 700;
+    }
+    h2::before {
+      content: "§" counter(sec, decimal-leading-zero);
+      font-family: var(--mono); font-size: .74rem; font-weight: 600;
+      color: var(--accent); letter-spacing: .04em;
+      border: 1px solid var(--accent-dim); border-radius: 6px;
+      padding: .3em .55em; transform: translateY(-.22em);
+      background: rgba(78,227,155,.06);
+    }
+    h3 { font-size: 1.42rem; margin: 2.1em 0 .55em; color: var(--ink-bright); font-weight: 600; }
+    h3 code { font-size: .88em; }
+    h4 { font-size: 1.1rem; margin: 1.5em 0 .4em; color: var(--accent); text-transform: uppercase; letter-spacing: .08em; font-family: var(--mono); font-weight: 600; }
+
+    p { margin: .95em 0; }
+    strong { color: var(--ink-bright); font-weight: 600; }
+    em { color: #d4dce6; }
+
+    mark {
+      background: linear-gradient(180deg, rgba(255,199,70,.0) 60%, rgba(255,199,70,.32) 60%);
+      color: var(--ink-bright); padding: 0 .2em; border-radius: 3px;
+    }
+
+    /* ---------- links ---------- */
+    a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(78,227,155,.32); transition: border-color .15s, color .15s; }
+    a:hover { color: #8af0c2; border-bottom-color: var(--accent); }
+
+    /* ---------- inline code & code blocks ---------- */
+    code { font-family: var(--mono); font-size: .85em; background: var(--surface-2); color: #e0ecf6; padding: .14em .45em; border-radius: 5px; border: 1px solid var(--border-soft); }
+    pre {
+      position: relative; font-size: .82rem; line-height: 1.62;
+      background: linear-gradient(180deg, #0e1219, #0a0d13);
+      border: 1px solid var(--border); border-radius: 11px;
+      padding: 20px 20px 18px; margin: 1.4em 0; overflow-x: auto;
+      box-shadow: 0 1px 0 rgba(255,255,255,.02) inset, 0 18px 44px -28px rgba(0,0,0,.9);
+    }
+    pre::before { content: ""; position: absolute; left: 0; top: 0; height: 100%; width: 3px; background: linear-gradient(var(--accent), transparent); border-radius: 11px 0 0 11px; opacity: .6; }
+    pre code { background: none; border: none; padding: 0; color: #d3e4f3; font-size: 1em; }
+
+    kbd { font-family: var(--mono); font-size: .82em; background: var(--surface-2); border: 1px solid var(--border); border-bottom-width: 2px; padding: 2px 8px; border-radius: 6px; color: var(--ink-bright); box-shadow: 0 1px 0 var(--border-soft); }
+
+    /* ---------- tables ---------- */
+    table { border-collapse: collapse; width: 100%; margin: 1.4em 0; font-size: .87rem; font-family: var(--mono); }
+    th, td { border: 1px solid var(--border); padding: 11px 14px; text-align: left; vertical-align: top; }
+    th { background: var(--surface); color: var(--ink-bright); font-weight: 600; border-bottom: 2px solid var(--accent-dim); text-transform: uppercase; font-size: .76rem; letter-spacing: .08em; }
+    tr:nth-child(even) td { background: rgba(255,255,255,.015); }
+    tr:hover td { background: rgba(78,227,155,.04); }
+    td code { font-size: .94em; }
+    td strong { color: var(--amber); }
+
+    /* ---------- lists ---------- */
+    ul, ol { padding-left: 1.5em; margin: .9em 0; }
+    li { margin: .4em 0; }
+    li::marker { color: var(--accent-dim); font-weight: 600; }
+    ul ul, ol ol, ul ol, ol ul { margin: .3em 0; }
+
+    /* ---------- blockquote (used by pandoc) ---------- */
+    blockquote { border-left: 3px solid var(--accent-dim); margin: 1.2em 0; padding: .2em 0 .2em 18px; color: var(--ink-dim); font-style: italic; }
+
+    hr { border: none; border-top: 1px solid var(--border); margin: 2.6em 0; }
+
+    /* ---------- masthead (h1 + first p) ---------- */
+    h1 + p { font-family: var(--mono); font-size: .82rem; color: var(--ink-dim); line-height: 2; letter-spacing: .02em; border-bottom: 1px solid var(--border-soft); padding-bottom: 1.2em; }
+    h1 + p strong { color: var(--amber); font-weight: 500; }
+
+    /* ---------- TOC ---------- */
+    #TOC {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 18px 22px; margin: 1.8em 0 2.4em; font-family: var(--mono); font-size: .78rem;
+    }
+    #TOC::before { content: "CONTENTS"; display: block; color: var(--accent); letter-spacing: .22em; font-size: .7rem; margin-bottom: .7em; font-weight: 600; }
+    #TOC ul { list-style: none; padding-left: 0; margin: 0; }
+    #TOC > ul > li { margin: .22em 0; }
+    #TOC ul ul { padding-left: 1.1em; border-left: 1px solid var(--border-soft); margin: .25em 0 .5em; }
+    #TOC a { color: var(--ink); border: none; }
+    #TOC a:hover { color: var(--accent); }
+
+    @media (min-width: 1320px) {
+      #TOC {
+        position: fixed; top: 0; left: 0; bottom: 0; width: 300px; margin: 0;
+        border-radius: 0; border: none; border-right: 1px solid var(--border);
+        padding: 64px 28px; overflow-y: auto;
+        background: linear-gradient(180deg, rgba(13,17,23,.92), rgba(8,10,14,.92));
+        backdrop-filter: blur(6px);
+      }
+      body { max-width: 1320px; padding-left: 360px; }
+    }
+
+    /* ============================================================
+       CALLOUTS — info / warn / success / danger / idea / metric
+       Use via:
+         ::: callout-warn
+         **Heading**
+         body text
+         :::
+       or raw <div class="callout warn"> ... </div>
+       ============================================================ */
+    /* Robust layout: icon is absolutely positioned and the content is padded.
+       (An earlier `display:grid` + `.callout > * { grid-column: 2 }` approach broke
+       when pandoc emitted loose prose as bare text nodes — those became anonymous
+       grid items that fell into the icon column and wrapped one word per line.
+       Absolute icon + padding flows ANY content structure correctly: loose text,
+       multiple inline elements, nested lists.) */
+    .callout {
+      position: relative;
+      margin: 1.7em 0;
+      padding: 18px 22px 16px 58px;
+      border-radius: 13px;
+      border: 1px solid var(--callout-border, var(--border));
+      border-left-width: 4px;
+      background: var(--callout-bg, var(--surface));
+    }
+    .callout::before {
+      content: var(--callout-icon, "·");
+      position: absolute;
+      left: 14px; top: 16px;
+      width: 30px; text-align: center;
+      font-size: 28px; line-height: 1.1;
+      color: var(--callout-accent, var(--accent));
+    }
+    .callout > * { min-width: 0; margin-top: 0; }
+    .callout > * + * { margin-top: .55em; }
+    .callout > p:first-child strong:first-child {
+      display: block;
+      font-family: var(--serif-display);
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: var(--callout-accent, var(--ink-bright));
+      letter-spacing: -.01em;
+      margin-bottom: .35em;
+    }
+    .callout p { line-height: 1.55; }
+    .callout code { background: rgba(0,0,0,.28); border-color: rgba(255,255,255,.06); }
+
+    .callout.info,    .callout-info    { --callout-border: var(--blue-dim);   --callout-bg: rgba(116,176,255,.08);   --callout-accent: var(--blue);   --callout-icon: "ℹ"; }
+    .callout.warn,    .callout-warn    { --callout-border: var(--amber-dim);  --callout-bg: rgba(255,199,70,.09);    --callout-accent: var(--amber);  --callout-icon: "⚠"; }
+    .callout.success, .callout-success { --callout-border: var(--accent-dim); --callout-bg: rgba(78,227,155,.08);    --callout-accent: var(--accent); --callout-icon: "✓"; }
+    .callout.danger,  .callout-danger  { --callout-border: var(--red-dim);    --callout-bg: rgba(255,107,107,.09);   --callout-accent: var(--red);    --callout-icon: "✕"; }
+    .callout.idea,    .callout-idea    { --callout-border: var(--purple-dim); --callout-bg: rgba(178,136,255,.08);   --callout-accent: var(--purple); --callout-icon: "✦"; }
+    .callout.metric,  .callout-metric  { --callout-border: var(--teal-dim);   --callout-bg: rgba(78,210,200,.08);    --callout-accent: var(--teal);   --callout-icon: "Σ"; }
+    .callout.action,  .callout-action  { --callout-border: var(--accent-dim); --callout-bg: rgba(78,227,155,.04);    --callout-accent: var(--accent); --callout-icon: "▸"; }
+
+    /* ============================================================
+       METRIC TILES — grid of big-number cards
+       Use via raw HTML:
+         <div class="metric-grid">
+           <div class="metric-tile alarm">
+             <div class="label">Pass all gates</div>
+             <div class="value">21%</div>
+             <div class="delta">39 / 187 results</div>
+           </div>
+         </div>
+       Variants: .alarm (red), .win (green), .info (blue), .warn (amber)
+       ============================================================ */
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px;
+      margin: 1.5em 0;
+    }
+    .metric-tile {
+      background: linear-gradient(180deg, var(--surface), var(--bg));
+      border: 1px solid var(--border);
+      border-top: 3px solid var(--tile-accent, var(--accent));
+      border-radius: 12px;
+      padding: 18px 18px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .metric-tile .label {
+      font-family: var(--mono);
+      font-size: .72rem;
+      letter-spacing: .14em;
+      color: var(--ink-dim);
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .metric-tile .value {
+      font-family: var(--serif-display);
+      font-weight: 700;
+      font-size: 2.55rem;
+      color: var(--tile-accent, var(--ink-bright));
+      line-height: 1;
+      letter-spacing: -.025em;
+    }
+    .metric-tile .delta {
+      font-family: var(--mono);
+      font-size: .8rem;
+      color: var(--ink-dim);
+    }
+    .metric-tile.alarm { --tile-accent: var(--red); }
+    .metric-tile.win   { --tile-accent: var(--accent); }
+    .metric-tile.info  { --tile-accent: var(--blue); }
+    .metric-tile.warn  { --tile-accent: var(--amber); }
+    .metric-tile.teal  { --tile-accent: var(--teal); }
+    .metric-tile.dim .value { color: var(--ink-bright); }
+
+    /* ============================================================
+       TOPIC CHIP — colored pill that can appear next to H2 text
+       ============================================================ */
+    .topic-chip {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: .68rem;
+      letter-spacing: .16em;
+      color: var(--bg);
+      background: var(--accent);
+      padding: 5px 11px;
+      border-radius: 999px;
+      font-weight: 700;
+      text-transform: uppercase;
+      vertical-align: middle;
+    }
+    .topic-chip.warn   { background: var(--amber); }
+    .topic-chip.danger { background: var(--red);   color: #fff; }
+    .topic-chip.info   { background: var(--blue);  color: var(--bg); }
+    .topic-chip.idea   { background: var(--purple); color: #fff; }
+    .topic-chip.teal   { background: var(--teal);  color: var(--bg); }
+
+    /* ============================================================
+       PULL QUOTE
+       ============================================================ */
+    .pullquote {
+      font-family: var(--serif-display);
+      font-size: 1.55rem;
+      font-weight: 500;
+      line-height: 1.38;
+      color: var(--ink-bright);
+      border-left: 4px solid var(--accent);
+      padding: 4px 0 4px 22px;
+      margin: 1.8em 0;
+      letter-spacing: -.012em;
+    }
+
+    /* ============================================================
+       SCHEMATIC — ASCII box-drawing diagrams, monospace canvas
+       Use via:
+         <div class="schematic">
+         ┌─────────┐    ┌─────────┐
+         │ Phase 0 │ ─→ │ Phase 1 │
+         └─────────┘    └─────────┘
+         </div>
+       ============================================================ */
+    .schematic {
+      font-family: var(--mono);
+      font-size: .86rem;
+      line-height: 1.4;
+      background: linear-gradient(180deg, #0d1117, #0a0d13);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px 28px;
+      margin: 1.6em 0;
+      color: #cfdcec;
+      white-space: pre;
+      overflow-x: auto;
+      position: relative;
+    }
+    .schematic::before { content: ""; position: absolute; left: 0; top: 0; height: 100%; width: 3px; background: linear-gradient(var(--teal), transparent); border-radius: 12px 0 0 12px; opacity: .6; }
+
+    /* ============================================================
+       RAW SVG / inline diagrams
+       ============================================================ */
+    .diagram, svg.diagram, .figure {
+      display: block; margin: 1.6em auto; max-width: 100%;
+      background: linear-gradient(180deg, #0d1117, #0a0d13);
+      border: 1px solid var(--border); border-radius: 12px;
+      padding: 22px 14px;
+    }
+    .figure-caption {
+      text-align: center; font-family: var(--mono); font-size: .76rem;
+      color: var(--ink-dim); margin-top: -.6em; margin-bottom: 1.6em;
+      letter-spacing: .04em;
+    }
+
+    /* ============================================================
+       MERMAID block — bigger frame, softer glow
+       ============================================================ */
+    .mermaid {
+      margin: 1.6em 0; text-align: center;
+      background: linear-gradient(180deg, #0e1320, #0a0d13);
+      border: 1px solid var(--border); border-radius: 13px;
+      padding: 24px 14px;
+      box-shadow: 0 18px 50px -36px rgba(78,227,155,.55) inset;
+    }
+    .mermaid svg { max-width: 100%; height: auto; }
+
+    /* Hide pandoc's title-block if present */
+    #title-block-header { display: none; }
+
+    /* ============================================================
+       UTILITY ROW — two-up / three-up adjacent blocks
+       ============================================================ */
+    .row {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: 1fr;
+      margin: 1.5em 0;
+    }
+    .row.two { grid-template-columns: 1fr 1fr; }
+    .row.three { grid-template-columns: repeat(3, 1fr); }
+    @media (max-width: 760px) {
+      .row.two, .row.three { grid-template-columns: 1fr; }
+    }
+  </style>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    const render = () => {
+      const blocks = new Set();
+      document.querySelectorAll('pre.mermaid, pre.sourceCode.mermaid').forEach((p) => blocks.add(p));
+      document.querySelectorAll('code.mermaid, code.language-mermaid').forEach((c) => {
+        const pre = c.closest('pre'); if (pre) blocks.add(pre);
+      });
+      blocks.forEach((pre) => {
+        const div = document.createElement('div');
+        div.className = 'mermaid';
+        div.textContent = pre.textContent.trim();
+        pre.replaceWith(div);
+      });
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'base',
+        securityLevel: 'loose',
+        fontFamily: 'IBM Plex Mono, monospace',
+        themeVariables: {
+          background: '#0a0d13',
+          primaryColor: '#1a212c',
+          primaryTextColor: '#f0f3f7',
+          primaryBorderColor: '#4ee39b',
+          lineColor: '#6c7a8b',
+          secondaryColor: '#191e28',
+          tertiaryColor: '#11161e',
+          tertiaryBorderColor: '#2a3340',
+          clusterBkg: 'rgba(78,227,155,.05)',
+          clusterBorder: '#2f8f63',
+          titleColor: '#4ee39b',
+          actorBkg: '#1a212c',
+          actorBorder: '#4ee39b',
+          actorTextColor: '#f0f3f7',
+          signalColor: '#9aa7b6',
+          signalTextColor: '#d3dbe5',
+          noteBkgColor: 'rgba(255,199,70,.14)',
+          noteBorderColor: '#ffc746',
+          noteTextColor: '#f6f8fb',
+          fontSize: '14px'
+        }
+      });
+      mermaid.run();
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', render);
+    else render();
+  </script>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Recall failure is visible in the session: engine
+install guard, hook heartbeat and error record, doctor accepts launchd
+distill</h1>
+</header>
+<nav id="TOC" role="doc-toc">
+<ul>
+<li><a href="#recall-failure-is-visible-in-the-session"
+id="toc-recall-failure-is-visible-in-the-session">Recall failure is
+visible in the session</a>
+<ul>
+<li><a href="#problem" id="toc-problem">Problem</a></li>
+<li><a href="#changes" id="toc-changes">Changes</a></li>
+<li><a href="#acceptance-criteria"
+id="toc-acceptance-criteria">Acceptance criteria</a></li>
+<li><a href="#out-of-scope" id="toc-out-of-scope">Out of scope</a></li>
+</ul></li>
+</ul>
+</nav>
+<h1 id="recall-failure-is-visible-in-the-session">Recall failure is
+visible in the session</h1>
+<p>Slice 1 of E-003. Approved by the owner on 2026-11-28 as phase 0,
+items 2, 3 and 5 of the plan.</p>
+<h2 id="problem">Problem</h2>
+<p>The installed <code>vault-engine</code> lost its <code>context</code>
+command on 2026-11-13. The recall hook fails open, so every interactive
+session ran without recall for 15 days and nothing said so. The doctor’s
+distill check also warns on a machine where the nightly job runs under
+launchd, not cron.</p>
+<h2 id="changes">Changes</h2>
+<ol type="1">
+<li><code>install.sh</code> (the <code>vault-engine</code> block): build
+to a temp path, run <code>&lt;temp&gt; context --cwd "$REPO"</code>, and
+install to <code>$BIN_HOME</code> (and copy to the AGY path) only when
+that exits 0. On failure print one line naming the reason, keep the
+installed binary, and carry on with the rest of the install.</li>
+<li><code>skills/agentic-vault/hooks/vault-recall.py</code>: on the
+first prompt of a session write exactly one record.
+<ul>
+<li>Engine exit 0 on the seed call: append
+<code>{ts, session_id, ok: true}</code> to
+<code>heartbeat.jsonl</code>.</li>
+<li>Anything else (non-zero exit, timeout, missing binary, any exception
+that reaches the handler): append
+<code>{ts, session_id, kind, detail}</code> to
+<code>errors.jsonl</code>, <code>kind</code> one of <code>exit</code>,
+<code>timeout</code>, <code>missing</code>, <code>exception</code>, and
+print one context line telling the session that recall is down.</li>
+<li>The session state file gains a <code>reported</code> flag, so the
+second engine call of a first prompt and every later prompt add
+nothing.</li>
+<li>Both files live in the hook’s state dir
+(<code>~/.claude/state/vault-recall/</code>, or
+<code>VAULT_RECALL_STATE</code>).</li>
+<li>The hook still exits 0 in every case.</li>
+</ul></li>
+<li><code>bin/ps-skills-doctor</code> <code>check_vault_distill</code>:
+accept the launchd job <code>local.vault-distill</code> as well as a
+crontab line; warn only when neither exists.</li>
+</ol>
+<h2 id="acceptance-criteria">Acceptance criteria</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />With
+<code>VAULT_ENGINE=/usr/bin/false</code>, a first prompt leaves 1 line
+in <code>errors.jsonl</code> with <code>kind: "exit"</code>, prints one
+recall-is-down line, and exits 0; a second run with the same session id
+leaves the count at 1.</label></li>
+<li><label><input type="checkbox" />With an engine that sleeps past the
+hook timeout the one line has <code>kind: "timeout"</code>; with
+<code>VAULT_ENGINE=/nonexistent</code> it has
+<code>kind: "missing"</code>.</label></li>
+<li><label><input type="checkbox" />With a working engine a first prompt
+adds 1 line to <code>heartbeat.jsonl</code> and 0 lines to
+<code>errors.jsonl</code>; a second prompt in the same session adds
+nothing to either.</label></li>
+<li><label><input type="checkbox" /><code>install.sh</code> run with a
+<code>go</code> build whose binary fails <code>context</code> leaves the
+previously installed <code>vault-engine</code> byte-identical and prints
+the reason; with a good build it installs it.</label></li>
+<li><label><input type="checkbox" /><code>check_vault_distill</code>
+returns no “no cron line” warning when <code>launchctl list</code> shows
+<code>local.vault-distill</code> and the crontab is empty, and still
+warns when both are absent.</label></li>
+<li><label><input
+type="checkbox" /><code>python3 -m unittest tests.test_vault_recall tests.test_ps_skills_doctor_distill tests.test_install -v</code>
+ends with <code>OK</code>.</label></li>
+</ul>
+<h2 id="out-of-scope">Out of scope</h2>
+<p>Rebuilding the engine on this machine (done by hand on 2026-11-28),
+recall precision (F-031), and any change to what recall injects.</p>
+</body>
+</html>

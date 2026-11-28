@@ -209,6 +209,9 @@ func writeBigIndex(tb testing.TB, e *VaultEngine) {
 }
 
 func TestContext_QueryStaysFastAt2000Notes(t *testing.T) {
+	if raceEnabled {
+		t.Skip("wall-clock budget is meaningless under the race detector")
+	}
 	e := contextVault(t)
 	writeBigIndex(t, e)
 	var runs []time.Duration

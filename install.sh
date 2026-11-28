@@ -142,10 +142,19 @@ link "$REPO/bin/ratchet" "$BIN_HOME/ratchet"
 
 if [[ -d "$REPO/tools/vault-engine" ]] && command -v go >/dev/null 2>&1; then
   echo "Building and installing vault-engine..."
-  (cd "$REPO/tools/vault-engine" && go build -o "$BIN_HOME/vault-engine" ./cmd/vault-engine)
-  if [[ -d "$HOME/.gemini/antigravity-cli/bin" ]]; then
-    cp "$BIN_HOME/vault-engine" "$HOME/.gemini/antigravity-cli/bin/vault-engine"
+  engine_build="$(mktemp -d)"
+  if ! (cd "$REPO/tools/vault-engine" && go build -o "$engine_build/vault-engine" ./cmd/vault-engine); then
+    echo "vault-engine: go build failed; keeping the installed binary"
+  elif ! "$engine_build/vault-engine" context --cwd "$REPO" >/dev/null 2>&1; then
+    echo "vault-engine: the new build fails \`context --cwd\`; keeping the installed binary"
+  else
+    mkdir -p "$BIN_HOME"
+    cp "$engine_build/vault-engine" "$BIN_HOME/vault-engine.new" && mv "$BIN_HOME/vault-engine.new" "$BIN_HOME/vault-engine"
+    if [[ -d "$HOME/.gemini/antigravity-cli/bin" ]]; then
+      cp "$BIN_HOME/vault-engine" "$HOME/.gemini/antigravity-cli/bin/vault-engine"
+    fi
   fi
+  rm -rf "$engine_build"
 fi
 
 reconcile_parity() {

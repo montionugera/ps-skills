@@ -276,5 +276,32 @@
     "title": "Upgrade ps-commu-explain visual quality and tailnet HTTPS",
     "created_at": "2026-11-22T07:44:52.708909+00:00",
     "promoted_to": "F-032"
+  },
+  {
+    "id": "I-046",
+    "title": "Recall failure is visible in the session: engine install guard, hook heartbeat and error record, doctor accepts launchd distill",
+    "created_at": "2026-11-28T16:25:37.670318+00:00",
+    "promoted_to": "F-033",
+    "epic": "E-003"
+  },
+  {
+    "id": "I-047",
+    "title": "Review ledger and reviewer result contract (bin/review-ledger collect, report, footer-hook, alarm)",
+    "created_at": "2026-11-28T16:25:37.671627+00:00",
+    "promoted_to": null,
+    "epic": "E-003"
+  },
+  {
+    "id": "I-048",
+    "title": "Reviews joined to fixes: review-ledger join, scorecard with controls, jev-gate lens record and name check",
+    "created_at": "2026-11-28T16:25:37.672196+00:00",
+    "promoted_to": null,
+    "epic": "E-003"
+  },
+  {
+    "id": "I-049",
+    "title": "Vault-engine latency test skips its wall-clock budget under the race detector",
+    "created_at": "2026-11-28T20:37:18.969506+00:00",
+    "promoted_to": "F-034"
   }
 ]

@@ -154,13 +154,14 @@ open({repr(str(arg_file))}, "w").write(json.dumps(sys.argv[1:]))
         idx = args.index("--limit")
         self.assertEqual(args[idx + 1], "2")
 
-    def test_slow_engine_times_out_silently(self):
+    def test_slow_engine_times_out_and_is_recorded(self):
         slow = self.dir / "slow-engine"
         slow.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n")
         slow.chmod(slow.stat().st_mode | stat.S_IEXEC)
         start = time.time()
-        self.assertEqual(self.run_hook(engine=slow), "")
+        self.assertIn("recall is down", self.context_of(self.run_hook(engine=slow)))
         self.assertLess(time.time() - start, 4)
+        self.assertEqual([r["kind"] for r in self.rows("errors.jsonl")], ["timeout"])
 
     def test_corrupt_state_is_reset(self):
         self.query_file.write_text(block(note("CONCEPT-a")))
@@ -168,8 +169,45 @@ open({repr(str(arg_file))}, "w").write(json.dumps(sys.argv[1:]))
         (self.state / "s1.json").write_text("{broken")
         self.assertIn("CONCEPT-a", self.run_hook())
 
-    def test_missing_engine_is_silent(self):
-        self.assertEqual(self.run_hook(engine=self.dir / "nope"), "")
+    def rows(self, name):
+        path = self.state / name
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_failing_engine_is_recorded_once_per_session(self):
+        out = self.run_hook(engine="/usr/bin/false")
+        self.assertEqual(self.context_of(out).count("\n"), 0)
+        self.assertIn("recall is down", self.context_of(out))
+        errors = self.rows("errors.jsonl")
+        self.assertEqual([(r["kind"], r["session_id"]) for r in errors], [("exit", "s1")])
+        self.assertEqual(set(errors[0]), {"ts", "session_id", "kind", "detail"})
+        self.assertEqual(self.run_hook(engine="/usr/bin/false"), "")
+        self.assertEqual(len(self.rows("errors.jsonl")), 1)
+        self.assertEqual(self.rows("heartbeat.jsonl"), [])
+        self.assertIn("recall is down", self.context_of(self.run_hook(engine="/usr/bin/false", session="s2")))
+        self.assertEqual(len(self.rows("errors.jsonl")), 2)
+
+    def test_missing_engine_is_recorded(self):
+        out = self.run_hook(engine=self.dir / "nope")
+        self.assertIn("recall is down", self.context_of(out))
+        self.assertEqual([r["kind"] for r in self.rows("errors.jsonl")], ["missing"])
+
+    def test_working_engine_leaves_one_heartbeat_per_session(self):
+        self.query_file.write_text(block(note("CONCEPT-a")))
+        self.run_hook()
+        self.query_file.write_text(block(note("CONCEPT-b")))
+        self.run_hook(prompt="a second prompt about codex quota")
+        beats = self.rows("heartbeat.jsonl")
+        self.assertEqual([(b["session_id"], b["ok"]) for b in beats], [("s1", True)])
+        self.assertIn("ts", beats[0])
+        self.assertEqual(self.rows("errors.jsonl"), [])
+
+    def test_query_failure_after_a_good_seed_adds_no_error(self):
+        flaky = self.dir / "flaky-engine"
+        flaky.write_text("#!/bin/sh\ncase \"$*\" in *--query*) exit 1;; esac\n")
+        flaky.chmod(flaky.stat().st_mode | stat.S_IEXEC)
+        self.assertEqual(self.run_hook(engine=flaky), "")
+        self.assertEqual(len(self.rows("heartbeat.jsonl")), 1)
+        self.assertEqual(self.rows("errors.jsonl"), [])
 
     def test_opt_out_env_vars_are_silent(self):
         self.query_file.write_text(block(note("CONCEPT-a")))

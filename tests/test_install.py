@@ -2,13 +2,15 @@
 
 import os
 import subprocess
+import tempfile
+import unittest
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
 
 
-def run_install(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run_install(home: Path, *args: str, path_prefix: str = "") -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update(
         HOME=str(home),
@@ -18,7 +20,7 @@ def run_install(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
         CODEX_HOME=str(home / ".codex"),
         CURSOR_HOME=str(home / ".cursor"),
         BIN_HOME=str(home / ".local" / "bin"),
-        PATH="/usr/bin:/bin",
+        PATH=f"{path_prefix}:/usr/bin:/bin" if path_prefix else "/usr/bin:/bin",
         CI="true",
     )
     return subprocess.run(
@@ -84,3 +86,48 @@ def test_installer_keeps_t3_antigravity_sessions_hook_free(tmp_path: Path) -> No
     assert not (fresh / "hooks.json").exists()
     assert not (old / "hooks.json").exists()
     assert (old / "hooks.json.disabled-agy-cancel-race").read_text() == '{"auto-handoff": {}}'
+
+
+FAKE_GO = """#!/bin/sh
+while [ "$1" != "-o" ]; do shift; done
+printf '#!/bin/sh\\nexit %s\\n' "$FAKE_ENGINE_EXIT" > "$2"
+chmod +x "$2"
+"""
+
+
+class TestEngineInstallGuard(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.home = root / "home"
+        self.installed = self.home / ".local" / "bin" / "vault-engine"
+        self.installed.parent.mkdir(parents=True)
+        self.installed.write_text("#!/bin/sh\nexit 0\n# previous\n")
+        self.before = self.installed.read_bytes()
+        fake = root / "fakebin"
+        fake.mkdir()
+        (fake / "go").write_text(FAKE_GO)
+        (fake / "go").chmod(0o755)
+        self.fake = str(fake)
+
+    def install(self, engine_exit: str) -> subprocess.CompletedProcess[str]:
+        os.environ["FAKE_ENGINE_EXIT"] = engine_exit
+        self.addCleanup(os.environ.pop, "FAKE_ENGINE_EXIT", None)
+        return run_install(self.home, path_prefix=self.fake)
+
+    def test_engine_failing_context_keeps_the_installed_binary(self):
+        result = self.install("3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.installed.read_bytes(), self.before)
+        self.assertIn("vault-engine: the new build fails", result.stdout)
+
+    def test_engine_passing_context_is_installed(self):
+        result = self.install("0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(self.installed.read_bytes(), self.before)
+        self.assertNotIn("keeping the installed binary", result.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

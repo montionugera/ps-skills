@@ -13,8 +13,9 @@ def ps(n_t3=0, n_py=0, n_shell=0):
     L += [f"{3000+i} 600 claude" for i in range(n_shell)]
     return shim("\n".join(L))
 def swap(used, total=10240.0): return shim(f"total = {total:.2f}M  used = {used:.2f}M  free = {total-used:.2f}M  (encrypted)")
-def run(tool, n_t3=0, n_py=0, n_shell=0, used=1000.0, **env):
-    e = dict(os.environ, AGENT_GUARD_PS_CMD=ps(n_t3, n_py, n_shell), AGENT_GUARD_SWAP_CMD=swap(used), **env)
+def memfree(pct): return shim(f"System-wide memory free percentage: {pct}%")
+def run(tool, n_t3=0, n_py=0, n_shell=0, used=1000.0, free=5, **env):
+    e = dict(os.environ, AGENT_GUARD_PS_CMD=ps(n_t3, n_py, n_shell), AGENT_GUARD_SWAP_CMD=swap(used), AGENT_GUARD_MEMFREE_CMD=memfree(free), **env)
     r = subprocess.run(["bash", str(HOOK)], input=json.dumps({"tool_name": tool, "tool_input": {}}), capture_output=True, text=True, env=e)
     return json.loads(r.stdout)["hookSpecificOutput"] if r.stdout.strip() else None
 class GuardTest(unittest.TestCase):
@@ -27,6 +28,8 @@ class GuardTest(unittest.TestCase):
         self.assertNotIn("permissionDecision", run("Agent", n_t3=4))
     def test_swap_deny_beats_everything(self):
         o = run("Agent", used=9100.0); self.assertEqual(o["permissionDecision"], "deny"); self.assertIn("swap is 0.89 full", o["permissionDecisionReason"])
+    def test_full_swap_alone_does_not_deny_while_memory_is_free(self):
+        self.assertNotIn("permissionDecision", run("Agent", used=9100.0, free=60))
     def test_swap_warning_in_context(self):
         o = run("Agent", used=7500.0); self.assertNotIn("permissionDecision", o); self.assertIn("Swap is 0.73 full", o["additionalContext"])
     def test_other_tools_silent(self):

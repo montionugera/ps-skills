@@ -3,7 +3,8 @@
 
 Calls `vault-engine context --query <prompt>` (no LLM), injects each note at most once per
 session, and stops at 6 notes / 2,400 bytes per session. Fails open: any problem means no
-output and exit 0, so it can never block a prompt.
+output and exit 0, so it can never block a prompt. The first prompt of a session leaves one
+record: heartbeat.jsonl when the engine answers, errors.jsonl plus one context line when it does not.
 """
 import fcntl
 import json
@@ -24,10 +25,28 @@ def state_dir() -> Path:
     return Path(os.environ.get("VAULT_RECALL_STATE") or Path.home() / ".claude" / "state" / "vault-recall")
 
 
+class EngineError(Exception):
+    def __init__(self, kind: str, detail: str):
+        super().__init__(detail)
+        self.kind, self.detail = kind, detail
+
+
 def run_engine(args: list[str]) -> str:
     binary = os.environ.get("VAULT_ENGINE") or shutil.which("vault-engine") or str(Path.home() / ".local/bin/vault-engine")
-    proc = subprocess.run([binary, "context", *args], capture_output=True, text=True, timeout=2)
-    return proc.stdout if proc.returncode == 0 else ""
+    try:
+        proc = subprocess.run([binary, "context", *args], capture_output=True, text=True, timeout=2)
+    except subprocess.TimeoutExpired:
+        raise EngineError("timeout", f"{binary} did not answer in 2s") from None
+    except FileNotFoundError:
+        raise EngineError("missing", f"{binary} not found") from None
+    if proc.returncode != 0:
+        raise EngineError("exit", f"{binary} exited {proc.returncode}: {proc.stderr.strip()[:200]}")
+    return proc.stdout
+
+
+def record(directory: Path, name: str, session: str, **fields) -> None:
+    with open(directory / name, "a") as log:
+        log.write(json.dumps({"ts": int(time.time()), "session_id": session, **fields}) + "\n")
 
 
 def note_lines(block: str) -> list[str]:
@@ -65,6 +84,7 @@ def main() -> int:
     demoted = set(json.loads(usage.read_text()).get("demoted", [])) if usage.exists() else set()
 
     chosen: list[str] = []
+    down = False
     with open(directory / f"{session}.json", "a+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         handle.seek(0)
@@ -75,10 +95,22 @@ def main() -> int:
             state = None  # corrupt state: start the session's budget again
         if state is None:
             # First prompt of the session: count what the SessionStart hook already injected.
-            seed = note_lines(run_engine(["--cwd", data.get("cwd") or os.getcwd()]))
-            state = {"ids": [note_id(line) for line in seed], "bytes": sum(size(line) for line in seed)}
+            state = {"ids": [], "bytes": 0, "reported": True}
+            try:
+                seed = note_lines(run_engine(["--cwd", data.get("cwd") or os.getcwd()]))
+                state["ids"] = [note_id(line) for line in seed]
+                state["bytes"] = sum(size(line) for line in seed)
+                record(directory, "heartbeat.jsonl", session, ok=True)
+            except Exception as exc:
+                down = True
+                kind, detail = (exc.kind, exc.detail) if isinstance(exc, EngineError) else ("exception", repr(exc))
+                record(directory, "errors.jsonl", session, kind=kind, detail=detail)
         used = 33
-        for line in note_lines(run_engine(["--query", prompt[:2000], "--limit", "2"])):
+        try:
+            found = [] if down else note_lines(run_engine(["--query", prompt[:2000], "--limit", "2"]))
+        except Exception:
+            found = []
+        for line in found:
             nid = note_id(line)
             if nid in state["ids"] or nid in demoted:
                 continue
@@ -94,11 +126,14 @@ def main() -> int:
         handle.truncate()
         json.dump(state, handle)
 
+    if down:
+        context = f"<vault-context>vault recall is down this session; details in {directory / 'errors.jsonl'}</vault-context>"
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}}))
+        return 0
     if not chosen:
         return 0
-    with open(directory / "injections.jsonl", "a") as log:
-        for line in chosen:
-            log.write(json.dumps({"ts": int(time.time()), "session_id": session, "note_id": note_id(line)}) + "\n")
+    for line in chosen:
+        record(directory, "injections.jsonl", session, note_id=note_id(line))
     context = "<vault-context>\n" + "\n".join(chosen) + "\n</vault-context>"
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}}))
     return 0

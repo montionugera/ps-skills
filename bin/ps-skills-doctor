@@ -85,8 +85,8 @@ def check_vault_recall(home, issues, warnings):
             warnings.append(f"vault-engine context returned nothing for a known note title: {known!r}")
 
 
-def check_vault_distill(home, issues, warnings, crontab=None):
-    """Knowledge save readiness (I-040): Jev key, cron line, age and exit code of the last nightly run."""
+def check_vault_distill(home, issues, warnings, crontab=None, launchd=None):
+    """Knowledge save readiness (I-040): Jev key, cron line or launchd job, age and exit code of the last nightly run."""
     vault = Path(os.environ.get("VAULT_ROOT") or home / "workspace" / "agentic-vault")
     if not (vault / "_meta").is_dir():
         return
@@ -100,8 +100,13 @@ def check_vault_distill(home, issues, warnings, crontab=None):
             crontab = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5).stdout
         except (OSError, subprocess.SubprocessError):
             crontab = ""
-    if "vault-distill" not in crontab:
-        warnings.append("vault-distill: no cron line (expected `40 23 * * *`, see README)")
+    if launchd is None:
+        try:
+            launchd = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            launchd = ""
+    if "vault-distill" not in crontab and "local.vault-distill" not in launchd:
+        warnings.append("vault-distill: no cron line or launchd job (expected `40 23 * * *` or local.vault-distill, see README)")
         return
     try:
         last = json.loads((home / ".claude" / "state" / "vault-distill" / "last-run.json").read_text())
